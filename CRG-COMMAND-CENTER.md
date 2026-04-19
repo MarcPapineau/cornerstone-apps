@@ -4,8 +4,30 @@
 > Lives in `~/.openclaw/workspace/CRG-COMMAND-CENTER.md`.
 > Claude refreshes this doc by querying GHL + Netlify + git directly. You read it.
 
-**Last refreshed:** 2026-04-19 02:30 EDT (Apr 18 night — overnight architecture sprint)
-**Refreshed by:** Claude (overnight 4-doc architecture build)
+**Last refreshed:** 2026-04-19 02:00 EDT (Apr 18 night — Morning Brief shipped + 4-doc architecture sprint)
+**Refreshed by:** Claude (overnight build)
+
+---
+
+## 📰 CRG MORNING BRIEF — LIVE (Apr 19 first send confirmed)
+
+Marc's daily 9-topic newspaper. Auto-sends at 6 AM EDT (10:00 UTC).
+
+| Item | Detail |
+|---|---|
+| Status | 🟢 LIVE — first send Apr 19 01:54 EDT, Resend id `4393154b-23da-4f1f-a52e-7af4abda04fd` |
+| Schedule | `0 10 * * *` UTC = 6 AM EDT / 5 AM EST (Netlify scheduled function) |
+| Trigger function | `/.netlify/functions/morning-brief?send=1` (kicks background, returns 202) |
+| Worker | `/.netlify/functions/morning-brief-background` (15-min runtime cap; ~73s typical) |
+| Source list | `cornerstoneregroup-site/data/morning-brief-sources.json` (commit for permanent change) |
+| Admin UI | https://cornerstoneregroup.netlify.app/morning-brief-admin.html (key in TOOLS.md) |
+| Topics | Crypto · Geopolitics · Monetary · Finance · Cdn Politics · Real Estate · AI · Science · Faith |
+| Format | Top 3 hot highlights → per-topic headline + 2-3 bullets + "why it matters to Marc" |
+| Hard rule | NO fabricated headlines. Every claim cites a source URL from the harvested feed set. |
+
+**To change a feed:** edit `data/morning-brief-sources.json`, push. Or use admin UI for ephemeral test.
+**To trigger now:** `curl https://cornerstoneregroup.netlify.app/.netlify/functions/morning-brief?send=1`
+**To preview without sending:** drop `?send=1` (default = dry preview returns brief JSON, no email).
 
 ---
 
@@ -119,6 +141,34 @@ Everything committed + pushed to git.
 - (optional) `GITHUB_TOKEN=<fine-grained PAT>` — durable queue writes back to repo
 
 **Push notifications:** wired in `sw.js` but inactive. See `VOICE-PLAN.md` for activation steps.
+
+---
+
+## 🏠 REAL ESTATE ENGINE — Apr 18 NIGHT BUILD
+
+> Overnight Apr 18→19 sprint. Marc asleep. World-class real estate content engine + site direction shipped to workspace; nothing pushed live. Marc reviews in the morning.
+
+**Lives in:** `02-REAL-ESTATE/`
+
+| Deliverable | Path |
+|---|---|
+| Audit (existing artifacts graded) | `02-REAL-ESTATE/AUDIT-2026-04-18.md` |
+| Brand & design system (CRG-aligned tokens) | `02-REAL-ESTATE/BRAND-SYSTEM.md` |
+| Content batch (5 LI + 5 IG + 3 blog) | `02-REAL-ESTATE/content/batch-2026-04-19/` |
+| IG visual mockup (renderable HTML) | `02-REAL-ESTATE/content/batch-2026-04-19/instagram-01-visual.html` |
+| Site rebrand plan (marcpapineau.com) | `02-REAL-ESTATE/SITE-REBRAND-PLAN.md` |
+| GHL social workflow specs (LI + IG drips) | `02-REAL-ESTATE/GHL-SOCIAL-WORKFLOWS.md` |
+
+**What ships in the batch:** 13 pieces, all dark CRG-aesthetic, all Ottawa-specific, all carrying the mandatory CRG attribution footer per the memory rule. Sources cited inline (Bank of Canada, OREB, CMHC, Statistics Canada, Government of Canada FHSA/HBP, Ontario LTT). Topics: BoC rate-pause read, Glebe deep dive, FHSA first-time buyer math, 122-124 Cobourg listing showcase, overpricing tax doctrine.
+
+**Decisions Marc owes the system tomorrow:**
+1. **marcpapineau.com hosting platform identity** — blocks site rebrand path (A: theme overrides on hosted SaaS, vs C: full custom Netlify rebuild). I checked GitHub — no `marcpapineau-*` repo exists.
+2. **Approve / red-line the 13 batch pieces** before they go to GHL drip.
+3. **OAuth Marc's LinkedIn + Instagram into GHL Social Planner** (one-time, ~10 min in GHL UI).
+4. **Airtable vs. GHL Custom Object** as content-calendar source-of-truth.
+5. **2814 Carling case study** — vendor permission to publicize as redacted portfolio piece?
+
+**No production changes pushed.** All assets stage in workspace. Old real estate articles (`02-REAL-ESTATE/content/article-boc-ottawa-re-*.html` and `infographic-re-instagram.html`) graded C+/B/B- — recommend archiving v1, re-skinning v2 + infographic to CRG palette.
 
 ---
 
