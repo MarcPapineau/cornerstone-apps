@@ -1,0 +1,26 @@
+{
+  "agent_id": "claude-code",
+  "name": "Claude (in Code)",
+  "team": "Build",
+  "role": "Engineering / build / orchestration — builds CRG infrastructure, runs sessions, writes code, deploys, evaluates",
+  "rubric_id": "claude-code",
+  "current_grade": 0,
+  "trend": "stable",
+  "recent_evaluations": [
+    {
+      "date": "2026-04-18T23:55:00-04:00",
+      "score": 0,
+      "evaluator": "self (per Marc's standing rule that Claude participates in scorecard system)",
+      "rubric_id": "claude-code",
+      "evidence_quote": "PLACEHOLDER — first self-eval pending. This session (overnight 4-doc build) will be the first scored output once Marc reviews in the morning.",
+      "subscores": {},
+      "notes": "Initial scorecard seeded. Per scorecard-system spec, Claude in Code writes session-end retrospective entries; Marc can override scores. Open question for Marc: do you want a separate Judge instance evaluating Claude, or is self-eval acceptable?"
+    }
+  ],
+  "proposals_pending": 0,
+  "last_self_improvement_run": null,
+  "deployment_history": [],
+  "active_version": "v1.0.0",
+  "owner": "marc@cornerstoneregroup.ca",
+  "self_eval_acceptable": "PENDING_MARC_DECISION"
+}

@@ -1,0 +1,27 @@
+{
+  "agent_id": "riley",
+  "name": "Riley",
+  "team": "Voice",
+  "role": "TBD — Vapi assistant 7c88ceca-a818-47f3-8516-df8b99db5009 exists but role/script not yet defined. Marc to confirm.",
+  "rubric_id": "voice-concierge",
+  "current_grade": 0,
+  "trend": "stable",
+  "recent_evaluations": [
+    {
+      "date": "2026-04-18T23:00:00-04:00",
+      "score": 0,
+      "evaluator": "CRG-Judge",
+      "rubric_id": "voice-concierge",
+      "evidence_quote": "PLACEHOLDER — role undefined, no calls evaluated",
+      "subscores": {},
+      "notes": "Scorecard seeded as placeholder. BLOCKER: Marc must define Riley's role before evaluations begin."
+    }
+  ],
+  "proposals_pending": 0,
+  "last_self_improvement_run": null,
+  "deployment_history": [],
+  "active_version": "v0.0.1-placeholder",
+  "owner": "marc@cornerstoneregroup.ca",
+  "vapi_assistant_id": "7c88ceca-a818-47f3-8516-df8b99db5009",
+  "blocking_question": "What is Riley's role? (inbound concierge? outbound speed-to-lead? specific vertical?)"
+}

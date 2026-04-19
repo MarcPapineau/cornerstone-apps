@@ -1,0 +1,78 @@
+{
+  "rubric_id": "outbound-email",
+  "version": "v1.0",
+  "applies_to_team": "Email",
+  "scoring_window": "per-send + 30-day reply tracking",
+  "weights": {
+    "research_first": 25,
+    "krite_pass": 25,
+    "response_rate_30d": 25,
+    "compliance": 15,
+    "voice_match": 10
+  },
+  "criteria": {
+    "research_first": {
+      "weight": 25,
+      "description": "References >= 1 verified prospect-specific fact (recent achievement, public quote, named project, attributable source).",
+      "scoring": {
+        "90_100": "Multiple specific facts cited; sources verifiable; non-generic framing.",
+        "70_89": "One strong specific fact; rest is reasonable framing.",
+        "50_69": "Generic with one weak personalization (name + company only).",
+        "0_49": "Boilerplate. No prospect-specific research."
+      },
+      "evidence_required": "List the cited facts + source URLs"
+    },
+    "krite_pass": {
+      "weight": 25,
+      "description": "KRITE voice_score >= 75 on first review (no revision required).",
+      "scoring": {
+        "100": "First-pass voice_score >= 90.",
+        "85_99": "First-pass voice_score 75-89.",
+        "50_84": "Required one KRITE revision before passing.",
+        "0_49": "Required >= 2 KRITE revisions OR was rejected outright."
+      },
+      "evidence_required": "KRITE verdict JSON for the send"
+    },
+    "response_rate_30d": {
+      "weight": 25,
+      "description": "Reply rate >= 8% over rolling 30 days for that send cohort.",
+      "scoring": {
+        "90_100": "Reply rate >= 12%.",
+        "70_89": "Reply rate 8-12%.",
+        "50_69": "Reply rate 4-8%.",
+        "0_49": "Reply rate < 4%."
+      },
+      "evidence_required": "Cohort send count + reply count from GHL conversations API",
+      "delayed_evaluation": true,
+      "evaluation_lag_days": 30
+    },
+    "compliance": {
+      "weight": 15,
+      "description": "CASL footer present, opt-out path live, sender identity clear, no spam triggers.",
+      "scoring": {
+        "100": "All four checks pass.",
+        "75_99": "All present but one weak (e.g., opt-out link valid but not prominent).",
+        "0_74": "ANY missing element. AUTOMATIC FAIL ZONE."
+      },
+      "evidence_required": "Email source HTML + footer screenshot"
+    },
+    "voice_match": {
+      "weight": 10,
+      "description": "Reads as Marc / Alex / Ade persona consistently. No persona bleed.",
+      "scoring": {
+        "90_100": "Indistinguishable from human-written; persona consistent.",
+        "70_89": "Voice consistent with one minor tonal slip.",
+        "50_69": "Voice mostly right but obvious AI tells.",
+        "0_49": "Persona bleed (sounds like a different sender) OR generic AI voice."
+      },
+      "evidence_required": "Comparison against persona reference doc"
+    }
+  },
+  "ground_truth_signals": [
+    "Reply received (binary)",
+    "Reply sentiment (positive/neutral/negative)",
+    "Booking conversion (replied + booked Discovery Brief)",
+    "Unsubscribe (binary, negative signal)",
+    "Spam complaint (binary, hard fail)"
+  ]
+}

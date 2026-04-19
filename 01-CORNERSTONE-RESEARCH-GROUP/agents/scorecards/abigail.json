@@ -1,0 +1,33 @@
+{
+  "agent_id": "abigail",
+  "name": "Abigail",
+  "team": "Voice",
+  "role": "Voice concierge — first-touch intake calls, books Discovery Brief on Marc's calendar",
+  "rubric_id": "voice-concierge",
+  "current_grade": 0,
+  "trend": "stable",
+  "recent_evaluations": [
+    {
+      "date": "2026-04-18T23:00:00-04:00",
+      "score": 0,
+      "evaluator": "CRG-Judge",
+      "rubric_id": "voice-concierge",
+      "evidence_quote": "PLACEHOLDER — no calls evaluated yet",
+      "subscores": {},
+      "notes": "Initial scorecard seeded. First evaluation triggers on first completed Vapi call after end-of-call-report webhook is wired."
+    }
+  ],
+  "proposals_pending": 0,
+  "last_self_improvement_run": null,
+  "deployment_history": [
+    {
+      "date": "2026-04-18T20:00:00-04:00",
+      "version": "v1.0.0",
+      "change_summary": "Initial assistant config — CALL-SCRIPT-v1.md system prompt deployed to Vapi assistant c746c0d8-827f-4b27-a095-0ff250fd1637",
+      "approved_by": "marc"
+    }
+  ],
+  "active_version": "v1.0.0",
+  "owner": "marc@cornerstoneregroup.ca",
+  "vapi_assistant_id": "c746c0d8-827f-4b27-a095-0ff250fd1637"
+}

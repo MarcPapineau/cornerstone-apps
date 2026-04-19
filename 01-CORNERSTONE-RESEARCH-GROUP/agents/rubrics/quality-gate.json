@@ -1,0 +1,76 @@
+{
+  "rubric_id": "quality-gate",
+  "version": "v1.0",
+  "applies_to_team": "Quality",
+  "scoring_window": "weekly aggregate (sampled)",
+  "weights": {
+    "precision": 30,
+    "recall": 30,
+    "false_positive_rate": 20,
+    "turnaround_time": 10,
+    "actionable_feedback": 10
+  },
+  "criteria": {
+    "precision": {
+      "weight": 30,
+      "description": "When KRITE flags content as 'needs revision,' human reviewer agrees >= 90% of the time. (Low false-positive flags.)",
+      "scoring": {
+        "90_100": "Agreement rate >= 90%.",
+        "70_89": "Agreement rate 75-89%.",
+        "50_69": "Agreement rate 60-74%.",
+        "0_49": "Agreement rate < 60% — KRITE is over-flagging."
+      },
+      "evidence_required": "Marc's audit log of last 10 KRITE flags + agree/disagree verdicts"
+    },
+    "recall": {
+      "weight": 30,
+      "description": "When content is actually broken (caught later by Marc, prospect, or downstream agent), KRITE caught it >= 90% of the time. (Low false-negatives.)",
+      "scoring": {
+        "90_100": "Catch rate >= 90% (only 1 in 10 issues slip past KRITE).",
+        "70_89": "Catch rate 75-89%.",
+        "50_69": "Catch rate 60-74%.",
+        "0_49": "Catch rate < 60% — KRITE is missing real issues."
+      },
+      "evidence_required": "Log of post-release issues + whether KRITE flagged at time of review"
+    },
+    "false_positive_rate": {
+      "weight": 20,
+      "description": "Flags later determined unjustified <= 10%.",
+      "scoring": {
+        "90_100": "FP rate <= 5%.",
+        "70_89": "FP rate 5-10%.",
+        "50_69": "FP rate 10-20%.",
+        "0_49": "FP rate > 20%."
+      },
+      "evidence_required": "Same audit log; specifically count of 'KRITE flagged but Marc disagreed'"
+    },
+    "turnaround_time": {
+      "weight": 10,
+      "description": "Median KRITE review completion time < 30 sec.",
+      "scoring": {
+        "100": "Median < 15 sec.",
+        "75_99": "Median 15-30 sec.",
+        "50_74": "Median 30-60 sec.",
+        "0_49": "Median > 60 sec."
+      },
+      "evidence_required": "Webhook execution duration logs"
+    },
+    "actionable_feedback": {
+      "weight": 10,
+      "description": "Each flagged issue includes specific line + suggested fix (not just 'needs revision').",
+      "scoring": {
+        "90_100": "Every flag includes line reference + concrete suggestion.",
+        "70_89": "Most flags actionable; some vague.",
+        "0_69": "Many flags lack specific guidance."
+      },
+      "evidence_required": "Sample 10 random KRITE verdicts; count actionability"
+    }
+  },
+  "ground_truth_signals": [
+    "Marc agreement on flagged items (binary per item)",
+    "Post-release issues caught vs missed (downstream feedback)",
+    "Webhook execution time (continuous)"
+  ],
+  "self_validation_blocked": true,
+  "self_validation_note": "KRITE cannot validate its own self-improvement proposals. Marc validates directly per scorecard system spec."
+}

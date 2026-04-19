@@ -1,0 +1,81 @@
+{
+  "rubric_id": "claude-code",
+  "version": "v1.0",
+  "applies_to_team": "Build",
+  "scoring_window": "per-session OR per-task",
+  "weights": {
+    "task_completion": 30,
+    "parallel_agent_usage": 15,
+    "root_cause_fixes": 25,
+    "no_overreach": 15,
+    "verification": 15
+  },
+  "criteria": {
+    "task_completion": {
+      "weight": 30,
+      "description": "Delivered what Marc asked for, end to end, verified working. No half-done deliverables.",
+      "scoring": {
+        "90_100": "Full task complete, verified, Marc accepts without redirect.",
+        "70_89": "Complete with one minor follow-up needed.",
+        "50_69": "Substantially complete but >= 1 acceptance criterion missed.",
+        "0_49": "Half-done, abandoned, or major scope missed."
+      },
+      "evidence_required": "Session transcript end-state + Marc's acceptance signal"
+    },
+    "parallel_agent_usage": {
+      "weight": 15,
+      "description": "Used parallel tool calls / agents when sub-tasks were independent (per Marc's standing rule).",
+      "scoring": {
+        "90_100": "Every independent sub-task fanned out in parallel.",
+        "70_89": "Most parallelizable work parallelized; one or two missed.",
+        "50_69": "Some serialization of work that could have been parallel.",
+        "0_49": "Defaulted to serial execution despite obvious parallelism."
+      },
+      "evidence_required": "Tool call log; count of parallel batches vs serial"
+    },
+    "root_cause_fixes": {
+      "weight": 25,
+      "description": "Fixed root causes per Quality Doctrine. No symptom-only patches. No repeat patches of same class of problem.",
+      "scoring": {
+        "90_100": "Root cause identified + structural fix + regression prevention.",
+        "70_89": "Root cause identified + clean fix; no regression prevention added.",
+        "50_69": "Symptom fix labeled as HOTFIX with follow-up SYSTEM FIX documented.",
+        "0_49": "Symptom-only patch with no acknowledgment OR repeat patch of same class of problem."
+      },
+      "evidence_required": "Fix log entry + classification (HOTFIX/PATCH/SYSTEM FIX)"
+    },
+    "no_overreach": {
+      "weight": 15,
+      "description": "Didn't gold-plate. Didn't add unrequested scope. Didn't deploy without KRITE for client-facing work.",
+      "scoring": {
+        "90_100": "Stayed in scope. Flagged out-of-scope ideas as separate proposals, didn't build them.",
+        "70_89": "Minor scope creep, self-reported.",
+        "50_69": "Built something Marc didn't ask for; reverted on request.",
+        "0_49": "Deployed client-facing work without KRITE OR built major unrequested scope. AUTOMATIC FAIL ZONE per AGENTS.md KRITE Gate."
+      },
+      "evidence_required": "Scope audit: what was asked vs what was delivered"
+    },
+    "verification": {
+      "weight": 15,
+      "description": "Verified end-to-end before claiming 'done': URL 200, feature works, file written + readable, commit pushed.",
+      "scoring": {
+        "90_100": "Every deliverable verified with explicit check + evidence.",
+        "70_89": "Most verified; one verification skipped but no consequence.",
+        "50_69": "Claimed done with weak verification (e.g., 'looks right').",
+        "0_49": "Claimed done without verification OR a verification later proved false."
+      },
+      "evidence_required": "Verification step log + outcome"
+    }
+  },
+  "ground_truth_signals": [
+    "Marc's post-session feedback (1-5 satisfaction OR redirect/approve)",
+    "Did Marc have to redo or fix Claude's work? (binary, negative signal)",
+    "Did Marc explicitly thank or praise specific work? (positive signal)",
+    "Time-to-deliver vs estimate (continuous)"
+  ],
+  "self_eval_protocol": {
+    "when": "End of every session",
+    "format": "Append to recent_evaluations with evaluator='self' and ground_truth_signals where available",
+    "marc_override": "Marc can update or replace any self-eval; his score wins"
+  }
+}

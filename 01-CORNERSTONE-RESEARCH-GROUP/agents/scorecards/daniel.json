@@ -1,0 +1,32 @@
+{
+  "agent_id": "daniel",
+  "name": "Daniel",
+  "team": "Content",
+  "role": "Research / market intel — 4-section digest (Macro, Market Intel, Ottawa Spotlight, Health) every 6h + weekly tool scout",
+  "rubric_id": "article-writer",
+  "current_grade": 0,
+  "trend": "stable",
+  "recent_evaluations": [
+    {
+      "date": "2026-04-18T23:00:00-04:00",
+      "score": 0,
+      "evaluator": "CRG-Judge",
+      "rubric_id": "article-writer",
+      "evidence_quote": "PLACEHOLDER — no digests evaluated yet",
+      "subscores": {},
+      "notes": "Initial scorecard seeded. Article-writer rubric applies with research-emphasis: sourcing weight effectively higher (verify >= 5 distinct sources per digest)."
+    }
+  ],
+  "proposals_pending": 0,
+  "last_self_improvement_run": null,
+  "deployment_history": [
+    {
+      "date": "2026-04-11T00:00:00-04:00",
+      "version": "v2.0.0",
+      "change_summary": "Modular sub-workflow architecture rebuild (per AGENT-EVOLUTION-PILOT-DANIEL.md)",
+      "approved_by": "marc"
+    }
+  ],
+  "active_version": "v2.0.0",
+  "owner": "marc@cornerstoneregroup.ca"
+}

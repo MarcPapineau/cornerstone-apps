@@ -1,0 +1,32 @@
+{
+  "agent_id": "apollos",
+  "name": "Apollos",
+  "team": "Content",
+  "role": "Article writer — daily articles for marc@cornerstoneregroup.ca with research, voice, structure, novelty",
+  "rubric_id": "article-writer",
+  "current_grade": 0,
+  "trend": "stable",
+  "recent_evaluations": [
+    {
+      "date": "2026-04-18T23:00:00-04:00",
+      "score": 0,
+      "evaluator": "CRG-Judge",
+      "rubric_id": "article-writer",
+      "evidence_quote": "PLACEHOLDER — no articles evaluated yet",
+      "subscores": {},
+      "notes": "Initial scorecard seeded. Weekly Monday 09:00 evaluation of all articles published in prior 7 days."
+    }
+  ],
+  "proposals_pending": 0,
+  "last_self_improvement_run": null,
+  "deployment_history": [
+    {
+      "date": "2026-04-15T07:00:00-04:00",
+      "version": "v3.0.0",
+      "change_summary": "APOLLOS v3 enhanced prompt deployed (per APOLLOS-V3-ENHANCED-PROMPT.md)",
+      "approved_by": "marc"
+    }
+  ],
+  "active_version": "v3.0.0",
+  "owner": "marc@cornerstoneregroup.ca"
+}

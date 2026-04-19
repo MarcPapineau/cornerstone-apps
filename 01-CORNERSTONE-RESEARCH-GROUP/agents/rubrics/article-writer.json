@@ -1,0 +1,80 @@
+{
+  "rubric_id": "article-writer",
+  "version": "v1.0",
+  "applies_to_team": "Content",
+  "scoring_window": "per-article",
+  "weights": {
+    "sourcing": 25,
+    "voice": 20,
+    "structure": 15,
+    "novelty": 25,
+    "compliance": 15
+  },
+  "criteria": {
+    "sourcing": {
+      "weight": 25,
+      "description": "Every claim attributable. >= 3 cited sources per article. No hallucinated statistics.",
+      "scoring": {
+        "90_100": ">= 5 cited sources, all verifiable, mix of primary + analyst.",
+        "70_89": ">= 3 cited sources, all verifiable.",
+        "50_69": "1-2 sources OR one source unverifiable.",
+        "0_49": "Zero sources cited OR any hallucinated statistic. AUTOMATIC FAIL ZONE."
+      },
+      "evidence_required": "List of citations + spot-check 2 URLs for liveness"
+    },
+    "voice": {
+      "weight": 20,
+      "description": "Matches Marc's brand voice: direct, builder mentality, faith-informed, Ottawa-local.",
+      "scoring": {
+        "90_100": "Voice indistinguishable from Marc's own writing. Ottawa specificity present.",
+        "70_89": "Voice consistent with one minor slip.",
+        "50_69": "Voice mostly right but generic in places.",
+        "0_49": "Voice mismatch (sounds AI-generic OR wrong persona)."
+      },
+      "evidence_required": "Comparison against Marc's voice reference samples"
+    },
+    "structure": {
+      "weight": 15,
+      "description": "Headers, scannable layout, >= 1 visual (chart/graph/table/image), CTA present.",
+      "scoring": {
+        "100": "All four present + visual is meaningful (not decorative stock photo).",
+        "75_99": "All four present but visual weak.",
+        "50_74": "Missing visual OR missing CTA.",
+        "0_49": "Wall of text OR missing >= 2 elements. AUTOMATIC FAIL per Quality Doctrine."
+      },
+      "evidence_required": "Render check of published article"
+    },
+    "novelty": {
+      "weight": 25,
+      "description": "Insight not findable in top-10 Google results for that topic. Original framing or original data.",
+      "scoring": {
+        "90_100": "Genuinely original angle OR proprietary data.",
+        "70_89": "Strong synthesis of existing material with one fresh framing.",
+        "50_69": "Solid summary of known material; light original angle.",
+        "0_49": "Rehash of top-10 SERP content."
+      },
+      "evidence_required": "Run topic through Google; compare top-10 results to article angle"
+    },
+    "compliance": {
+      "weight": 15,
+      "description": "Disclaimers present (financial / health). No medical or financial advice without qualifier.",
+      "scoring": {
+        "100": "All required disclaimers present and prominent.",
+        "75_99": "Disclaimers present but buried.",
+        "0_74": "Missing required disclaimer for topic. AUTOMATIC FAIL ZONE."
+      },
+      "evidence_required": "Disclaimer text scan"
+    }
+  },
+  "ground_truth_signals": [
+    "Open rate (Buffer/Metricool API)",
+    "Click-through rate",
+    "Time on page (if hosted)",
+    "Reply / DM volume",
+    "Share count"
+  ],
+  "research_emphasis_for_daniel": {
+    "applies_when": "agent_id == 'daniel'",
+    "override": "sourcing weight effectively higher; require >= 5 distinct sources per digest section, not per article overall"
+  }
+}

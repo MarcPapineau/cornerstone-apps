@@ -1,0 +1,75 @@
+{
+  "rubric_id": "voice-concierge",
+  "version": "v1.0",
+  "applies_to_team": "Voice",
+  "scoring_window": "per-call",
+  "weights": {
+    "warmth": 15,
+    "accuracy": 20,
+    "q11_asked": 15,
+    "booking_success": 25,
+    "reality_check_passed": 25
+  },
+  "criteria": {
+    "warmth": {
+      "weight": 15,
+      "description": "Tone is peer-to-peer, not robotic or salesy. Names back specific details from prospect's intake.",
+      "scoring": {
+        "90_100": "Genuinely warm. Echoed prospect's specific words/numbers/anecdotes. Prospect felt heard.",
+        "70_89": "Professional and pleasant. No robot tells. Some named-back detail.",
+        "50_69": "Functional but mechanical. Generic acknowledgments.",
+        "0_49": "Cold, scripted, or pushy."
+      },
+      "evidence_required": "Quote >= 1 line where agent acknowledges prospect by name + a specific intake answer detail"
+    },
+    "accuracy": {
+      "weight": 20,
+      "description": "Confirms intake answers without misrepresenting. No fabricated facts about prospect or CRG.",
+      "scoring": {
+        "90_100": "Every confirmation matches intake verbatim. Zero hallucinated facts.",
+        "70_89": "All material facts correct. Minor paraphrasing only.",
+        "50_69": "One minor misstatement caught and corrected on call.",
+        "0_49": "Material misstatement uncorrected; or hallucinated CRG capability."
+      },
+      "evidence_required": "Cross-reference >= 3 intake answers against transcript confirmations"
+    },
+    "q11_asked": {
+      "weight": 15,
+      "description": "Q11 (Vision) question asked verbatim. Prospect given >= 90 sec uninterrupted to answer.",
+      "scoring": {
+        "100": "Q11 asked verbatim AND prospect spoke >= 90 sec uninterrupted AND agent summarized back in one sentence.",
+        "70_99": "Q11 asked but with paraphrasing OR summary back missing.",
+        "1_69": "Q11 attempted but cut short, interrupted, or paraphrased beyond recognition.",
+        "0": "Q11 not asked. AUTOMATIC FAIL FOR THIS CRITERION."
+      },
+      "evidence_required": "Quote of Q11 verbatim from transcript + duration of prospect response"
+    },
+    "booking_success": {
+      "weight": 25,
+      "description": "Discovery Brief slot booked OR clean handoff/decline appropriately tagged.",
+      "scoring": {
+        "100": "Slot booked, calendar invite confirmed, prospect tagged abigail-booked-marc.",
+        "70_99": "Booking attempted but prospect requested email follow-up; handled cleanly.",
+        "50_69": "Decline or no-answer handled correctly with proper tagging.",
+        "0_49": "Booking attempt failed AND no clean handoff path documented."
+      },
+      "evidence_required": "GHL appointment ID + outcome tag verification"
+    },
+    "reality_check_passed": {
+      "weight": 25,
+      "description": "No hallucinated CRG capabilities. No pricing quoted. Handoff keywords honored. No promises about scope/timeline.",
+      "scoring": {
+        "100": "Full call passes all reality checks. Any prospect questions outside scope deflected to Marc cleanly.",
+        "70_99": "One minor borderline statement (e.g., spoke about a capability without explicit CRG reference) but no hard violation.",
+        "0_69": "ANY pricing quoted, scope promised, or hallucinated CRG service. AUTOMATIC FAIL ZONE."
+      },
+      "evidence_required": "Full transcript scan against deflection keywords and capability allowlist"
+    }
+  },
+  "ground_truth_signals": [
+    "GHL appointment created (binary)",
+    "Outcome tag applied (categorical)",
+    "Prospect post-call SMS reply (sentiment proxy)",
+    "Marc's post-Discovery-Brief 'how was the prep?' rating (1-5)"
+  ]
+}

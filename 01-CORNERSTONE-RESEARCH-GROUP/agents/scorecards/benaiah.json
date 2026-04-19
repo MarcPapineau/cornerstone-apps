@@ -1,0 +1,32 @@
+{
+  "agent_id": "benaiah",
+  "name": "Benaiah",
+  "team": "Email",
+  "role": "Outbound email AI — drafts and sends prospect emails with research-first frame",
+  "rubric_id": "outbound-email",
+  "current_grade": 0,
+  "trend": "stable",
+  "recent_evaluations": [
+    {
+      "date": "2026-04-18T23:00:00-04:00",
+      "score": 0,
+      "evaluator": "CRG-Judge",
+      "rubric_id": "outbound-email",
+      "evidence_quote": "PLACEHOLDER — no sends evaluated yet",
+      "subscores": {},
+      "notes": "Initial scorecard seeded. First evaluation triggers on first send via benaiah-send.js Netlify function."
+    }
+  ],
+  "proposals_pending": 0,
+  "last_self_improvement_run": null,
+  "deployment_history": [
+    {
+      "date": "2026-04-18T12:00:00-04:00",
+      "version": "v1.0.0",
+      "change_summary": "Initial benaiah-send.js Netlify function with KRITE quality gate (voice_score >= 75 threshold)",
+      "approved_by": "marc"
+    }
+  ],
+  "active_version": "v1.0.0",
+  "owner": "marc@cornerstoneregroup.ca"
+}
