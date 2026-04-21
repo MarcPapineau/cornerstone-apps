@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Env files
+.env
+.env.local
+.env.*.local
+
+# Backup files (historical server.js snapshots should never be committed —
+# they have embedded secrets from pre-env-var days)
+server-BACKUP-*.js
+server-BACKUP-*.ts
+*-BACKUP-*.js
+*.backup
+*.bak
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local data / output
+data/local-*.json
+output/
