@@ -4021,12 +4021,262 @@ setInterval(tick, 30000);
       .replace(/'/g, '&#39;');
   }
 
+  /* ---------- Scorecards ---------- */
+  async function loadScorecards() {
+    const root = document.getElementById('scorecard-panel');
+    if (!root) return;
+    try {
+      const res = await fetch(FN('command-scorecards'), { cache: 'no-store', credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      renderScorecards(root, data);
+    } catch (_) {
+      root.innerHTML = '<div class="gq-empty">Scorecards offline — will retry in 30s</div>';
+    }
+  }
+  function renderScorecards(root, data) {
+    const eyebrow = document.getElementById('sc-eyebrow');
+    const agents = data.agents || [];
+    if (eyebrow) {
+      eyebrow.textContent = agents.length + ' agents · ' +
+        (data.backend === 'static' ? 'static data' : data.backend);
+    }
+    if (!agents.length) {
+      root.innerHTML = '<div class="gq-empty">No scorecards found. Run <code>node scripts/sync-scorecards.js</code>.</div>';
+      return;
+    }
+    root.innerHTML = agents.map(a => {
+      const grade = Math.max(0, Math.min(100, Number(a.current_grade) || 0));
+      const evals = Array.isArray(a.recent_evaluations) ? a.recent_evaluations.slice(0, 4) : [];
+      const lastDate = evals[0] ? (evals[0].date || '').slice(0, 10) : '—';
+      const role = a.role_title || a.role || a.team || '';
+      const evalsHtml = evals.map(ev => {
+        const d = (ev.date || '').slice(0, 10);
+        const notes = escapeHtml(ev.notes || ev.evidence_quote || '—');
+        return `<div class="sc-eval">
+          <span class="date">${escapeHtml(d)}</span> ·
+          <span class="score">${Number(ev.score) || 0}</span> ·
+          <span>${escapeHtml(ev.evaluator || '—')}</span>
+          <div style="color:var(--muted);margin-top:2px;">${notes}</div>
+        </div>`;
+      }).join('') || '<div class="gq-empty">No evaluations recorded yet.</div>';
+      return `
+        <div class="sc-card" data-id="${escapeHtml(a.agent_id)}">
+          <div class="sc-head">
+            <div>
+              <div class="sc-name">${escapeHtml(a.name || a.agent_id)}</div>
+              <div class="sc-role">${escapeHtml(role)}</div>
+            </div>
+            <span class="sc-team">${escapeHtml(a.team || '')}</span>
+          </div>
+          <div class="sc-grade-row">
+            <span class="sc-grade-n">${grade}</span>
+            <span class="sc-grade-bar"><span class="fill" style="width:${grade}%"></span></span>
+            <span class="sc-grade-meta">${escapeHtml(a.trend || '')}</span>
+          </div>
+          <div class="sc-meta-line">
+            <span>rubric: ${escapeHtml(a.rubric_id || '—')}</span>
+            <span>last eval: ${escapeHtml(lastDate)}</span>
+          </div>
+          <div class="sc-details">${evalsHtml}</div>
+        </div>
+      `;
+    }).join('');
+    root.querySelectorAll('.sc-card').forEach(card => {
+      card.addEventListener('click', () => card.classList.toggle('open'));
+    });
+  }
+
+  /* ---------- Events feed ---------- */
+  let _eventsOldestShown = null;
+  async function loadEvents(before) {
+    const root = document.getElementById('events-list');
+    if (!root) return;
+    try {
+      const url = FN('command-events') + '?limit=50' + (before ? '&before=' + encodeURIComponent(before) : '');
+      const res = await fetch(url, { cache: 'no-store', credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      renderEvents(root, data, !!before);
+    } catch (_) {
+      if (!before) root.innerHTML = '<div class="gq-empty">Events offline — will retry in 30s</div>';
+    }
+  }
+  function renderEvents(root, data, append) {
+    const backend = document.getElementById('ef-backend');
+    const updated = document.getElementById('ef-updated');
+    if (backend) backend.textContent = data.backend || '--';
+    if (updated) updated.textContent = 'updated ' + fmtRelative(data.timestamp);
+    const events = data.events || [];
+    const older = document.getElementById('ef-older');
+    if (!events.length && !append) {
+      root.innerHTML = '<div class="gq-empty">No events yet. Agents will emit to the bus as Wave 2a lands.</div>';
+      if (older) older.disabled = true;
+      return;
+    }
+    const rows = events.map(ev => {
+      const ts = (ev.timestamp || ev.ts || '').slice(11, 19) || '--';
+      const date = (ev.timestamp || ev.ts || '').slice(0, 10);
+      const src = ev.source || ev.src || 'unknown';
+      const type = ev.type || ev.event || 'event';
+      const payload = ev.payload
+        ? (typeof ev.payload === 'string' ? ev.payload : JSON.stringify(ev.payload))
+        : (ev.summary || '');
+      return `<div class="event-row" title="${escapeHtml(date + ' ' + ts)}">
+        <span class="event-ts">${escapeHtml(ts)}</span>
+        <span class="event-src">${escapeHtml(src)}</span>
+        <span>
+          <span class="event-type">${escapeHtml(type)}</span>
+          <span class="event-payload">${escapeHtml(String(payload).slice(0, 240))}</span>
+        </span>
+      </div>`;
+    }).join('');
+    if (append) root.insertAdjacentHTML('beforeend', rows);
+    else root.innerHTML = rows;
+    const last = events[events.length - 1];
+    if (last && last.timestamp) _eventsOldestShown = last.timestamp;
+    if (older) older.disabled = events.length < (data.limit || 50);
+  }
+  (function wireOlder() {
+    const btn = document.getElementById('ef-older');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      if (_eventsOldestShown) loadEvents(_eventsOldestShown);
+    });
+  })();
+
+  /* ---------- Autonomy mode ---------- */
+  let _currentAutonomy = 'off';
+  async function loadAutonomy() {
+    try {
+      const res = await fetch(FN('autonomy-mode'), { cache: 'no-store', credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      _currentAutonomy = data.mode || 'off';
+      const dot = document.getElementById('am-dot');
+      const mode = document.getElementById('am-mode');
+      const env = document.getElementById('am-env');
+      const updated = document.getElementById('am-updated');
+      if (dot) {
+        dot.classList.remove('am-off','am-green','am-yellow','am-full');
+        dot.classList.add('am-' + _currentAutonomy);
+      }
+      if (mode) mode.textContent = _currentAutonomy;
+      if (env) env.textContent = data.env_present ? 'env:set' : 'env:default';
+      if (updated) updated.textContent = 'updated ' + fmtRelative(data.timestamp);
+    } catch (_) {
+      const mode = document.getElementById('am-mode');
+      if (mode) mode.textContent = 'offline';
+    }
+  }
+  (function wireAutonomyModal() {
+    const tile = document.getElementById('autonomy-tile');
+    const overlay = document.getElementById('autonomy-modal-overlay');
+    const closeBtn = document.getElementById('am-modal-close');
+    const cancelBtn = document.getElementById('am-cancel');
+    const form = document.getElementById('am-modal-form');
+    const status = document.getElementById('am-modal-status');
+    if (!tile || !overlay || !form) return;
+    function open() {
+      const checked = form.querySelector(`input[name="am-mode"][value="${_currentAutonomy}"]`);
+      if (checked) checked.checked = true;
+      if (status) { status.textContent = ''; status.className = 'am-modal-status'; }
+      overlay.hidden = false;
+    }
+    function close() { overlay.hidden = true; }
+    tile.addEventListener('click', open);
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    if (cancelBtn) cancelBtn.addEventListener('click', close);
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const picked = form.querySelector('input[name="am-mode"]:checked');
+      if (!picked) return;
+      if (status) { status.textContent = 'Applying…'; status.className = 'am-modal-status'; }
+      try {
+        const res = await fetch(FN('autonomy-mode-set'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ mode: picked.value })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          if (status) { status.textContent = 'Applied · ' + (data.note || ''); status.className = 'am-modal-status ok'; }
+          setTimeout(() => { close(); loadAutonomy(); }, 1400);
+        } else {
+          if (status) { status.textContent = (data.note || data.error || 'Failed'); status.className = 'am-modal-status err'; }
+        }
+      } catch (err) {
+        if (status) { status.textContent = 'Network error: ' + (err.message || err); status.className = 'am-modal-status err'; }
+      }
+    });
+  })();
+
+  /* ---------- Samuel digest ---------- */
+  async function loadSamuel() {
+    const body = document.getElementById('samuel-body');
+    if (!body) return;
+    try {
+      const res = await fetch(FN('command-samuel-digest'), { cache: 'no-store', credentials: 'include' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      renderSamuel(body, data);
+    } catch (_) {
+      body.innerHTML = '<div class="gq-empty">Samuel offline — will retry in 30s</div>';
+    }
+  }
+  function renderSamuel(body, data) {
+    const dateEl = document.getElementById('sm-date');
+    const subEl = document.getElementById('sm-sub');
+    const updated = document.getElementById('sm-updated');
+    if (updated) updated.textContent = 'updated ' + fmtRelative(data.timestamp);
+    if (!data.has_digest || !data.digest) {
+      if (dateEl) dateEl.textContent = 'no runs';
+      if (subEl) subEl.textContent = data.note || 'Samuel has not run yet.';
+      body.innerHTML = `<div class="gq-empty">${escapeHtml(data.note || 'Samuel has not run yet — next eval Monday 06:00 UTC')}</div>`;
+      return;
+    }
+    const d = data.digest;
+    if (dateEl) dateEl.textContent = (d.date || '').slice(0, 10) || '--';
+    if (subEl) subEl.textContent = (d.proposals ? d.proposals.length : 0) + ' proposals · ' +
+      (d.flagged_agents ? d.flagged_agents.length : 0) + ' flagged';
+
+    const proposalsHtml = (d.proposals || []).slice(0, 8).map(p => `
+      <div class="sm-proposal">
+        <span class="conf">conf ${p.confidence != null ? (Number(p.confidence).toFixed(2)) : '—'}</span>
+        <span class="who">${escapeHtml(p.agent_name || p.agent_id || '—')}</span>
+        <div>${escapeHtml(p.suggested_change || p.rationale || '—')}</div>
+      </div>
+    `).join('');
+    const deltasHtml = (d.score_deltas || []).slice(0, 8).map(dd => {
+      const delta = Number(dd.delta);
+      const cls = delta > 0 ? 'd-pos' : delta < 0 ? 'd-neg' : '';
+      const sign = delta > 0 ? '+' : '';
+      return `<div class="sm-delta">
+        <span class="agent">${escapeHtml(dd.agent_name || dd.agent_id || '—')}</span>
+        <span class="nums">${dd.prev_grade ?? '—'} → ${dd.new_grade ?? '—'}</span>
+        <span class="${cls}">${sign}${Number.isFinite(delta) ? delta : ''}</span>
+      </div>`;
+    }).join('');
+
+    body.innerHTML = `
+      ${d.summary ? `<div class="sm-summary">${escapeHtml(d.summary)}</div>` : ''}
+      ${proposalsHtml ? `<div class="sm-section"><div class="sm-section-hd">Proposals</div>${proposalsHtml}</div>` : ''}
+      ${deltasHtml ? `<div class="sm-section"><div class="sm-section-hd">Monday-before deltas</div>${deltasHtml}</div>` : ''}
+    `;
+  }
+
   /* ---------- Boot + poll ---------- */
   function refreshAll() {
     loadQueue();
     loadBrief();
     loadResearch();
     loadVaultKeeper();
+    loadScorecards();
+    loadEvents();
+    loadAutonomy();
+    loadSamuel();
   }
   refreshAll();
   setInterval(refreshAll, POLL_MS);

@@ -1,0 +1,78 @@
+[build]
+  functions = "netlify/functions"
+  publish = "."
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+    Service-Worker-Allowed = "/"
+
+[[headers]]
+  for = "/manifest.json"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+# Friendly /api/* aliases for the dashboard fetches
+[[redirects]]
+  from   = "/api/queue-list"
+  to     = "/.netlify/functions/queue-list"
+  status = 200
+
+[[redirects]]
+  from   = "/api/queue-update"
+  to     = "/.netlify/functions/queue-update"
+  status = 200
+
+[[redirects]]
+  from   = "/api/morning-brief"
+  to     = "/.netlify/functions/morning-brief"
+  status = 200
+
+[[redirects]]
+  from   = "/api/research-feed"
+  to     = "/.netlify/functions/research-feed"
+  status = 200
+
+[[redirects]]
+  from   = "/api/status"
+  to     = "/.netlify/functions/status"
+  status = 200
+
+[[redirects]]
+  from   = "/api/command-scorecards"
+  to     = "/.netlify/functions/command-scorecards"
+  status = 200
+
+[[redirects]]
+  from   = "/api/command-events"
+  to     = "/.netlify/functions/command-events"
+  status = 200
+
+[[redirects]]
+  from   = "/api/autonomy-mode"
+  to     = "/.netlify/functions/autonomy-mode"
+  status = 200
+
+[[redirects]]
+  from   = "/api/autonomy-mode-set"
+  to     = "/.netlify/functions/autonomy-mode-set"
+  status = 200
+
+[[redirects]]
+  from   = "/api/command-samuel-digest"
+  to     = "/.netlify/functions/command-samuel-digest"
+  status = 200
+
+# Environment variables (set in Netlify UI):
+# WINDMILL_BASE_URL = https://gmbh-lion-mar-epson.trycloudflare.com (flip to api.cornerstoneregroup.ca after DNS)
+# WINDMILL_TOKEN    = BnrlvHahVtlJrGFFA7UVrhmbwP2r1pUJ
+# CRG_AUTONOMY_MODE = off | green | yellow | full  (read by autonomy-mode.js; set by autonomy-mode-set.js via Netlify API)
+# NETLIFY_PERSONAL_ACCESS_TOKEN = <user PAT, site:write>  (needed by autonomy-mode-set.js)
+# NETLIFY_SITE_ID = <site uuid>  (needed by autonomy-mode-set.js)

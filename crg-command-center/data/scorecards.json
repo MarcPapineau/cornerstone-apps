@@ -1,0 +1,534 @@
+{
+  "synced_at": "2026-04-22T22:28:24.151Z",
+  "source": "../01-CORNERSTONE-RESEARCH-GROUP/agents/scorecards",
+  "count": 15,
+  "scorecards": [
+    {
+      "agent_id": "abigail",
+      "name": "Abigail",
+      "team": "Voice",
+      "role": "Voice concierge — first-touch intake calls, books Discovery Brief on Marc's calendar",
+      "rubric_id": "voice-concierge",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-18T23:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "voice-concierge",
+          "evidence_quote": "PLACEHOLDER — no calls evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers on first completed Vapi call after end-of-call-report webhook is wired."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [
+        {
+          "date": "2026-04-18T20:00:00-04:00",
+          "version": "v1.0.0",
+          "change_summary": "Initial assistant config — CALL-SCRIPT-v1.md system prompt deployed to Vapi assistant c746c0d8-827f-4b27-a095-0ff250fd1637",
+          "approved_by": "marc"
+        }
+      ],
+      "active_version": "v1.0.0",
+      "owner": "marc@cornerstoneregroup.ca",
+      "vapi_assistant_id": "c746c0d8-827f-4b27-a095-0ff250fd1637"
+    },
+    {
+      "agent_id": "apollos",
+      "name": "Apollos",
+      "team": "Content",
+      "role": "Article writer — daily articles for marc@cornerstoneregroup.ca with research, voice, structure, novelty",
+      "rubric_id": "article-writer",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-18T23:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "article-writer",
+          "evidence_quote": "PLACEHOLDER — no articles evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. Weekly Monday 09:00 evaluation of all articles published in prior 7 days."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [
+        {
+          "date": "2026-04-15T07:00:00-04:00",
+          "version": "v3.0.0",
+          "change_summary": "APOLLOS v3 enhanced prompt deployed (per APOLLOS-V3-ENHANCED-PROMPT.md)",
+          "approved_by": "marc"
+        }
+      ],
+      "active_version": "v3.0.0",
+      "owner": "marc@cornerstoneregroup.ca"
+    },
+    {
+      "agent_id": "asaph",
+      "name": "Asaph",
+      "role_title": "SEO Manager",
+      "team": "Marketing",
+      "role": "SEO Manager — keyword research within Lydia's themes, on-page audit, content briefs to Apollos, weekly SERP movement tracking",
+      "rubric_id": "seo-manager",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-19T05:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "seo-manager",
+          "evidence_quote": "PLACEHOLDER — no SEO outputs evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers on first weekly SERP movement report (Monday 8am ET) once Search Console creds wired by Levite."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [
+        {
+          "date": "2026-04-19T05:00:00-04:00",
+          "version": "v0.1.0-spec",
+          "change_summary": "Initial spec written (overnight build) per scorecards/seo-manager.md — awaiting Marc ratification + alias confirmation (Asaph vs Ezra-the-Scribe naming collision risk)",
+          "approved_by": "pending"
+        }
+      ],
+      "active_version": "v0.1.0-spec",
+      "owner": "marc@cornerstoneregroup.ca",
+      "spec_path": "01-CORNERSTONE-RESEARCH-GROUP/agents/scorecards/seo-manager.md",
+      "reports_to_marketing_manager": "lydia",
+      "alias_open_question": "Asaph chosen to avoid collision with Ezra (Daily Brief Editor, live). Marc to confirm or rename."
+    },
+    {
+      "agent_id": "benaiah",
+      "name": "Benaiah",
+      "team": "Email",
+      "role": "Outbound email AI — drafts and sends prospect emails with research-first frame",
+      "rubric_id": "outbound-email",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-18T23:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "outbound-email",
+          "evidence_quote": "PLACEHOLDER — no sends evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers on first send via benaiah-send.js Netlify function."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [
+        {
+          "date": "2026-04-18T12:00:00-04:00",
+          "version": "v1.0.0",
+          "change_summary": "Initial benaiah-send.js Netlify function with KRITE quality gate (voice_score >= 75 threshold)",
+          "approved_by": "marc"
+        }
+      ],
+      "active_version": "v1.0.0",
+      "owner": "marc@cornerstoneregroup.ca"
+    },
+    {
+      "agent_id": "claude-code",
+      "name": "Claude (in Code)",
+      "team": "Build",
+      "role": "Engineering / build / orchestration — builds CRG infrastructure, runs sessions, writes code, deploys, evaluates",
+      "rubric_id": "claude-code",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-18T23:55:00-04:00",
+          "score": 0,
+          "evaluator": "self (per Marc's standing rule that Claude participates in scorecard system)",
+          "rubric_id": "claude-code",
+          "evidence_quote": "PLACEHOLDER — first self-eval pending. This session (overnight 4-doc build) will be the first scored output once Marc reviews in the morning.",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. Per scorecard-system spec, Claude in Code writes session-end retrospective entries; Marc can override scores. Open question for Marc: do you want a separate Judge instance evaluating Claude, or is self-eval acceptable?"
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [],
+      "active_version": "v1.0.0",
+      "owner": "marc@cornerstoneregroup.ca",
+      "self_eval_acceptable": "PENDING_MARC_DECISION"
+    },
+    {
+      "agent_id": "daniel",
+      "name": "Daniel",
+      "team": "Content",
+      "role": "Research / market intel — 4-section digest (Macro, Market Intel, Ottawa Spotlight, Health) every 6h + weekly tool scout",
+      "rubric_id": "article-writer",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-18T23:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "article-writer",
+          "evidence_quote": "PLACEHOLDER — no digests evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. Article-writer rubric applies with research-emphasis: sourcing weight effectively higher (verify >= 5 distinct sources per digest)."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [
+        {
+          "date": "2026-04-11T00:00:00-04:00",
+          "version": "v2.0.0",
+          "change_summary": "Modular sub-workflow architecture rebuild (per AGENT-EVOLUTION-PILOT-DANIEL.md)",
+          "approved_by": "marc"
+        }
+      ],
+      "active_version": "v2.0.0",
+      "owner": "marc@cornerstoneregroup.ca"
+    },
+    {
+      "agent_id": "ezra",
+      "name": "Ezra",
+      "role_title": "Daily Brief Editor",
+      "team": "Content",
+      "role": "Daily Brief Editor — edits and ships Marc's 5:45am morning brief; synthesizes Daniel's research digest, Martha's calendar brief, and Lydia's campaign highlights into a single scannable daily document",
+      "rubric_id": "article-writer",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-20T00:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "article-writer",
+          "evidence_quote": "PLACEHOLDER — no morning briefs evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers on first morning brief delivery (target 5:45am ET daily). Rubric: article-writer (shared Content team rubric). Key emphasis: synthesis quality (T4 outputs from T1 calendar + T1 research) and scanability (Marc reads in < 90 sec)."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [],
+      "active_version": "v0.1.0-spec",
+      "status": "spec",
+      "last_evaluated": null,
+      "version": "v0.1.0-spec",
+      "owner": "marc@cornerstoneregroup.ca",
+      "biblical_alias_rationale": "Ezra the Scribe (Ezra 7; Nehemiah 8) was the editor and teacher who synthesized the Law for the returning exiles — he read, explained, and applied the canonical texts so the people could act on them. CRG's Daily Brief Editor synthesizes raw research (Daniel), calendar data (Martha), and campaign signals (Lydia) into a morning document Marc can act on in < 90 seconds. Ezra's editorial role — not authoring the law, but making it comprehensible and actionable — is the exact function.",
+      "reports_to": "claude-orchestrator",
+      "synthesizes_from": [
+        "daniel",
+        "martha",
+        "lydia"
+      ],
+      "delivery_sla": "5:45am ET daily",
+      "note": "Alias note: Ezra (Daily Brief Editor) is distinct from Asaph (SEO Manager). No naming collision — different roles, different biblical figures, different teams."
+    },
+    {
+      "agent_id": "joseph",
+      "name": "Joseph",
+      "role_title": "Bookkeeper",
+      "team": "Finance",
+      "role": "Bookkeeper — transaction categorization, invoice tracking, Xero reconciliation across all CRG silos; supplies cost-structure actuals to Solomon for pricing decisions; flags financial exceptions to Marc within 24h",
+      "rubric_id": "bookkeeper",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-20T00:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "bookkeeper",
+          "evidence_quote": "PLACEHOLDER — no reconciliation cycles evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers on first completed weekly Xero reconciliation run. Rubric: bookkeeper (new, purpose-built for finance operations)."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [],
+      "active_version": "v0.1.0-spec",
+      "status": "spec",
+      "last_evaluated": null,
+      "version": "v0.1.0-spec",
+      "owner": "marc@cornerstoneregroup.ca",
+      "biblical_alias_rationale": "Joseph of Egypt (Genesis 39-47) was the archetype of administrative stewardship at scale — he managed Potiphar's house, then the prison, then Pharaoh's entire national supply chain and treasury. He categorized the surplus grain (7 years of recording and storing), tracked all incoming tribute, reconciled the granary records, and flagged the famine before it was a crisis. No biblical figure better represents meticulous, multi-ledger financial administration with an early-warning function. Joseph as Bookkeeper is the exact mapping.",
+      "reports_to": "claude-orchestrator",
+      "supplies_data_to": [
+        "solomon"
+      ],
+      "receives_expense_items_from": [
+        "martha"
+      ],
+      "stack": [
+        "Xero",
+        "bank feed API",
+        "receipt OCR (when wired)"
+      ],
+      "cra_compliance_note": "All categorizations must be defensible under CRA business-expense rules. Personal expenses NEVER coded as business. Silo separation maintained for potential entity separation."
+    },
+    {
+      "agent_id": "krite",
+      "name": "KRITE",
+      "team": "Quality",
+      "role": "Quality gate / judge — reviews all client-facing output before release",
+      "rubric_id": "quality-gate",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-18T23:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "quality-gate",
+          "evidence_quote": "PLACEHOLDER — no reviews evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. KRITE evaluations sampled — every 10th verdict + all rejections audited."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [
+        {
+          "date": "2026-04-18T12:00:00-04:00",
+          "version": "v1.0.0",
+          "change_summary": "Initial KRITE 4-axis scoring (voice, compliance, research-first, tone) integrated into benaiah-send.js",
+          "approved_by": "marc"
+        }
+      ],
+      "active_version": "v1.0.0",
+      "owner": "marc@cornerstoneregroup.ca",
+      "self_improvement_validator": "marc-direct (KRITE cannot self-validate)"
+    },
+    {
+      "agent_id": "riley",
+      "name": "Riley",
+      "team": "Voice",
+      "role": "TBD — Vapi assistant 7c88ceca-a818-47f3-8516-df8b99db5009 exists but role/script not yet defined. Marc to confirm.",
+      "rubric_id": "voice-concierge",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-18T23:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "voice-concierge",
+          "evidence_quote": "PLACEHOLDER — role undefined, no calls evaluated",
+          "subscores": {},
+          "notes": "Scorecard seeded as placeholder. BLOCKER: Marc must define Riley's role before evaluations begin."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [],
+      "active_version": "v0.0.1-placeholder",
+      "owner": "marc@cornerstoneregroup.ca",
+      "vapi_assistant_id": "7c88ceca-a818-47f3-8516-df8b99db5009",
+      "blocking_question": "What is Riley's role? (inbound concierge? outbound speed-to-lead? specific vertical?)"
+    },
+    {
+      "agent_id": "levite",
+      "name": "Levite",
+      "role_title": "Vault Keeper",
+      "team": "Infrastructure",
+      "role": "Vault Keeper — API key health monitoring every 6h, secrets rotation via Doppler + Netlify scheduled functions, OAuth token refresh; Marc never touches a credential directly",
+      "rubric_id": "vault-keeper",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-20T00:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "vault-keeper",
+          "evidence_quote": "PLACEHOLDER — no rotation cycles evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers after first complete 6h health check cycle is logged in Doppler. Rubric: vault-keeper (new, purpose-built for secrets infrastructure)."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [],
+      "active_version": "v0.1.0-spec",
+      "status": "spec",
+      "last_evaluated": null,
+      "version": "v0.1.0-spec",
+      "owner": "marc@cornerstoneregroup.ca",
+      "biblical_alias_rationale": "The Levites (Numbers 3:6-9; 1 Chronicles 9:26-27) were the priestly tribe assigned to guard the Tabernacle — specifically the gatekeepers who controlled access to the holy of holies. No unauthorized person entered; they kept the keys and the watch. CRG's Vault Keeper is the gatekeeper of the credential layer: nothing gets in or out without Levite's control, and no agent (including Claude) ever touches a raw API key.",
+      "check_cadence": "every 6h",
+      "stack": [
+        "Doppler",
+        "Netlify scheduled functions",
+        "OAuth refresh endpoints"
+      ],
+      "consumers_served": [
+        "abigail",
+        "benaiah",
+        "daniel",
+        "lydia",
+        "asaph",
+        "martha",
+        "nehemiah",
+        "ezra",
+        "solomon",
+        "joseph",
+        "apollos",
+        "krite"
+      ]
+    },
+    {
+      "agent_id": "lydia",
+      "name": "Lydia",
+      "role_title": "Marketing Manager",
+      "team": "Marketing",
+      "role": "Marketing Manager — cross-silo campaign strategy, brand consistency, channel mix, A/B test design; sits above Apollos (Content) and Asaph (SEO)",
+      "rubric_id": "marketing-manager",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-19T05:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "marketing-manager",
+          "evidence_quote": "PLACEHOLDER — no marketing outputs evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers on first weekly marketing dashboard delivery (Friday 4pm ET)."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [
+        {
+          "date": "2026-04-19T05:00:00-04:00",
+          "version": "v0.1.0-spec",
+          "change_summary": "Initial spec written (overnight build) per scorecards/marketing-manager.md — awaiting Marc ratification",
+          "approved_by": "pending"
+        }
+      ],
+      "active_version": "v0.1.0-spec",
+      "owner": "marc@cornerstoneregroup.ca",
+      "spec_path": "01-CORNERSTONE-RESEARCH-GROUP/agents/scorecards/marketing-manager.md",
+      "directs": [
+        "apollos",
+        "asaph"
+      ]
+    },
+    {
+      "agent_id": "martha",
+      "name": "Martha",
+      "role_title": "Office Manager",
+      "team": "Operations",
+      "role": "Office Manager — calendar/inbox triage, meeting prep, follow-up tracking, weekly personal-life review",
+      "rubric_id": "office-manager",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-19T05:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "office-manager",
+          "evidence_quote": "PLACEHOLDER — no operations runs evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers on first morning calendar brief delivery."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [
+        {
+          "date": "2026-04-19T05:00:00-04:00",
+          "version": "v0.1.0-spec",
+          "change_summary": "Initial spec written (overnight build) per scorecards/office-manager.md — awaiting Marc ratification",
+          "approved_by": "pending"
+        }
+      ],
+      "active_version": "v0.1.0-spec",
+      "owner": "marc@cornerstoneregroup.ca",
+      "spec_path": "01-CORNERSTONE-RESEARCH-GROUP/agents/scorecards/office-manager.md"
+    },
+    {
+      "agent_id": "nehemiah",
+      "name": "Nehemiah",
+      "role_title": "Automation Engineer",
+      "team": "Build",
+      "role": "Automation Engineer — builds n8n workflows, Windmill scripts, and code executor tasks; implements technical fixes specified by Asaph, Martha, Lydia; wires webhook infrastructure",
+      "rubric_id": "claude-code",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-20T00:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "claude-code",
+          "evidence_quote": "PLACEHOLDER — no automation builds evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers on first n8n workflow or Windmill script shipped to production. Rubric: claude-code (shared Build team rubric) — covers code correctness, idempotency, error handling, and documentation quality."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [],
+      "active_version": "v0.1.0-spec",
+      "status": "spec",
+      "last_evaluated": null,
+      "version": "v0.1.0-spec",
+      "owner": "marc@cornerstoneregroup.ca",
+      "biblical_alias_rationale": "Nehemiah rebuilt the walls of Jerusalem in 52 days (Neh 6:15) — the archetype of rapid, systematic infrastructure build under pressure. He coordinated workers, managed logistics, and shipped a complete defensible system on deadline. CRG's Automation Engineer is the infrastructure builder who wires the walls (webhooks, workflows, scripts) that protect and accelerate every other agent.",
+      "reports_to": "claude-orchestrator",
+      "implements_specs_from": [
+        "asaph",
+        "martha",
+        "lydia",
+        "levite"
+      ]
+    },
+    {
+      "agent_id": "solomon",
+      "name": "Solomon",
+      "role_title": "Pricing Logic",
+      "team": "Strategy",
+      "role": "Pricing Logic — pricing strategy, tier analysis, revenue modelling across all CRG silos; Lydia uses Solomon's pricing decisions as a positioning input; never makes strategic brand decisions",
+      "rubric_id": "pricing-analyst",
+      "current_grade": 0,
+      "trend": "stable",
+      "recent_evaluations": [
+        {
+          "date": "2026-04-20T00:00:00-04:00",
+          "score": 0,
+          "evaluator": "CRG-Judge",
+          "rubric_id": "pricing-analyst",
+          "evidence_quote": "PLACEHOLDER — no pricing recommendations evaluated yet",
+          "subscores": {},
+          "notes": "Initial scorecard seeded. First evaluation triggers on first pricing memo or tier analysis delivered to Marc. Rubric: pricing-analyst (new, purpose-built)."
+        }
+      ],
+      "proposals_pending": 0,
+      "last_self_improvement_run": null,
+      "deployment_history": [],
+      "active_version": "v0.1.0-spec",
+      "status": "spec",
+      "last_evaluated": null,
+      "version": "v0.1.0-spec",
+      "owner": "marc@cornerstoneregroup.ca",
+      "biblical_alias_rationale": "Solomon (1 Kings 3-4; 10:1-29) was the archetype of commercial wisdom — he managed trade routes, negotiated with Hiram of Tyre, set the tribute structure for 12 districts, and received the Queen of Sheba's revenue-intelligence visit. He is the canonical figure for pricing as applied wisdom: not just knowing market rates, but understanding the strategic value of positioning at every tier. Chosen over Joseph (logistics) and Daniel (research) specifically because Solomon's domain was commerce and valuation.",
+      "reports_to": "claude-orchestrator",
+      "outputs_consumed_by": [
+        "lydia"
+      ],
+      "cost_data_source": "joseph",
+      "escalation_threshold": "any spend recommendation > $50 escalates to Marc"
+    }
+  ]
+}
