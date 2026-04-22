@@ -1,0 +1,33 @@
+{
+  "agent_id": "jason",
+  "name": "Jason",
+  "team": "Intake",
+  "role": "Intake Submission — receives prospect form POST, validates + enriches + dedupes, hands off to Abigail (voice) or Benaiah (email fallback).",
+  "rubric_id": "jason",
+  "current_grade": 0,
+  "trend": "stable",
+  "recent_evaluations": [
+    {
+      "date": "2026-04-21T00:00:00-04:00",
+      "score": 0,
+      "evaluator": "samuel",
+      "rubric_id": "jason",
+      "evidence_quote": "PLACEHOLDER — no submissions evaluated yet",
+      "subscores": {},
+      "notes": "Initial scorecard seeded 2026-04-21 (cleanup PR). First evaluation triggers on first prospect submission via jason-intake-submit.js."
+    }
+  ],
+  "proposals_pending": 0,
+  "last_self_improvement_run": null,
+  "deployment_history": [
+    {
+      "date": "2026-04-21T00:00:00-04:00",
+      "version": "v0.1.0",
+      "change_summary": "Scorecard + rubric added to roster during Wave 2b cleanup. jason-intake-submit.js already in production; rubric retro-applied.",
+      "approved_by": "marc"
+    }
+  ],
+  "active_version": "v0.1.0",
+  "owner": "marc@cornerstoneregroup.ca",
+  "biblical_alias_rationale": "Jason of Thessalonica (Acts 17:5-9) — the receiver-of-travelers who validated new arrivals, posted bond, and documented the handoff. First-mile of the funnel."
+}

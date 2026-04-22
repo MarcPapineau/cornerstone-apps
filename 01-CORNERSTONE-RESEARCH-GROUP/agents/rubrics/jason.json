@@ -1,0 +1,65 @@
+{
+  "rubric_id": "jason",
+  "version": "v1.0",
+  "applies_to_team": "Intake",
+  "scoring_window": "per-submission + weekly batch review",
+  "notes": "Rubric for the Jason intake submission agent (netlify/functions/jason-intake-submit.js). Scored per-submission for validation + handoff; weekly batch review for completeness + compliance trends.",
+  "weights": {
+    "data_completeness": 30,
+    "validation": 25,
+    "handoff_quality": 25,
+    "compliance": 20
+  },
+  "criteria": {
+    "data_completeness": {
+      "weight": 30,
+      "description": "All required fields captured (name, email, phone OR preference-email-only, vertical, stated problem). Enrichment (Apollo/Clearbit when wired) applied without overwriting user-entered text. Gaps logged explicitly as data, not silently dropped.",
+      "scoring": {
+        "90_100": "All required fields present; enrichment added; any gaps explicitly logged with reason.",
+        "70_89": "One non-critical field missing (e.g., role title) with gap logged.",
+        "50_69": "Critical field missing (phone AND email both absent OR stated problem empty) and submission still handed off.",
+        "0_49": "Multiple critical fields missing; submission handed off anyway."
+      },
+      "evidence_required": "Submission JSON record + gap log + enrichment delta (before/after)"
+    },
+    "validation": {
+      "weight": 25,
+      "description": "Spam defenses active (honeypot check, rate limit, email MX check). Idempotency (no duplicate GHL contact on resubmit — dedupe key = email + phone hash). Out-of-scope vertical correctly declined (not handed to Abigail).",
+      "scoring": {
+        "90_100": "Spam caught (honeypot/rate/MX) OR legitimate submission passed all checks cleanly. No duplicate contact. Out-of-scope declined with polite offer (blog subscribe / decline email).",
+        "70_89": "Minor validation gap (e.g., MX check skipped on known domain) but no downstream issue.",
+        "50_69": "Duplicate contact created OR out-of-scope submission incorrectly handed to Abigail.",
+        "0_49": "Spam reached Abigail/Benaiah OR multiple duplicate contacts in GHL."
+      },
+      "evidence_required": "Validation log entries + GHL contact lookup (dedupe check) + downstream handoff record"
+    },
+    "handoff_quality": {
+      "weight": 25,
+      "description": "Correct route selection: phone present + in-scope vertical → Abigail; email-only or phone invalid → Benaiah; out-of-scope → polite decline. Abigail/Benaiah receives all context needed (stated problem, vertical, any enrichment) — no context loss at handoff.",
+      "scoring": {
+        "90_100": "Route matches rules exactly. Receiving agent has full context. Handoff event (intake.submitted) published with all fields.",
+        "70_89": "Route correct but one context field missing (recovered by receiving agent).",
+        "50_69": "Route incorrect (e.g., email-only submission sent to Abigail who cannot call).",
+        "0_49": "Route incorrect AND receiving agent had to query source data to recover context."
+      },
+      "evidence_required": "agent-bus event payload + receiving agent's first-action log"
+    },
+    "compliance": {
+      "weight": 20,
+      "description": "PII handled correctly (logged but never emailed in plaintext; phone/email hashed where referenced in events). Consent basis documented (intake = explicit opt-in). Confirmation message sent immediately and truthfully (does not promise booking if Abigail is unavailable).",
+      "scoring": {
+        "100": "All PII correctly handled. Consent captured and timestamped. Confirmation message accurate.",
+        "75_99": "Minor PII handling slip (e.g., phone in log message plaintext) caught and remediated.",
+        "0_74": "PII emailed in plaintext OR consent not captured OR confirmation message made a promise the system cannot keep. AUTOMATIC FAIL ZONE."
+      },
+      "evidence_required": "Function log scan for plaintext PII + consent record + confirmation message text"
+    }
+  },
+  "ground_truth_signals": [
+    "Handoff success rate (Abigail/Benaiah received payload and acknowledged)",
+    "Dedupe correctness (duplicate contact count in GHL)",
+    "Spam catch rate vs spam bypass rate",
+    "Confirmation delivery rate (prospect received the immediate reply)",
+    "Time from form POST to handoff event (target < 5 sec)"
+  ]
+}

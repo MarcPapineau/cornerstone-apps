@@ -3,7 +3,7 @@
   "name": "Abigail",
   "team": "Voice",
   "role": "Voice concierge — first-touch intake calls, books Discovery Brief on Marc's calendar",
-  "rubric_id": "voice-concierge",
+  "rubric_id": "abigail",
   "current_grade": 0,
   "trend": "stable",
   "recent_evaluations": [
@@ -11,7 +11,7 @@
       "date": "2026-04-18T23:00:00-04:00",
       "score": 0,
       "evaluator": "CRG-Judge",
-      "rubric_id": "voice-concierge",
+      "rubric_id": "abigail",
       "evidence_quote": "PLACEHOLDER — no calls evaluated yet",
       "subscores": {},
       "notes": "Initial scorecard seeded. First evaluation triggers on first completed Vapi call after end-of-call-report webhook is wired."

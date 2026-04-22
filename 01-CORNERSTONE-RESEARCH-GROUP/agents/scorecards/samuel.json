@@ -1,0 +1,34 @@
+{
+  "agent_id": "samuel",
+  "name": "Samuel",
+  "role_title": "Weekly Agent Evaluator",
+  "team": "Meta",
+  "role": "Prophet-judge — weekly rubric-anchored evaluation of every CRG agent; generates self-improvement proposals (PRs for customer-facing agents, auto-merge for back-office on 4-week >90 streak).",
+  "rubric_id": "quality-gate",
+  "current_grade": 0,
+  "trend": "stable",
+  "recent_evaluations": [
+    {
+      "date": "2026-04-21T00:00:00-04:00",
+      "score": 0,
+      "evaluator": "krite",
+      "rubric_id": "quality-gate",
+      "evidence_quote": "PLACEHOLDER — Samuel has not yet completed a full weekly sweep under the Samuel name",
+      "subscores": {},
+      "notes": "Renamed from Agent Judge / CRG-Judge 2026-04-21. Scorecard now keyed to samuel.json. First evaluation triggers after the first Monday 2:00 AM ET sweep of all roster scorecards."
+    }
+  ],
+  "proposals_pending": 0,
+  "last_self_improvement_run": null,
+  "deployment_history": [
+    {
+      "date": "2026-04-21T00:00:00-04:00",
+      "version": "v1.0.0",
+      "change_summary": "Rename Agent Judge → Samuel. Prophet-judge archetype locked. Netlify function samuel-background.js replaces agent-judge-background.js. Model upgraded to claude-opus-4-7 per model-selection rule.",
+      "approved_by": "marc"
+    }
+  ],
+  "active_version": "v1.0.0",
+  "owner": "marc@cornerstoneregroup.ca",
+  "biblical_alias_rationale": "Samuel — last judge, first of the great prophets (1 Sam 3-16). Anointed Saul, rejected Saul, anointed David. Evaluated kings against the standard (1 Sam 15:22) and corrected his own bias mid-process (1 Sam 16:7). The archetype of evidence-anchored, bias-resistant evaluation of power."
+}

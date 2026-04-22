@@ -3,7 +3,7 @@
   "name": "Daniel",
   "team": "Content",
   "role": "Research / market intel — 4-section digest (Macro, Market Intel, Ottawa Spotlight, Health) every 6h + weekly tool scout",
-  "rubric_id": "article-writer",
+  "rubric_id": "daniel-research",
   "current_grade": 0,
   "trend": "stable",
   "recent_evaluations": [
@@ -11,7 +11,7 @@
       "date": "2026-04-18T23:00:00-04:00",
       "score": 0,
       "evaluator": "CRG-Judge",
-      "rubric_id": "article-writer",
+      "rubric_id": "daniel-research",
       "evidence_quote": "PLACEHOLDER — no digests evaluated yet",
       "subscores": {},
       "notes": "Initial scorecard seeded. Article-writer rubric applies with research-emphasis: sourcing weight effectively higher (verify >= 5 distinct sources per digest)."

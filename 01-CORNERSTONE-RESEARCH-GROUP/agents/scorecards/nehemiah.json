@@ -1,0 +1,32 @@
+{
+  "agent_id": "nehemiah",
+  "name": "Nehemiah",
+  "role_title": "Automation Engineer",
+  "team": "Build",
+  "role": "Automation Engineer — builds n8n workflows, Windmill scripts, and code executor tasks; implements technical fixes specified by Asaph, Martha, Lydia; wires webhook infrastructure",
+  "rubric_id": "nehemiah",
+  "current_grade": 0,
+  "trend": "stable",
+  "recent_evaluations": [
+    {
+      "date": "2026-04-20T00:00:00-04:00",
+      "score": 0,
+      "evaluator": "CRG-Judge",
+      "rubric_id": "nehemiah",
+      "evidence_quote": "PLACEHOLDER — no automation builds evaluated yet",
+      "subscores": {},
+      "notes": "Initial scorecard seeded. First evaluation triggers on first n8n workflow or Windmill script shipped to production. Rubric: claude-code (shared Build team rubric) — covers code correctness, idempotency, error handling, and documentation quality."
+    }
+  ],
+  "proposals_pending": 0,
+  "last_self_improvement_run": null,
+  "deployment_history": [],
+  "active_version": "v0.1.0-spec",
+  "status": "spec",
+  "last_evaluated": null,
+  "version": "v0.1.0-spec",
+  "owner": "marc@cornerstoneregroup.ca",
+  "biblical_alias_rationale": "Nehemiah rebuilt the walls of Jerusalem in 52 days (Neh 6:15) — the archetype of rapid, systematic infrastructure build under pressure. He coordinated workers, managed logistics, and shipped a complete defensible system on deadline. CRG's Automation Engineer is the infrastructure builder who wires the walls (webhooks, workflows, scripts) that protect and accelerate every other agent.",
+  "reports_to": "claude-orchestrator",
+  "implements_specs_from": ["asaph", "martha", "lydia", "levite"]
+}

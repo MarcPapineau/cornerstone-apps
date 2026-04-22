@@ -1,0 +1,67 @@
+{
+  "rubric_id": "nehemiah",
+  "version": "v1.0",
+  "applies_to_team": "Orchestration",
+  "scoring_window": "weekly (heartbeat + standup + reaper) — aggregated across 7 days of runs",
+  "notes": "Rubric for the Nehemiah conductor agent (netlify/functions/nehemiah-conductor.js). Evaluates the orchestrator itself: heartbeat reliability, queue health, escalation correctness, standup quality.",
+  "weights": {
+    "heartbeat_reliability": 25,
+    "queue_health": 25,
+    "escalation_correctness": 25,
+    "standup_quality": 25
+  },
+  "criteria": {
+    "heartbeat_reliability": {
+      "weight": 25,
+      "description": "nehemiah.heartbeat event emitted every 15 min (96 beats/day target). Misses logged. Dashboard read latency < 30 sec after beat emitted.",
+      "scoring": {
+        "90_100": "≥ 94 of 96 beats/day emitted on time. Zero silent misses. Dashboard reads current heartbeat within 30 sec.",
+        "70_89": "90-93 of 96 beats/day. Any miss logged with cause.",
+        "50_69": "85-89 of 96 beats/day OR a miss stretch > 2 consecutive ticks without a logged cause.",
+        "0_49": "< 85 beats/day OR the dashboard went > 30 min without a fresh beat."
+      },
+      "evidence_required": "Heartbeat event log (timestamps) for the evaluation window + dashboard read-latency sample"
+    },
+    "queue_health": {
+      "weight": 25,
+      "description": "Reaper sweeps stale claims (> SLA per agent type) and correctly re-queues or dead-letters. Queue depth stays within budget (no runaway backlog). Idempotency holds (no double-processing of reaped claims).",
+      "scoring": {
+        "90_100": "Zero claims stuck > 2× SLA. Reaper decisions audit-clean. Queue depth bounded throughout window.",
+        "70_89": "≤ 2 claims stuck > 2× SLA (caught and resolved within the window).",
+        "50_69": "A runaway backlog event (queue depth > 50) that took > 1 hour to resolve.",
+        "0_49": "A double-processed claim OR a dead-lettered claim that should have been re-queued (lost work)."
+      },
+      "evidence_required": "agent-queue.json snapshots (start + end of window) + reaper decision log"
+    },
+    "escalation_correctness": {
+      "weight": 25,
+      "description": "Red-tier events surface to Marc immediately (defined list: Abigail hallucination, Benaiah CASL fail, Lazarus pitch-on-call-1, Levite vault alert, Daniel empty brief, any agent paused). Yellow-tier events aggregate into the 8am standup. No red escalated as yellow. No yellow escalated as red (cry-wolf).",
+      "scoring": {
+        "90_100": "Every red-tier event in the window reached Marc within 5 min. Every yellow-tier event landed in the standup. Zero mis-tier.",
+        "70_89": "One mis-tier event (red sent as yellow OR yellow sent as red) — self-corrected.",
+        "50_69": "Two or more mis-tier events OR a red-tier event reached Marc > 30 min late.",
+        "0_49": "A red-tier event was silently swallowed (never reached Marc) OR cry-wolf spam (≥ 5 false-red alerts in 24h)."
+      },
+      "evidence_required": "Event log filtered by tier + Marc email/SMS delivery timestamps + standup content diff"
+    },
+    "standup_quality": {
+      "weight": 25,
+      "description": "Daily standup at 8:00 AM ET, every day (7/week), ≤ 200 words, BLUF, named-agent granularity, includes pattern-calls not just individual failures. Cross-cut insight (e.g., Apollos + Lydia scoring down together → brief-format issue) present when data warrants.",
+      "scoring": {
+        "90_100": "7/7 standups delivered on time. ≤ 200 words. Every agent named. At least one cross-cut insight per week when data warrants.",
+        "70_89": "6 of 7 standups delivered (one missed or > 30 min late). Named-agent granularity held.",
+        "50_69": "≤ 5 of 7 standups delivered OR standup exceeded 300 words OR cross-cut insight missing when data clearly warranted.",
+        "0_49": "≤ 3 standups/week OR a standup that said 'most agents ran fine' without named granularity."
+      },
+      "evidence_required": "Copy of each standup in the window + delivery timestamps + samples of cross-cut insight lines (or logged absence)"
+    }
+  },
+  "ground_truth_signals": [
+    "Heartbeat beats emitted per day (target 96)",
+    "Queue depth over time (max + mean)",
+    "Claims stuck > SLA (count per day)",
+    "Red-tier events → Marc notification latency (seconds)",
+    "Standup delivery rate (standups/week)",
+    "Marc's 'did the standup surface the right thing?' rating (sampled weekly, 1-5)"
+  ]
+}

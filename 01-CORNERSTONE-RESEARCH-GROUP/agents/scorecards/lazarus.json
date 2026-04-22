@@ -1,27 +1,34 @@
 {
-  "agent_id": "riley",
-  "name": "Riley",
+  "agent_id": "lazarus",
+  "name": "Lazarus",
   "team": "Voice",
-  "role": "TBD — Vapi assistant 7c88ceca-a818-47f3-8516-df8b99db5009 exists but role/script not yet defined. Marc to confirm.",
+  "role": "BDM / Database Reactivation — dormant-contact revival via Vapi outbound calls; books discovery calls for Marc.",
   "rubric_id": "voice-concierge",
   "current_grade": 0,
   "trend": "stable",
   "recent_evaluations": [
     {
-      "date": "2026-04-18T23:00:00-04:00",
+      "date": "2026-04-21T00:00:00-04:00",
       "score": 0,
-      "evaluator": "CRG-Judge",
+      "evaluator": "samuel",
       "rubric_id": "voice-concierge",
-      "evidence_quote": "PLACEHOLDER — role undefined, no calls evaluated",
+      "evidence_quote": "PLACEHOLDER — no calls evaluated yet",
       "subscores": {},
-      "notes": "Scorecard seeded as placeholder. BLOCKER: Marc must define Riley's role before evaluations begin."
+      "notes": "Renamed from Riley 2026-04-21. Scorecard now keyed to lazarus.json. First evaluation triggers on first completed Vapi call after lazarus-call-report webhook receives payload."
     }
   ],
   "proposals_pending": 0,
   "last_self_improvement_run": null,
-  "deployment_history": [],
-  "active_version": "v0.0.1-placeholder",
+  "deployment_history": [
+    {
+      "date": "2026-04-21T00:00:00-04:00",
+      "version": "v1.0.0",
+      "change_summary": "Rename Riley → Lazarus. Archetype (resurrection of the dormant) made explicit. Netlify functions and Vapi assistant env (LAZARUS_ASSISTANT_ID) aligned; legacy RILEY_ASSISTANT_ID fallback retained until Vapi config rotated.",
+      "approved_by": "marc"
+    }
+  ],
+  "active_version": "v1.0.0",
   "owner": "marc@cornerstoneregroup.ca",
   "vapi_assistant_id": "7c88ceca-a818-47f3-8516-df8b99db5009",
-  "blocking_question": "What is Riley's role? (inbound concierge? outbound speed-to-lead? specific vertical?)"
+  "biblical_alias_rationale": "Lazarus of Bethany (John 11) — dead four days, past the point of return, called out by name. The industry assumes dormant leads are dead; scripture says dead ≠ gone. Lazarus raises them."
 }

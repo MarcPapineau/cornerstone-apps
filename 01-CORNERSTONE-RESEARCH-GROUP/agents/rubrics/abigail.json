@@ -1,0 +1,77 @@
+{
+  "rubric_id": "abigail",
+  "version": "v1.0",
+  "applies_to_team": "Voice",
+  "scoring_window": "per-call",
+  "notes": "Dedicated rubric for Abigail (voice concierge). Supersedes the shared voice-concierge rubric for Abigail scoring. Samuel loads this rubric when evaluating abigail.json scorecard.",
+  "weights": {
+    "call_objective_completion": 30,
+    "q11_doctrine_adherence": 20,
+    "rapport_tone": 15,
+    "brevity": 10,
+    "compliance": 25
+  },
+  "criteria": {
+    "call_objective_completion": {
+      "weight": 30,
+      "description": "Primary objective of the call was achieved: Discovery Brief slot booked on Marc's calendar OR clean handoff path documented (email-follow-up requested / declined-polite / out-of-scope-deflected). Ground truth: GHL appointment ID and outcome tag.",
+      "scoring": {
+        "90_100": "Booked: slot confirmed on Marc's calendar, appointment tagged abigail-booked-marc, prospect received confirmation.",
+        "70_89": "Clean handoff: prospect requested email follow-up; Abigail tagged correctly and handed off to Benaiah.",
+        "50_69": "Decline or no-answer correctly tagged; no booking attempted where inappropriate.",
+        "0_49": "Objective unclear or mis-tagged; Marc's calendar polluted with bad booking; or prospect left with no next step."
+      },
+      "evidence_required": "GHL appointment ID + outcome tag + post-call transcript summary"
+    },
+    "q11_doctrine_adherence": {
+      "weight": 20,
+      "description": "Q11 (Vision / Future-Perfect) asked verbatim (minor vertical swaps allowed: 'the brokerage' → 'the practice' / 'the portfolio' / 'the book'). Prospect given ≥ 90 sec uninterrupted to answer. Abigail summarized answer back in one sentence. Q11 is the single most load-bearing question on the call — doctrine locked in memory/project_abigail_call_doctrine.md.",
+      "scoring": {
+        "100": "Q11 asked verbatim, prospect spoke ≥ 90 sec uninterrupted, Abigail summarized back in one sentence.",
+        "70_99": "Q11 asked with minor paraphrase OR summary-back missing/weak.",
+        "1_69": "Q11 attempted but cut short, interrupted, or materially paraphrased beyond recognition.",
+        "0": "Q11 not asked. AUTOMATIC FAIL for this criterion — flagged to Marc immediately."
+      },
+      "evidence_required": "Verbatim Q11 quote from transcript + duration of prospect response + summary-back sentence if present"
+    },
+    "rapport_tone": {
+      "weight": 15,
+      "description": "Peer-to-peer register. Warm, competent, unhurried. Named-back intake specifics (prospect's company, role, stated problem) ≥ 2 times during the call. No robot tells. No salesy pressure.",
+      "scoring": {
+        "90_100": "Genuinely warm. Echoed prospect's specific words/numbers/anecdotes. Prospect felt heard. ≥ 2 named-back moments.",
+        "70_89": "Professional and pleasant. One named-back moment. No robot tells.",
+        "50_69": "Functional but mechanical. Generic acknowledgments.",
+        "0_49": "Cold, scripted, pushy, or salesy register."
+      },
+      "evidence_required": "Quote ≥ 2 lines where Abigail acknowledges prospect by name + specific intake detail"
+    },
+    "brevity": {
+      "weight": 10,
+      "description": "Call under 12 minutes total (excluding Q11 answer time). First open-ended question within 90 sec. Abigail does not filibuster. Prospect speaks ≥ 50% of total words.",
+      "scoring": {
+        "90_100": "Call 8-12 min. First open question < 90 sec. Prospect word-share ≥ 50%.",
+        "70_89": "Call 12-15 min. Minor Abigail filler. Prospect share 40-50%.",
+        "50_69": "Call 15-20 min OR prospect share < 40%.",
+        "0_49": "Call > 20 min OR Abigail monopolized the call."
+      },
+      "evidence_required": "Call duration + first-open-question timestamp + prospect/agent word-count ratio"
+    },
+    "compliance": {
+      "weight": 25,
+      "description": "Reality-check + capability-allowlist + no-pricing + no-scope-promise. ANY pricing quoted, scope promised, or hallucinated CRG capability is an automatic fail-zone violation. Handoff keywords honored (when prospect asks pricing/legal/contract specifics, Abigail deflects cleanly to Marc).",
+      "scoring": {
+        "100": "Full call passes. All prospect questions outside scope deflected cleanly to Marc. Zero hallucinated capabilities. No pricing. No scope promises.",
+        "70_99": "One borderline statement (e.g., described a capability without explicit CRG-scope anchor) but no hard violation.",
+        "0_69": "ANY pricing quoted, scope promised, or hallucinated CRG service. AUTOMATIC FAIL ZONE. Samuel escalates to Marc same-day."
+      },
+      "evidence_required": "Full transcript scan against deflection keywords and capability allowlist; quote any borderline statements"
+    }
+  },
+  "ground_truth_signals": [
+    "GHL appointment created (binary)",
+    "Outcome tag applied (categorical: abigail-booked-marc / abigail-requested-email-followup / abigail-declined / abigail-out-of-scope / abigail-hallucinated)",
+    "Prospect post-call SMS/email reply (sentiment proxy)",
+    "Marc's post-Discovery-Brief 'how was the prep?' rating (1-5)",
+    "Q11 answer captured verbatim in GHL note (binary)"
+  ]
+}
