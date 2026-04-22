@@ -4,6 +4,8 @@
  * Proxies to Windmill system_status_v1 and returns the JSON.
  */
 
+const { checkAuth, unauthorized } = require('./_lib/garvis-auth');
+
 const WINDMILL_BASE = process.env.WINDMILL_BASE_URL || "https://gmbh-lion-mar-epson.trycloudflare.com";
 // TODO(levite): rotate WINDMILL_TOKEN — previous value leaked in git history pre-2026-04-21
 const WINDMILL_TOKEN = process.env.WINDMILL_TOKEN;
@@ -12,6 +14,8 @@ exports.handler = async function (event) {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, headers: cors(), body: "" };
   }
+
+  if (!checkAuth(event)) return unauthorized(cors());
 
   if (!WINDMILL_TOKEN) {
     return {

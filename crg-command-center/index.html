@@ -1,0 +1,4269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="theme-color" content="#0C0C0C" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>Cornerstone Command</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png" />
+<meta name="apple-mobile-web-app-title" content="Garvis" />
+<meta name="application-name" content="Garvis" />
+<meta name="mobile-web-app-capable" content="yes" />
+<script>
+/* PWA: register service worker. Garvis is pinnable / installable. */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .then(function (reg) {
+        // Trigger update check on each load — Stark mandate: always-fresh.
+        reg.update().catch(function () {});
+        if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+        reg.addEventListener('updatefound', function () {
+          var nw = reg.installing;
+          if (nw) {
+            nw.addEventListener('statechange', function () {
+              if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+                nw.postMessage({ type: 'SKIP_WAITING' });
+              }
+            });
+          }
+        });
+      })
+      .catch(function (err) { console.warn('[Garvis SW] registration failed', err); });
+  });
+}
+</script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --ink:       #0C0C0C;
+    --ink-2:     #101010;
+    --stone:     #1A1A1A;
+    --slate:     #222222;
+    --surface:   #141416;
+    --surface-2: #1c1c1f;
+    --border:    rgba(240,235,225,0.08);
+    --border-2:  rgba(240,235,225,0.14);
+    --bone:      #F0EBE1;
+    --bone-dim:  rgba(240,235,225,0.75);
+    --muted:     #8C8377;
+    --gold:      #C4922A;
+    --gold-bright:#E2B04A;
+    --gold-dim:  #8F6B20;
+    --green:     #3DD68C;
+    --yellow:    #E2B04A;
+    --red:       #E07070;
+  }
+  html { scroll-behavior: smooth; }
+  body {
+    background-color: var(--ink);
+    color: var(--bone);
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+    padding: 24px 28px 96px;
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    position: relative;
+    overflow-x: hidden;
+  }
+
+  /* =========================================================================
+     STARK HUD — animated grid + particulate background (CSS only, pseudo-els)
+     ========================================================================= */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -20vh -20vw;
+    pointer-events: none;
+    z-index: 0;
+    background-image:
+      linear-gradient(to right,  rgba(226,176,74,0.075) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(226,176,74,0.075) 1px, transparent 1px);
+    background-size: 52px 52px, 52px 52px;
+    animation: stark-grid-drift 60s linear infinite;
+    mask-image: radial-gradient(ellipse at 50% 40%, black 40%, transparent 88%);
+    -webkit-mask-image: radial-gradient(ellipse at 50% 40%, black 40%, transparent 88%);
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background-image:
+      radial-gradient(1px 1px at 12% 18%, rgba(226,176,74,0.32) 100%, transparent),
+      radial-gradient(1px 1px at 37% 62%, rgba(226,176,74,0.22) 100%, transparent),
+      radial-gradient(1px 1px at 69% 28%, rgba(226,176,74,0.28) 100%, transparent),
+      radial-gradient(1px 1px at 82% 78%, rgba(226,176,74,0.20) 100%, transparent),
+      radial-gradient(1px 1px at 54% 44%, rgba(226,176,74,0.24) 100%, transparent),
+      radial-gradient(1px 1px at 23% 82%, rgba(226,176,74,0.18) 100%, transparent),
+      radial-gradient(1px 1px at 91% 12%, rgba(226,176,74,0.22) 100%, transparent),
+      radial-gradient(1px 1px at  7% 52%, rgba(226,176,74,0.16) 100%, transparent);
+    animation: stark-particulate 32s ease-in-out infinite;
+    opacity: 0.55;
+  }
+  @keyframes stark-grid-drift {
+    0%   { background-position: 0 0, 0 0; }
+    100% { background-position: 520px 520px, 520px 520px; }
+  }
+  @keyframes stark-particulate {
+    0%   { transform: translate3d(0, 0, 0); }
+    50%  { transform: translate3d(22px, -16px, 0); }
+    100% { transform: translate3d(0, 0, 0); }
+  }
+
+  /* keep content above HUD */
+  .wrap, .cmd-header, .section, .cmd-footer, .modal-scrim { position: relative; z-index: 1; }
+
+  /* =========================================================================
+     STARK — header enhancements (HUD clock, typewriter cursor)
+     ========================================================================= */
+  .brand h1 { position: relative; }
+  .brand h1 .cursor {
+    display: inline-block;
+    width: 2px;
+    height: 0.82em;
+    background: var(--gold-bright);
+    margin-left: 3px;
+    vertical-align: baseline;
+    animation: stark-blink 1s step-end infinite;
+  }
+  @keyframes stark-blink { 50% { opacity: 0; } }
+
+  .hdr-meta .val.hud {
+    color: var(--bone);
+    letter-spacing: 0.08em;
+  }
+  .hdr-meta .val.hud .sec {
+    color: var(--gold-bright);
+    transition: text-shadow 180ms ease;
+  }
+  .hdr-meta .val.hud .sec.flash {
+    text-shadow: 0 0 10px rgba(226,176,74,0.75);
+  }
+
+  /* =========================================================================
+     STARK — pulsing LIVE dots (enhanced)
+     ========================================================================= */
+  .live-chip .live-dot,
+  .live-dot.stark {
+    position: relative;
+    background: var(--gold-bright) !important;
+    color: var(--gold-bright);
+    box-shadow: 0 0 0 0 rgba(226,176,74,0.7);
+    animation: stark-live-pulse 2s ease-out infinite;
+  }
+  .live-chip {
+    border-color: rgba(226,176,74,0.35) !important;
+    background: rgba(226,176,74,0.06) !important;
+    color: var(--gold-bright) !important;
+  }
+  @keyframes stark-live-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(226,176,74,0.7); background: var(--gold); }
+    50%  { box-shadow: 0 0 0 8px rgba(226,176,74,0);  background: var(--gold-bright); }
+    100% { box-shadow: 0 0 0 0 rgba(226,176,74,0);    background: var(--gold); }
+  }
+
+  /* =========================================================================
+     STARK — metadata console line
+     ========================================================================= */
+  .meta-console {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+    line-height: 1.75;
+    margin-bottom: 18px;
+    padding: 2px 2px;
+  }
+  .meta-console::before {
+    content: "// ";
+    color: var(--gold);
+  }
+  .meta-console .k { color: #9a9185; }
+  .meta-console .v { color: var(--bone); }
+  .meta-console .g { color: var(--gold-bright); }
+  .meta-console .sep { color: var(--muted); margin: 0 8px; opacity: 0.5; }
+
+  /* =========================================================================
+     STARK — drawn-in rule under every section head
+     ========================================================================= */
+  .section-head {
+    position: relative;
+    border-bottom: none !important;
+    padding-bottom: 12px !important;
+  }
+  .section-head::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 1px;
+    background: linear-gradient(to right, var(--gold) 0%, rgba(196,146,42,0.25) 40%, transparent 100%);
+    transform-origin: left;
+    transform: scaleX(0);
+    animation: stark-draw 700ms cubic-bezier(0.2, 0.7, 0.1, 1) forwards;
+  }
+  @keyframes stark-draw {
+    to { transform: scaleX(1); }
+  }
+  .section-head h2 {
+    position: relative;
+    padding-left: 16px;
+  }
+  .section-head h2::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 50%;
+    transform: translateY(-50%);
+    width: 6px; height: 6px;
+    background: var(--gold-bright);
+    box-shadow: 0 0 10px rgba(226,176,74,0.6);
+  }
+
+  /* =========================================================================
+     STARK — reveal-on-scroll
+     ========================================================================= */
+  .stark-reveal {
+    opacity: 0;
+    transform: translateY(20px);
+    transition: opacity 600ms ease-out, transform 600ms ease-out;
+    will-change: opacity, transform;
+  }
+  .stark-reveal.in {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* =========================================================================
+     STARK — scanline on hover (silos, script-tools, task-cards, health-cells)
+     ========================================================================= */
+  .silo, .script-tool, .task-card, .health-cell, .jump-link, .app-chip, .counter-cell {
+    position: relative;
+    overflow: hidden;
+  }
+  .silo::after, .script-tool::after, .task-card::after,
+  .health-cell::after, .jump-link::after, .counter-cell::after {
+    content: "";
+    position: absolute;
+    top: -2px; left: 0;
+    width: 100%;
+    height: 1px;
+    background: linear-gradient(to right, transparent 0%, var(--gold-bright) 45%, var(--gold-bright) 55%, transparent 100%);
+    opacity: 0;
+    transition: top 800ms ease-out, opacity 180ms ease;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .silo:hover::after, .script-tool:hover::after, .task-card:hover::after,
+  .health-cell:hover::after, .jump-link:hover::after, .counter-cell:hover::after {
+    top: 100%;
+    opacity: 0.9;
+  }
+
+  /* =========================================================================
+     STARK — corner brackets on silos (targeting reticles)
+     ========================================================================= */
+  .silo .stark-bracket {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--gold);
+    opacity: 0.75;
+    pointer-events: none;
+    z-index: 2;
+    transition: opacity 200ms, border-color 200ms;
+  }
+  .silo:hover .stark-bracket { opacity: 1; border-color: var(--gold-bright); }
+  .silo .stark-bracket.tl { top: 6px;  left: 6px;  border-right: none; border-bottom: none; }
+  .silo .stark-bracket.tr { top: 6px;  right: 6px; border-left: none;  border-bottom: none; }
+  .silo .stark-bracket.bl { bottom: 6px; left: 6px;  border-right: none; border-top: none; }
+  .silo .stark-bracket.br { bottom: 6px; right: 6px; border-left: none;  border-top: none; }
+
+  /* =========================================================================
+     STARK — HIGH priority task glow (beyond breathe)
+     ========================================================================= */
+  .task-card.high {
+    box-shadow: 0 0 24px rgba(226,176,74,0.22) !important;
+    animation: stark-high-glow 3s ease-in-out infinite !important;
+  }
+  @keyframes stark-high-glow {
+    0%, 100% { box-shadow: 0 0 18px rgba(226,176,74,0.18); }
+    50%      { box-shadow: 0 0 32px rgba(226,176,74,0.38); }
+  }
+
+  /* =========================================================================
+     STARK — health matrix (5x5 micro-dot grid)
+     ========================================================================= */
+  .health-cell .top { align-items: flex-start; }
+  .health-cell .matrix {
+    display: inline-grid;
+    grid-template-columns: repeat(5, 4px);
+    grid-auto-rows: 4px;
+    gap: 2px;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .health-cell .matrix .m {
+    width: 4px; height: 4px;
+    border-radius: 1px;
+    background: rgba(224,112,112,0.22);
+  }
+  .health-cell .matrix .m.on.green  { background: var(--green);  box-shadow: 0 0 3px rgba(61,214,140,0.6); }
+  .health-cell .matrix .m.on.yellow { background: var(--yellow); box-shadow: 0 0 3px rgba(226,176,74,0.6); }
+  .health-cell .matrix .m.on.red    { background: var(--red);    }
+  .health-cell .matrix .m.on.gray   { background: var(--muted);  }
+
+  /* =========================================================================
+     STARK — app-chip host font (monospace already) + arrow glow on hover
+     ========================================================================= */
+  .app-chip:hover .url { color: var(--gold-bright); }
+  .app-chip:hover .arrow { text-shadow: 0 0 8px rgba(226,176,74,0.6); }
+
+  /* =========================================================================
+     STARK — counters: count-up-ready styling
+     ========================================================================= */
+  .counter-cell {
+    transition: border-color 200ms ease, transform 200ms ease;
+  }
+  .counter-cell:hover { border-color: rgba(196,146,42,0.45); }
+  .counter-cell .n {
+    text-shadow: 0 0 22px rgba(226,176,74,0.18);
+  }
+  .counter-cell .sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+    margin-top: 2px;
+    opacity: 0.75;
+  }
+
+  /* =========================================================================
+     STARK — footer enhancements
+     ========================================================================= */
+  .cmd-footer .hud-build {
+    color: var(--gold-bright);
+    letter-spacing: 0.12em;
+  }
+  .cmd-footer .k { color: var(--muted); }
+  .cmd-footer .v { color: var(--bone); }
+
+  /* Vault Keeper (Levite) chip — appears in footer right side. Color reflects state. */
+  .vault-keeper-chip { padding: 2px 8px; border: 1px solid var(--border); border-radius: 3px; font-size: 10px; letter-spacing: 0.04em; }
+  .vault-keeper-chip[data-state="ok"]      { color: #6dd58c; border-color: #6dd58c44; }
+  .vault-keeper-chip[data-state="alert"]   { color: #ff6b6b; border-color: #ff6b6b66; animation: vk-pulse 2s ease-in-out infinite; }
+  .vault-keeper-chip[data-state="unknown"] { color: var(--muted); }
+  @keyframes vk-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+  /* =========================================================================
+     STARK — reduced motion
+     ========================================================================= */
+  @media (prefers-reduced-motion: reduce) {
+    body::before, body::after { animation: none !important; }
+    .brand h1 .cursor { opacity: 0 !important; animation: none !important; }
+    .stark-reveal { opacity: 1 !important; transform: none !important; }
+    .section-head::after { transform: scaleX(1) !important; animation: none !important; }
+    .task-card.high { animation: none !important; }
+    .live-chip .live-dot, .live-dot.stark { animation: none !important; }
+  }
+
+  /* mobile scale-down */
+  @media (max-width: 760px) {
+    body::before { background-size: 40px 40px, 40px 40px; }
+    .section-head h2 { padding-left: 14px; }
+    .meta-console { font-size: 10px; letter-spacing: 0; }
+    .silo .stark-bracket { width: 10px; height: 10px; }
+  }
+  h1, h2, h3, .serif { font-family: 'Cormorant Garamond', serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .wrap { max-width: 1400px; margin: 0 auto; }
+
+  /* ===== HEADER ===== */
+  .cmd-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 24px; flex-wrap: wrap;
+    padding: 22px 28px;
+    background: linear-gradient(180deg, rgba(26,26,26,0.9) 0%, rgba(15,15,15,0.65) 100%);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    position: relative; overflow: hidden;
+    margin-bottom: 24px;
+  }
+  .cmd-header::before {
+    content: ""; position: absolute; inset: 0; padding: 1px;
+    background: linear-gradient(135deg, rgba(196,146,42,0.5), rgba(196,146,42,0) 60%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    pointer-events: none;
+  }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand-mark {
+    width: 34px; height: 34px;
+    border: 1px solid var(--gold);
+    transform: rotate(45deg);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .brand-mark > span {
+    width: 12px; height: 12px; background: var(--gold); display: block;
+  }
+  .brand h1 {
+    font-size: 26px; line-height: 1; font-weight: 600; letter-spacing: -0.01em;
+  }
+  .brand .eyebrow {
+    font-size: 10px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--gold); margin-top: 4px;
+  }
+  .hdr-meta {
+    display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  }
+  .hdr-meta .block {
+    display: flex; flex-direction: column; gap: 3px; line-height: 1;
+  }
+  .hdr-meta .lbl {
+    font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--muted); font-weight: 500;
+  }
+  .hdr-meta .val { color: var(--bone); font-size: 14px; }
+  .hdr-meta .val.gold { color: var(--gold-bright); }
+  .live-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border-radius: 2px;
+    border: 1px solid rgba(61,214,140,0.3);
+    background: rgba(61,214,140,0.08);
+    color: var(--green);
+    font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase;
+    font-weight: 600;
+  }
+  .live-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 10px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes pulse-red { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  @keyframes border-breathe {
+    0%, 100% { box-shadow: 0 0 0 rgba(196,146,42,0); }
+    50%      { box-shadow: 0 0 24px rgba(196,146,42,0.25); }
+  }
+
+  .task-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border-radius: 2px;
+    border: 1px solid rgba(196,146,42,0.4);
+    background: rgba(196,146,42,0.08);
+    color: var(--gold-bright);
+    font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase;
+    font-weight: 600;
+  }
+  .task-pill .n { color: var(--bone); font-weight: 700; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+
+  /* ===== SECTION HEADING ===== */
+  .section { margin-top: 36px; }
+  .section-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 24px; margin-bottom: 14px; padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-head h2 {
+    font-size: 20px; font-weight: 500; letter-spacing: 0.01em; color: var(--bone);
+  }
+  .section-head .eyebrow {
+    font-size: 10px; letter-spacing: 0.28em; text-transform: uppercase; color: var(--gold);
+    font-family: 'Inter', sans-serif; font-weight: 600;
+  }
+  .section-head .hint { font-size: 11px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+  .divider-line { height: 1px; background: linear-gradient(90deg, transparent, rgba(196,146,42,0.4), transparent); margin: 8px 0 16px; }
+
+  /* ===== SYSTEM HEALTH STRIP (compact) ===== */
+  .health-strip {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .health-cell {
+    background: linear-gradient(180deg, rgba(26,26,26,0.75), rgba(15,15,15,0.55));
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 4px;
+    min-width: 0;
+    transition: border-color 0.2s;
+  }
+  .health-cell:hover { border-color: rgba(196,146,42,0.35); }
+  .health-cell .top { display: flex; align-items: center; gap: 8px; }
+  .health-cell .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    flex-shrink: 0; box-shadow: 0 0 8px currentColor;
+  }
+  .dot.green  { background: var(--green);  color: var(--green); }
+  .dot.yellow { background: var(--yellow); color: var(--yellow); }
+  .dot.red    { background: var(--red);    color: var(--red); animation: pulse-red 1.5s infinite; }
+  .dot.gray   { background: var(--muted);  color: var(--muted); box-shadow: none; }
+  .health-cell .name {
+    font-size: 11px; font-weight: 600; color: var(--bone);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .health-cell .detail {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ===== SILO CARDS ===== */
+  .silos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .silo {
+    background: linear-gradient(180deg, rgba(26,26,26,0.8) 0%, rgba(15,15,15,0.6) 100%);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 22px;
+    display: flex; flex-direction: column; gap: 16px;
+    position: relative; overflow: hidden;
+    transition: border-color 0.3s, transform 0.3s;
+  }
+  .silo:hover { border-color: rgba(196,146,42,0.35); transform: translateY(-2px); }
+  .silo::before {
+    content: ""; position: absolute; inset: 0; padding: 1px;
+    background: linear-gradient(135deg, rgba(196,146,42,0.4), rgba(196,146,42,0) 55%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    pointer-events: none; border-radius: 4px;
+  }
+  .silo-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 12px;
+  }
+  .silo-head .glyph {
+    width: 42px; height: 42px; border: 1px solid var(--gold);
+    color: var(--gold-bright);
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Cormorant Garamond', serif; font-weight: 600;
+    font-size: 22px; line-height: 1;
+    flex-shrink: 0;
+  }
+  .silo-title .eyebrow {
+    font-size: 9px; letter-spacing: 0.28em; text-transform: uppercase; color: var(--gold);
+    font-weight: 600; margin-bottom: 4px;
+  }
+  .silo-title h3 { font-size: 24px; font-weight: 500; line-height: 1.1; }
+  .silo-pct {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px; font-weight: 500;
+    color: var(--gold-bright);
+    text-align: right; line-height: 1;
+  }
+  .silo-pct .sub {
+    display: block; font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--muted); margin-top: 4px;
+  }
+  .progress {
+    height: 6px; width: 100%;
+    background: rgba(240,235,225,0.06);
+    border-radius: 2px; overflow: hidden;
+  }
+  .progress .bar {
+    height: 100%; background: linear-gradient(90deg, var(--gold-dim), var(--gold-bright));
+    border-radius: 2px; transition: width 0.4s ease;
+  }
+  .silo-group { display: flex; flex-direction: column; gap: 6px; }
+  .silo-group .lbl {
+    font-size: 9px; letter-spacing: 0.24em; text-transform: uppercase;
+    color: var(--gold); font-weight: 600;
+  }
+  .silo-group .body { font-size: 13px; color: var(--bone-dim); line-height: 1.5; }
+  .app-chip {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 8px 10px;
+    background: rgba(240,235,225,0.03);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--bone); text-decoration: none;
+    font-size: 12px;
+    transition: all 0.15s;
+  }
+  .app-chip:hover {
+    border-color: rgba(196,146,42,0.45);
+    background: rgba(196,146,42,0.05);
+    color: var(--gold-bright);
+  }
+  .app-chip .arrow { color: var(--muted); transition: color 0.15s; }
+  .app-chip:hover .arrow { color: var(--gold-bright); }
+  .app-chip .url {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    flex: 1; min-width: 0;
+  }
+
+  .mini-meta {
+    display: grid; grid-template-columns: auto 1fr; gap: 8px 14px;
+    font-size: 12px; align-items: baseline;
+  }
+  .mini-meta dt { color: var(--muted); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; }
+  .mini-meta dd { color: var(--bone-dim); font-family: 'JetBrains Mono', monospace; font-size: 11px; line-height: 1.5; word-break: break-word; }
+  .mini-meta .status-ok { color: var(--green); }
+  .mini-meta .status-warn { color: var(--yellow); }
+  .mini-meta .status-bad { color: var(--red); }
+
+  .obj-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  .obj-list li {
+    font-size: 12px; line-height: 1.45; display: flex; gap: 8px;
+    color: var(--bone-dim);
+  }
+  .obj-list li .icon {
+    flex-shrink: 0; width: 14px; display: inline-block; font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; line-height: 1.45;
+  }
+  .obj-list.met .icon { color: var(--green); }
+  .obj-list.pending .icon { color: var(--gold); }
+
+  /* ===== SCRIPT ENGINE PANEL ===== */
+  .script-panel {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+  }
+  .script-tool {
+    background: linear-gradient(180deg, rgba(26,26,26,0.8), rgba(15,15,15,0.6));
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 18px 20px;
+    display: flex; flex-direction: column; gap: 10px;
+    transition: border-color 0.2s;
+  }
+  .script-tool:hover { border-color: rgba(196,146,42,0.4); }
+  .script-tool .top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .script-tool .name { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 20px; color: var(--bone); }
+  .script-tool .url {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--muted); text-decoration: none; word-break: break-all;
+  }
+  .script-tool .url:hover { color: var(--gold-bright); }
+  .script-tool .agent-line {
+    font-size: 11px; color: var(--bone-dim);
+    font-family: 'JetBrains Mono', monospace;
+    padding-top: 8px; border-top: 1px solid var(--border);
+  }
+  .badge-status {
+    font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 2px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .badge-live {
+    background: rgba(61,214,140,0.08);
+    border: 1px solid rgba(61,214,140,0.3);
+    color: var(--green);
+  }
+  .badge-spec {
+    background: rgba(196,146,42,0.08);
+    border: 1px solid rgba(196,146,42,0.3);
+    color: var(--gold-bright);
+  }
+  .script-foot {
+    margin-top: 14px; font-size: 11px; color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    padding: 10px 12px; border: 1px dashed rgba(196,146,42,0.25);
+    border-radius: 3px;
+  }
+  .script-foot b { color: var(--gold-bright); font-weight: 500; }
+
+  /* ===== TASK QUEUE ===== */
+  .task-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 14px;
+  }
+  .task-card {
+    background: linear-gradient(180deg, rgba(26,26,26,0.8), rgba(15,15,15,0.6));
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 18px 20px;
+    display: flex; flex-direction: column; gap: 10px;
+    position: relative;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .task-card:hover { transform: translateY(-2px); }
+  .task-card.high {
+    border-color: rgba(196,146,42,0.4);
+    animation: border-breathe 3.2s ease-in-out infinite;
+  }
+  .task-card.done {
+    opacity: 0.5;
+  }
+  .task-card.done .title { text-decoration: line-through; text-decoration-color: rgba(240,235,225,0.4); }
+  .task-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .prio {
+    font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; font-weight: 700;
+    padding: 3px 8px; border-radius: 2px;
+  }
+  .prio.HIGH   { background: linear-gradient(135deg, var(--gold-bright), var(--gold)); color: var(--ink); }
+  .prio.MEDIUM { background: rgba(196,146,42,0.1); border: 1px solid rgba(196,146,42,0.35); color: var(--gold-bright); }
+  .prio.LOW    { background: rgba(240,235,225,0.05); border: 1px solid var(--border-2); color: var(--muted); }
+  .task-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--muted); letter-spacing: 0.08em;
+  }
+  .task-card .title { font-family: 'Cormorant Garamond', serif; font-size: 19px; line-height: 1.2; font-weight: 500; }
+  .task-card .why { font-size: 12px; color: var(--bone-dim); line-height: 1.45; }
+  .task-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: auto; padding-top: 6px; }
+  .done-badge {
+    display: none; font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--green); font-weight: 600;
+  }
+  .task-card.done .done-badge { display: inline; }
+  .task-card.done .btn-instr { opacity: 0.7; }
+  .btn-instr {
+    border: 1px solid rgba(196,146,42,0.5);
+    background: transparent;
+    color: var(--bone);
+    font-family: 'Inter', sans-serif;
+    font-size: 11px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    padding: 8px 14px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-instr:hover {
+    border-color: var(--gold);
+    background: rgba(196,146,42,0.08);
+    color: var(--gold-bright);
+  }
+
+  /* ===== MODAL ===== */
+  .modal-scrim {
+    position: fixed; inset: 0; background: rgba(6,6,6,0.82);
+    backdrop-filter: blur(4px);
+    display: none; align-items: center; justify-content: center;
+    padding: 32px 20px; z-index: 1000;
+  }
+  .modal-scrim.open { display: flex; }
+  .modal {
+    width: 100%; max-width: 720px; max-height: 88vh;
+    background: linear-gradient(180deg, #141416 0%, #0e0e10 100%);
+    border: 1px solid rgba(196,146,42,0.4);
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.55), 0 0 40px rgba(196,146,42,0.1);
+  }
+  .modal-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 16px; padding: 22px 26px;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-head .eyebrow {
+    font-size: 9px; letter-spacing: 0.28em; text-transform: uppercase; color: var(--gold);
+    margin-bottom: 8px;
+  }
+  .modal-head h3 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 26px; line-height: 1.15; }
+  .modal-head .why { font-size: 12px; color: var(--bone-dim); margin-top: 6px; }
+  .modal-close {
+    background: transparent; border: 1px solid var(--border-2);
+    color: var(--muted); font-size: 16px; line-height: 1; font-family: 'JetBrains Mono', monospace;
+    width: 28px; height: 28px; cursor: pointer; border-radius: 2px;
+    flex-shrink: 0;
+    transition: all 0.15s;
+  }
+  .modal-close:hover { color: var(--bone); border-color: var(--gold); }
+  .modal-body { padding: 22px 26px; overflow-y: auto; }
+  .modal-body ol { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
+  .modal-body li { font-size: 13px; line-height: 1.55; color: var(--bone); }
+  .modal-body code, .modal-body kbd {
+    font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+    background: rgba(196,146,42,0.08);
+    border: 1px solid rgba(196,146,42,0.2);
+    color: var(--gold-bright);
+    padding: 1px 6px; border-radius: 2px;
+  }
+  .modal-foot {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 16px 26px;
+    border-top: 1px solid var(--border);
+    background: rgba(0,0,0,0.2);
+  }
+  .btn-gold {
+    background: linear-gradient(135deg, var(--gold-bright), var(--gold));
+    color: var(--ink);
+    font-weight: 600; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    padding: 10px 16px; border-radius: 2px;
+    border: none; cursor: pointer;
+    transition: all 0.15s;
+    box-shadow: 0 4px 14px rgba(196,146,42,0.25);
+  }
+  .btn-gold:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(196,146,42,0.4); }
+  .btn-ghost {
+    border: 1px solid rgba(196,146,42,0.5);
+    background: transparent; color: var(--bone);
+    font-weight: 600; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    padding: 10px 16px; border-radius: 2px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .btn-ghost:hover { border-color: var(--gold); background: rgba(196,146,42,0.08); color: var(--gold-bright); }
+  .btn-danger-ghost {
+    border: 1px solid rgba(224,112,112,0.4);
+    background: transparent; color: var(--red);
+    font-weight: 600; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    padding: 8px 12px; border-radius: 2px;
+    cursor: pointer; transition: all 0.15s;
+    margin-left: auto;
+  }
+  .btn-danger-ghost:hover { background: rgba(224,112,112,0.08); }
+  .copy-flash { color: var(--green); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; display: none; font-family: 'JetBrains Mono', monospace; }
+  .copy-flash.show { display: inline; }
+
+  /* ===== JUMP GRID ===== */
+  .jump-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 10px;
+  }
+  .jump-link {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 12px 14px;
+    background: linear-gradient(180deg, rgba(26,26,26,0.75), rgba(15,15,15,0.5));
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--bone); text-decoration: none;
+    font-size: 13px; font-weight: 500;
+    transition: all 0.15s;
+  }
+  .jump-link:hover { border-color: rgba(196,146,42,0.45); background: rgba(196,146,42,0.05); color: var(--gold-bright); transform: translateY(-1px); }
+  .jump-link .tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted);
+  }
+  .jump-link:hover .tag { color: var(--gold); }
+  .jump-link .arrow { color: var(--muted); transition: color 0.15s; }
+  .jump-link:hover .arrow { color: var(--gold-bright); }
+
+  /* ===== GARVIS LIVE QUEUE / BRIEF / RESEARCH / FUNBOX (additive) ===== */
+  .garvis-trio {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+  @media (max-width: 1100px) { .garvis-trio { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 720px)  { .garvis-trio { grid-template-columns: 1fr; } }
+  .garvis-card {
+    position: relative;
+    background: linear-gradient(180deg, rgba(26,26,26,0.8), rgba(15,15,15,0.6));
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 18px 20px;
+    display: flex; flex-direction: column; gap: 12px;
+    overflow: hidden;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .garvis-card:hover { border-color: rgba(196,146,42,0.4); transform: translateY(-2px); }
+  .garvis-card::before,
+  .garvis-card::after {
+    content: ""; position: absolute; width: 12px; height: 12px;
+    border: 1px solid var(--gold); pointer-events: none; opacity: 0.55;
+  }
+  .garvis-card::before { top: 6px; left: 6px; border-right: none; border-bottom: none; }
+  .garvis-card::after  { bottom: 6px; right: 6px; border-left: none; border-top: none; }
+  .garvis-card .gc-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  }
+  .garvis-card .gc-title {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 20px; font-weight: 500; line-height: 1.1; color: var(--bone);
+  }
+  .garvis-card .gc-eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--gold);
+  }
+  .garvis-card .gc-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted); line-height: 1.5;
+  }
+  .garvis-card .gc-list {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .garvis-card .gc-list li {
+    display: flex; align-items: flex-start; gap: 8px;
+    font-size: 12px; line-height: 1.45; color: var(--bone-dim);
+  }
+  .garvis-card .gc-list li .icon {
+    flex-shrink: 0; width: 14px; color: var(--gold);
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  }
+  .garvis-card .gc-foot {
+    margin-top: auto; padding-top: 8px; border-top: 1px dashed var(--border-2);
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  }
+  .garvis-card .gc-link {
+    color: var(--gold-bright);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; text-decoration: none;
+    letter-spacing: 0.06em;
+  }
+  .garvis-card .gc-link:hover { text-decoration: underline; }
+  .garvis-card .gc-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--muted);
+  }
+  .gq-row {
+    display: grid;
+    grid-template-columns: 22px 1fr auto;
+    align-items: center; gap: 10px;
+    padding: 8px 4px;
+    border-bottom: 1px solid rgba(240,235,225,0.04);
+    transition: opacity 0.6s, transform 0.6s;
+  }
+  .gq-row:last-child { border-bottom: none; }
+  .gq-row.completed { opacity: 0; transform: translateX(40px); }
+  .gq-row.done .gq-title { text-decoration: line-through; color: var(--muted); }
+  .gq-check {
+    width: 16px; height: 16px;
+    border: 1px solid rgba(196,146,42,0.55);
+    background: transparent;
+    border-radius: 2px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: all 0.15s; padding: 0;
+  }
+  .gq-check:hover { background: rgba(196,146,42,0.12); border-color: var(--gold-bright); }
+  .gq-check.done { background: linear-gradient(135deg, var(--gold-bright), var(--gold)); border-color: var(--gold-bright); color: var(--ink); font-weight: 700; font-size: 11px; }
+  .gq-title {
+    font-size: 12px; line-height: 1.35; color: var(--bone-dim);
+    font-family: 'Inter', sans-serif;
+  }
+  .gq-tags { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+  .gq-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.06em;
+    padding: 2px 6px; border-radius: 2px;
+    border: 1px solid var(--border-2);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .gq-tag.ai    { color: var(--green); border-color: rgba(61,214,140,0.3); }
+  .gq-tag.human { color: var(--gold-bright); border-color: rgba(196,146,42,0.3); }
+  .gq-tag.silo  { color: var(--bone-dim); }
+  .gq-tag.HIGH  { color: var(--gold-bright); border-color: rgba(196,146,42,0.5); }
+  .gq-empty {
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; padding: 16px 4px; text-align: center;
+  }
+
+  /* Vault Keeper indicator (footer) */
+  .vault-keeper {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.08em; color: var(--bone-dim);
+  }
+  .vault-keeper .vk-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); box-shadow: 0 0 6px rgba(240,235,225,0.2);
+  }
+  .vault-keeper.ok   .vk-dot { background: var(--green);  box-shadow: 0 0 8px rgba(61,214,140,0.55); }
+  .vault-keeper.warn .vk-dot { background: var(--yellow); box-shadow: 0 0 8px rgba(226,176,74,0.55); }
+  .vault-keeper.bad  .vk-dot { background: var(--red);    box-shadow: 0 0 8px rgba(224,112,112,0.55); }
+
+  /* ===== COUNTER STRIP ===== */
+  .counters-strip {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px;
+  }
+  .counter-cell {
+    background: linear-gradient(180deg, rgba(26,26,26,0.75), rgba(15,15,15,0.5));
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 4px;
+    min-width: 0;
+  }
+  .counter-cell .n {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 600;
+    font-size: 34px; line-height: 1;
+    background: linear-gradient(135deg, var(--gold-bright), var(--gold));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .counter-cell .lbl {
+    font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--muted); font-weight: 500;
+  }
+
+  /* ===== FOOTER ===== */
+  .cmd-footer {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 12px 24px;
+    background: rgba(10,10,11,0.92);
+    backdrop-filter: blur(10px);
+    border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted);
+    z-index: 20;
+    gap: 16px; flex-wrap: wrap;
+  }
+  .cmd-footer .left, .cmd-footer .right { display: inline-flex; align-items: center; gap: 10px; }
+
+  /* ===== LOADING ===== */
+  .loading { opacity: 0.45; }
+
+  /* ===== RESPONSIVE ===== */
+  @media (max-width: 1100px) {
+    .health-strip { grid-template-columns: repeat(4, 1fr); }
+    .silos { grid-template-columns: 1fr 1fr; }
+    .script-panel { grid-template-columns: 1fr 1fr; }
+    .counters-strip { grid-template-columns: repeat(3, 1fr); }
+  }
+  @media (max-width: 760px) {
+    body { padding: 16px 14px 96px; }
+    .health-strip { grid-template-columns: repeat(2, 1fr); }
+    .silos { grid-template-columns: 1fr; }
+    .script-panel { grid-template-columns: 1fr; }
+    .counters-strip { grid-template-columns: repeat(2, 1fr); }
+    .brand h1 { font-size: 22px; }
+    .silo-title h3 { font-size: 20px; }
+  }
+
+  /* =========================================================================
+     BUILD ROADMAP — flagship module cards (hero-feature treatment)
+     ========================================================================= */
+  .roadmap-sub {
+    font-size: 12px; color: var(--bone-dim); margin: -4px 0 16px;
+    max-width: 780px; line-height: 1.5;
+  }
+  .roadmap-stack { display: flex; flex-direction: column; gap: 22px; }
+
+  .roadmap-card {
+    position: relative;
+    background: linear-gradient(180deg, rgba(26,26,26,0.85) 0%, rgba(15,15,15,0.65) 100%);
+    border: 1px solid rgba(196,146,42,0.35);
+    border-radius: 5px;
+    padding: 30px 32px 26px;
+    display: flex; flex-direction: column; gap: 22px;
+    overflow: hidden;
+    box-shadow: 0 0 28px rgba(226,176,74,0.08), inset 0 0 0 1px rgba(196,146,42,0.05);
+    animation: border-breathe 4.2s ease-in-out infinite;
+    min-height: 620px;
+  }
+  .roadmap-card::before {
+    content: ""; position: absolute; inset: 0; padding: 1px;
+    background: linear-gradient(135deg, rgba(196,146,42,0.55), rgba(196,146,42,0) 60%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    pointer-events: none; border-radius: 5px;
+  }
+  .roadmap-card .stark-bracket {
+    position: absolute; width: 14px; height: 14px;
+    border: 2px solid var(--gold); opacity: 0.85;
+    pointer-events: none; z-index: 2;
+    transition: opacity 200ms, border-color 200ms;
+  }
+  .roadmap-card:hover .stark-bracket { opacity: 1; border-color: var(--gold-bright); }
+  .roadmap-card .stark-bracket.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+  .roadmap-card .stark-bracket.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+  .roadmap-card .stark-bracket.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+  .roadmap-card .stark-bracket.br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+
+  .roadmap-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 20px; flex-wrap: wrap;
+  }
+  .roadmap-head .left { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+  .roadmap-head .eyebrow-sm {
+    font-size: 10px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--gold); font-weight: 600;
+  }
+  .roadmap-head h3 {
+    font-family: 'Cormorant Garamond', serif; font-weight: 500;
+    font-size: 42px; line-height: 1; color: var(--bone);
+    letter-spacing: 0.02em;
+  }
+  .roadmap-head .label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--bone-dim);
+    letter-spacing: 0.04em; line-height: 1.5;
+  }
+  .roadmap-live {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--gold-bright); white-space: nowrap;
+  }
+  .roadmap-live .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--gold-bright);
+    box-shadow: 0 0 8px var(--gold-bright);
+    animation: pulse-gold 1.6s infinite;
+  }
+  @keyframes pulse-gold {
+    0%, 100% { box-shadow: 0 0 6px var(--gold-bright); opacity: 1; }
+    50%      { box-shadow: 0 0 14px var(--gold-bright); opacity: 0.65; }
+  }
+
+  .roadmap-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 7px 14px; border-radius: 2px;
+    background: linear-gradient(135deg, rgba(226,176,74,0.18), rgba(196,146,42,0.08));
+    border: 1px solid rgba(226,176,74,0.55);
+    color: var(--gold-bright);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.2em; font-weight: 600;
+    text-transform: uppercase;
+    box-shadow: 0 0 18px rgba(226,176,74,0.25);
+    width: fit-content;
+  }
+
+  .roadmap-meta {
+    display: grid; grid-template-columns: auto 1fr; gap: 6px 18px;
+    font-size: 12px; align-items: baseline;
+    padding: 12px 0; border-top: 1px dashed var(--border-2);
+    border-bottom: 1px dashed var(--border-2);
+  }
+  .roadmap-meta dt {
+    color: var(--muted); font-size: 10px; letter-spacing: 0.18em;
+    text-transform: uppercase; font-weight: 600;
+  }
+  .roadmap-meta dd {
+    color: var(--bone-dim); font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; line-height: 1.55;
+  }
+  .roadmap-oneliner {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 20px; line-height: 1.35; color: var(--bone);
+    font-weight: 400; font-style: italic;
+    padding: 4px 0 2px;
+    border-left: 2px solid var(--gold);
+    padding-left: 16px;
+  }
+
+  .roadmap-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+  }
+  .roadmap-col {
+    background: rgba(240,235,225,0.025);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 10px;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .roadmap-col:hover {
+    border-color: rgba(196,146,42,0.35);
+    background: rgba(196,146,42,0.04);
+  }
+  .roadmap-col .hd {
+    font-size: 10px; letter-spacing: 0.24em; text-transform: uppercase;
+    color: var(--gold); font-weight: 600;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+  .roadmap-col ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  .roadmap-col li {
+    font-size: 12px; line-height: 1.45; color: var(--bone-dim);
+    display: flex; gap: 8px; align-items: flex-start;
+  }
+  .roadmap-col li::before {
+    content: "›"; color: var(--gold); font-family: 'JetBrains Mono', monospace;
+    font-weight: 600; flex-shrink: 0;
+  }
+
+  .roadmap-silos {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  }
+  .roadmap-silos .lbl {
+    font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; margin-right: 6px;
+  }
+  .silo-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 11px; border-radius: 2px;
+    background: rgba(240,235,225,0.04);
+    border: 1px solid var(--border-2);
+    color: var(--bone-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.06em;
+  }
+  .silo-pill.ref {
+    border-color: rgba(196,146,42,0.4);
+    color: var(--gold-bright);
+    background: rgba(196,146,42,0.06);
+  }
+
+  .roadmap-phases {
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .roadmap-phases .hd {
+    font-size: 10px; letter-spacing: 0.24em; text-transform: uppercase;
+    color: var(--gold); font-weight: 600;
+  }
+  .phase-track {
+    display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px;
+    position: relative;
+  }
+  .phase-node {
+    background: linear-gradient(180deg, rgba(26,26,26,0.75), rgba(15,15,15,0.55));
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 10px 10px 12px;
+    display: flex; flex-direction: column; gap: 4px;
+    min-width: 0;
+    position: relative;
+    transition: border-color 0.2s, transform 0.2s, background 0.2s;
+  }
+  .phase-node:hover {
+    border-color: rgba(196,146,42,0.5);
+    transform: translateY(-2px);
+    background: linear-gradient(180deg, rgba(196,146,42,0.08), rgba(15,15,15,0.6));
+  }
+  .phase-node .num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; letter-spacing: 0.12em; color: var(--gold-bright);
+    font-weight: 600;
+  }
+  .phase-node .t {
+    font-size: 11px; line-height: 1.25; color: var(--bone);
+    font-weight: 500;
+  }
+  .phase-node .dur {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.08em; color: var(--muted);
+    margin-top: auto;
+  }
+  .phase-total {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--bone-dim);
+    text-align: right; padding-top: 4px;
+  }
+  .phase-total b { color: var(--gold-bright); font-weight: 600; }
+
+  .roadmap-terminal {
+    background: #0A0A0A;
+    border: 1px solid var(--border-2);
+    border-left: 2px solid var(--gold);
+    border-radius: 3px;
+    padding: 14px 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; line-height: 1.65;
+    color: var(--bone-dim);
+    white-space: pre-wrap; word-break: break-word;
+    overflow-x: auto;
+  }
+  .roadmap-terminal .tkey { color: var(--gold); }
+  .roadmap-terminal .tcom { color: var(--muted); }
+
+  .roadmap-actions {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    padding-top: 4px;
+  }
+  .rm-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 11px 20px; border-radius: 2px;
+    font-family: 'Inter', sans-serif;
+    font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+    font-weight: 600; cursor: pointer;
+    text-decoration: none;
+    transition: all 0.2s;
+    border: 1px solid transparent;
+  }
+  .rm-btn.primary {
+    background: linear-gradient(135deg, var(--gold-bright), var(--gold));
+    color: var(--ink);
+    box-shadow: 0 0 18px rgba(226,176,74,0.25);
+  }
+  .rm-btn.primary:hover {
+    box-shadow: 0 0 26px rgba(226,176,74,0.45);
+    transform: translateY(-1px);
+  }
+  .rm-btn.ghost {
+    background: transparent;
+    border-color: rgba(196,146,42,0.45);
+    color: var(--gold-bright);
+  }
+  .rm-btn.ghost:hover {
+    background: rgba(196,146,42,0.08);
+    border-color: var(--gold-bright);
+  }
+
+  .roadmap-placeholder {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+    margin-top: 4px;
+  }
+  .rm-slot {
+    border: 1px dashed rgba(196,146,42,0.28);
+    border-radius: 4px;
+    padding: 28px 20px;
+    text-align: center;
+    color: rgba(196,146,42,0.55);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase;
+    background: rgba(196,146,42,0.015);
+    transition: border-color 0.3s, color 0.3s;
+  }
+  .rm-slot:hover {
+    border-color: rgba(196,146,42,0.5);
+    color: var(--gold-bright);
+  }
+  .rm-slot .ph-lbl { display: block; font-size: 9px; letter-spacing: 0.26em; }
+  .rm-slot .ph-sub {
+    display: block; font-size: 9px; letter-spacing: 0.14em;
+    color: var(--muted); margin-top: 6px; text-transform: none;
+  }
+
+  @media (max-width: 980px) {
+    .roadmap-grid { grid-template-columns: 1fr; }
+    .phase-track { grid-template-columns: repeat(3, 1fr); }
+    .roadmap-placeholder { grid-template-columns: 1fr; }
+    .roadmap-head h3 { font-size: 34px; }
+    .roadmap-card { min-height: 0; padding: 22px 20px; }
+  }
+  @media (max-width: 520px) {
+    .phase-track { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  /* =========================================================================
+     BENAIAH OUTBOUND QUEUE PANEL
+     ========================================================================= */
+  .benaiah-panel {
+    background: linear-gradient(180deg, rgba(22,22,22,0.85), rgba(12,12,12,0.7));
+    border: 1px solid rgba(196,146,42,0.3);
+    border-radius: 4px;
+    padding: 22px 22px 24px;
+    position: relative;
+    box-shadow: 0 0 24px rgba(196,146,42,0.08);
+  }
+  .benaiah-panel::before {
+    content: ""; position: absolute; inset: 0; padding: 1px;
+    background: linear-gradient(135deg, rgba(196,146,42,0.55), rgba(196,146,42,0) 55%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    pointer-events: none; border-radius: 4px;
+  }
+  .benaiah-head {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 14px; flex-wrap: wrap; margin-bottom: 8px;
+  }
+  .benaiah-title-row {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .benaiah-title-row h3 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 26px; font-weight: 500; line-height: 1; color: var(--bone);
+  }
+  .benaiah-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 5px 11px; border-radius: 2px;
+    border: 1px solid rgba(196,146,42,0.5);
+    background: rgba(196,146,42,0.1);
+    color: var(--gold-bright);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    font-weight: 600;
+    animation: benaiah-pulse 2.6s ease-in-out infinite;
+  }
+  .benaiah-pill .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--gold-bright); box-shadow: 0 0 10px var(--gold-bright);
+  }
+  @keyframes benaiah-pulse {
+    0%, 100% { box-shadow: 0 0 0 rgba(196,146,42,0); }
+    50%      { box-shadow: 0 0 16px rgba(196,146,42,0.3); }
+  }
+  .benaiah-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted);
+    margin-bottom: 16px;
+  }
+  .benaiah-meta .tcom { color: var(--gold); }
+
+  .benaiah-queue {
+    display: flex; flex-direction: column; gap: 10px;
+    margin-top: 6px;
+  }
+  .queue-row {
+    display: grid;
+    grid-template-columns: 1.6fr 2.4fr 1.2fr 1fr 1.2fr;
+    gap: 12px; align-items: center;
+    padding: 14px 16px;
+    background: #0A0A0A;
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--gold);
+    border-radius: 3px;
+    font-size: 12px;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .queue-row:hover { border-color: rgba(196,146,42,0.4); background: #0c0c0c; }
+  .qr-recipient .name { color: var(--bone); font-weight: 500; font-size: 13px; }
+  .qr-recipient .email { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 11px; margin-top: 2px; }
+  .qr-recipient .role { color: var(--gold); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; margin-top: 2px; }
+  .qr-subject { color: var(--bone-dim); font-size: 12.5px; line-height: 1.45; }
+  .qr-status {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+    font-weight: 600;
+    border: 1px solid transparent;
+  }
+  .qr-status.draft    { background: rgba(240,235,225,0.05); border-color: var(--border-2); color: var(--muted); }
+  .qr-status.review   { background: rgba(226,176,74,0.08); border-color: rgba(196,146,42,0.35); color: var(--gold-bright); }
+  .qr-status.passed   { background: rgba(61,214,140,0.08); border-color: rgba(61,214,140,0.35); color: var(--green); }
+  .qr-status.blocked  { background: rgba(224,112,112,0.08); border-color: rgba(224,112,112,0.35); color: var(--red); }
+  .qr-status.sent     { background: rgba(61,214,140,0.12); border-color: rgba(61,214,140,0.5); color: var(--green); }
+  .qr-score {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px; color: var(--bone);
+  }
+  .qr-score .lbl {
+    display: block; font-size: 9px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 2px;
+  }
+  .qr-score .val.green  { color: var(--green); }
+  .qr-score .val.yellow { color: var(--gold-bright); }
+  .qr-score .val.red    { color: var(--red); }
+  .qr-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+  .qr-btn {
+    font-family: 'Inter', sans-serif;
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    font-weight: 600;
+    padding: 8px 12px;
+    border-radius: 2px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .qr-btn.preview { background: transparent; border-color: rgba(196,146,42,0.45); color: var(--gold-bright); }
+  .qr-btn.preview:hover { background: rgba(196,146,42,0.08); border-color: var(--gold-bright); }
+  .qr-btn.send    {
+    background: linear-gradient(135deg, var(--gold-bright), var(--gold));
+    color: var(--ink);
+    box-shadow: 0 0 12px rgba(226,176,74,0.2);
+  }
+  .qr-btn.send:hover:not(:disabled) {
+    box-shadow: 0 0 20px rgba(226,176,74,0.4);
+    transform: translateY(-1px);
+  }
+  .qr-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  /* BENAIAH preview modal */
+  .benaiah-modal-scrim {
+    position: fixed; inset: 0;
+    background: rgba(5,5,5,0.88);
+    backdrop-filter: blur(4px);
+    z-index: 200;
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 40px 20px;
+    overflow-y: auto;
+  }
+  .benaiah-modal-scrim.open { display: flex; }
+  .benaiah-modal {
+    background: linear-gradient(180deg, #141416, #0d0d0e);
+    border: 1px solid rgba(196,146,42,0.4);
+    border-radius: 6px;
+    width: 100%;
+    max-width: 880px;
+    padding: 26px 28px;
+    position: relative;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.7);
+  }
+  .bm-head {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 14px; margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .bm-head h3 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 24px; font-weight: 500; color: var(--bone);
+  }
+  .bm-head .sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted); margin-top: 4px;
+  }
+  .bm-close {
+    background: transparent; border: 1px solid var(--border-2);
+    color: var(--bone-dim); font-size: 18px;
+    width: 32px; height: 32px; border-radius: 2px;
+    cursor: pointer; transition: all 0.2s; flex-shrink: 0;
+  }
+  .bm-close:hover { color: var(--red); border-color: var(--red); }
+
+  .bm-tabs {
+    display: flex; gap: 4px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+  }
+  .bm-tab {
+    font-family: 'Inter', sans-serif;
+    font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+    font-weight: 600;
+    padding: 10px 16px;
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.2s, border-color 0.2s;
+  }
+  .bm-tab:hover { color: var(--bone-dim); }
+  .bm-tab.active { color: var(--gold-bright); border-bottom-color: var(--gold-bright); }
+
+  .bm-panel { display: none; }
+  .bm-panel.active { display: block; }
+
+  .bm-email-frame {
+    background: #fafafa;
+    border: 1px solid var(--border-2);
+    border-radius: 4px;
+    padding: 32px 40px;
+    max-height: 540px;
+    overflow-y: auto;
+    color: #202020;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 15px;
+    line-height: 1.7;
+  }
+  .bm-email-frame .email-hdr {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #666;
+    padding-bottom: 12px;
+    margin-bottom: 18px;
+    border-bottom: 1px solid #ddd;
+    white-space: pre-wrap;
+  }
+  .bm-email-frame pre {
+    white-space: pre-wrap;
+    font-family: Georgia, serif;
+    font-size: 15px;
+    line-height: 1.7;
+    color: #202020;
+  }
+
+  .bm-scorecard {
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .bm-score-row {
+    display: grid;
+    grid-template-columns: 160px 1fr;
+    gap: 12px; align-items: center;
+    padding: 12px 14px;
+    background: #0A0A0A;
+    border: 1px solid var(--border-2);
+    border-radius: 3px;
+    font-size: 13px;
+  }
+  .bm-score-row .lbl {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  .bm-score-row .val { color: var(--bone); font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+  .bm-score-row .val.green { color: var(--green); }
+  .bm-score-row .val.yellow { color: var(--gold-bright); }
+  .bm-score-row .val.red { color: var(--red); }
+
+  .bm-flag-list {
+    list-style: none; padding: 0; margin: 6px 0 0;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .bm-flag-list li {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--bone-dim);
+    padding: 6px 10px;
+    background: rgba(226,176,74,0.05);
+    border-left: 2px solid var(--gold);
+    border-radius: 0 2px 2px 0;
+  }
+  .bm-empty {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted); font-style: italic;
+  }
+
+  .bm-email-field {
+    display: flex; flex-direction: column; gap: 6px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .bm-email-field label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--gold);
+  }
+  .bm-email-field input {
+    background: #0a0a0a;
+    border: 1px solid var(--border-2);
+    color: var(--bone);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    padding: 10px 12px;
+    border-radius: 3px;
+  }
+  .bm-email-field input:focus { outline: none; border-color: var(--gold); }
+
+  .bm-actions {
+    display: flex; gap: 10px; justify-content: flex-end;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .bm-status-line {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted);
+    padding: 8px 12px;
+    background: #0A0A0A;
+    border-radius: 2px;
+    margin-top: 10px;
+    white-space: pre-wrap;
+  }
+  .bm-status-line.ok { color: var(--green); }
+  .bm-status-line.err { color: var(--red); }
+
+  /* =========================================================================
+     PROSPECT PIPELINE (in silo cards)
+     ========================================================================= */
+  .prospect-pipeline {
+    margin-top: 8px;
+    padding-top: 14px;
+    border-top: 1px dashed var(--border-2);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .prospect-pipeline .pp-hd {
+    font-size: 9px; letter-spacing: 0.24em; text-transform: uppercase;
+    color: var(--gold); font-weight: 600;
+  }
+  .prospect-card {
+    background: #0A0A0A;
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--gold);
+    border-radius: 2px;
+    padding: 10px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.55;
+  }
+  .prospect-card .pc-name {
+    color: var(--gold-bright);
+    font-weight: 600;
+    font-size: 12px;
+    font-family: 'Inter', sans-serif;
+    letter-spacing: 0.02em;
+  }
+  .prospect-card .pc-co {
+    color: var(--bone-dim);
+    font-size: 11px;
+    font-family: 'Inter', sans-serif;
+    margin-bottom: 6px;
+  }
+  .prospect-card .pc-row { color: var(--bone-dim); }
+  .prospect-card .pc-k { color: var(--gold); }
+  .prospect-card.empty {
+    border-left-color: var(--border-2);
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  @media (max-width: 900px) {
+    .queue-row { grid-template-columns: 1fr; gap: 8px; }
+    .qr-actions { justify-content: flex-start; }
+    .bm-score-row { grid-template-columns: 1fr; }
+  }
+
+  /* ====== Wave 1e add-on: silo static badge ====== */
+  .silo-static-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    font-size: 9px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--muted);
+    border: 1px solid rgba(240,235,225,0.12);
+    border-radius: 2px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    vertical-align: middle;
+  }
+
+  /* ====== Scorecard panel ====== */
+  .scorecard-panel {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 10px;
+  }
+  .sc-card {
+    position: relative;
+    padding: 12px 14px;
+    border: 1px solid rgba(196,146,42,0.18);
+    border-radius: 4px;
+    background: rgba(18,18,20,0.55);
+    cursor: pointer;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .sc-card:hover { border-color: rgba(196,146,42,0.45); transform: translateY(-1px); }
+  .sc-card.open { border-color: var(--gold-bright); }
+  .sc-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 8px;
+  }
+  .sc-name { font-weight: 700; font-size: 14px; color: var(--gold-bright); letter-spacing: 0.02em; }
+  .sc-team { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+  .sc-role { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+  .sc-grade-row {
+    display: grid; grid-template-columns: 52px 1fr 52px; gap: 8px;
+    align-items: center; margin-top: 8px;
+  }
+  .sc-grade-n { font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 700; color: var(--gold-bright); }
+  .sc-grade-bar {
+    height: 6px; background: rgba(240,235,225,0.06);
+    border-radius: 3px; overflow: hidden; position: relative;
+  }
+  .sc-grade-bar .fill {
+    position: absolute; top: 0; left: 0; height: 100%;
+    background: linear-gradient(90deg, var(--gold), var(--gold-bright));
+  }
+  .sc-grade-meta { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--muted); text-align: right; }
+  .sc-meta-line {
+    display: flex; justify-content: space-between; gap: 10px;
+    font-family: 'JetBrains Mono', monospace; font-size: 9px;
+    color: var(--muted); margin-top: 6px; letter-spacing: 0.04em;
+  }
+  .sc-details {
+    display: none; margin-top: 10px; padding-top: 10px;
+    border-top: 1px dashed rgba(196,146,42,0.22);
+  }
+  .sc-card.open .sc-details { display: block; }
+  .sc-eval {
+    padding: 6px 0; border-bottom: 1px solid rgba(240,235,225,0.05);
+    font-size: 11px; color: var(--ink); line-height: 1.45;
+  }
+  .sc-eval:last-child { border-bottom: none; }
+  .sc-eval .date { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--muted); }
+  .sc-eval .score { color: var(--gold-bright); font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+
+  /* ====== Events feed ====== */
+  .events-list {
+    max-height: 320px; overflow-y: auto;
+    border-top: 1px solid rgba(240,235,225,0.04);
+    margin-top: 6px;
+  }
+  .event-row {
+    display: grid;
+    grid-template-columns: 70px 90px 1fr;
+    gap: 8px; padding: 6px 2px;
+    border-bottom: 1px solid rgba(240,235,225,0.04);
+    font-size: 11px; align-items: baseline;
+  }
+  .event-row:last-child { border-bottom: none; }
+  .event-ts { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--muted); }
+  .event-src { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--gold); }
+  .event-type { font-weight: 600; color: var(--ink); }
+  .event-payload { display: block; color: var(--muted); font-size: 10px; margin-top: 2px; line-height: 1.4; }
+  .ef-older { background: transparent; border: 1px solid rgba(196,146,42,0.3); cursor: pointer; padding: 4px 10px; border-radius: 3px; }
+  .ef-older:hover { border-color: var(--gold-bright); }
+  .ef-older[disabled] { opacity: 0.4; cursor: default; }
+
+  /* ====== Autonomy tile ====== */
+  .autonomy-tile {
+    display: grid;
+    grid-template-columns: 18px 1fr auto;
+    gap: 10px; align-items: center;
+    padding: 12px 14px;
+    margin-top: 8px;
+    border: 1px solid rgba(196,146,42,0.3);
+    border-radius: 4px;
+    background: rgba(18,18,20,0.55);
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+    color: var(--ink);
+    font-family: inherit;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .autonomy-tile:hover { border-color: var(--gold-bright); transform: translateY(-1px); }
+  .at-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; background: #6a6a6a; box-shadow: 0 0 8px currentColor; }
+  .at-dot.am-off    { background: #c94a4a; color: #c94a4a; }
+  .at-dot.am-green  { background: #46b86a; color: #46b86a; }
+  .at-dot.am-yellow { background: #e3c14a; color: #e3c14a; }
+  .at-dot.am-full   { background: #c4922a; color: #c4922a; box-shadow: 0 0 12px #c4922a; }
+  .at-mode { font-weight: 700; font-size: 16px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--gold-bright); }
+  .at-hint { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--muted); }
+
+  .autonomy-modal-overlay {
+    position: fixed; inset: 0; z-index: 9000;
+    background: rgba(0,0,0,0.65);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .autonomy-modal-overlay[hidden] { display: none; }
+  .autonomy-modal {
+    width: min(440px, 100%);
+    background: #0f0f11;
+    border: 1px solid rgba(196,146,42,0.35);
+    border-radius: 4px;
+    padding: 20px 22px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  }
+  .am-modal-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .am-modal-head h3 { margin: 0; font-size: 16px; color: var(--gold-bright); letter-spacing: 0.04em; }
+  .am-modal-close { background: transparent; border: 0; color: var(--muted); font-size: 22px; cursor: pointer; line-height: 1; }
+  .am-modal-sub { font-size: 11px; color: var(--muted); margin: 6px 0 14px; line-height: 1.5; }
+  .am-radio {
+    display: grid;
+    grid-template-columns: 20px 14px 1fr;
+    gap: 10px; align-items: center;
+    padding: 8px; margin-bottom: 4px;
+    border: 1px solid transparent; border-radius: 3px;
+    cursor: pointer; font-size: 12px;
+  }
+  .am-radio:hover { border-color: rgba(196,146,42,0.22); background: rgba(196,146,42,0.05); }
+  .am-radio input { margin: 0; }
+  .am-dot-chip { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .am-dot-chip.am-off    { background: #c94a4a; }
+  .am-dot-chip.am-green  { background: #46b86a; }
+  .am-dot-chip.am-yellow { background: #e3c14a; }
+  .am-dot-chip.am-full   { background: #c4922a; }
+  .am-modal-foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+  .am-btn {
+    padding: 8px 16px; border-radius: 3px; cursor: pointer; font-family: inherit;
+    font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  .am-btn.primary { background: linear-gradient(135deg, var(--gold), var(--gold-bright)); color: #111; border: 0; font-weight: 700; }
+  .am-btn.secondary { background: transparent; color: var(--muted); border: 1px solid rgba(240,235,225,0.15); }
+  .am-btn.primary:hover { filter: brightness(1.1); }
+  .am-btn.secondary:hover { color: var(--ink); }
+  .am-modal-status { margin-top: 10px; font-size: 11px; color: var(--muted); min-height: 14px; }
+  .am-modal-status.ok { color: #46b86a; }
+  .am-modal-status.err { color: #c94a4a; }
+
+  /* ====== Samuel digest ====== */
+  .samuel-body { font-size: 12px; padding-top: 4px; }
+  .sm-summary { color: var(--ink); line-height: 1.5; margin-bottom: 10px; font-size: 11px; }
+  .sm-section { margin-top: 8px; }
+  .sm-section-hd { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px; }
+  .sm-proposal { padding: 6px 0; border-bottom: 1px solid rgba(240,235,225,0.04); font-size: 11px; }
+  .sm-proposal:last-child { border-bottom: none; }
+  .sm-proposal .who { color: var(--gold-bright); font-weight: 700; }
+  .sm-proposal .conf { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--muted); float: right; }
+  .sm-delta { display: flex; gap: 8px; font-size: 11px; padding: 4px 0; font-family: 'JetBrains Mono', monospace; }
+  .sm-delta .agent { color: var(--ink); min-width: 90px; }
+  .sm-delta .nums  { color: var(--muted); }
+  .sm-delta .d-pos { color: #46b86a; font-weight: 700; }
+  .sm-delta .d-neg { color: #c94a4a; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<!-- =============================================================
+     GARVIS AUTH GATE — Wave 1e hardening (2026-04-22)
+     Blocks all function fetches until a valid garvis_token cookie
+     is in place. HttpOnly cookie is set by /.netlify/functions/garvis-auth.
+     ============================================================= -->
+<style>
+  #garvis-auth-scrim {
+    position: fixed; inset: 0; z-index: 999999;
+    background: rgba(10,10,12,0.96);
+    backdrop-filter: blur(8px);
+    display: none; align-items: center; justify-content: center;
+    font-family: 'Inter', system-ui, sans-serif;
+    color: #e8e8ea;
+  }
+  #garvis-auth-scrim.open { display: flex; }
+  #garvis-auth-card {
+    width: min(440px, calc(100vw - 40px));
+    padding: 28px 32px 24px;
+    background: #0F1014;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+  }
+  #garvis-auth-card .gauth-title {
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 24px; font-weight: 600;
+    margin-bottom: 4px;
+  }
+  #garvis-auth-card .gauth-sub {
+    font-size: 12px; color: #8c8c92;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    margin-bottom: 20px;
+  }
+  #garvis-auth-card input {
+    width: 100%; box-sizing: border-box;
+    padding: 12px 14px;
+    background: #1a1b20; color: #fff;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: 'JetBrains Mono', monospace;
+    outline: none;
+  }
+  #garvis-auth-card input:focus { border-color: #c9a66b; }
+  #garvis-auth-card button {
+    margin-top: 14px; width: 100%;
+    padding: 12px; border-radius: 6px;
+    background: #c9a66b; color: #0C0C0C;
+    border: none; cursor: pointer;
+    font-weight: 600; font-size: 14px;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  #garvis-auth-card button:disabled { opacity: 0.5; cursor: wait; }
+  #garvis-auth-card .gauth-err {
+    margin-top: 12px; font-size: 12px; color: #e8706a;
+    min-height: 16px;
+  }
+</style>
+<div id="garvis-auth-scrim" role="dialog" aria-modal="true" aria-labelledby="gauth-title">
+  <div id="garvis-auth-card">
+    <div class="gauth-title" id="gauth-title">Garvis Command</div>
+    <div class="gauth-sub">Access required</div>
+    <form id="gauth-form" autocomplete="off">
+      <input id="gauth-password" type="password" placeholder="Dashboard password" autofocus />
+      <button type="submit" id="gauth-submit">Unlock</button>
+      <div class="gauth-err" id="gauth-err" aria-live="polite"></div>
+    </form>
+  </div>
+</div>
+<script>
+/* Garvis auth gate. Runs before any app JS.
+   - Patches window.fetch to send credentials on same-origin calls (cookies).
+   - On boot, probes /.netlify/functions/garvis-auth (GET). If 401, blocks the
+     UI with a password overlay until the user POSTs a valid password.
+   - After success, the HttpOnly cookie carries auth for all future fetches. */
+(function garvisAuthGate() {
+  'use strict';
+
+  // Patch fetch: include credentials on every same-origin call so the
+  // garvis_token cookie rides along automatically.
+  var _origFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init || {};
+    // Only force credentials for same-origin requests (strings starting with
+    // '/' or matching window.origin). Leave absolute cross-origin alone.
+    var url = typeof input === 'string' ? input : (input && input.url) || '';
+    var sameOrigin = !url || url.startsWith('/') || url.startsWith(window.location.origin);
+    if (sameOrigin && !('credentials' in init)) {
+      init.credentials = 'include';
+    }
+    return _origFetch(input, init);
+  };
+
+  var scrim = document.getElementById('garvis-auth-scrim');
+  var form  = document.getElementById('gauth-form');
+  var input = document.getElementById('gauth-password');
+  var btn   = document.getElementById('gauth-submit');
+  var err   = document.getElementById('gauth-err');
+
+  function showOverlay() {
+    scrim.classList.add('open');
+    try { input.focus(); } catch (_) {}
+  }
+  function hideOverlay() {
+    scrim.classList.remove('open');
+  }
+
+  // Retry hook — once auth lands, nudge the live channels to reload.
+  function retryFetches() {
+    try {
+      if (typeof tick === 'function') try { tick(); } catch (_) {}
+    } catch (_) {}
+  }
+
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    err.textContent = '';
+    btn.disabled = true;
+    try {
+      var res = await _origFetch('/.netlify/functions/garvis-auth', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: input.value })
+      });
+      if (res.ok) {
+        input.value = '';
+        hideOverlay();
+        retryFetches();
+      } else if (res.status === 401) {
+        err.textContent = 'Incorrect password.';
+      } else {
+        err.textContent = 'Server error (' + res.status + '). Try again.';
+      }
+    } catch (e2) {
+      err.textContent = 'Network error: ' + e2.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Probe on boot. If unauthenticated, show overlay.
+  (async function probe() {
+    try {
+      var res = await _origFetch('/.netlify/functions/garvis-auth', {
+        method: 'GET',
+        credentials: 'include'
+      });
+      if (!res.ok) showOverlay();
+    } catch (_) {
+      showOverlay();
+    }
+  })();
+})();
+</script>
+
+<div class="wrap">
+
+  <!-- ============================================= HEADER ============================================= -->
+  <header class="cmd-header">
+    <div class="brand">
+      <div class="brand-mark"><span></span></div>
+      <div>
+        <h1><span id="title-text">Cornerstone Command</span><span class="cursor" aria-hidden="true"></span></h1>
+        <div class="eyebrow">Operations &middot; Build Picture</div>
+      </div>
+    </div>
+    <div class="hdr-meta">
+      <div class="block">
+        <span class="lbl">HUD Clock · UTC</span>
+        <span class="val mono hud" id="clock">--:--:--</span>
+      </div>
+      <div class="block">
+        <span class="lbl">Toronto · ET</span>
+        <span class="val mono hud" id="clock-local">--:--:--</span>
+      </div>
+      <div class="block">
+        <span class="lbl">As of</span>
+        <span class="val mono" id="as-of">--</span>
+      </div>
+      <span class="live-chip"><span class="live-dot"></span>LIVE &middot; auto-refresh 30s</span>
+      <span class="task-pill" id="task-pill">
+        <span class="n" id="task-pending-n">0</span> tasks pending &middot;
+        <span class="n" id="task-high-n">0</span> high-priority
+      </span>
+    </div>
+  </header>
+
+  <!-- ============================================= META CONSOLE LINE ============================================= -->
+  <div class="meta-console" id="meta-console">
+    <span class="k">session:</span> <span class="v" id="m-session">—</span><span class="sep">·</span>
+    <span class="k">operator:</span> <span class="v">marc@cornerstoneregroup.ca</span><span class="sep">·</span>
+    <span class="k">node:</span> <span class="v">mac-m1-primary</span><span class="sep">·</span>
+    <span class="k">uptime:</span> <span class="g" id="m-uptime">00h 00m 00s</span><span class="sep">·</span>
+    <span class="k">last sync:</span> <span class="g" id="m-lastsync">—</span><span class="sep">·</span>
+    <span class="k">worker:</span> <span class="v">windmill.system_status_v1</span>
+  </div>
+
+  <!-- ============================================= 1. SYSTEM HEALTH STRIP ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>System Health</h2>
+      <span class="eyebrow">Live &middot; Windmill-backed</span>
+    </div>
+    <div class="health-strip" id="health-strip">
+      <!-- 7 cells injected by JS -->
+    </div>
+  </section>
+
+  <!-- ============================================= 2. BUILD PICTURE BY SILO ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Build Picture by Silo</h2>
+      <span class="eyebrow">3 verticals &middot; objectives tracked</span>
+    </div>
+    <div class="silos" id="silos">
+      <!-- 3 silos injected by JS -->
+    </div>
+  </section>
+
+  <!-- ============================================= 3. SCRIPT ENGINE TOOLS ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Script Engine Tools</h2>
+      <span class="eyebrow">4 tools &middot; 3 call agents queued &middot; NorthLend Calculator</span>
+    </div>
+    <div class="script-panel" id="script-panel">
+      <!-- 3 tools injected by JS -->
+    </div>
+    <div class="script-foot">
+      <b>3 Vapi assistants queued for wiring.</b> Scripts drafted in <code>SCRIPT-ENGINE-CALL-AGENT-SCRIPTS.md</code>
+    </div>
+  </section>
+
+  <!-- ============================================= 4. TASK QUEUE ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Task Queue for Marc</h2>
+      <span class="hint" id="task-progress">0 of 0 complete</span>
+    </div>
+    <div class="task-grid" id="task-grid">
+      <!-- task cards injected by JS -->
+    </div>
+  </section>
+
+  <!-- ============================================= 4A. BENAIAH OUTBOUND QUEUE ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>BENAIAH &middot; Outbound Queue</h2>
+      <span class="eyebrow">Phase 0 &middot; Live</span>
+    </div>
+    <div class="benaiah-panel">
+      <div class="benaiah-head">
+        <div class="benaiah-title-row">
+          <h3>Alex &middot; sends on Marc's behalf</h3>
+          <span class="benaiah-pill"><span class="dot"></span>SPEC APPROVED &middot; PHASE 0 LIVE</span>
+        </div>
+      </div>
+      <div class="benaiah-meta">
+        <span class="tcom">// agent identity:</span> Alex &middot; Assistant to Marc Papineau &middot; krite-gated &middot; resend-backed
+      </div>
+      <div class="benaiah-queue" id="benaiah-queue">
+        <!-- queue rows injected by JS -->
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================= 4B. BUILD ROADMAP ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Build Roadmap &middot; Flagship Modules</h2>
+      <span class="eyebrow">Spec'd &middot; Awaiting build</span>
+    </div>
+    <div class="roadmap-sub">Spec'd and approved. Not yet built. These become the CRG product differentiators.</div>
+
+    <div class="roadmap-stack">
+
+      <!-- BENAIAH hero-feature card -->
+      <article class="roadmap-card" id="roadmap-benaiah">
+        <span class="stark-bracket tl"></span>
+        <span class="stark-bracket tr"></span>
+        <span class="stark-bracket bl"></span>
+        <span class="stark-bracket br"></span>
+
+        <div class="roadmap-head">
+          <div class="left">
+            <span class="eyebrow-sm">Flagship Module &middot; 01</span>
+            <h3>BENAIAH</h3>
+            <div class="label">Executive Assistant Agent &middot; Email Triage + Autonomous Booking + Ghost Follow-Up</div>
+          </div>
+          <div class="roadmap-live"><span class="dot"></span>SPEC</div>
+        </div>
+
+        <div class="roadmap-pill">Spec Approved &middot; Awaiting Build</div>
+
+        <dl class="roadmap-meta">
+          <dt>Named after</dt>
+          <dd>Benaiah ben Jehoiada &mdash; David's chief of staff, "guarded the gate"</dd>
+          <dt>Role</dt>
+          <dd>Executive assistant &middot; inbox &rarr; classify &rarr; draft &rarr; book &rarr; follow up</dd>
+        </dl>
+
+        <div class="roadmap-oneliner">
+          "You don't reply to emails anymore. Benaiah does. It sounds like you, books your calendar, and chases down your ghosts."
+        </div>
+
+        <div class="roadmap-grid">
+          <div class="roadmap-col">
+            <div class="hd">Inbox Triage</div>
+            <ul>
+              <li>Gmail / Outlook / IMAP connection</li>
+              <li>6-category intent classification</li>
+              <li>Voice match from last 200 sent emails</li>
+            </ul>
+          </div>
+          <div class="roadmap-col">
+            <div class="hd">Autonomous Booking</div>
+            <ul>
+              <li>Drafts reply in client's voice</li>
+              <li>Proposes slots from GHL calendar</li>
+              <li>Respects Google Calendar 2-way sync (no double-book)</li>
+            </ul>
+          </div>
+          <div class="roadmap-col">
+            <div class="hd">Ghost Follow-Up</div>
+            <ul>
+              <li>Nightly CRM database pull</li>
+              <li>Segments by 7 / 14 / 30 / 90-day silence</li>
+              <li>Re-engages dormant contacts in voice</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="roadmap-silos">
+          <span class="lbl">Deployment by silo</span>
+          <span class="silo-pill">Real Estate pack</span>
+          <span class="silo-pill">Mortgage Broker pack (Jason)</span>
+          <span class="silo-pill">Financial Advisor pack</span>
+          <span class="silo-pill ref">Marc's Personal RE (reference)</span>
+        </div>
+
+        <div class="roadmap-phases">
+          <div class="hd">Build Phases</div>
+          <div class="phase-track">
+            <div class="phase-node">
+              <span class="num">PHASE 0</span>
+              <span class="t">Voice Training MVP</span>
+              <span class="dur">1 week</span>
+            </div>
+            <div class="phase-node">
+              <span class="num">PHASE 1</span>
+              <span class="t">Draft + Approval Queue</span>
+              <span class="dur">1 week</span>
+            </div>
+            <div class="phase-node">
+              <span class="num">PHASE 2</span>
+              <span class="t">KRITE Integration</span>
+              <span class="dur">3 days</span>
+            </div>
+            <div class="phase-node">
+              <span class="num">PHASE 3</span>
+              <span class="t">Calendar + Form Booking</span>
+              <span class="dur">1 week</span>
+            </div>
+            <div class="phase-node">
+              <span class="num">PHASE 4</span>
+              <span class="t">Ghost Follow-Up</span>
+              <span class="dur">1 week</span>
+            </div>
+            <div class="phase-node">
+              <span class="num">PHASE 5</span>
+              <span class="t">Multilingual (Jason)</span>
+              <span class="dur">1 week</span>
+            </div>
+            <div class="phase-node">
+              <span class="num">PHASE 6</span>
+              <span class="t">Productization</span>
+              <span class="dur">2 weeks</span>
+            </div>
+          </div>
+          <div class="phase-total">Total: <b>~7&ndash;8 weeks</b></div>
+        </div>
+
+        <div class="roadmap-terminal"><span class="tcom">// depends on:</span> GHL calendar &middot; GHL contacts DB &middot; KRITE review &middot; email provider OAuth
+<span class="tcom">// feeds:     </span> GHL timeline &middot; Command Center approval queue &middot; client daily digest
+<span class="tcom">// loop:      </span> inbox &rarr; classify &rarr; draft &rarr; KRITE &rarr; [auto-send | queue for approval] &rarr; log</div>
+
+        <div class="roadmap-actions">
+          <a class="rm-btn ghost" href="file:///Users/marcpapineau/.openclaw/workspace/AGENT-SPEC-BENAIAH.md" target="_blank" rel="noopener">View Full Spec &rarr;</a>
+          <button class="rm-btn primary" type="button" onclick="this.innerText='Intent Logged &middot; Phase 0';this.disabled=true;">Approve Phase 0 Build</button>
+        </div>
+      </article>
+
+      <!-- More modules to come -->
+      <div class="roadmap-placeholder">
+        <div class="rm-slot">
+          <span class="ph-lbl">TBD &middot; Q2</span>
+          <span class="ph-sub">More modules to come</span>
+        </div>
+        <div class="rm-slot">
+          <span class="ph-lbl">TBD &middot; Q2</span>
+          <span class="ph-sub">More modules to come</span>
+        </div>
+        <div class="rm-slot">
+          <span class="ph-lbl">TBD &middot; Q3</span>
+          <span class="ph-sub">More modules to come</span>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============================================= 5. PROJECT JUMP PANEL ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Project Jump</h2>
+      <span class="eyebrow">Shortcuts &middot; new tab</span>
+    </div>
+    <div class="jump-grid" id="jump-grid">
+      <!-- jump links injected by JS -->
+    </div>
+  </section>
+
+  <!-- ============================================= 6. COUNTERS ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Platform Counters</h2>
+      <span class="eyebrow">Today &middot; totals</span>
+    </div>
+    <div class="counters-strip">
+      <div class="counter-cell">
+        <span class="n mono" id="ctr-contacts">--</span>
+        <span class="lbl">New GHL contacts today</span>
+      </div>
+      <div class="counter-cell">
+        <span class="n mono" id="ctr-calls">--</span>
+        <span class="lbl">Vapi calls today</span>
+      </div>
+      <div class="counter-cell">
+        <span class="n mono" id="ctr-apps">--</span>
+        <span class="lbl">Apps deployed</span>
+      </div>
+      <div class="counter-cell">
+        <span class="n mono" id="ctr-drips">--</span>
+        <span class="lbl">Drip campaigns</span>
+      </div>
+      <div class="counter-cell">
+        <span class="n mono" id="ctr-agents-wired">--</span>
+        <span class="lbl">Vapi agents wired</span>
+      </div>
+      <div class="counter-cell">
+        <span class="n mono" id="ctr-agents-spec">--</span>
+        <span class="lbl">Vapi agents in spec</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================= 7. GARVIS LIVE QUEUE / BRIEF / RESEARCH ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Garvis Live Channels</h2>
+      <span class="eyebrow">Task queue &middot; Morning brief &middot; Research feed &middot; auto-refresh 30s</span>
+    </div>
+    <div class="garvis-trio">
+
+      <!-- Live task queue -->
+      <article class="garvis-card" id="garvis-queue-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Channel 01</div>
+            <div class="gc-title">Task Queue</div>
+          </div>
+          <span class="gc-meta" id="gq-status">--</span>
+        </div>
+        <div class="gc-sub">Live queue. Mark complete; chat updates feed in. Polls every 30s.</div>
+        <div id="garvis-queue-list">
+          <div class="gq-empty">Loading queue&hellip;</div>
+        </div>
+        <div class="gc-foot">
+          <a class="gc-link" href="/.netlify/functions/queue-list" target="_blank" rel="noopener">View raw &rarr;</a>
+          <span class="gc-meta" id="gq-updated">--</span>
+        </div>
+      </article>
+
+      <!-- Morning brief -->
+      <article class="garvis-card" id="garvis-brief-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Channel 02</div>
+            <div class="gc-title" id="mb-title">Morning Brief</div>
+          </div>
+          <span class="gc-meta" id="mb-date">--</span>
+        </div>
+        <div class="gc-sub" id="mb-sub">9 standing topics &middot; 6:00 ET</div>
+        <ul class="gc-list" id="mb-bullets">
+          <li><span class="icon">&rsaquo;</span><span>Loading today's brief&hellip;</span></li>
+        </ul>
+        <div class="gc-foot">
+          <a class="gc-link" id="mb-link" href="#" target="_blank" rel="noopener">Read full brief &rarr;</a>
+          <span class="gc-meta" id="mb-meta">--</span>
+        </div>
+      </article>
+
+      <!-- Research feed -->
+      <article class="garvis-card" id="garvis-research-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Channel 03</div>
+            <div class="gc-title">Research Feed</div>
+          </div>
+          <span class="gc-meta" id="rf-count">-- compounds</span>
+        </div>
+        <div class="gc-sub">Overnight peptide research output &middot; LUKE app pipeline</div>
+        <ul class="gc-list" id="rf-list">
+          <li><span class="icon">&rsaquo;</span><span>Loading research index&hellip;</span></li>
+        </ul>
+        <div class="gc-foot">
+          <a class="gc-link" id="rf-link" href="https://peptide-resource-app.netlify.app/" target="_blank" rel="noopener">Browse all &rarr;</a>
+          <span class="gc-meta" id="rf-meta">--</span>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ============================================= 7B. AGENT SCORECARDS ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Agent Scorecards</h2>
+      <span class="eyebrow" id="sc-eyebrow">org-wide &middot; Judge-scored</span>
+    </div>
+    <div class="scorecard-panel" id="scorecard-panel">
+      <div class="gq-empty">Loading scorecards&hellip;</div>
+    </div>
+  </section>
+
+  <!-- ============================================= 7C. EVENTS FEED + AUTONOMY + SAMUEL ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Agent Bus &middot; Autonomy &middot; Samuel</h2>
+      <span class="eyebrow">Events feed &middot; kill-switch &middot; weekly eval digest</span>
+    </div>
+    <div class="garvis-trio">
+
+      <!-- Events feed -->
+      <article class="garvis-card" id="garvis-events-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Agent Bus</div>
+            <div class="gc-title">Events Feed</div>
+          </div>
+          <span class="gc-meta" id="ef-backend">--</span>
+        </div>
+        <div class="gc-sub">Reverse-chronological &middot; reads Netlify Blobs <code>events</code> store (stubbed until Wave 2a)</div>
+        <div class="events-list" id="events-list">
+          <div class="gq-empty">Loading events&hellip;</div>
+        </div>
+        <div class="gc-foot">
+          <button class="gc-link ef-older" id="ef-older" type="button">Load older &rarr;</button>
+          <span class="gc-meta" id="ef-updated">--</span>
+        </div>
+      </article>
+
+      <!-- Autonomy mode tile -->
+      <article class="garvis-card" id="garvis-autonomy-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Kill-switch</div>
+            <div class="gc-title">Autonomy Mode</div>
+          </div>
+          <span class="gc-meta" id="am-env">--</span>
+        </div>
+        <div class="gc-sub">Current <code>CRG_AUTONOMY_MODE</code> &middot; click tile to change tier</div>
+        <button class="autonomy-tile" id="autonomy-tile" type="button" aria-haspopup="dialog">
+          <span class="at-dot" id="am-dot"></span>
+          <span class="at-mode" id="am-mode">--</span>
+          <span class="at-hint">Click to change</span>
+        </button>
+        <div class="gc-foot">
+          <a class="gc-link" href="/.netlify/functions/autonomy-mode" target="_blank" rel="noopener">View raw &rarr;</a>
+          <span class="gc-meta" id="am-updated">--</span>
+        </div>
+      </article>
+
+      <!-- Samuel digest -->
+      <article class="garvis-card" id="garvis-samuel-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Weekly eval</div>
+            <div class="gc-title">Samuel Digest</div>
+          </div>
+          <span class="gc-meta" id="sm-date">--</span>
+        </div>
+        <div class="gc-sub" id="sm-sub">Latest Monday run &middot; proposals + score deltas</div>
+        <div class="samuel-body" id="samuel-body">
+          <div class="gq-empty">Loading digest&hellip;</div>
+        </div>
+        <div class="gc-foot">
+          <a class="gc-link" href="/.netlify/functions/command-samuel-digest" target="_blank" rel="noopener">View raw &rarr;</a>
+          <span class="gc-meta" id="sm-updated">--</span>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ============================================= AUTONOMY MODE MODAL ============================================= -->
+  <div class="autonomy-modal-overlay" id="autonomy-modal-overlay" hidden>
+    <div class="autonomy-modal" role="dialog" aria-modal="true" aria-labelledby="am-modal-title">
+      <div class="am-modal-head">
+        <h3 id="am-modal-title">Set Autonomy Mode</h3>
+        <button class="am-modal-close" id="am-modal-close" type="button" aria-label="Close">&times;</button>
+      </div>
+      <div class="am-modal-sub">Writes <code>CRG_AUTONOMY_MODE</code> via the Netlify API. Requires <code>NETLIFY_PERSONAL_ACCESS_TOKEN</code> + <code>NETLIFY_SITE_ID</code>.</div>
+      <form id="am-modal-form">
+        <label class="am-radio"><input type="radio" name="am-mode" value="off"><span class="am-dot-chip am-off"></span><b>off</b> &mdash; all autonomous writes blocked</label>
+        <label class="am-radio"><input type="radio" name="am-mode" value="green"><span class="am-dot-chip am-green"></span><b>green</b> &mdash; read-only surfaces</label>
+        <label class="am-radio"><input type="radio" name="am-mode" value="yellow"><span class="am-dot-chip am-yellow"></span><b>yellow</b> &mdash; human-approved via queue</label>
+        <label class="am-radio"><input type="radio" name="am-mode" value="full"><span class="am-dot-chip am-full"></span><b>full</b> &mdash; fully autonomous</label>
+        <div class="am-modal-foot">
+          <button type="button" class="am-btn secondary" id="am-cancel">Cancel</button>
+          <button type="submit" class="am-btn primary" id="am-submit">Apply</button>
+        </div>
+        <div class="am-modal-status" id="am-modal-status"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============================================= 8. FUNBOX ============================================= -->
+  <section class="section">
+    <div class="section-head">
+      <h2>Funbox</h2>
+      <span class="eyebrow">Experimental ideas &middot; spec stage</span>
+    </div>
+    <div class="garvis-trio">
+
+      <article class="garvis-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Funbox &middot; 01</div>
+            <div class="gc-title">Garvis Voice</div>
+          </div>
+          <span class="gc-meta">JARVIS-mode</span>
+        </div>
+        <div class="gc-sub">Voice-in / typed-work-out. ElevenLabs + KRITE-gated reply. Stark-system mandate.</div>
+        <ul class="gc-list">
+          <li><span class="icon">&rsaquo;</span><span>Wake-word listener (always-on, local)</span></li>
+          <li><span class="icon">&rsaquo;</span><span>Marc's voice fingerprint &rarr; dispatch to right agent</span></li>
+          <li><span class="icon">&rsaquo;</span><span>Typed reply renders in chat queue</span></li>
+        </ul>
+        <div class="gc-foot">
+          <a class="gc-link" href="#funbox-garvis-voice">Open spec &rarr;</a>
+          <span class="gc-meta">SPEC</span>
+        </div>
+      </article>
+
+      <article class="garvis-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Funbox &middot; 02</div>
+            <div class="gc-title">Expert Clones</div>
+          </div>
+          <span class="gc-meta">12 specced</span>
+        </div>
+        <div class="gc-sub">Apollos, Daniel, Krite, Levite, Solomon, Silas, Nehemiah, Benaiah, Asher, Caleb, Joab, Hiram</div>
+        <ul class="gc-list">
+          <li><span class="icon">&rsaquo;</span><span>Each clone scored by Judge weekly</span></li>
+          <li><span class="icon">&rsaquo;</span><span>Auto-research &rarr; prompt-tuning PRs</span></li>
+          <li><span class="icon">&rsaquo;</span><span>Claude included in scorecard loop</span></li>
+        </ul>
+        <div class="gc-foot">
+          <a class="gc-link" href="#funbox-expert-clones">Open spec &rarr;</a>
+          <span class="gc-meta">SPEC</span>
+        </div>
+      </article>
+
+      <article class="garvis-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Funbox &middot; 03</div>
+            <div class="gc-title">Vault OS Pitch Deck</div>
+          </div>
+          <span class="gc-meta">DRAFT</span>
+        </div>
+        <div class="gc-sub">Family-office multi-tenant treasury OS &mdash; pitch surface for the Papineau family deployment.</div>
+        <ul class="gc-list">
+          <li><span class="icon">&rsaquo;</span><span>Reference deployment: papineau-family-finance</span></li>
+          <li><span class="icon">&rsaquo;</span><span>Productize for 5 family-office pilots</span></li>
+          <li><span class="icon">&rsaquo;</span><span>Ties to NorthLend + RE silos</span></li>
+        </ul>
+        <div class="gc-foot">
+          <a class="gc-link" href="#funbox-vault-os">Open spec &rarr;</a>
+          <span class="gc-meta">SPEC</span>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+</div>
+
+<!-- ===== MODAL OVERLAY ===== -->
+<div class="modal-scrim" id="modal-scrim" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <div class="eyebrow" id="modal-prio">&middot;</div>
+        <h3 id="modal-title">--</h3>
+        <div class="why" id="modal-why">--</div>
+      </div>
+      <button class="modal-close" id="modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <ol id="modal-steps"></ol>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-gold" id="btn-copy">Copy all</button>
+      <button class="btn-ghost" id="btn-done">Mark Done</button>
+      <span class="copy-flash" id="copy-flash">Copied</span>
+      <button class="btn-danger-ghost" id="btn-undo" style="display:none;">Mark Undone</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== BENAIAH PREVIEW MODAL ===== -->
+<div class="benaiah-modal-scrim" id="benaiah-modal-scrim" role="dialog" aria-modal="true" aria-labelledby="bm-title">
+  <div class="benaiah-modal">
+    <div class="bm-head">
+      <div>
+        <h3 id="bm-title">BENAIAH &middot; Preview</h3>
+        <div class="sub" id="bm-sub">--</div>
+      </div>
+      <button class="bm-close" id="bm-close" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="bm-tabs">
+      <button class="bm-tab active" data-tab="email" type="button">Rendered Email</button>
+      <button class="bm-tab" data-tab="krite" type="button">KRITE Scorecard</button>
+    </div>
+
+    <div class="bm-panel active" id="bm-panel-email">
+      <div class="bm-email-frame" id="bm-email-frame">
+        <div class="email-hdr" id="bm-email-hdr">--</div>
+        <pre id="bm-email-body">--</pre>
+      </div>
+    </div>
+
+    <div class="bm-panel" id="bm-panel-krite">
+      <div class="bm-scorecard" id="bm-scorecard">
+        <div class="bm-score-row">
+          <span class="lbl">Status</span>
+          <span class="val" id="bmk-status">Not yet reviewed</span>
+        </div>
+        <div class="bm-score-row">
+          <span class="lbl">Voice Score</span>
+          <span class="val" id="bmk-voice">—</span>
+        </div>
+        <div class="bm-score-row">
+          <span class="lbl">Compliance</span>
+          <span class="val" id="bmk-compliance">—</span>
+        </div>
+        <div class="bm-score-row">
+          <span class="lbl">Research-First</span>
+          <span class="val" id="bmk-research">—</span>
+        </div>
+        <div>
+          <div class="bm-score-row" style="grid-template-columns:1fr;">
+            <span class="lbl">Flags</span>
+            <ul class="bm-flag-list" id="bmk-flags"><li class="bm-empty">No flags yet.</li></ul>
+          </div>
+        </div>
+        <div>
+          <div class="bm-score-row" style="grid-template-columns:1fr;">
+            <span class="lbl">Suggested Edits</span>
+            <ul class="bm-flag-list" id="bmk-edits"><li class="bm-empty">None.</li></ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bm-email-field">
+      <label for="bm-recipient-email">Recipient email (Michael)</label>
+      <input type="email" id="bm-recipient-email" placeholder="e.g. michael@example.com"/>
+    </div>
+
+    <div class="bm-actions">
+      <button class="rm-btn ghost" id="bm-run-krite" type="button">Run KRITE Review</button>
+      <button class="rm-btn primary" id="bm-send" type="button" disabled>Send</button>
+    </div>
+
+    <div class="bm-status-line" id="bm-status-line" style="display:none;"></div>
+  </div>
+</div>
+
+<!-- ===== FOOTER ===== -->
+<footer class="cmd-footer">
+  <span class="left">
+    <span class="live-dot stark"></span>
+    <span class="hud-build">LIVE</span>
+    <span><span class="k">· auto-refresh:</span> <span class="v">30s</span></span>
+    <span><span class="k">· next tick:</span> <span class="v" id="next-tick">30s</span></span>
+  </span>
+  <span class="right">
+    <span class="vault-keeper" id="vault-keeper" title="Vault Keeper / Levite agent — secret rotation + leak surveillance">
+      <span class="vk-dot"></span>
+      <span class="vk-label">🛡 Vault Keeper · INITIALIZING</span>
+    </span>
+    <span><span class="k">last refresh:</span> <span class="v" id="last-refresh">--</span></span>
+    <span><span class="k">· build:</span> <span class="hud-build" id="build-id">stark.02</span></span>
+  </span>
+</footer>
+
+<script>
+/* =========================================================================
+   CORNERSTONE COMMAND — CLIENT LOGIC
+   ========================================================================= */
+
+const SYSTEM_ORDER = [
+  'ghl_crm', 'vault_os', 'windmill', 'peptide_app',
+  'script_engine', 'vapi_qualifier', 'cloudflare_tunnel'
+];
+const SYSTEM_LABELS = {
+  script_engine:     'Script Engine',
+  vapi_qualifier:    'Vapi Qualifier',
+  ghl_crm:           'GHL CRM',
+  windmill:          'Windmill',
+  vault_os:          'Vault OS',
+  peptide_app:       'Peptide App',
+  cloudflare_tunnel: 'CF Tunnel'
+};
+
+/* ---------- SILO DATA ---------- */
+// TEMP: these %s are authored not fetched. See backlog: wire to live build state.
+const SILOS = [
+  {
+    id: 'real-estate',
+    glyph: 'RE',
+    eyebrow: 'Silo 01',
+    name: 'Real Estate',
+    pct: 30,
+    pctNote: 'Objectives met',
+    apps: [
+      { label: 'RE Silo Page', url: 'https://cornerstoneregroup.netlify.app/real-estate/' }
+    ],
+    drips: { count: 0, list: [] },
+    agents: 'None wired yet',
+    agentsStatus: 'bad',
+    crm: 'Marc Papineau Real Estate',
+    crmNote: 'Location OaIjyU9hKEG9lu2PRrSH &middot; partial scopes',
+    crmStatus: 'warn',
+    met: [
+      'RE silo page live (new today 2026-04-18)',
+      'Homepage silo router fixed',
+      'Footer links corrected across all silo pages'
+    ],
+    pending: [
+      'Build RE-specific drip (nurture past clients + reactivate dormant leads)',
+      'Wire Reactivation AI Agent',
+      'Replace placeholder testimonials with real pilot quotes',
+      'Add RE calendar booking URL'
+    ],
+    prospects: []
+  },
+  {
+    id: 'mortgage-brokers',
+    glyph: 'MB',
+    eyebrow: 'Silo 02',
+    name: 'Mortgage Brokers',
+    pct: 70,
+    pctNote: 'Objectives met',
+    apps: [
+      { label: 'MB Silo Page', url: 'https://cornerstoneregroup.netlify.app/mortgage-brokers/' },
+      { label: 'Licensing Landing', url: 'https://cornerstoneregroup.netlify.app/licensing/' },
+      { label: 'Script Evaluator', url: 'https://crg-script-evaluator.netlify.app/' },
+      { label: 'Compliance Engine', url: 'https://crg-compliance-engine.netlify.app/' }
+    ],
+    drips: { count: 1, list: ['Licensing Inquiry — Mortgage Broker (7 emails)'] },
+    agents: '1 spec-ready (Alex — Licensing Inquiry Vapi)',
+    agentsStatus: 'warn',
+    crm: 'Cornerstone Re Group',
+    crmNote: 'Location 9Z3U7KnyQSbbnaKyTS2e &middot; live',
+    crmStatus: 'ok',
+    met: [
+      'Mortgage silo page live',
+      'Licensing landing page live w/ end-to-end GHL contact creation (contact 720PrLejF4v7q5bb6yEn confirmed)',
+      'All 7 drip emails drafted',
+      'Vapi call script drafted',
+      'GHL key rotated (pit-f36f03f4&hellip;)',
+      'Windmill system_status_v1 updated'
+    ],
+    pending: [
+      'Paste 7 emails into GHL',
+      'Build GHL workflow for the drip',
+      'Wire Vapi assistant',
+      'Replace book-page calendar slug',
+      'Set up Jason Anbara custom presentation page'
+    ],
+    prospects: [
+      {
+        name: 'Jason Anbara',
+        company: 'Mortgage Alliance / NorthLend Financial',
+        relationship: 'Cold discovery · intro via [source TBD]',
+        status: 'Research complete · Custom presentation building · Email queued in BENAIAH',
+        next_step: "Send Michael email via BENAIAH, book one of the 3 proposed slots, deliver custom presentation week of Apr 27"
+      }
+    ]
+  },
+  {
+    id: 'financial-advisors',
+    glyph: 'FA',
+    eyebrow: 'Silo 03',
+    name: 'Financial Advisors',
+    pct: 25,
+    pctNote: 'Objectives met',
+    apps: [
+      { label: 'FA Silo Page', url: 'https://cornerstoneregroup.netlify.app/financial-advisors/' },
+      { label: 'Vault OS', url: 'https://papineau-family-finance.netlify.app/' }
+    ],
+    drips: { count: 0, list: [] },
+    agents: 'None',
+    agentsStatus: 'bad',
+    crm: 'Inherits from Cornerstone Re Group',
+    crmNote: 'Same subaccount &middot; acceptable for now',
+    crmStatus: 'warn',
+    met: [
+      'FA silo page live',
+      'Vault OS deployed and working'
+    ],
+    pending: [
+      'Build FA-specific drip (signal triggers for Vanguard 24.4% churn data)',
+      'Wire an FA-specific call agent',
+      'Add FNA-specific calculator',
+      'Downgrade M-006 LUKE status in catalog'
+    ],
+    prospects: [
+      {
+        name: 'Jim Beaulne',
+        company: 'Primerica',
+        relationship: 'Close friend + fellow Christian · warm prospect',
+        status: 'Not yet ready · Marc will signal when to initiate',
+        next_step: 'When Marc signals: commission deep-research brief → custom presentation → Alex-sent outreach. Same treatment as Jason Anbara.'
+      }
+    ]
+  }
+];
+
+/* ---------- BENAIAH OUTBOUND QUEUE ---------- */
+/* Body text sourced from EMAIL-TO-MICHAEL-JASON-ASSISTANT.md (between the triple-backtick block). */
+const BENAIAH_JASON_MICHAEL_BODY_TEXT =
+`Hi Michael,
+
+Thanks for reaching out about coordinating time for Marc and Jason. Happy
+to help — Marc's holding three slots for discovery briefs in the week of
+the 27th (60 min each, video):
+
+   • Monday, April 27 · 12:00 PM ET
+   • Wednesday, April 29 · 1:00 PM ET
+   • Friday, May 1 · 12:00 PM ET
+
+Let me know which works best on Jason's calendar and I'll send the
+confirmation + video link.
+
+A quick note on why Marc asked me to send more than just times: he came
+across the Mortgage Automator case study where Jason said the software
+"let us go out there and bring in much more capital" on the NorthLend
+side. That quote is exactly the thesis Marc wants to extend — but on the
+brokerage side. Specifically: the renewal book that's compounded over
+10+ years of originating, inbound response time across TikTok / Instagram
+/ web, and the trilingual advantage (English, French, Arabic) that mostly
+goes uncaptured when a human can't answer a DM at 11 PM.
+
+2025 is obviously a standout year for Jason — CMA Excellence, Bruyère
+Foundation board, the Forty Under 40 year-after feature — and Marc wants
+the conversation to be additive to where Jason's already operating, not
+generic.
+
+To get there, Marc put together a 3-minute intake he reviews before every
+discovery brief. It's the difference between a generic pitch and a
+conversation built around Jason's actual numbers:
+
+→ https://cornerstoneregroup.netlify.app/intake/jason/
+
+If the form is overkill, a one-line reply with these four answers works
+just as well:
+
+   1. In one sentence, what's the single operational thing costing Jason
+      the most sleep right now?
+   2. Ballpark size of the brokerage's database — past clients + active
+      leads combined?
+   3. How are upcoming mortgage renewals tracked today — dedicated
+      system, spreadsheet, or "we just know"?
+   4. When a new inbound lead comes in (DM, web form, referral), who
+      handles first contact and within what time window?
+
+That's everything. Thanks Michael — appreciate you helping coordinate.
+
+Best,
+Alex
+Assistant to Marc Papineau
+Cornerstone Research Group
+marc@cornerstoneregroup.ca · cornerstoneregroup.ca`;
+
+function plaintextToHtmlEmail(text) {
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return '<div style="font-family:Georgia,\'Times New Roman\',serif;font-size:15px;line-height:1.7;color:#202020;white-space:pre-wrap;">' + escaped + '</div>';
+}
+
+const BENAIAH_QUEUE = [
+  {
+    id: 'jason-outreach-michael',
+    recipient_name: 'Michael',
+    recipient_email: '',
+    recipient_role: 'Assistant to Jason Anbara',
+    subject: 'Re: Time with Jason — confirming + a short intake',
+    body_source: 'EMAIL-TO-MICHAEL-JASON-ASSISTANT.md',
+    body_text: BENAIAH_JASON_MICHAEL_BODY_TEXT,
+    body_html: plaintextToHtmlEmail(BENAIAH_JASON_MICHAEL_BODY_TEXT),
+    status: 'DRAFT',        // DRAFT | REVIEWING | PASSED | BLOCKED | SENT
+    statusNote: 'awaiting recipient email + KRITE review',
+    voice_score: null,
+    krite_flags: [],
+    krite_edits: [],
+    krite_compliance: null,
+    krite_research: null,
+    message_id: null,
+    send_id: null
+  }
+];
+
+/* ---------- SCRIPT ENGINE TOOLS ---------- */
+const SCRIPT_TOOLS = [
+  {
+    name: 'Script Evaluator',
+    url: 'https://crg-script-evaluator.netlify.app/',
+    status: 'live',
+    agent: 'evaluator-alex &middot; spec-ready'
+  },
+  {
+    name: 'Compliance Engine',
+    url: 'https://crg-compliance-engine.netlify.app/',
+    status: 'live',
+    agent: 'compliance-alex &middot; spec-ready'
+  },
+  {
+    name: 'Script Generator',
+    url: 'https://crg-script-generator.netlify.app/',
+    status: 'live',
+    agent: 'generator-alex &middot; spec-ready'
+  },
+  {
+    name: 'NorthLend Calculator',
+    url: 'https://cornerstoneregroup.netlify.app/calculators/mortgage/',
+    status: 'live',
+    agent: 'embed: /intake/jason/ &middot; mortgage broker pack'
+  }
+];
+
+/* ---------- TASKS ---------- */
+const TASKS = [
+  {
+    id: "benaiah-setup-env",
+    priority: "HIGH",
+    title: "Set BENAIAH Netlify env vars (unlocks the Send button)",
+    time: "~5 min",
+    why: "BENAIAH Phase 0 is deployed but needs API credentials to actually send. Without this, the Send Jason Email button will error on KRITE review step.",
+    steps: [
+      "Netlify dashboard &rarr; cornerstoneregroup site &rarr; Site settings &rarr; Environment variables",
+      "Add <code>ANTHROPIC_API_KEY</code> = your Claude API key (for KRITE review). Get one at console.anthropic.com",
+      "Add <code>RESEND_KEY</code> = your Resend API key (already have one &mdash; see <code>luke-app/server.js</code>). Get a new one at resend.com/api-keys if needed",
+      "Add <code>GHL_TOKEN</code> = <code>pit-f36f03f4-24db-4186-9b64-2cb7735fca36</code> (already live)",
+      "Add <code>GHL_LOCATION_ID</code> = <code>9Z3U7KnyQSbbnaKyTS2e</code>",
+      "Redeploy the cornerstoneregroup site",
+      "Back to Command Center &rarr; BENAIAH Outbound Queue &rarr; Preview the Jason email &rarr; Run KRITE Review &rarr; if it passes, fill in Michael's email &rarr; Send"
+    ]
+  },
+  {
+    id: "paste-ghl-emails",
+    priority: "HIGH",
+    title: "Paste 7 mortgage-licensing email templates into GHL",
+    time: "~15 min",
+    why: "The drip workflow can't fire until the templates exist.",
+    steps: [
+      "Open <code>GHL-EMAIL-PACK-MORTGAGE-LICENSING.md</code> in the workspace",
+      "In GHL: Marketing &rarr; Emails &rarr; Templates &rarr; + New &rarr; HTML Builder",
+      "For each of the 7 emails in the pack: paste the template name as title, paste the HTML block into the HTML editor, paste the subject line + preview text into email settings, save",
+      "Templates to create in order: <code>EMAIL-01-IMMEDIATE</code>, <code>EMAIL-02-POST-CALL</code>, <code>EMAIL-03-DAY1-VALUE</code>, <code>EMAIL-04-DAY2-RATE</code>, <code>EMAIL-05-DAY3-SOCIAL</code>, <code>EMAIL-06-DAY5-LICENSING</code>, <code>EMAIL-07-BREAKUP</code>"
+    ]
+  },
+  {
+    id: "ghl-workflow",
+    priority: "HIGH",
+    title: "Build GHL drip workflow for licensing inquiry",
+    time: "~10 min",
+    why: "Connects the 7 email templates + Vapi call into an automated sequence.",
+    steps: [
+      "Do this AFTER the 7 templates are pasted",
+      "In GHL: Automation &rarr; Workflows &rarr; + New Workflow",
+      "Name: <code>Licensing Inquiry — Mortgage Broker</code>",
+      "Trigger: Tag Added = <code>licensing-inquiry</code>",
+      "Follow the step table in <code>GHL-EMAIL-PACK-MORTGAGE-LICENSING.md</code> (12 steps)",
+      "For the Vapi call step: use a Webhook action, POST to your Vapi outbound-call endpoint with <code>{{contact.phone}}</code>",
+      "Save and Publish"
+    ]
+  },
+  {
+    id: "ghl-custom-fields",
+    priority: "MEDIUM",
+    title: "Create 6 GHL custom fields for the drip merge tags",
+    time: "~3 min",
+    why: "Emails reference agent_count, demo_time, etc. These fields need to exist first.",
+    steps: [
+      "In GHL: Settings &rarr; Custom Fields &rarr; + Add",
+      "Create: <code>agent_count</code> (Number), <code>current_stack</code> (Text), <code>licensing_interest</code> (Single-select: High / Exploring / Referral), <code>demo_day</code> (Text), <code>demo_time</code> (Text), <code>company_name</code> (Text)"
+    ]
+  },
+  {
+    id: "wire-vapi-assistants",
+    priority: "HIGH",
+    title: "Create 3 Vapi assistants for the Script Engine tools",
+    time: "~30 min",
+    why: "Script Evaluator / Compliance / Generator all need a call agent wired to them.",
+    steps: [
+      "Log into Vapi dashboard",
+      "Rotate the API key if the current one shows AUTH yellow in Command Center",
+      "Create assistant <code>evaluator-alex</code>: paste Vapi system prompt from <code>SCRIPT-ENGINE-CALL-AGENT-SCRIPTS.md</code> &rarr; Script 1",
+      "Create assistant <code>compliance-alex</code>: paste from &rarr; Script 2",
+      "Create assistant <code>generator-alex</code>: paste from &rarr; Script 3",
+      "Assign each to an outbound phone number",
+      "Test each with your own phone"
+    ]
+  },
+  {
+    id: "replace-book-calendar",
+    priority: "HIGH",
+    title: "Replace GHL calendar slug placeholder on /book/ page",
+    time: "~5 min",
+    why: "The book page iframes a placeholder calendar URL that renders blank. Prospects can't self-book.",
+    steps: [
+      "In GHL: Calendars &rarr; pick your Discovery Call calendar &rarr; Settings &rarr; copy the public booking URL",
+      "Open <code>cornerstoneregroup-site/book/index.html</code>",
+      "Find and replace <code>cornerstoneregroup-demo</code> with your real slug",
+      "<code>cd cornerstoneregroup-site &amp;&amp; netlify deploy --prod --dir .</code>"
+    ]
+  },
+  {
+    id: "rotate-vapi-key",
+    priority: "MEDIUM",
+    title: "Rotate Vapi API key",
+    time: "~5 min",
+    why: "Command Center shows Vapi AUTH yellow — the key is stale.",
+    steps: [
+      "Log into Vapi dashboard &rarr; Account &rarr; API Keys",
+      "Rotate or regenerate the public key",
+      "Update the <code>VAPI_KEY</code> constant in Windmill script <code>u/admin/system_status_v1</code> (hardcoded near top)",
+      "Command Center will flip to green on next 30s refresh"
+    ]
+  },
+  {
+    id: "cloudflare-tunnel",
+    priority: "LOW",
+    title: "Replace Cloudflare quick tunnel with permanent tunnel",
+    time: "~15 min",
+    why: "Quick tunnels expire on restart. The Command Center and several Netlify functions route through gmbh-lion-mar-epson.trycloudflare.com — any restart breaks production.",
+    steps: [
+      "On the Mac running cloudflared: <code>cloudflared tunnel login</code>",
+      "<code>cloudflared tunnel create cornerstone-prod</code>",
+      "Route a DNS record in GoDaddy (or Cloudflare) to the tunnel",
+      "Update every Netlify function + Windmill reference that uses the current <code>gmbh-lion-mar-epson.trycloudflare.com</code> URL"
+    ]
+  },
+  {
+    id: "jason-custom-presentation",
+    priority: "HIGH",
+    title: "Review Jason Anbara custom presentation (built overnight)",
+    time: "~10 min",
+    why: "Meeting is ~2 weeks out. Presentation + email-to-Michael + intake form are built. Your approval unblocks send.",
+    steps: [
+      "Open <code>JASON-ANBARA-RESEARCH-BRIEF.md</code> — read the research that informed everything",
+      "Open <code>JASON-MEETING-PLAN.md</code> — the 12-screen pitch flow",
+      "Review the email draft to Michael (assistant) — find it at <code>EMAIL-TO-MICHAEL-JASON-ASSISTANT.md</code>",
+      "Visit <code>https://cornerstoneregroup.netlify.app/jason/</code> (production preview URL)",
+      "Approve or request edits",
+      "Once approved: send email, Michael books the meeting"
+    ]
+  },
+  {
+    id: "benaiah-phase0",
+    priority: "HIGH",
+    title: "Approve BENAIAH Phase 0 build (voice-training MVP, 1 week)",
+    time: "~10 min to review",
+    why: "BENAIAH is the flagship module — runs on Marc's own inbox first as reference deployment, then productized for Jason and every silo. Phase 0 is just the Gmail OAuth + voice-fingerprint extraction. Approve to unblock the start.",
+    steps: [
+      "Read <code>AGENT-SPEC-BENAIAH.md</code> in the workspace — covers architecture, build phases, pricing model",
+      "Confirm the name BENAIAH sticks (fits the APOLLOS/DANIEL/KRITE/NEHEMIAH/SOLOMON/SILAS naming pattern)",
+      "Approve Phase 0 scope: Gmail API OAuth connection + extract voice fingerprint from last 200 sent emails + build prompt template",
+      "Greenlight dogfooding on Marc's inbox as the reference deployment",
+      "Reply: 'Approved — start Phase 0'"
+    ]
+  }
+];
+
+/* ---------- JUMP LINKS ---------- */
+const WORKSPACE_PREFIX = 'file:///Users/marcpapineau/.openclaw/workspace/';
+const JUMP_LINKS = [
+  { label: 'CRG Site',             url: 'https://cornerstoneregroup.netlify.app/',           tag: 'Live' },
+  { label: 'Script Evaluator',     url: 'https://crg-script-evaluator.netlify.app/',         tag: 'Live' },
+  { label: 'Script Evaluator v2',  url: 'https://crg-script-evaluator-v2.netlify.app/',      tag: 'Preview' },
+  { label: 'Compliance Engine',    url: 'https://crg-compliance-engine.netlify.app/',        tag: 'Live' },
+  { label: 'Learning Dashboard',   url: 'https://crg-learning-dashboard.netlify.app/',       tag: 'Live' },
+  { label: 'Vault OS',             url: 'https://papineau-family-finance.netlify.app/',      tag: 'Live' },
+  { label: 'Peptide App',          url: 'https://peptide-resource-app.netlify.app/',         tag: 'Live' },
+  { label: 'LUKE App',             url: 'http://localhost:3000/',                            tag: 'localhost' },
+  { label: 'MyBioYouth POS',       url: 'http://localhost:3001/',                            tag: 'localhost' },
+  { label: 'Module Catalog',       url: WORKSPACE_PREFIX + 'MODULE-CATALOG-v3-FINAL.md',     tag: 'File' },
+  { label: 'Lead Engine Scripts',  url: WORKSPACE_PREFIX + 'LEAD-ENGINE-MORTGAGE-BROKER-LICENSING-SCRIPTS.md', tag: 'File' },
+  { label: 'Script Engine Scripts',url: WORKSPACE_PREFIX + 'SCRIPT-ENGINE-CALL-AGENT-SCRIPTS.md', tag: 'File' },
+  { label: 'Jason Meeting Plan',   url: WORKSPACE_PREFIX + 'JASON-MEETING-PLAN.md',          tag: 'File' },
+  { label: 'Windmill',             url: 'https://gmbh-lion-mar-epson.trycloudflare.com/',    tag: 'Tunnel' },
+  { label: 'GHL Dashboard',        url: 'https://app.gohighlevel.com/location/9Z3U7KnyQSbbnaKyTS2e/dashboard', tag: 'App' }
+];
+
+/* =========================================================================
+   STATE
+   ========================================================================= */
+const DONE_KEY = 'crg-command-tasks-done';
+let doneSet = new Set();
+try {
+  const raw = localStorage.getItem(DONE_KEY);
+  if (raw) doneSet = new Set(JSON.parse(raw));
+} catch (e) { doneSet = new Set(); }
+
+function persistDone() {
+  try { localStorage.setItem(DONE_KEY, JSON.stringify([...doneSet])); } catch (e) {}
+}
+
+/* =========================================================================
+   CLOCK + AS-OF
+   ========================================================================= */
+/* All user-facing dates use America/Toronto (Marc's TZ). UTC HUD clock stays in
+   the Stark layer for ops-relevance. */
+const GARVIS_TZ = 'America/Toronto';
+function fmtTime(d) {
+  return d.toLocaleTimeString('en-US', {
+    timeZone: GARVIS_TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  });
+}
+function fmtAsOf(d) {
+  return d.toLocaleString('en-US', {
+    timeZone: GARVIS_TZ, year: 'numeric', month: 'short', day: '2-digit',
+    hour: 'numeric', minute: '2-digit', hour12: true
+  });
+}
+function updateClock() {
+  const now = new Date();
+  const asOf = document.getElementById('as-of');
+  if (asOf) asOf.textContent = fmtAsOf(now);
+  const local = document.getElementById('clock-local');
+  if (local) local.textContent = fmtTime(now) + ' ET';
+}
+updateClock();
+setInterval(updateClock, 30000);
+// Verify on console (per spec):
+try { console.log('[Garvis] Toronto time at load:', fmtAsOf(new Date())); } catch (_) {}
+
+/* =========================================================================
+   RENDER: HEALTH STRIP
+   ========================================================================= */
+function renderHealth(data) {
+  const root = document.getElementById('health-strip');
+  root.innerHTML = '';
+  const systems = (data && data.systems) ? data.systems : {};
+
+  SYSTEM_ORDER.forEach(key => {
+    const sys = systems[key] || { status: 'gray', label: '—', detail: '' };
+    const label = SYSTEM_LABELS[key] || key;
+    const cell = document.createElement('div');
+    cell.className = 'health-cell';
+    cell.innerHTML = `
+      <div class="top">
+        <span class="dot ${sys.status || 'gray'}"></span>
+        <span class="name">${label}</span>
+      </div>
+      <div class="detail">${sys.label || '—'}${sys.detail ? ' &middot; ' + sys.detail : ''}</div>
+    `;
+    root.appendChild(cell);
+  });
+}
+
+/* =========================================================================
+   RENDER: SILOS
+   ========================================================================= */
+function crmStatusClass(s) {
+  return s === 'ok' ? 'status-ok' : s === 'bad' ? 'status-bad' : 'status-warn';
+}
+function agentStatusClass(s) {
+  return s === 'ok' ? 'status-ok' : s === 'bad' ? 'status-bad' : 'status-warn';
+}
+
+function renderSilos() {
+  const root = document.getElementById('silos');
+  root.innerHTML = '';
+  SILOS.forEach(silo => {
+    const card = document.createElement('div');
+    card.className = 'silo';
+    const appsHtml = silo.apps.map(a => `
+      <a class="app-chip" href="${a.url}" target="_blank" rel="noopener">
+        <span class="url">${a.url.replace(/^https?:\/\//, '')}</span>
+        <span class="arrow">&rarr;</span>
+      </a>`).join('');
+
+    const dripsBody = silo.drips.count === 0
+      ? `<span style="color:var(--muted);font-style:italic;">No drips built yet — add one.</span>`
+      : `<b style="color:var(--gold-bright);">${silo.drips.count} ready</b> &middot; ${silo.drips.list.join('; ')}`;
+
+    const metHtml = silo.met.map(x => `<li><span class="icon">&#10003;</span><span>${x}</span></li>`).join('');
+    const pendingHtml = silo.pending.map(x => `<li><span class="icon">&#9744;</span><span>${x}</span></li>`).join('');
+
+    card.innerHTML = `
+      <div class="silo-head">
+        <div style="display:flex;gap:14px;align-items:flex-start;">
+          <div class="glyph">${silo.glyph}</div>
+          <div class="silo-title">
+            <div class="eyebrow">${silo.eyebrow}</div>
+            <h3>${silo.name}</h3>
+          </div>
+        </div>
+        <div class="silo-pct">
+          ${silo.pct}%
+          <span class="sub">${silo.pctNote} <span class="silo-static-badge" title="Authored number — not wired to live build state yet">(static)</span></span>
+        </div>
+      </div>
+
+      <div class="progress"><div class="bar" style="width:${silo.pct}%"></div></div>
+
+      <div class="silo-group">
+        <div class="lbl">Apps</div>
+        <div class="body" style="display:flex;flex-direction:column;gap:6px;">${appsHtml}</div>
+      </div>
+
+      <div class="silo-group">
+        <div class="lbl">Drip Campaigns</div>
+        <div class="body">${dripsBody}</div>
+      </div>
+
+      <dl class="mini-meta">
+        <dt>Call Agents</dt>
+        <dd class="${agentStatusClass(silo.agentsStatus)}">${silo.agents}</dd>
+        <dt>CRM</dt>
+        <dd class="${crmStatusClass(silo.crmStatus)}">${silo.crm}<br/><span style="color:var(--muted);">${silo.crmNote}</span></dd>
+      </dl>
+
+      <div class="silo-group">
+        <div class="lbl">Objectives Met &#10003;</div>
+        <ul class="obj-list met">${metHtml}</ul>
+      </div>
+
+      <div class="silo-group">
+        <div class="lbl">Objectives Pending &#9744;</div>
+        <ul class="obj-list pending">${pendingHtml}</ul>
+      </div>
+
+      ${renderProspectPipeline(silo.prospects)}
+    `;
+    root.appendChild(card);
+  });
+}
+
+function renderProspectPipeline(prospects) {
+  const cards = (prospects && prospects.length)
+    ? prospects.map(p => `
+        <div class="prospect-card">
+          <div class="pc-name">${p.name}</div>
+          <div class="pc-co">${p.company}</div>
+          <div class="pc-row"><span class="pc-k">relationship:</span> ${p.relationship}</div>
+          <div class="pc-row"><span class="pc-k">status:</span> ${p.status}</div>
+          <div class="pc-row"><span class="pc-k">next:</span> ${p.next_step}</div>
+        </div>
+      `).join('')
+    : `<div class="prospect-card empty">No named prospects yet &middot; Marc's own book is the reference deployment</div>`;
+
+  return `
+    <div class="prospect-pipeline">
+      <div class="pp-hd">Prospect Pipeline</div>
+      ${cards}
+    </div>
+  `;
+}
+
+/* =========================================================================
+   RENDER: SCRIPT TOOLS
+   ========================================================================= */
+function renderScriptTools() {
+  const root = document.getElementById('script-panel');
+  root.innerHTML = '';
+  SCRIPT_TOOLS.forEach(t => {
+    const cell = document.createElement('div');
+    cell.className = 'script-tool';
+    cell.innerHTML = `
+      <div class="top">
+        <div class="name">${t.name}</div>
+        <span class="badge-status badge-live"><span class="dot green" style="width:6px;height:6px;"></span> Live</span>
+      </div>
+      <a class="url" href="${t.url}" target="_blank" rel="noopener">${t.url.replace(/^https?:\/\//, '')} &rarr;</a>
+      <div class="agent-line">
+        <span style="color:var(--muted);letter-spacing:0.16em;text-transform:uppercase;font-size:9px;">Call agent</span><br/>
+        ${t.agent}
+      </div>
+    `;
+    root.appendChild(cell);
+  });
+}
+
+/* =========================================================================
+   RENDER: TASKS
+   ========================================================================= */
+function renderTasks() {
+  const root = document.getElementById('task-grid');
+  root.innerHTML = '';
+  let pending = 0, high = 0, doneCount = 0;
+
+  TASKS.forEach(task => {
+    const isDone = doneSet.has(task.id);
+    if (isDone) doneCount++;
+    else {
+      pending++;
+      if (task.priority === 'HIGH') high++;
+    }
+    const card = document.createElement('article');
+    card.className = 'task-card ' + task.priority.toLowerCase() + (isDone ? ' done' : '');
+    card.dataset.taskId = task.id;
+    card.innerHTML = `
+      <div class="task-head">
+        <span class="prio ${task.priority}">${task.priority}</span>
+        <span class="task-time">${task.time}</span>
+      </div>
+      <div class="title">${task.title}</div>
+      <div class="why">${task.why}</div>
+      <div class="task-foot">
+        <button class="btn-instr" data-open-task="${task.id}">Open Instructions &rarr;</button>
+        <span class="done-badge">&#10003; Done</span>
+      </div>
+    `;
+    root.appendChild(card);
+  });
+
+  document.getElementById('task-pending-n').textContent = pending;
+  document.getElementById('task-high-n').textContent = high;
+  document.getElementById('task-progress').textContent =
+    `${doneCount} of ${TASKS.length} complete`;
+}
+
+/* =========================================================================
+   RENDER: JUMP GRID
+   ========================================================================= */
+function renderJumpGrid() {
+  const root = document.getElementById('jump-grid');
+  root.innerHTML = '';
+  JUMP_LINKS.forEach(j => {
+    const el = document.createElement('a');
+    el.className = 'jump-link';
+    el.href = j.url; el.target = '_blank'; el.rel = 'noopener';
+    el.innerHTML = `
+      <span>${j.label}</span>
+      <span style="display:flex;align-items:center;gap:8px;">
+        <span class="tag">${j.tag}</span>
+        <span class="arrow">&rarr;</span>
+      </span>
+    `;
+    root.appendChild(el);
+  });
+}
+
+/* =========================================================================
+   RENDER: COUNTERS
+   ========================================================================= */
+function renderCounters(data) {
+  const counters = (data && data.counters) ? data.counters : {};
+  document.getElementById('ctr-contacts').textContent = counters.contacts_today ?? '0';
+  document.getElementById('ctr-calls').textContent = counters.calls_today ?? '0';
+
+  // static-compute from silo data
+  const allApps = new Set();
+  SILOS.forEach(s => s.apps.forEach(a => allApps.add(a.url)));
+  SCRIPT_TOOLS.forEach(t => allApps.add(t.url));
+  // plus Peptide + Learning Dashboard deployed, MyBioYouth local, LUKE (~10)
+  ['https://peptide-resource-app.netlify.app/',
+   'https://crg-learning-dashboard.netlify.app/'
+  ].forEach(u => allApps.add(u));
+
+  document.getElementById('ctr-apps').textContent = allApps.size;
+  let totalDrips = 0;
+  SILOS.forEach(s => totalDrips += s.drips.count);
+  document.getElementById('ctr-drips').textContent = totalDrips;
+  document.getElementById('ctr-agents-wired').textContent = '0';
+  document.getElementById('ctr-agents-spec').textContent = '4';
+}
+
+/* =========================================================================
+   MODAL
+   ========================================================================= */
+const modalScrim = document.getElementById('modal-scrim');
+const modalTitle = document.getElementById('modal-title');
+const modalWhy   = document.getElementById('modal-why');
+const modalPrio  = document.getElementById('modal-prio');
+const modalSteps = document.getElementById('modal-steps');
+const btnCopy    = document.getElementById('btn-copy');
+const btnDone    = document.getElementById('btn-done');
+const btnUndo    = document.getElementById('btn-undo');
+const copyFlash  = document.getElementById('copy-flash');
+let currentTask = null;
+
+function openTask(taskId) {
+  const task = TASKS.find(t => t.id === taskId);
+  if (!task) return;
+  currentTask = task;
+  modalPrio.textContent = task.priority + ' \u00b7 ' + task.time;
+  modalTitle.textContent = task.title;
+  modalWhy.textContent = task.why;
+  modalSteps.innerHTML = task.steps.map(s => `<li>${s}</li>`).join('');
+  copyFlash.classList.remove('show');
+
+  const isDone = doneSet.has(task.id);
+  btnDone.style.display = isDone ? 'none' : '';
+  btnUndo.style.display = isDone ? '' : 'none';
+
+  modalScrim.classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+function closeModal() {
+  modalScrim.classList.remove('open');
+  document.body.style.overflow = '';
+  currentTask = null;
+}
+document.getElementById('modal-close').addEventListener('click', closeModal);
+modalScrim.addEventListener('click', (e) => { if (e.target === modalScrim) closeModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && modalScrim.classList.contains('open')) closeModal(); });
+
+/* Strip HTML tags for clipboard output */
+function stripTags(html) {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  return tmp.textContent || '';
+}
+
+btnCopy.addEventListener('click', () => {
+  if (!currentTask) return;
+  const md = `# ${currentTask.title}\n\n` +
+             `**Priority:** ${currentTask.priority}  \n` +
+             `**Time:** ${currentTask.time}  \n` +
+             `**Why:** ${currentTask.why}\n\n` +
+             currentTask.steps.map((s, i) => `${i + 1}. ${stripTags(s)}`).join('\n');
+  const write = navigator.clipboard && navigator.clipboard.writeText
+    ? navigator.clipboard.writeText(md)
+    : new Promise((resolve, reject) => {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = md; document.body.appendChild(ta);
+          ta.select(); document.execCommand('copy');
+          document.body.removeChild(ta); resolve();
+        } catch (err) { reject(err); }
+      });
+  write.then(() => {
+    copyFlash.classList.add('show');
+    setTimeout(() => copyFlash.classList.remove('show'), 1500);
+  });
+});
+
+btnDone.addEventListener('click', () => {
+  if (!currentTask) return;
+  doneSet.add(currentTask.id);
+  persistDone();
+  renderTasks();
+  closeModal();
+});
+btnUndo.addEventListener('click', () => {
+  if (!currentTask) return;
+  doneSet.delete(currentTask.id);
+  persistDone();
+  renderTasks();
+  closeModal();
+});
+
+/* Task card delegation */
+document.getElementById('task-grid').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-open-task]');
+  if (btn) openTask(btn.dataset.openTask);
+});
+
+/* =========================================================================
+   STATUS FETCH (live refresh every 30s)
+   ========================================================================= */
+async function fetchStatus() {
+  try {
+    const resp = await fetch('/.netlify/functions/status', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return await resp.json();
+  } catch (err) {
+    console.error('Status fetch failed:', err);
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   LEVITE — Vault Keeper snapshot fetch.
+   Levite lives on the cornerstoneregroup-site Netlify deploy. We piggyback
+   on its public health endpoint (CORS: *) to enrich the existing health
+   tiles WITHOUT changing the visual layout — we just overlay live status
+   for keys Levite can prove are working (GHL, Vapi, Resend, ElevenLabs).
+   ------------------------------------------------------------------------- */
+const LEVITE_BASE = 'https://cornerstoneregroup.netlify.app';
+
+async function fetchLeviteSnapshot() {
+  try {
+    const resp = await fetch(LEVITE_BASE + '/api/levite/snapshot', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return await resp.json();
+  } catch (err) {
+    console.warn('Levite snapshot fetch failed:', err);
+    return null;
+  }
+}
+
+// Maps Levite service name → SYSTEM_ORDER key in the existing tile grid.
+const LEVITE_TO_TILE = {
+  ghl: 'ghl_crm',
+  vapi: 'vapi_qualifier'
+  // resend / elevenlabs / anthropic / perplexity have no existing tile —
+  // they're surfaced via the Vault Keeper footer indicator instead.
+};
+
+function mergeLeviteIntoStatus(statusData, levite) {
+  if (!levite || !levite.health) return statusData;
+  const data = statusData ? JSON.parse(JSON.stringify(statusData)) : { systems: {} };
+  data.systems = data.systems || {};
+
+  for (const h of levite.health) {
+    const tileKey = LEVITE_TO_TILE[h.service];
+    if (!tileKey) continue;
+    const status = h.ok ? 'green' : 'red';
+    const detail = h.ok
+      ? ('healthy · vault ' + (h.status || 'ok'))
+      : ('vault check ' + (h.reason || ('HTTP ' + h.status)));
+    data.systems[tileKey] = {
+      ...(data.systems[tileKey] || {}),
+      status,
+      label: h.ok ? 'OK' : 'CHECK KEY',
+      detail
+    };
+  }
+  return data;
+}
+
+let _lastLeviteSnapshot = null;
+
+async function tick() {
+  const [data, levite] = await Promise.all([fetchStatus(), fetchLeviteSnapshot()]);
+  if (levite) _lastLeviteSnapshot = levite;
+  const merged = mergeLeviteIntoStatus(data, _lastLeviteSnapshot);
+  renderHealth(merged);
+  renderCounters(merged);
+  renderVaultKeeperFooter(_lastLeviteSnapshot);
+  document.getElementById('last-refresh').textContent = fmtTime(new Date());
+}
+
+/* -------------------------------------------------------------------------
+   Vault Keeper footer indicator. One small chip in the existing footer —
+   no layout change. Reflects last Levite run + alert state.
+   ------------------------------------------------------------------------- */
+function renderVaultKeeperFooter(levite) {
+  const el = document.getElementById('vault-keeper-chip');
+  if (!el) return;
+  if (!levite) {
+    el.textContent = '🛡 Vault Keeper · —';
+    el.dataset.state = 'unknown';
+    return;
+  }
+  const ts = levite.finished_at ? new Date(levite.finished_at) : null;
+  const tsTxt = ts ? ts.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '—';
+  const passing = levite.summary?.passing ?? 0;
+  const total   = levite.summary?.total_checks ?? 0;
+  const alert   = !!levite.summary?.alert_marc;
+  el.textContent = `🛡 Vault Keeper · ${passing}/${total} · ${tsTxt}`;
+  el.dataset.state = alert ? 'alert' : 'ok';
+}
+
+/* =========================================================================
+   RENDER: BENAIAH OUTBOUND QUEUE
+   ========================================================================= */
+function statusClass(status) {
+  switch (status) {
+    case 'REVIEWING': return 'review';
+    case 'PASSED':    return 'passed';
+    case 'BLOCKED':   return 'blocked';
+    case 'SENT':      return 'sent';
+    case 'DRAFT':
+    default:          return 'draft';
+  }
+}
+function statusLabel(status) {
+  switch (status) {
+    case 'REVIEWING': return 'KRITE REVIEWING';
+    case 'PASSED':    return 'KRITE PASSED ✓';
+    case 'BLOCKED':   return 'KRITE BLOCKED';
+    case 'SENT':      return 'SENT';
+    case 'DRAFT':
+    default:          return 'DRAFT';
+  }
+}
+
+function renderBenaiahQueue() {
+  const root = document.getElementById('benaiah-queue');
+  if (!root) return;
+  root.innerHTML = '';
+  BENAIAH_QUEUE.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'queue-row';
+    const score = (typeof item.voice_score === 'number') ? item.voice_score : null;
+    const scoreClass = score === null ? '' : (score >= 85 ? 'green' : score >= 75 ? 'yellow' : 'red');
+    const scoreHtml = score === null
+      ? '<span class="val" style="color:var(--muted);">—</span>'
+      : `<span class="val ${scoreClass}">${score}/100</span>`;
+    const canSend = item.status === 'PASSED';
+    row.innerHTML = `
+      <div class="qr-recipient">
+        <div class="name">${item.recipient_name || '(recipient)'}</div>
+        <div class="email">${item.recipient_email || '&lt;email not set&gt;'}</div>
+        <div class="role">${item.recipient_role || ''}</div>
+      </div>
+      <div class="qr-subject">${item.subject}</div>
+      <div><span class="qr-status ${statusClass(item.status)}">${statusLabel(item.status)}</span>${item.statusNote ? '<div style="font-size:10px;color:var(--muted);margin-top:4px;font-family:\'JetBrains Mono\',monospace;">' + item.statusNote + '</div>' : ''}</div>
+      <div class="qr-score">
+        <span class="lbl">Voice</span>
+        ${scoreHtml}
+      </div>
+      <div class="qr-actions">
+        <button class="qr-btn preview" type="button" data-id="${item.id}" data-act="preview">Preview</button>
+        <button class="qr-btn send" type="button" data-id="${item.id}" data-act="send" ${canSend ? '' : 'disabled'}>Send Now</button>
+      </div>
+    `;
+    root.appendChild(row);
+  });
+
+  // Wire up button clicks
+  root.querySelectorAll('.qr-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const id = btn.getAttribute('data-id');
+      const act = btn.getAttribute('data-act');
+      const item = BENAIAH_QUEUE.find(q => q.id === id);
+      if (!item) return;
+      if (act === 'preview') openBenaiahModal(item);
+      else if (act === 'send') {
+        openBenaiahModal(item);
+        // Auto-trigger send from modal when already PASSED
+        setTimeout(() => document.getElementById('bm-send').click(), 150);
+      }
+    });
+  });
+}
+
+/* =========================================================================
+   BENAIAH PREVIEW MODAL
+   ========================================================================= */
+let CURRENT_BENAIAH_ITEM = null;
+
+function openBenaiahModal(item) {
+  CURRENT_BENAIAH_ITEM = item;
+  const scrim = document.getElementById('benaiah-modal-scrim');
+  document.getElementById('bm-title').textContent = 'BENAIAH · ' + item.subject;
+  document.getElementById('bm-sub').textContent = 'to: ' + (item.recipient_name || '(recipient)') + ' · role: ' + (item.recipient_role || '');
+  document.getElementById('bm-email-hdr').textContent =
+    'From:     Alex · Assistant to Marc Papineau <onboarding@resend.dev>\n' +
+    'Reply-to: marc@cornerstoneregroup.ca\n' +
+    'To:       ' + (item.recipient_email || '(fill in below)') + '\n' +
+    'Subject:  ' + item.subject;
+  document.getElementById('bm-email-body').textContent = item.body_text;
+  document.getElementById('bm-recipient-email').value = item.recipient_email || '';
+  renderKriteScorecard(item);
+  updateSendButton(item);
+  setStatusLine('', '');
+  // default to email tab
+  setBenaiahTab('email');
+  scrim.classList.add('open');
+}
+function closeBenaiahModal() {
+  document.getElementById('benaiah-modal-scrim').classList.remove('open');
+}
+function setBenaiahTab(which) {
+  document.querySelectorAll('.bm-tab').forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === which));
+  document.getElementById('bm-panel-email').classList.toggle('active', which === 'email');
+  document.getElementById('bm-panel-krite').classList.toggle('active', which === 'krite');
+}
+function setStatusLine(msg, kind) {
+  const el = document.getElementById('bm-status-line');
+  if (!msg) { el.style.display = 'none'; el.textContent = ''; el.className = 'bm-status-line'; return; }
+  el.style.display = 'block';
+  el.textContent = msg;
+  el.className = 'bm-status-line' + (kind ? ' ' + kind : '');
+}
+function renderKriteScorecard(item) {
+  const statusEl = document.getElementById('bmk-status');
+  const voiceEl  = document.getElementById('bmk-voice');
+  const compEl   = document.getElementById('bmk-compliance');
+  const resEl    = document.getElementById('bmk-research');
+  const flagsEl  = document.getElementById('bmk-flags');
+  const editsEl  = document.getElementById('bmk-edits');
+
+  if (item.voice_score === null || typeof item.voice_score === 'undefined') {
+    statusEl.textContent = 'Not yet reviewed';
+    statusEl.className = 'val';
+    voiceEl.textContent = '—'; voiceEl.className = 'val';
+    compEl.textContent = '—';  compEl.className = 'val';
+    resEl.textContent = '—';   resEl.className = 'val';
+    flagsEl.innerHTML = '<li class="bm-empty">No flags yet.</li>';
+    editsEl.innerHTML = '<li class="bm-empty">None.</li>';
+    return;
+  }
+  const passed = item.status === 'PASSED';
+  statusEl.textContent = passed ? 'PASSED' : (item.status === 'BLOCKED' ? 'BLOCKED' : 'Reviewed');
+  statusEl.className = 'val ' + (passed ? 'green' : 'red');
+  voiceEl.textContent = item.voice_score + '/100';
+  voiceEl.className = 'val ' + (item.voice_score >= 85 ? 'green' : item.voice_score >= 75 ? 'yellow' : 'red');
+  compEl.textContent = item.krite_compliance === null ? '—' : (item.krite_compliance ? 'PASS' : 'FAIL');
+  compEl.className = 'val ' + (item.krite_compliance === false ? 'red' : 'green');
+  resEl.textContent = item.krite_research === null ? '—' : (item.krite_research ? 'PASS' : 'FAIL');
+  resEl.className = 'val ' + (item.krite_research === false ? 'red' : 'green');
+  flagsEl.innerHTML = (item.krite_flags && item.krite_flags.length)
+    ? item.krite_flags.map(f => '<li>' + escapeHtml(f) + '</li>').join('')
+    : '<li class="bm-empty">No flags.</li>';
+  editsEl.innerHTML = (item.krite_edits && item.krite_edits.length)
+    ? item.krite_edits.map(e => '<li>' + escapeHtml(e) + '</li>').join('')
+    : '<li class="bm-empty">None.</li>';
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function updateSendButton(item) {
+  const btn = document.getElementById('bm-send');
+  const hasEmail = !!document.getElementById('bm-recipient-email').value.trim();
+  btn.disabled = !(item.status === 'PASSED' && hasEmail);
+}
+
+async function runKriteReview() {
+  const item = CURRENT_BENAIAH_ITEM;
+  if (!item) return;
+  const emailField = document.getElementById('bm-recipient-email');
+  const recipientEmail = emailField.value.trim();
+  if (!recipientEmail) {
+    setStatusLine('Fill in recipient email first — KRITE needs it to run the dry_run send.', 'err');
+    return;
+  }
+  item.recipient_email = recipientEmail;
+  item.status = 'REVIEWING';
+  renderBenaiahQueue();
+  setStatusLine('Running KRITE review…', '');
+  setBenaiahTab('krite');
+  try {
+    const resp = await fetch('https://cornerstoneregroup.netlify.app/.netlify/functions/benaiah-send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        template_id: item.id,
+        recipient_email: recipientEmail,
+        recipient_name: item.recipient_name,
+        subject: item.subject,
+        body_html: item.body_html,
+        body_text: item.body_text,
+        dry_run: true
+      })
+    });
+    const data = await resp.json();
+    const score = data.krite_score || {};
+    item.voice_score     = typeof score.voice_score === 'number' ? score.voice_score : null;
+    item.krite_flags     = Array.isArray(score.flags) ? score.flags : [];
+    item.krite_edits     = Array.isArray(score.suggested_edits) ? score.suggested_edits : [];
+    item.krite_compliance = typeof score.compliance_pass === 'boolean' ? score.compliance_pass : null;
+    item.krite_research   = typeof score.research_first_pass === 'boolean' ? score.research_first_pass : null;
+    if (data.ok && data.dry_run) {
+      item.status = 'PASSED';
+      item.statusNote = 'KRITE cleared · ready to send';
+      setStatusLine('KRITE passed. Voice score ' + (item.voice_score || '?') + '/100. Send button is live.', 'ok');
+    } else {
+      item.status = 'BLOCKED';
+      item.statusNote = 'KRITE flagged — review scorecard';
+      setStatusLine('KRITE blocked: ' + (data.error || 'see flags below'), 'err');
+    }
+  } catch (err) {
+    item.status = 'BLOCKED';
+    item.statusNote = 'Network or function error';
+    setStatusLine('Network error: ' + err.message + '. If env vars are not yet set in Netlify, that\'s expected — see "Set BENAIAH Netlify env vars" in the Task Queue.', 'err');
+  }
+  renderKriteScorecard(item);
+  renderBenaiahQueue();
+  updateSendButton(item);
+}
+
+async function sendBenaiah() {
+  const item = CURRENT_BENAIAH_ITEM;
+  if (!item) return;
+  if (item.status !== 'PASSED') {
+    setStatusLine('Run KRITE Review first — the Send button only unlocks after a pass.', 'err');
+    return;
+  }
+  const recipientEmail = document.getElementById('bm-recipient-email').value.trim();
+  if (!recipientEmail) { setStatusLine('Missing recipient email.', 'err'); return; }
+  item.recipient_email = recipientEmail;
+  setStatusLine('Sending…', '');
+  try {
+    const resp = await fetch('https://cornerstoneregroup.netlify.app/.netlify/functions/benaiah-send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        template_id: item.id,
+        recipient_email: recipientEmail,
+        recipient_name: item.recipient_name,
+        subject: item.subject,
+        body_html: item.body_html,
+        body_text: item.body_text,
+        dry_run: false
+      })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      item.status = 'SENT';
+      item.statusNote = 'sent · ' + new Date().toLocaleString();
+      item.message_id = data.message_id || null;
+      item.send_id = data.send_id || null;
+      setStatusLine('Sent. send_id=' + (data.send_id || '—') + ' · message_id=' + (data.message_id || '—'), 'ok');
+    } else {
+      setStatusLine('Send blocked: ' + (data.error || 'unknown'), 'err');
+    }
+  } catch (err) {
+    setStatusLine('Network error: ' + err.message, 'err');
+  }
+  renderBenaiahQueue();
+  updateSendButton(item);
+}
+
+/* Wire modal controls once DOM is ready */
+(function wireBenaiahModal() {
+  const close = document.getElementById('bm-close');
+  const scrim = document.getElementById('benaiah-modal-scrim');
+  if (close) close.addEventListener('click', closeBenaiahModal);
+  if (scrim) scrim.addEventListener('click', (e) => { if (e.target === scrim) closeBenaiahModal(); });
+  document.querySelectorAll('.bm-tab').forEach(t => t.addEventListener('click', () => setBenaiahTab(t.getAttribute('data-tab'))));
+  const runBtn = document.getElementById('bm-run-krite');
+  if (runBtn) runBtn.addEventListener('click', runKriteReview);
+  const sendBtn = document.getElementById('bm-send');
+  if (sendBtn) sendBtn.addEventListener('click', sendBenaiah);
+  const emailInput = document.getElementById('bm-recipient-email');
+  if (emailInput) emailInput.addEventListener('input', () => {
+    if (CURRENT_BENAIAH_ITEM) updateSendButton(CURRENT_BENAIAH_ITEM);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && scrim && scrim.classList.contains('open')) closeBenaiahModal();
+  });
+})();
+
+/* =========================================================================
+   INIT
+   ========================================================================= */
+renderSilos();
+renderScriptTools();
+renderTasks();
+renderJumpGrid();
+renderBenaiahQueue();
+renderCounters(null);
+renderHealth(null);
+tick();
+setInterval(tick, 30000);
+
+/* =========================================================================
+   GARVIS LIVE CHANNELS — queue, brief, research, vault keeper
+   Additive. Does not touch existing render fns.
+   ========================================================================= */
+(function garvisLiveChannels() {
+  'use strict';
+
+  const POLL_MS = 30000;
+  const FN = (path) => '/.netlify/functions/' + path;
+
+  function fmtRelative(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    const diffMs = Date.now() - d.getTime();
+    const m = Math.floor(diffMs / 60000);
+    if (m < 1)  return 'just now';
+    if (m < 60) return m + 'm ago';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ago';
+    const days = Math.floor(h / 24);
+    return days + 'd ago';
+  }
+
+  /* ---------- Queue ---------- */
+  async function loadQueue() {
+    try {
+      const res = await fetch(FN('queue-list'), { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      renderQueue(data);
+    } catch (err) {
+      const root = document.getElementById('garvis-queue-list');
+      if (root) root.innerHTML = '<div class="gq-empty">Queue offline — will retry in 30s</div>';
+      const s = document.getElementById('gq-status'); if (s) s.textContent = 'OFFLINE';
+    }
+  }
+
+  function renderQueue(data) {
+    const root = document.getElementById('garvis-queue-list');
+    if (!root) return;
+    const items = (data.items || []).filter(i => !i.completed_at).slice(0, 8);
+    const status = document.getElementById('gq-status');
+    const updated = document.getElementById('gq-updated');
+    if (status) status.textContent = (data.pending || items.length) + ' pending · ' + (data.backend || 'live');
+    if (updated) updated.textContent = 'updated ' + fmtRelative(data.timestamp);
+
+    if (!items.length) {
+      root.innerHTML = '<div class="gq-empty">Queue clear. ✨</div>';
+      return;
+    }
+
+    root.innerHTML = items.map(item => {
+      const ai = item.ai_estimate ? `<span class="gq-tag ai">AI ${escapeHtml(item.ai_estimate)}</span>` : '';
+      const hu = item.human_estimate ? `<span class="gq-tag human">Human ${escapeHtml(item.human_estimate)}</span>` : '';
+      const silo = item.silo ? `<span class="gq-tag silo">${escapeHtml(item.silo)}</span>` : '';
+      const prio = item.priority === 'HIGH' ? `<span class="gq-tag HIGH">HIGH</span>` : '';
+      return `
+        <div class="gq-row" data-id="${escapeHtml(item.id)}">
+          <button class="gq-check" data-action="complete" data-id="${escapeHtml(item.id)}" aria-label="Mark complete"></button>
+          <span class="gq-title">${escapeHtml(item.title || 'Untitled')}</span>
+          <span class="gq-tags">${prio}${ai}${hu}${silo}</span>
+        </div>
+      `;
+    }).join('');
+
+    root.querySelectorAll('.gq-check').forEach(btn => {
+      btn.addEventListener('click', onCompleteClick);
+    });
+  }
+
+  async function onCompleteClick(e) {
+    const btn = e.currentTarget;
+    const id  = btn.dataset.id;
+    const row = btn.closest('.gq-row');
+    if (!id || !row) return;
+    btn.classList.add('done');
+    btn.textContent = '✓';
+    row.classList.add('done');
+    try {
+      await fetch(FN('queue-update'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, action: 'complete' })
+      });
+    } catch (_) { /* still animate out — refresh re-syncs */ }
+    setTimeout(() => {
+      row.classList.add('completed');
+      setTimeout(loadQueue, 700);
+    }, 1000);
+  }
+
+  /* ---------- Morning brief ---------- */
+  async function loadBrief() {
+    try {
+      const res = await fetch(FN('morning-brief'), { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const t = document.getElementById('mb-title');   if (t) t.textContent = data.title || 'Morning Brief';
+      const d = document.getElementById('mb-date');    if (d) d.textContent = data.date || '';
+      const sub = document.getElementById('mb-sub');   if (sub && data.subtitle) sub.textContent = data.subtitle;
+      const ul = document.getElementById('mb-bullets');
+      if (ul) {
+        const bullets = (data.bullets && data.bullets.length) ? data.bullets : ['Brief pending — check back at 6:05 ET.'];
+        ul.innerHTML = bullets.slice(0, 5).map(b => `<li><span class="icon">&rsaquo;</span><span>${escapeHtml(b)}</span></li>`).join('');
+      }
+      const link = document.getElementById('mb-link');
+      if (link && data.full_url) link.href = data.full_url;
+      const meta = document.getElementById('mb-meta');
+      if (meta) meta.textContent = data.generated_at ? fmtRelative(data.generated_at) : 'pending';
+    } catch (err) {
+      const meta = document.getElementById('mb-meta'); if (meta) meta.textContent = 'offline';
+    }
+  }
+
+  /* ---------- Research feed ---------- */
+  async function loadResearch() {
+    try {
+      const res = await fetch(FN('research-feed'), { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const items = (data.items || []).slice(0, 5);
+      const cnt = document.getElementById('rf-count');
+      if (cnt) cnt.textContent = (data.count || items.length) + ' compounds';
+      const ul = document.getElementById('rf-list');
+      if (ul) {
+        if (!items.length) {
+          ul.innerHTML = '<li><span class="icon">&rsaquo;</span><span>No research published yet.</span></li>';
+        } else {
+          ul.innerHTML = items.map(it => {
+            const cat = it.category ? ` <span style="color:var(--muted);font-size:10px;font-family:JetBrains Mono,monospace;">· ${escapeHtml(it.category)}</span>` : '';
+            return `<li><span class="icon">&rsaquo;</span><span>${escapeHtml(it.title || it.slug)}${cat}</span></li>`;
+          }).join('');
+        }
+      }
+      const link = document.getElementById('rf-link');
+      if (link && data.browse_url) link.href = data.browse_url;
+      const meta = document.getElementById('rf-meta');
+      if (meta) meta.textContent = data.generated_at ? fmtRelative(data.generated_at) : (data.note || 'awaiting publish');
+    } catch (err) {
+      const meta = document.getElementById('rf-meta'); if (meta) meta.textContent = 'offline';
+    }
+  }
+
+  /* ---------- Vault Keeper ---------- */
+  async function loadVaultKeeper() {
+    const el = document.getElementById('vault-keeper');
+    if (!el) return;
+    try {
+      const res = await fetch('/health/secrets.json', { cache: 'no-store' });
+      if (!res.ok) {
+        setVK(el, 'init', '🛡 Vault Keeper · INITIALIZING');
+        return;
+      }
+      const data = await res.json();
+      const status = (data.status || 'unknown').toLowerCase();
+      const note   = data.note || ('rotated ' + fmtRelative(data.last_rotated));
+      let cls = 'init';
+      if (status === 'green' || status === 'ok')   cls = 'ok';
+      else if (status === 'yellow' || status === 'warn') cls = 'warn';
+      else if (status === 'red'    || status === 'bad')  cls = 'bad';
+      setVK(el, cls, '🛡 Vault Keeper · ' + status.toUpperCase() + ' · ' + note);
+    } catch (_) {
+      setVK(el, 'init', '🛡 Vault Keeper · INITIALIZING');
+    }
+  }
+  function setVK(el, cls, label) {
+    el.classList.remove('ok', 'warn', 'bad');
+    if (cls && cls !== 'init') el.classList.add(cls);
+    const lbl = el.querySelector('.vk-label');
+    if (lbl) lbl.textContent = label;
+  }
+
+  /* ---------- HTML escape ---------- */
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  /* ---------- Boot + poll ---------- */
+  function refreshAll() {
+    loadQueue();
+    loadBrief();
+    loadResearch();
+    loadVaultKeeper();
+  }
+  refreshAll();
+  setInterval(refreshAll, POLL_MS);
+})();
+
+/* =========================================================================
+   STARK ENHANCEMENT LAYER — additive, non-destructive polish
+   ========================================================================= */
+(function starkLayer() {
+  'use strict';
+  const REDUCED = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const BOOT_TIME = Date.now();
+  const SESSION_ID = 'crg-' + Math.random().toString(36).slice(2, 8).toUpperCase();
+  const pad = n => String(n).padStart(2, '0');
+
+  const msession = document.getElementById('m-session');
+  if (msession) msession.textContent = SESSION_ID;
+
+  /* ---------------- Title typewriter ---------------- */
+  (function typewriter() {
+    const el = document.getElementById('title-text');
+    if (!el) return;
+    const text = el.textContent || 'Cornerstone Command';
+    if (REDUCED) { el.textContent = text; return; }
+    el.textContent = '';
+    let i = 0;
+    (function step() {
+      if (i <= text.length) {
+        el.textContent = text.slice(0, i);
+        i++;
+        setTimeout(step, 45);
+      }
+    })();
+  })();
+
+  /* ---------------- HUD clock override ---------------- */
+  let lastSec = -1;
+  function starkClock() {
+    const d = new Date();
+    const y = d.getUTCFullYear();
+    const mo = pad(d.getUTCMonth() + 1);
+    const da = pad(d.getUTCDate());
+    const hh = pad(d.getUTCHours());
+    const mi = pad(d.getUTCMinutes());
+    const ss = pad(d.getUTCSeconds());
+    const clock = document.getElementById('clock');
+    if (clock) {
+      clock.innerHTML = `${y}.${mo}.${da} · ${hh}:${mi}:<span class="sec">${ss}</span> UTC+00`;
+      const sec = clock.querySelector('.sec');
+      if (sec && !REDUCED && d.getUTCSeconds() !== lastSec) {
+        sec.classList.add('flash');
+        setTimeout(() => sec.classList.remove('flash'), 180);
+        lastSec = d.getUTCSeconds();
+      }
+    }
+    // uptime readout
+    const up = Math.floor((Date.now() - BOOT_TIME) / 1000);
+    const uh = Math.floor(up / 3600);
+    const um = Math.floor((up % 3600) / 60);
+    const us = up % 60;
+    const mu = document.getElementById('m-uptime');
+    if (mu) mu.textContent = `${pad(uh)}h ${pad(um)}m ${pad(us)}s`;
+  }
+  setInterval(starkClock, 1000);
+  starkClock();
+
+  /* ---------------- next-tick countdown ---------------- */
+  // Track countdown based on last-refresh timestamp text; use our own 30s wall clock.
+  let lastRefreshAt = Date.now();
+  const origLastRefresh = document.getElementById('last-refresh');
+  if (origLastRefresh) {
+    const observer = new MutationObserver(() => { lastRefreshAt = Date.now(); });
+    observer.observe(origLastRefresh, { childList: true, characterData: true, subtree: true });
+  }
+  setInterval(() => {
+    const el = document.getElementById('next-tick');
+    if (!el) return;
+    const elapsed = Math.floor((Date.now() - lastRefreshAt) / 1000);
+    const remaining = Math.max(0, 30 - elapsed);
+    el.textContent = remaining + 's';
+  }, 500);
+
+  /* ---------------- last-sync meta line ---------------- */
+  function updateLastSync() {
+    const el = document.getElementById('m-lastsync');
+    if (!el) return;
+    const d = new Date();
+    el.textContent = d.getUTCFullYear() + '-' + pad(d.getUTCMonth()+1) + '-' + pad(d.getUTCDate()) + 'T' +
+                     pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds()) + 'Z';
+  }
+  updateLastSync();
+  setInterval(updateLastSync, 30000);
+
+  /* ---------------- Health matrix injection ---------------- */
+  function statusToFill(s) {
+    if (s === 'green') return 25;
+    if (s === 'yellow') return 14;
+    if (s === 'red') return 4;
+    return 8;
+  }
+  function buildMatrix(cls, fill) {
+    let html = '<span class="matrix">';
+    for (let i = 0; i < 25; i++) {
+      html += `<span class="m ${i < fill ? 'on ' + cls : ''}"></span>`;
+    }
+    return html + '</span>';
+  }
+  function injectMatrices() {
+    document.querySelectorAll('#health-strip .health-cell').forEach(cell => {
+      if (cell.querySelector('.matrix')) return;
+      const dot = cell.querySelector('.dot');
+      if (!dot) return;
+      const cls = ['green','yellow','red','gray'].find(c => dot.classList.contains(c)) || 'gray';
+      const fill = statusToFill(cls);
+      const top = cell.querySelector('.top');
+      if (top) {
+        const matrix = document.createElement('span');
+        matrix.innerHTML = buildMatrix(cls, fill);
+        matrix.style.marginLeft = 'auto';
+        top.appendChild(matrix.firstChild);
+      }
+    });
+  }
+  // re-run on every render (renderHealth rebuilds innerHTML); observe the strip
+  const healthStrip = document.getElementById('health-strip');
+  if (healthStrip) {
+    const hObs = new MutationObserver(() => injectMatrices());
+    hObs.observe(healthStrip, { childList: true });
+    injectMatrices();
+  }
+
+  /* ---------------- Corner brackets on silos ---------------- */
+  function injectBrackets() {
+    document.querySelectorAll('#silos .silo').forEach(silo => {
+      if (silo.querySelector('.stark-bracket')) return;
+      ['tl','tr','bl','br'].forEach(pos => {
+        const b = document.createElement('span');
+        b.className = 'stark-bracket ' + pos;
+        silo.appendChild(b);
+      });
+    });
+  }
+  const silosEl = document.getElementById('silos');
+  if (silosEl) {
+    const sObs = new MutationObserver(() => injectBrackets());
+    sObs.observe(silosEl, { childList: true });
+    injectBrackets();
+  }
+
+  /* ---------------- Counter count-up ---------------- */
+  const countedIds = new Set();
+  function countUp(el, to) {
+    if (!el) return;
+    const target = Number(String(to).replace(/[^\d.-]/g, '')) || 0;
+    if (REDUCED) { el.textContent = target.toLocaleString(); return; }
+    const dur = 900;
+    const start = performance.now();
+    const from = 0;
+    function frame(now) {
+      const t = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const val = Math.round(from + (target - from) * eased);
+      el.textContent = val.toLocaleString();
+      if (t < 1) requestAnimationFrame(frame);
+      else el.textContent = target.toLocaleString();
+    }
+    requestAnimationFrame(frame);
+  }
+  function animateCounters() {
+    ['ctr-contacts','ctr-calls','ctr-apps','ctr-drips','ctr-agents-wired','ctr-agents-spec',
+     'task-pending-n','task-high-n'].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const txt = (el.textContent || '').trim();
+      if (!txt || txt === '--') return;
+      const key = id + ':' + txt;
+      if (countedIds.has(key)) return;
+      countedIds.add(key);
+      countUp(el, txt);
+    });
+  }
+  // Initial + observe for late renders
+  setTimeout(animateCounters, 150);
+  setTimeout(animateCounters, 600);
+  ['ctr-contacts','ctr-calls','ctr-apps','ctr-drips','ctr-agents-wired','ctr-agents-spec',
+   'task-pending-n','task-high-n'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const o = new MutationObserver(() => animateCounters());
+    o.observe(el, { childList: true, characterData: true, subtree: true });
+  });
+
+  /* ---------------- Reveal on scroll ---------------- */
+  function tagReveals() {
+    const selectors = ['.section', '.silo', '.script-tool', '.task-card', '.jump-link', '.counter-cell', '.health-cell'];
+    selectors.forEach(sel => {
+      document.querySelectorAll(sel).forEach(el => {
+        if (!el.classList.contains('stark-reveal')) el.classList.add('stark-reveal');
+      });
+    });
+  }
+  tagReveals();
+
+  if ('IntersectionObserver' in window && !REDUCED) {
+    const groups = new Map();
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const el = entry.target;
+        const parent = el.parentElement;
+        const idx = groups.get(parent) || 0;
+        groups.set(parent, idx + 1);
+        setTimeout(() => el.classList.add('in'), Math.min(idx, 8) * 120);
+        io.unobserve(el);
+      });
+    }, { threshold: 0.05, rootMargin: '0px 0px -40px 0px' });
+
+    function observeAll() {
+      document.querySelectorAll('.stark-reveal').forEach(el => {
+        if (!el.dataset.starkObserved) {
+          io.observe(el);
+          el.dataset.starkObserved = '1';
+        }
+      });
+    }
+    observeAll();
+    // re-observe after render cycles (silos/tasks render async-ish)
+    setTimeout(() => { tagReveals(); observeAll(); }, 100);
+    setTimeout(() => { tagReveals(); observeAll(); }, 500);
+    setTimeout(() => { tagReveals(); observeAll(); }, 1500);
+  } else {
+    document.querySelectorAll('.stark-reveal').forEach(el => el.classList.add('in'));
+  }
+
+  /* ---------------- Promote live-dots to stark class ---------------- */
+  document.querySelectorAll('.live-dot').forEach(d => d.classList.add('stark'));
+})();
+</script>
+</body>
+</html>
