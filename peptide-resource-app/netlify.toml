@@ -1,0 +1,21 @@
+[build]
+  publish = "dist"
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/.netlify/functions/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+  force = true
+
+# Friendly alias for the Vitalis chat function
+[[redirects]]
+  from = "/api/vitalis-chat"
+  to = "/.netlify/functions/vitalis-chat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
