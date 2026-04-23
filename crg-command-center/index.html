@@ -1863,6 +1863,141 @@ if ('serviceWorker' in navigator) {
   .sm-delta .nums  { color: var(--muted); }
   .sm-delta .d-pos { color: #46b86a; font-weight: 700; }
   .sm-delta .d-neg { color: #c94a4a; font-weight: 700; }
+
+  /* =========================================================================
+     ROUTINES TAB — scheduled automation registry
+     ========================================================================= */
+  .routines-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .routine-card {
+    position: relative;
+    background: linear-gradient(180deg, rgba(22,22,22,0.88), rgba(12,12,12,0.72));
+    border: 1px solid rgba(196,146,42,0.28);
+    border-left: 3px solid var(--gold);
+    border-radius: 4px;
+    padding: 20px 22px 18px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 14px;
+    align-items: flex-start;
+    overflow: hidden;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .routine-card:hover {
+    border-color: rgba(196,146,42,0.55);
+    background: linear-gradient(180deg, rgba(26,22,12,0.9), rgba(15,12,8,0.75));
+  }
+  .routine-card.status-ok     { border-left-color: var(--green); }
+  .routine-card.status-failed { border-left-color: var(--red); }
+  .routine-card.status-never  { border-left-color: var(--gold-dim); }
+  .routine-card::after {
+    content: "";
+    position: absolute;
+    top: -2px; left: 0; width: 100%; height: 1px;
+    background: linear-gradient(to right, transparent 0%, var(--gold-bright) 45%, var(--gold-bright) 55%, transparent 100%);
+    opacity: 0;
+    transition: top 800ms ease-out, opacity 180ms ease;
+    pointer-events: none;
+  }
+  .routine-card:hover::after { top: 100%; opacity: 0.7; }
+
+  .routine-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .routine-header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .routine-name {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 22px; font-weight: 500; line-height: 1;
+    color: var(--bone);
+  }
+  .routine-agent-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--gold-bright);
+    padding: 3px 8px; border: 1px solid rgba(196,146,42,0.4);
+    border-radius: 2px; background: rgba(196,146,42,0.07);
+  }
+  .routine-desc {
+    font-size: 12px; color: var(--bone-dim); line-height: 1.5; max-width: 680px;
+  }
+  .routine-meta {
+    display: flex; gap: 18px; flex-wrap: wrap; align-items: center;
+    margin-top: 4px;
+  }
+  .routine-meta-item {
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .routine-meta-lbl {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .routine-meta-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--bone-dim);
+  }
+  .routine-meta-val.gold  { color: var(--gold-bright); }
+  .routine-meta-val.green { color: var(--green); }
+  .routine-meta-val.red   { color: var(--red); }
+  .routine-meta-val.muted { color: var(--muted); font-style: italic; }
+  .routine-output {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--muted);
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 6px 10px;
+    margin-top: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .routine-output .tkey { color: var(--gold); }
+
+  .routine-status-col {
+    display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+    min-width: 120px;
+  }
+  .routine-status-badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 6px 12px; border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .routine-status-badge.ok     { background: rgba(61,214,140,0.10); border: 1px solid rgba(61,214,140,0.35); color: var(--green); }
+  .routine-status-badge.failed { background: rgba(224,112,112,0.10); border: 1px solid rgba(224,112,112,0.35); color: var(--red); }
+  .routine-status-badge.never  { background: rgba(196,146,42,0.08); border: 1px solid rgba(196,146,42,0.35); color: var(--gold-bright); }
+  .routine-status-badge .sbdot {
+    width: 7px; height: 7px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .routine-status-badge.ok     .sbdot { background: var(--green); box-shadow: 0 0 6px rgba(61,214,140,0.6); }
+  .routine-status-badge.failed .sbdot { background: var(--red);   box-shadow: 0 0 6px rgba(224,112,112,0.6); }
+  .routine-status-badge.never  .sbdot { background: var(--gold-dim); }
+
+  .routine-action-needed {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.08em;
+    color: var(--gold);
+    text-align: right;
+    max-width: 160px;
+    line-height: 1.45;
+  }
+
+  .routines-sub {
+    font-size: 12px; color: var(--bone-dim); margin: -4px 0 16px;
+    max-width: 760px; line-height: 1.5;
+  }
+  .routines-loading {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted); padding: 16px 4px; text-align: center;
+  }
+
+  @media (max-width: 680px) {
+    .routine-card { grid-template-columns: 1fr; }
+    .routine-status-col { align-items: flex-start; }
+  }
 </style>
 </head>
 <body>
@@ -2563,6 +2698,20 @@ if ('serviceWorker' in navigator) {
         </div>
       </article>
 
+    </div>
+  </section>
+
+</div>
+
+  <!-- ============================================= 9. ROUTINES ============================================= -->
+  <section class="section" id="section-routines">
+    <div class="section-head">
+      <h2>Routines</h2>
+      <span class="eyebrow">Scheduled automation &middot; <span id="routines-count">4</span> registered</span>
+    </div>
+    <div class="routines-sub">Durable cron jobs that run while Marc sleeps. Every routine has a skill file, a cost cap, and a Garvis output target. Status reflects last known run.</div>
+    <div class="routines-grid" id="routines-grid">
+      <div class="routines-loading">Loading routines&hellip;</div>
     </div>
   </section>
 
@@ -4513,6 +4662,122 @@ setInterval(tick, 30000);
 
   /* ---------------- Promote live-dots to stark class ---------------- */
   document.querySelectorAll('.live-dot').forEach(d => d.classList.add('stark'));
+})();
+</script>
+
+<script>
+/* =========================================================================
+   ROUTINES PANEL — renders from /data/routines.json
+   Added: feat/garvis-routines-tab (2026-04-22)
+   ========================================================================= */
+(function () {
+  'use strict';
+
+  var STATUS_LABELS = {
+    'ok':           ['ok',    'OK'],
+    'failed':       ['failed','FAILED'],
+    'never-fired':  ['never', 'NEVER FIRED'],
+    'never':        ['never', 'NEVER FIRED']
+  };
+
+  function statusBadge(status) {
+    var s = STATUS_LABELS[status] || ['never', status || 'UNKNOWN'];
+    return '<span class="routine-status-badge ' + s[0] + '">' +
+           '<span class="sbdot"></span>' + s[1] + '</span>';
+  }
+
+  function cardClass(status) {
+    if (status === 'ok')      return 'routine-card status-ok';
+    if (status === 'failed')  return 'routine-card status-failed';
+    return 'routine-card status-never';
+  }
+
+  function fmtTs(iso) {
+    if (!iso) return '—';
+    try {
+      var d = new Date(iso);
+      return d.toLocaleDateString('en-CA', {month:'short', day:'numeric'}) +
+             ' · ' +
+             d.toLocaleTimeString('en-CA', {hour:'2-digit', minute:'2-digit', timeZoneName:'short'});
+    } catch(e) { return iso; }
+  }
+
+  function renderRoutine(r) {
+    var lastFired = r.last_fired ? fmtTs(r.last_fired) : '—';
+    var nextFire  = r.next_fire  ? fmtTs(r.next_fire)  : '—';
+    var outputLoc = r.output_location || '';
+    var actionHtml = r.marc_action_required
+      ? '<div class="routine-action-needed">&#9888; Marc action: ' + r.marc_action_required + '</div>'
+      : '';
+    var statusDetail = r.status_detail
+      ? '<div class="routine-meta-val muted" style="max-width:300px;white-space:normal;font-size:10px;line-height:1.45;margin-top:4px;">' + r.status_detail + '</div>'
+      : '';
+
+    return '<div class="' + cardClass(r.status) + '">' +
+      '<div class="routine-main">' +
+        '<div class="routine-header">' +
+          '<div class="routine-name">' + (r.name || r.id) + '</div>' +
+          '<span class="routine-agent-tag">' + (r.agent || '') + '</span>' +
+        '</div>' +
+        '<div class="routine-desc">' + (r.description || '') + '</div>' +
+        '<div class="routine-meta">' +
+          '<div class="routine-meta-item">' +
+            '<span class="routine-meta-lbl">Schedule</span>' +
+            '<span class="routine-meta-val gold">' + (r.cron_human || r.cron || '—') + '</span>' +
+          '</div>' +
+          '<div class="routine-meta-item">' +
+            '<span class="routine-meta-lbl">Cron</span>' +
+            '<span class="routine-meta-val">' + (r.cron || '—') + '</span>' +
+          '</div>' +
+          '<div class="routine-meta-item">' +
+            '<span class="routine-meta-lbl">Last fired</span>' +
+            '<span class="routine-meta-val ' + (r.last_fired ? '' : 'muted') + '">' + lastFired + '</span>' +
+          '</div>' +
+          '<div class="routine-meta-item">' +
+            '<span class="routine-meta-lbl">Next fire</span>' +
+            '<span class="routine-meta-val gold">' + nextFire + '</span>' +
+          '</div>' +
+        '</div>' +
+        (outputLoc ? '<div class="routine-output"><span class="tkey">output →</span> ' + outputLoc + '</div>' : '') +
+        statusDetail +
+      '</div>' +
+      '<div class="routine-status-col">' +
+        statusBadge(r.status) +
+        actionHtml +
+      '</div>' +
+    '</div>';
+  }
+
+  async function loadRoutines() {
+    var grid = document.getElementById('routines-grid');
+    var countEl = document.getElementById('routines-count');
+    if (!grid) return;
+
+    try {
+      var res = await fetch('/data/routines.json', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var data = await res.json();
+      var routines = (data && data.routines) || [];
+
+      if (!routines.length) {
+        grid.innerHTML = '<div class="routines-loading">No routines registered.</div>';
+        return;
+      }
+
+      if (countEl) countEl.textContent = routines.length;
+      grid.innerHTML = routines.map(renderRoutine).join('');
+    } catch (err) {
+      console.warn('[Garvis Routines] fetch failed:', err);
+      grid.innerHTML = '<div class="routines-loading">Could not load routines data — check /data/routines.json</div>';
+    }
+  }
+
+  // Load on DOM ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', loadRoutines);
+  } else {
+    loadRoutines();
+  }
 })();
 </script>
 </body>
