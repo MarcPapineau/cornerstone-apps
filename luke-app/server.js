@@ -25,7 +25,7 @@ const TABLES = {
 
 // ── Startup env-var guard ────────────────────────────────────
 // Required secrets must be present in production; warn-only in dev.
-const REQUIRED_ENV_VARS = ['LUKE_BEARER', 'WINDMILL_TOKEN', 'RESEND_KEY'];
+const REQUIRED_ENV_VARS = ['LUKE_BEARER', 'WINDMILL_TOKEN', 'RESEND_KEY', 'ANTHROPIC_KEY'];
 const missingVars = REQUIRED_ENV_VARS.filter(v => !process.env[v]);
 if (missingVars.length > 0) {
   const msg = `[Vitalis POS] Missing required env vars: ${missingVars.join(', ')}`;
@@ -3529,7 +3529,7 @@ RULES:
 Priority values: "Primary" | "Supporting" | "Optional"`;
 
   try {
-    const ANTHROPIC_KEY = 'REDACTED_ANTHROPIC_KEY';
+    const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY;
     const aiResp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
