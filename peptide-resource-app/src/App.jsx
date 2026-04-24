@@ -12,6 +12,10 @@ import Contact from './pages/Contact';
 import Highlights from './pages/Highlights';
 import FAQ from './pages/FAQ';
 import Start from './pages/Start';
+import Landing from './pages/Landing';
+import Protocol from './pages/Protocol';
+import Build from './pages/Build';
+import Book from './pages/Book';
 import VitalisChat from './components/VitalisChat';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
@@ -73,10 +77,25 @@ function AppRoutes() {
           user ? <Navigate to="/start" replace /> : <Login />
         } />
 
-        {/* Protected */}
+        {/* ── 5-Step Waterfall — Primary Nav ── */}
         <Route path="/" element={
-          <RequireAuth><Start /></RequireAuth>
+          <RequireAuth><Landing /></RequireAuth>
         } />
+        <Route path="/goals" element={
+          <RequireAuth><Landing /></RequireAuth>
+        } />
+        <Route path="/protocol/:goal" element={
+          <RequireAuth><Protocol /></RequireAuth>
+        } />
+        {/* Step 3 — Personalize: handled by chat widget on Protocol page */}
+        <Route path="/build" element={
+          <RequireAuth><Build /></RequireAuth>
+        } />
+        <Route path="/book" element={
+          <RequireAuth><Book /></RequireAuth>
+        } />
+
+        {/* ── Library sub-nav (old content, still reachable) ── */}
         <Route path="/start" element={
           <RequireAuth><Start /></RequireAuth>
         } />
