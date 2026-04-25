@@ -1,27 +1,40 @@
 // ============================================================================
-// VITALIS CHAT — API CLIENT
+// VITALIS CHAT — API CLIENT (BUG-001 fix: polling pattern)
 // ============================================================================
-// Calls the Netlify function proxy (/api/vitalis-chat). The client NEVER
-// touches the Anthropic API key directly — that lives server-side only.
+// Calls the Netlify sync router (/api/vitalis-chat).
+// The ANTHROPIC_API_KEY never reaches the browser — it lives in the
+// vitalis-chat-background function only.
 //
-// Swap the model in ONE line by editing MODEL_CONFIG in vitalis-chat-config.js.
+// Flow:
+//   1. POST { userMessage, ... } → 202 { runId, status: "queued" }
+//      OR  → 200 { text, moderation } (synchronous moderation block)
+//   2. Poll POST { runId, poll: true } every POLL_INTERVAL_MS
+//      until status === "complete" | "error" | timeout
+//
+// Model: swap in one line via MODEL_CONFIG in vitalis-chat-config.js.
 // ============================================================================
 
 import { MODEL_CONFIG } from '../data/vitalis-chat-config.js';
 
 const ENDPOINT = '/.netlify/functions/vitalis-chat';
+const POLL_INTERVAL_MS = 2000;   // poll every 2 seconds
+const POLL_TIMEOUT_MS  = 90000;  // give up after 90 seconds
 
 /**
  * Send a message to the Vitalis chat backend.
  *
+ * For a synchronous moderation block, returns immediately with { ok: true, text, moderation }.
+ * For a real query, fires the background function, polls until complete, then resolves.
+ *
  * @param {Object} params
- * @param {string} params.userMessage - The user's prompt for this turn.
- * @param {Array}  params.history     - Prior turns: [{role, content}, ...].
- * @param {Object} params.intake      - User intake answers.
- * @param {Object} params.catalog     - catalog-data.json (or null to use server default).
- * @param {string} params.evidenceMode - 'clinical' | 'community'.
- * @param {string} params.stackContext - Optional: stack currently selected in UI.
- * @returns {Promise<{ok, text, tokensIn, tokensOut, model, costUsd, error}>}
+ * @param {string} params.userMessage
+ * @param {Array}  params.history       [{role, content}]
+ * @param {Object} params.intake
+ * @param {Object} params.catalog
+ * @param {string} params.evidenceMode  'clinical' | 'community'
+ * @param {string} params.stackContext
+ * @param {Function} [params.onStatus]  Optional callback: (status: 'queued'|'polling'|'complete'|'error') => void
+ * @returns {Promise<{ok, text, tokensIn, tokensOut, model, costUsd, moderation, protocolId, error}>}
  */
 export async function sendMessage({
   userMessage,
@@ -30,13 +43,15 @@ export async function sendMessage({
   catalog = null,
   evidenceMode = 'clinical',
   stackContext = null,
+  onStatus = null,
 } = {}) {
   if (!userMessage || typeof userMessage !== 'string') {
     return { ok: false, error: 'userMessage is required' };
   }
 
   try {
-    const res = await fetch(ENDPOINT, {
+    // Step 1: Submit the query
+    const submitRes = await fetch(ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -52,51 +67,136 @@ export async function sendMessage({
       }),
     });
 
-    // Handle non-200s without throwing so the UI can show a friendly banner
-    if (!res.ok) {
-      let errText = `HTTP ${res.status}`;
+    if (!submitRes.ok) {
+      let errText = `HTTP ${submitRes.status}`;
       try {
-        const data = await res.json();
+        const data = await submitRes.json();
         errText = data.error || errText;
-      } catch {
-        /* ignore parse error */
-      }
+      } catch { /* ignore */ }
+      return { ok: false, error: errText, httpStatus: submitRes.status };
+    }
+
+    const submitData = await submitRes.json();
+
+    // Synchronous moderation block — no runId, response is immediate
+    if (submitData.moderation?.flagged || !submitData.runId) {
+      _logCost(submitData);
       return {
-        ok: false,
-        error: errText,
-        httpStatus: res.status,
+        ok: true,
+        text: submitData.text || '',
+        tokensIn: submitData.tokensIn || 0,
+        tokensOut: submitData.tokensOut || 0,
+        model: submitData.model || MODEL_CONFIG.primary,
+        costUsd: estimateCost(submitData.model, submitData.tokensIn, submitData.tokensOut),
+        moderation: submitData.moderation || null,
+        protocolId: submitData.protocolId || null,
       };
     }
 
-    const data = await res.json();
+    // Step 2: Poll for the background result
+    const { runId } = submitData;
+    if (onStatus) onStatus('queued');
 
-    // Cost tracking — log per-request token usage to console until Langfuse lands
-    if (data.tokensIn || data.tokensOut) {
-      const cost = estimateCost(data.model, data.tokensIn, data.tokensOut);
-      // eslint-disable-next-line no-console
-      console.log('[vitalis-chat] cost:', {
-        model: data.model,
-        in: data.tokensIn,
-        out: data.tokensOut,
-        usd: cost.toFixed(4),
+    const result = await _pollForResult(runId, onStatus);
+    return result;
+
+  } catch (err) {
+    return { ok: false, error: err.message || 'Network error' };
+  }
+}
+
+/**
+ * Poll the sync router for a background result.
+ * Resolves when status is "complete" or "error", rejects on timeout.
+ */
+async function _pollForResult(runId, onStatus) {
+  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let pollCount = 0;
+
+  while (Date.now() < deadline) {
+    // Wait before first poll — background function needs at least a moment to start
+    await _sleep(POLL_INTERVAL_MS);
+    pollCount++;
+
+    if (onStatus) onStatus('polling');
+
+    let pollData;
+    try {
+      const pollRes = await fetch(ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId, poll: true }),
       });
+
+      if (!pollRes.ok) {
+        // Transient network hiccup — keep trying until deadline
+        console.warn('[vitalis-chat] poll HTTP error', pollRes.status, '— retrying');
+        continue;
+      }
+
+      pollData = await pollRes.json();
+    } catch (err) {
+      console.warn('[vitalis-chat] poll fetch error:', err.message, '— retrying');
+      continue;
     }
 
-    return {
-      ok: true,
-      text: data.text || '',
-      tokensIn: data.tokensIn || 0,
-      tokensOut: data.tokensOut || 0,
-      model: data.model || MODEL_CONFIG.primary,
-      costUsd: estimateCost(data.model, data.tokensIn, data.tokensOut),
-      moderation: data.moderation || null,
-      protocolId: data.protocolId || null,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      error: err.message || 'Network error',
-    };
+    const { status, result, error } = pollData;
+
+    if (status === 'complete' && result) {
+      if (onStatus) onStatus('complete');
+      _logCost(result);
+      return {
+        ok: true,
+        text: result.text || '',
+        tokensIn: result.tokensIn || 0,
+        tokensOut: result.tokensOut || 0,
+        model: result.model || MODEL_CONFIG.primary,
+        costUsd: estimateCost(result.model, result.tokensIn, result.tokensOut),
+        moderation: result.moderation || null,
+        protocolId: result.protocolId || null,
+      };
+    }
+
+    if (status === 'error') {
+      if (onStatus) onStatus('error');
+      return {
+        ok: false,
+        error: error || result?.error || 'Background function reported an error',
+      };
+    }
+
+    // status === 'pending' | 'not_found' — keep polling
+    if (status === 'not_found' && pollCount > 5) {
+      // After 10s without the job appearing in Blobs, something went wrong
+      return {
+        ok: false,
+        error: `Chat job ${runId} not found after ${pollCount} polls — background function may have failed to start`,
+      };
+    }
+  }
+
+  if (onStatus) onStatus('error');
+  return {
+    ok: false,
+    error: `Chat timed out after ${POLL_TIMEOUT_MS / 1000}s. The server may still be generating — please try again.`,
+    httpStatus: 504,
+  };
+}
+
+function _sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function _logCost(data) {
+  if (data && (data.tokensIn || data.tokensOut)) {
+    const cost = estimateCost(data.model, data.tokensIn, data.tokensOut);
+    // eslint-disable-next-line no-console
+    console.log('[vitalis-chat] cost:', {
+      model: data.model,
+      in: data.tokensIn,
+      out: data.tokensOut,
+      usd: cost.toFixed(4),
+    });
   }
 }
 
@@ -117,7 +217,7 @@ function estimateCost(model, tokensIn = 0, tokensOut = 0) {
 
 /**
  * Send the completed stack recommendation to Marc via GHL.
- * Reuses the existing ghl-proxy function.
+ * Reuses the existing ghl-proxy function — unchanged.
  */
 export async function sendStackToMarc({ intake, protocolMarkdown, protocolId, userEmail, userName } = {}) {
   if (!protocolMarkdown) {
