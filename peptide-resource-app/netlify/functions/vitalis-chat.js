@@ -144,28 +144,6 @@ exports.handler = async (event) => {
   }
 
   // -------------------------------------------------------------------------
-  // DEBUG MODE: Write a test blob from sync function { debugWrite: true, runId }
-  // Remove before stable release. Used to verify Blobs works from sync functions.
-  // -------------------------------------------------------------------------
-  if (body.debugWrite === true && body.runId) {
-    const testId = body.runId;
-    try {
-      await writeResult(testId, { status: 'complete', result: { text: 'debug blob write test', tokensIn: 1, tokensOut: 1, model: 'test', protocolId: 'TEST-001' } });
-      return {
-        statusCode: 200,
-        headers: { ...CORS, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ok: true, runId: testId, message: 'blob written from sync function' }),
-      };
-    } catch (err) {
-      return {
-        statusCode: 500,
-        headers: { ...CORS, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ok: false, error: err.message }),
-      };
-    }
-  }
-
-  // -------------------------------------------------------------------------
   // MODE 2: Polling — { runId, poll: true }
   // -------------------------------------------------------------------------
   if (body.poll === true && body.runId) {
