@@ -49,7 +49,10 @@ export default function Book() {
           timeline: form.timeline,
           message: form.message,
           source: 'vitalis-waterfall-v1',
-          selectedStacks: cartItems.map(s => s.id || s.goal),
+          // FIX BUG-009: renamed to 'compounds' to match book-consult.js expectation
+          // backward-compat key kept for 1 week
+          compounds: cartItems.map(s => s.goal || s.id),
+          selectedStacks: cartItems.map(s => s.goal || s.id),
         }),
       });
 

@@ -66,14 +66,31 @@ export default function VitalisChat() {
   const [intake, setIntake] = useState(null);
   const [history, setHistory] = useState([]); // [{role, content, ts, protocolId?, cost?}]
   const [pending, setPending] = useState(false);
+  const [pendingStatus, setPendingStatus] = useState('idle'); // 'idle'|'queued'|'polling'
   const [input, setInput] = useState('');
   const [evidenceMode, setEvidenceMode] = useState(DEFAULT_EVIDENCE_MODE);
   const [error, setError] = useState(null);
   const [lastProtocolId, setLastProtocolId] = useState(null);
   const [sendingToMarc, setSendingToMarc] = useState(false);
   const [sentToMarcOk, setSentToMarcOk] = useState(false);
+  // FIX BUG-007: stack context injected via Protocol.jsx "Ask Vitalis" event
+  const [stackContext, setStackContext] = useState(null);
 
   const scrollRef = useRef(null);
+
+  // --------- FIX BUG-007: listen for protocol context from Protocol.jsx ------
+  useEffect(() => {
+    const handler = (e) => {
+      const { context, goal, stack } = e.detail || {};
+      const seedMessage = context || (stack ? `Tell me more about the "${stack.goal}" protocol${goal ? ` for ${goal}` : ''}.` : null);
+      if (seedMessage) setStackContext(seedMessage);
+      setCollapsed(false);
+      // If already past age-gate, pre-seed the input with the context message
+      setInput(prev => prev || seedMessage || '');
+    };
+    window.addEventListener('vitalis-chat-open', handler);
+    return () => window.removeEventListener('vitalis-chat-open', handler);
+  }, []);
 
   // --------- boot: rehydrate localStorage ----------------------------------
   useEffect(() => {
@@ -140,6 +157,7 @@ export default function VitalisChat() {
 
     setError(null);
     setPending(true);
+    setPendingStatus('queued');
     setSentToMarcOk(false);
 
     const newHistory = [...history, { role: 'user', content: trimmed, ts: Date.now() }];
@@ -153,7 +171,13 @@ export default function VitalisChat() {
         intake,
         catalog: catalogData,
         evidenceMode,
+        // FIX BUG-007: inject protocol page context on first message
+        stackContext: stackContext || undefined,
+        // BUG-001 fix: status callback drives spinner label during polling
+        onStatus: (s) => setPendingStatus(s),
       });
+      // Clear stack context after first use so it doesn't repeat on every message
+      if (stackContext) setStackContext(null);
 
       if (!res.ok) {
         setError(res.error || 'Chat error');
@@ -189,6 +213,7 @@ export default function VitalisChat() {
       setError(err.message || 'Network error');
     } finally {
       setPending(false);
+      setPendingStatus('idle');
     }
   }
 
@@ -281,6 +306,7 @@ export default function VitalisChat() {
           <MessageList
             history={history}
             pending={pending}
+            pendingStatus={pendingStatus}
             scrollRef={scrollRef}
           />
           {lastProtocolId && history.length > 0 && history[history.length - 1]?.role === 'assistant' && (
@@ -622,7 +648,7 @@ function CheckRow({ checked, onChange, label }) {
 // ============================================================================
 // Message list + rendering
 // ============================================================================
-function MessageList({ history, pending, scrollRef }) {
+function MessageList({ history, pending, pendingStatus, scrollRef }) {
   return (
     <div
       ref={scrollRef}
@@ -639,7 +665,7 @@ function MessageList({ history, pending, scrollRef }) {
       {history.map((m, i) => (
         <MessageBubble key={i} msg={m} />
       ))}
-      {pending && <Spinner />}
+      {pending && <Spinner status={pendingStatus} />}
     </div>
   );
 }
@@ -961,15 +987,20 @@ function renderInlineFormatting(text) {
 // ============================================================================
 // Spinner, send bar, input
 // ============================================================================
-function Spinner() {
+function Spinner({ status = 'polling' }) {
+  // BUG-001 fix: show contextual label during polling phases
+  const label = status === 'queued'
+    ? 'Vitalis is thinking…'
+    : 'Vitalis is researching… (30–60s for full protocol)';
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: T.textMuted, fontSize: 12 }}>
       <div style={{
         width: 16, height: 16, borderRadius: '50%',
         border: `2px solid ${T.goldSoft}`, borderTopColor: T.gold,
         animation: 'vitalis-spin 0.8s linear infinite',
+        flexShrink: 0,
       }} />
-      Vitalis is researching…
+      <span>{label}</span>
       <style>{`@keyframes vitalis-spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );

@@ -1,7 +1,6 @@
 import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import Nav from './components/Nav';
-import Home from './pages/Home';
 import Login from './pages/Login';
 import CompoundLibrary from './pages/CompoundLibrary';
 import StackFinder from './pages/StackFinder';
@@ -57,10 +56,21 @@ function AuthLoading() {
   );
 }
 
+// FIX BUG-003: preview bypass persists via localStorage
+function isPreviewMode() {
+  if (typeof window === 'undefined') return false;
+  if (window.location.search.includes('vitalis-preview=1')) {
+    try { localStorage.setItem('vitalis_preview', 'true'); } catch {}
+    return true;
+  }
+  try { return localStorage.getItem('vitalis_preview') === 'true'; } catch {}
+  return false;
+}
+
 function RequireAuth({ children }) {
   const { user, isLoading } = useAuth();
   if (isLoading) return <AuthLoading />;
-  if (!user) return <Navigate to="/login" replace />;
+  if (!user && !isPreviewMode()) return <Navigate to="/login" replace />;
   return children;
 }
 
@@ -70,7 +80,7 @@ function AppRoutes() {
 
   return (
     <div style={{ minHeight: '100vh', background: '#0a1628' }}>
-      {user && <Nav />}
+      {(user || isPreviewMode()) && <Nav />}
       <Routes>
         {/* Public */}
         <Route path="/login" element={
@@ -139,10 +149,10 @@ function AppRoutes() {
       </Routes>
 
       {/* Vitalis Chat — persistent bottom-right widget on all authed routes.
-          Also renders when ?vitalis-preview=1 is in the URL for demo/QA without auth. */}
-      {(user || (typeof window !== 'undefined' && window.location.search.includes('vitalis-preview=1'))) && <VitalisChat />}
+          Also renders for preview mode (vitalis-preview=1 or localStorage flag). */}
+      {(user || isPreviewMode()) && <VitalisChat />}
 
-      {user && (
+      {(user || isPreviewMode()) && (
         <footer style={{ borderTop: '1px solid rgba(255,255,255,0.06)', padding: '32px 20px', textAlign: 'center' }}>
           <div style={{ maxWidth: '800px', margin: '0 auto' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '16px' }}>

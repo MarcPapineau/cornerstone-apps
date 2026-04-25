@@ -3,11 +3,12 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 // ── 5-step primary waterfall nav ────────────────────────────
+// FIX BUG-010: labels match page headers. Step 3 = Personalize (chat widget, no link)
 const WATERFALL_STEPS = [
   { to: '/',          label: '1 Goals',       step: 1 },
   { to: '/protocol/', label: '2 Protocol',    step: 2, partial: true },
-  { to: '/build',     label: '3 Build',       step: 4 },
-  { to: '/book',      label: '4 Book',        step: 5 },
+  { to: '/build',     label: '4 Build',       step: 4 },
+  { to: '/book',      label: '5 Book',        step: 5 },
 ];
 
 // ── Library sub-nav (old content, still reachable) ───────────

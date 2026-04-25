@@ -2,6 +2,12 @@
   publish = "dist"
   functions = "netlify/functions"
 
+# Background function: 15-minute window — BUG-001 fix (Anthropic call duration)
+# The "-background.js" suffix signals Netlify to use the background queue.
+# No explicit timeout needed — background functions always get 15 min.
+[functions."vitalis-chat-background"]
+  included_files = []
+
 [[redirects]]
   from = "/.netlify/functions/*"
   to = "/.netlify/functions/:splat"

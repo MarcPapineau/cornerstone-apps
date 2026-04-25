@@ -1,32 +1,54 @@
 // ============================================================
 // Protocol.jsx — Step 2: Protocol
 // Reads :goal param, renders matching stack cards
+// FIX PASS 2026-04-24: BUG-002 cart, BUG-004 sexual-health,
+//   BUG-005 tier badge, BUG-006 KLOW copy, BUG-007 chat event,
+//   BUG-008 goals[] filter
 // ============================================================
 
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { STACKS } from '../data/stacks.js';
-import { COMBOS } from '../data/combos.js';
 
-// Map URL slugs → stacks.js goal IDs + display
+// Map URL slugs → stacks.js IDs + display labels
+// ids[] matched against stack.id AND stack.goals[] array
 const GOAL_MAP = {
-  'cognitive-focus':      { ids: ['cognitive'],           label: 'Cognitive & Focus',    icon: '🧠' },
-  'fat-loss':             { ids: ['fatloss', 'metabolic-fatloss'], label: 'Fat Loss',       icon: '🔥' },
-  'healing-recovery':     { ids: ['healing'],             label: 'Healing & Recovery',   icon: '🩹' },
-  'athletic-performance': { ids: ['performance'],         label: 'Athletic Performance', icon: '💪' },
-  'anti-aging':           { ids: ['antiaging', 'longevity'], label: 'Anti-Aging',        icon: '✨' },
-  'immune-defense':       { ids: ['immune'],              label: 'Immune Defense',       icon: '🛡️' },
-  'sexual-health':        { ids: ['sexual'],              label: 'Sexual Health',        icon: '💫' },
-  'sleep-recovery':       { ids: ['sleep'],               label: 'Sleep & Recovery',     icon: '🌙' },
-  'add-neurological':     { ids: ['cognitive'],           label: 'ADD / Neurological',   icon: '⚡' },
+  'cognitive-focus':      { ids: ['cognitive', 'selank-dsip-sleep'], label: 'Cognitive & Focus',    icon: '🧠' },
+  'fat-loss':             { ids: ['fatloss', 'metabolic-fatloss'],   label: 'Fat Loss',              icon: '🔥' },
+  'healing-recovery':     { ids: ['healing'],                        label: 'Healing & Recovery',   icon: '🩹' },
+  'athletic-performance': { ids: ['performance', 'peak-performance'], label: 'Athletic Performance', icon: '💪' },
+  'anti-aging':           { ids: ['antiaging', 'longevity'],         label: 'Anti-Aging',           icon: '✨' },
+  'immune-defense':       { ids: ['immune'],                         label: 'Immune Defense',       icon: '🛡️' },
+  // FIX BUG-004: sexual-health now maps to fertility + menopause stacks that exist in stacks.js
+  'sexual-health':        { ids: ['fertility', 'menopause'],         label: 'Sexual Health',        icon: '💫' },
+  'sleep-recovery':       { ids: ['sleep', 'selank-dsip-sleep'],     label: 'Sleep & Recovery',     icon: '🌙' },
+  // FIX BUG-008: add-neurological includes selank-dsip-sleep (has goals:['sleep','cognitive'])
+  'add-neurological':     { ids: ['cognitive', 'selank-dsip-sleep'], label: 'ADD / Neurological',   icon: '⚡' },
   'metabolic-health':     { ids: ['metabolic', 'metabolic-fatloss', 'fatloss'], label: 'Metabolic Health', icon: '⚙️' },
 };
 
-// Fallback stack cards built from COMBOS data for goals not in STACKS
-const COMBO_GOAL_MAP = {
-  'healing-recovery':     ['klow', 'glow-10'],
-  'anti-aging':           ['glow-10'],
-  'athletic-performance': ['klow'],
+// Per-stack synergy narrative — goal-specific, not KLOW-specific (FIX BUG-006)
+const STACK_SYNERGY = {
+  'cognitive-focus':
+    'Semax elevates BDNF while Selank quiets anxiety — together they create a focused, calm mind state neither achieves alone. NAD+ provides the cellular fuel the brain needs to sustain peak performance.',
+  'fat-loss':
+    'Retatrutide attacks fat via three simultaneous hormonal pathways. AOD-9604 adds direct lipolysis. GHK-Cu preserves skin integrity as body composition shifts. Single compounds address one mechanism; this stack addresses the whole system.',
+  'healing-recovery':
+    'BPC-157 targets the exact injury site. TB-500 circulates systemically to address everything else. KPV manages inflammation and gut health throughout. Local + systemic + inflammatory — three simultaneous repair axes.',
+  'athletic-performance':
+    'CJC-1295 and Ipamorelin trigger a clean, pulsatile GH release that neither achieves alone — the gold standard GH optimization approach. TB-500 handles systemic connective tissue recovery between sessions.',
+  'anti-aging':
+    'NAD+ restores cellular energy and DNA repair. GHK-Cu activates 4,000+ longevity genes. CJC + Ipamorelin drive the GH axis. Epithalon extends telomeres. Aging happens at every level simultaneously — so should your protocol.',
+  'immune-defense':
+    'Thymosin Alpha-1 restores T-cell intelligence. BPC-157 heals the gut lining (the root of chronic immune activation). KPV manages cytokine storms. NAD+ addresses mitochondrial dysfunction underlying every chronic immune condition.',
+  'sexual-health':
+    'Kisspeptin works upstream at the HPG axis — addressing root hormonal signalling rather than symptoms. NAD+ improves mitochondrial quality in reproductive cells. Stacking compounds that each address a different layer of hormonal health produces results no single compound can match.',
+  'sleep-recovery':
+    'Ipamorelin stimulates GH release during deep sleep. BPC-157 uses that healing window to repair tissue. Selank quiets the mind to get you into deep sleep in the first place. The stack addresses both the mental and physiological layers of sleep dysfunction.',
+  'add-neurological':
+    'Semax elevates BDNF for sharper focus and working memory. Selank stabilizes GABA and enkephalins — calming without sedation. DSIP resets deep sleep architecture where much of the cognitive recovery in ADD/ADHD occurs. Three mechanisms, one protocol.',
+  'metabolic-health':
+    'Metabolic dysfunction is multi-layered: insulin resistance, fat oxidation inefficiency, gut inflammation, and mitochondrial decline. A single GLP-1 agonist addresses one layer. This stack addresses all four simultaneously.',
 };
 
 const TIER_BADGE = {
@@ -43,37 +65,54 @@ export default function Protocol() {
 
   const goalMeta = GOAL_MAP[goal] || { ids: [], label: goal, icon: '🔬' };
 
-  // Pull matching stacks
+  // FIX BUG-008: filter checks id match AND goals[] array
   let matchedStacks = STACKS.filter(s =>
-    goalMeta.ids.some(id => s.id === id || (s.goal && s.goal.toLowerCase().includes(id.toLowerCase())))
+    goalMeta.ids.some(id =>
+      s.id === id ||
+      (Array.isArray(s.goals) && s.goals.some(g => g.toLowerCase().includes(id.toLowerCase())))
+    )
   );
 
-  // Also try matching by goal string
+  // Deduplicate (a stack can appear in multiple id slots)
+  const seenIds = new Set();
+  matchedStacks = matchedStacks.filter(s => {
+    if (seenIds.has(s.id)) return false;
+    seenIds.add(s.id);
+    return true;
+  });
+
+  // Secondary fallback by goal label keyword
   if (matchedStacks.length === 0) {
+    const keyword = goalMeta.label.toLowerCase().split(' ')[0];
     matchedStacks = STACKS.filter(s =>
-      goalMeta.label && s.goal && s.goal.toLowerCase().includes(goalMeta.label.toLowerCase().split(' ')[0])
+      (s.goal && s.goal.toLowerCase().includes(keyword)) ||
+      (Array.isArray(s.goals) && s.goals.some(g => g.toLowerCase().includes(keyword)))
     );
   }
 
-  // Fallback: use first 2 stacks relevant to the category
-  if (matchedStacks.length === 0) {
-    matchedStacks = STACKS.slice(0, 3);
-  }
+  // No random fallback — show authoring state instead of wrong stacks (FIX BUG-004 root cause)
+  const showAuthoringFallback = matchedStacks.length === 0;
 
   // Limit to 3 for demo
   matchedStacks = matchedStacks.slice(0, 3);
 
+  // FIX BUG-002: write to sessionStorage so Build.jsx reads the same cart
   const addToCart = (stack) => {
     if (!cartItems.find(c => c.id === stack.id)) {
-      setCartItems(prev => [...prev, stack]);
+      const next = [...cartItems, stack];
+      setCartItems(next);
+      try { sessionStorage.setItem('vitalis_cart_v1', JSON.stringify(next)); } catch {}
     }
   };
 
+  // FIX BUG-007: dispatch event VitalisChat.jsx now listens for
   const handleSendToChat = (stack) => {
-    // Open chat widget by triggering the floating button
-    // The widget listens for a custom event
     const event = new CustomEvent('vitalis-chat-open', {
-      detail: { context: `I'm interested in the "${stack.goal}" protocol: ${stack.tagline}. ${stack.description}` }
+      detail: {
+        stack,
+        goal: goalMeta.label,
+        context: `Tell me more about the "${stack.goal}" protocol — which components address ${goalMeta.label}? ${stack.tagline}`,
+      }
     });
     window.dispatchEvent(event);
     setChatOpened(true);
@@ -148,6 +187,37 @@ export default function Protocol() {
           </div>
         )}
 
+        {/* Authoring fallback — shown instead of wrong stacks */}
+        {showAuthoringFallback && (
+          <div style={{
+            padding: '32px 24px', textAlign: 'center',
+            background: 'rgba(212,175,55,0.04)', border: '1px solid rgba(212,175,55,0.15)',
+            borderRadius: '16px', marginBottom: '24px',
+          }}>
+            <div style={{ fontSize: '2rem', marginBottom: '12px' }}>🔬</div>
+            <h3 style={{ color: '#fff', margin: '0 0 8px', fontSize: '1.1rem', fontWeight: 700 }}>
+              Protocol in Development
+            </h3>
+            <p style={{ color: '#94a3b8', margin: '0 0 20px', fontSize: '0.9rem', lineHeight: 1.6 }}>
+              We're authoring a dedicated {goalMeta.label} protocol. Chat with Vitalis below for personalized guidance while we finalize this stack.
+            </p>
+            <button
+              onClick={() => {
+                const ev = new CustomEvent('vitalis-chat-open', {
+                  detail: { goal: goalMeta.label, context: `I'm looking for a ${goalMeta.label} protocol. What do you recommend?` }
+                });
+                window.dispatchEvent(ev);
+              }}
+              style={{
+                padding: '10px 24px', borderRadius: '8px', background: '#d4af37',
+                color: '#0a1628', border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.88rem',
+              }}
+            >
+              Ask Vitalis for {goalMeta.label} Guidance →
+            </button>
+          </div>
+        )}
+
         {/* Stack cards */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
           {matchedStacks.map(stack => (
@@ -176,7 +246,7 @@ export default function Protocol() {
           </div>
         )}
 
-        {/* Stacking doctrine callout */}
+        {/* FIX BUG-006: goal-specific synergy copy, no KLOW hardcode */}
         <div style={{
           marginTop: '40px',
           padding: '20px 24px',
@@ -188,10 +258,7 @@ export default function Protocol() {
             Why Stacks, Not Singles
           </div>
           <p style={{ margin: 0, fontSize: '0.85rem', color: '#94a3b8', lineHeight: 1.6 }}>
-            Single compounds address one mechanism. Synergistic stacks address a system.
-            KLOW heals at 4 layers simultaneously — local, systemic, inflammatory, structural.
-            CJC + Ipamorelin triggers a clean pulsatile GH release neither achieves alone.
-            Marc's doctrine: always recommend stacks, never singles.
+            {STACK_SYNERGY[goal] || 'Single compounds address one mechanism. Synergistic stacks address a system — multiple pathways firing simultaneously produce results no individual compound can achieve alone.'}
           </p>
         </div>
       </div>
@@ -202,8 +269,11 @@ export default function Protocol() {
 function StackCard({ stack, inCart, onAddToCart, onSendToChat, onBuild }) {
   const [expanded, setExpanded] = useState(false);
 
-  // Determine dominant evidence tier
+  // FIX BUG-005: use stack.confidence field; default T2 only if not set
   const tier = stack.confidence || 'T2';
+
+  // Key studies come from stack.keyStudies or stack.research
+  const studies = stack.keyStudies || stack.research || [];
 
   return (
     <div style={{
@@ -223,7 +293,8 @@ function StackCard({ stack, inCart, onAddToCart, onSendToChat, onBuild }) {
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px', flexWrap: 'wrap' }}>
               <span style={{ fontSize: '1.4rem' }}>{stack.emoji || '🔬'}</span>
               <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 800, color: '#fff' }}>{stack.goal}</h3>
-              <EvidenceTierBadge tier="T2" />
+              {/* FIX BUG-005: use computed tier variable, not hardcoded "T2" */}
+              <EvidenceTierBadge tier={tier} />
             </div>
             <p style={{ margin: 0, fontSize: '0.88rem', color: '#d4af37', fontStyle: 'italic' }}>{stack.tagline}</p>
           </div>
@@ -297,7 +368,7 @@ function StackCard({ stack, inCart, onAddToCart, onSendToChat, onBuild }) {
       </div>
 
       {/* Expanded: key studies */}
-      {expanded && stack.research && stack.research.length > 0 && (
+      {expanded && studies.length > 0 && (
         <div style={{
           padding: '20px 24px',
           borderTop: '1px solid rgba(255,255,255,0.06)',
@@ -307,16 +378,17 @@ function StackCard({ stack, inCart, onAddToCart, onSendToChat, onBuild }) {
             Key Studies
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {stack.research.slice(0, 3).map((ref, i) => (
+            {studies.slice(0, 3).map((ref, i) => (
               <div key={i} style={{ fontSize: '0.82rem', color: '#64748b', display: 'flex', gap: '8px' }}>
                 <span style={{ color: '#d4af37', flexShrink: 0 }}>›</span>
                 <span>
                   {ref.url ? (
                     <a href={ref.url} target="_blank" rel="noopener noreferrer" style={{ color: '#94a3b8', textDecoration: 'none' }}>
-                      {ref.title}
+                      {ref.title || ref.citation}
                     </a>
-                  ) : ref.title}
+                  ) : (ref.title || ref.citation)}
                   {ref.journal && <span style={{ color: '#475569', fontSize: '0.78rem' }}> — {ref.journal}</span>}
+                  {ref.finding && <span style={{ color: '#475569', fontSize: '0.78rem', display: 'block', marginTop: '2px' }}>{ref.finding}</span>}
                 </span>
               </div>
             ))}
