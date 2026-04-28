@@ -71,25 +71,31 @@ const SUPPLY_DOSING = {
 // shape so external matchers still resolve peptide keys correctly.
 const SUPPLY_WEEKS = SUPPLY_DOSING;
 
-// 2026-04-27 LATE-EOD (Marc spec): PAIRED PENS have their own dose convention.
-// Convention per Marc: a pen labeled "15mg" of a paired combo (e.g. TB500+BPC157)
-// contains 15mg of EACH substance — NOT a shared 15mg volume. Total active = 30mg.
-// The combined dose given to the patient is what's listed below; it's split
-// 50/50 across the two peptides, so per-substance consumption = combinedMgPerWeek
-// divided by the number of substances in the pair. Each substance runs out
-// in vialMg / per-substance-mg-per-week weeks; both run out together.
+// 2026-04-27 LATE-EOD (Marc canonical spec, corrected): PAIRED PENS dose convention.
+// A pen labeled "15mg" of a paired combo (e.g. TB500+BPC157) contains 15mg of EACH
+// substance — NOT a shared 15mg volume. The peptides are co-dissolved at equal
+// concentration in the same liquid, so when the patient draws N mg of liquid for
+// their weekly dose, they consume N mg of EACH peptide simultaneously. Both
+// substances run out together at: supply_weeks = vialMg / drawDoseMgPerWeek.
+//
+// The `combinedMgPerWeek` JSON key below is the DRAW DOSE per week (mg of liquid
+// drawn, which equals mg consumed of each peptide). Key name retained for
+// compatibility; semantically it is the per-substance per-week consumption.
+//
+// Marc anchor 2026-04-27 EOD: 15mg BPC+TB pen at 2.5 mg/wk = 6 weeks per pen.
+// Earlier implementation incorrectly divided by N substances — that bug is fixed.
 //
 // Add new paired combos here as Marc specifies them.
 const SUPPLY_PAIRED = {
   // BPC-157 + TB-500 healing/repair pair. Marc 2026-04-27 spec:
-  //   low  = 2.5mg/wk combined (recovery / maintenance)
-  //   mid  = 5mg/wk combined   (standard recovery)
-  //   high = 7.5mg/wk combined (post-surgery / major repair)
-  // For 15mg-each pen: low=12w · mid=6w · high=4w
+  //   low  = 2.5mg/wk draw dose (recovery / maintenance)
+  //   mid  = 5mg/wk draw dose   (standard recovery)
+  //   high = 7.5mg/wk draw dose (post-surgery / major repair)
+  // For 15mg-each pen: low=6w · mid=3w · high=2w
   'BPC-157 + TB-500': {
-    low:  { combinedMgPerWeek: 2.5, doseNote: 'BPC+TB combined 2.5mg/wk – maintenance/light' },
-    mid:  { combinedMgPerWeek: 5,   doseNote: 'BPC+TB combined 5mg/wk – standard recovery' },
-    high: { combinedMgPerWeek: 7.5, doseNote: 'BPC+TB combined 7.5mg/wk – post-surgery/major' },
+    low:  { combinedMgPerWeek: 2.5, doseNote: 'BPC+TB draw dose 2.5mg/wk (= 2.5mg of each substance/wk) – maintenance/light' },
+    mid:  { combinedMgPerWeek: 5,   doseNote: 'BPC+TB draw dose 5mg/wk (= 5mg of each substance/wk) – standard recovery' },
+    high: { combinedMgPerWeek: 7.5, doseNote: 'BPC+TB draw dose 7.5mg/wk (= 7.5mg of each substance/wk) – post-surgery/major' },
   },
 
   // Ipamorelin + CJC-1295 GH-stimulation pair — PROPOSAL ONLY, awaiting
@@ -265,12 +271,16 @@ function getSupplyData(productOrName, doseLevel) {
     };
   }
 
-  // 3b. PAIRED PEN — Marc 2026-04-27 LATE-EOD spec: pen labeled "Xmg" contains
-  // X mg of EACH substance (NOT shared X mg volume). Each substance is consumed
-  // at combinedMgPerWeek / N_substances mg/week.
+  // 3b. PAIRED PEN — Marc 2026-04-27 EOD canonical math (CORRECTED):
+  // Pen labeled "Xmg" contains X mg of EACH substance. Peptides are co-dissolved
+  // at equal concentration in the same liquid, so drawing N mg of liquid consumes
+  // N mg of EACH substance simultaneously. Both substances run out together at
+  // supply = vialMg / drawDoseMgPerWeek. (Earlier implementation incorrectly
+  // divided by peptideKeys.length — that produced 12w on a 15mg pen at 2.5mg/wk
+  // when Marc's anchor is 6w. Fixed.)
   //
-  // First check the SUPPLY_PAIRED table for an explicit combined-dose entry
-  // (e.g. BPC+TB has its own combined-dose convention different from running
+  // First check the SUPPLY_PAIRED table for an explicit draw-dose entry
+  // (e.g. BPC+TB has its own draw-dose convention different from running
   // each peptide at its solo-dose tier).
   const pairKeyA = peptideKeys.slice().sort().join(' + ');
   const pairKeyB = peptideKeys.join(' + ');
@@ -280,15 +290,15 @@ function getSupplyData(productOrName, doseLevel) {
   if (pairedEntry) {
     const tier = pairedEntry[level] || pairedEntry.mid;
     if (!tier || !tier.combinedMgPerWeek) return null;
-    const perSubstanceMgPerWeek = tier.combinedMgPerWeek / peptideKeys.length;
-    const supplyWeeks = vialMg / perSubstanceMgPerWeek;
+    // combinedMgPerWeek is the DRAW DOSE per week. Drawing N mg of liquid
+    // consumes N mg of each substance, so supply = vialMg / tier.combinedMgPerWeek.
+    const supplyWeeks = vialMg / tier.combinedMgPerWeek;
     return {
       perVial: supplyWeeks,
       doseNote: `${tier.doseNote} – ${doseLabel}`,
       _peptidesMatched: peptideKeys,
       _isPaired: true,
-      _combinedMgPerWeek: tier.combinedMgPerWeek,
-      _perSubstanceMgPerWeek: perSubstanceMgPerWeek,
+      _drawDoseMgPerWeek: tier.combinedMgPerWeek,
       _vialMgPerSubstance: vialMg,
     };
   }
@@ -717,7 +727,7 @@ function renderOrderLines() {
 
   const thead = document.querySelector('#order-table thead tr');
   if (thead && !thead.querySelector('.col-cost')) {
-    thead.innerHTML = `<th>Product</th><th>Qty</th><th>MSRP</th><th class="col-cost" style="color:#f59e0b">Cost</th><th>Line Total</th><th class="col-margin" style="color:#22c55e">Net</th><th></th>`;
+    thead.innerHTML = `<th>Product</th><th>Qty</th><th>MSRP</th><th class="col-cost" style="color:var(--gold)">Cost</th><th>Line Total</th><th class="col-margin" style="color:var(--green)">Net</th><th></th>`;
   }
   tbody.innerHTML = orderLines.map((l, i) => {
     const lineCost = (l.cost||0)*l.qty;
@@ -771,7 +781,7 @@ function renderOrderLines() {
         ${tierSelector}
         <span class="supply-chip">⏱ ${weeks} wks supply</span>
         <span class="supply-chip supply-chip-gold">~$${monthlyCost}/mo</span>
-        <span class="supply-chip" style="background:rgba(34,197,94,0.1);color:#22c55e;border-color:#22c55e">$${cycleTotalCost} for ${weeks}w</span>
+        <span class="supply-chip" style="background:rgba(61,214,140,0.1);color:var(--green);border-color:rgba(61,214,140,0.3)">$${cycleTotalCost} for ${weeks}w</span>
         <span class="supply-chip-dose">${supplyData.doseNote}</span>
       </div>`;
     }
@@ -792,9 +802,9 @@ function renderOrderLines() {
         <button class="qty-btn" onclick="changeQty(${i},1)">+</button>
       </div></td>
       <td>${msrpDisplay}</td>
-      <td style="color:#f59e0b;font-size:13px">${l.cost>0?'$'+l.cost.toFixed(2):'—'}</td>
+      <td style="color:var(--gold);font-size:13px">${l.cost>0?'$'+l.cost.toFixed(2):'—'}</td>
       <td><strong>$${l.lineTotal.toFixed(2)}</strong></td>
-      <td style="color:#22c55e;font-size:13px;font-weight:600">${lineProfit>0?'+$'+lineProfit.toFixed(2)+' ('+marginPct+'%)':'—'}</td>
+      <td style="color:var(--green);font-size:13px;font-weight:600">${lineProfit>0?'+$'+lineProfit.toFixed(2)+' ('+marginPct+'%)':'—'}</td>
       <td><button class="btn-remove" onclick="removeOrderLine(${i})">✕</button></td>
     </tr>`;
   }).join('');
@@ -904,10 +914,10 @@ function renderSupplyPanel() {
 
   // Per-peptide budget breakdown rows for total cost / monthly cost (BUG #3 / #8)
   const breakdownRows = linesWithSupply.map(x => `
-    <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.8fr;gap:8px;padding:5px 8px;border-bottom:1px solid #f3f4f6;font-size:12px;">
+    <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.8fr;gap:8px;padding:5px 8px;border-bottom:1px solid var(--border);font-size:12px;">
       <span style="font-weight:600;">${x.name}</span>
       <span style="text-align:right;color:var(--gold);font-weight:700;">$${x.monthlyCost.toFixed(0)}/mo</span>
-      <span style="text-align:right;color:#22c55e;font-weight:600;">$${x.cycleTotal.toFixed(0)} cycle</span>
+      <span style="text-align:right;color:var(--green);font-weight:600;">$${x.cycleTotal.toFixed(0)} cycle</span>
       <span style="text-align:right;color:var(--text-muted);">${x.qty}× / ${x.weeks.toFixed(1)}w</span>
     </div>`).join('');
 
@@ -956,20 +966,20 @@ function renderSupplyPanel() {
         <div></div>
       </div>
     </div>
-    <div class="supply-budget-breakdown" style="margin-top:10px;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa;padding:8px;">
-      <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.8fr;gap:8px;padding:4px 8px;font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;">
+    <div class="supply-budget-breakdown" style="margin-top:10px;border:1px solid var(--border);border-radius:4px;background:var(--surface);padding:8px;">
+      <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.8fr;gap:8px;padding:4px 8px;font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);">
         <span>Peptide</span><span style="text-align:right;">$/Month</span><span style="text-align:right;">Cycle Cost</span><span style="text-align:right;">Qty / Supply</span>
       </div>
       ${breakdownRows}
     </div>
-    <div class="supply-panel-footer" style="display:flex;justify-content:space-between;margin-top:10px;padding:8px;background:#fafafa;border-radius:6px;">
+    <div class="supply-panel-footer" style="display:flex;justify-content:space-between;margin-top:10px;padding:8px;background:var(--surface);border-radius:4px;border:1px solid var(--border);">
       <div class="supply-footer-item">
         <span class="supply-footer-label" style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Runs out first</span>
         <div class="supply-footer-value gold" style="font-weight:700;color:var(--gold);">${bottleneckLine ? bottleneckLine.name : '—'} @ ${bottleneckWeeks} wks</div>
       </div>
       <div class="supply-footer-item" style="text-align:right;">
         <span class="supply-footer-label" style="font-size:10px;color:var(--text-muted);text-transform:uppercase;">Total Monthly Cost</span>
-        <div class="supply-footer-value green" style="font-weight:700;color:#22c55e;">~$${totalMonthly.toFixed(0)}/month</div>
+        <div class="supply-footer-value green" style="font-weight:700;color:var(--green);">~$${totalMonthly.toFixed(0)}/month</div>
       </div>
     </div>
     <div class="protocol-toggle-row" style="margin-top:10px;text-align:center;">
@@ -1035,7 +1045,7 @@ function renderOrderProtocolPanel(linesWithSupply) {
   if (namesLower.includes('kpv') && (namesLower.includes('bpc') || namesLower.includes('histamine'))) synergyNotes.push('KPV: add this as your gut/histamine support — particularly useful if you flush or react with other peptides.');
 
   const synergyHtml = synergyNotes.length
-    ? `<div style="background:#fffbeb;border-left:3px solid var(--gold);padding:8px 12px;font-size:12px;color:#92400e;margin-bottom:10px;">
+    ? `<div style="background:rgba(196,146,42,0.08);border-left:3px solid var(--gold);padding:8px 12px;font-size:12px;color:var(--bone-dim);margin-bottom:10px;">
          <strong>Stack synergy notes:</strong><ul style="margin:4px 0 0 16px;padding:0;">${synergyNotes.map(n => `<li style="margin-bottom:3px;">${n}</li>`).join('')}</ul>
        </div>`
     : '';
@@ -1044,16 +1054,16 @@ function renderOrderProtocolPanel(linesWithSupply) {
   const totalCycle = linesWithSupply.reduce((s, x) => s + x.cycleTotal, 0);
 
   return `
-    <div class="order-protocol-pane" style="border:1px solid #d1d5db;border-radius:8px;padding:12px;background:#fafafa;">
+    <div class="order-protocol-pane" style="border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--surface);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
-        <div style="font-weight:800;font-size:14px;color:#111827;">Generated Protocol</div>
-        <button onclick="printOrderProtocol()" style="padding:6px 14px;background:#0d9488;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:700;font-size:12px;">Print Protocol</button>
+        <div style="font-weight:700;font-size:13px;color:var(--bone);letter-spacing:0.1em;text-transform:uppercase;">Generated Protocol</div>
+        <button onclick="printOrderProtocol()" style="padding:6px 14px;background:var(--gold);color:#0c0c0c;border:none;border-radius:3px;cursor:pointer;font-weight:700;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;">Print Protocol</button>
       </div>
       <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">For research purposes only. Not medical advice.</div>
       ${synergyHtml}
       ${compoundCards}
       <div style="display:flex;justify-content:space-between;padding:10px;background:#fff;border-top:2px solid #e5e7eb;border-radius:0 0 6px 6px;font-size:12px;font-weight:700;">
-        <span>Cycle total: <span style="color:#22c55e;">$${totalCycle.toFixed(0)}</span></span>
+        <span>Cycle total: <span style="color:var(--green);">$${totalCycle.toFixed(0)}</span></span>
         <span>Monthly cost: <span style="color:var(--gold);">$${totalMonthly.toFixed(0)}/mo</span></span>
       </div>
     </div>`;
@@ -1812,7 +1822,7 @@ function openCompound(id) {
   document.getElementById('cmpd-mechanism').textContent = c.mechanism||'';
   document.getElementById('cmpd-delivery').textContent = c.delivery==='vial'?'💉 Vial + BAC Water + Insulin Syringe':'🖊 Peptide Pen (pre-loaded)';
   document.getElementById('cmpd-storage').textContent = c.storage||'';
-  document.getElementById('cmpd-confidence').innerHTML = {HIGH:'<span style="color:#22c55e">● HIGH</span>',MEDIUM:'<span style="color:#f59e0b">● MEDIUM</span>',LOW:'<span style="color:#ef4444">● LOW</span>'}[c.confidence]||c.confidence||'';
+  document.getElementById('cmpd-confidence').innerHTML = {HIGH:'<span style="color:var(--green)">● HIGH</span>',MEDIUM:'<span style="color:var(--gold)">● MEDIUM</span>',LOW:'<span style="color:var(--red)">● LOW</span>'}[c.confidence]||c.confidence||'';
   document.getElementById('cmpd-benefits').innerHTML = (c.benefits||[]).map(b=>`<span class="benefit-pill">${b}</span>`).join('');
   const r = c.reconstitution||{};
   document.getElementById('cmpd-recon-bac').textContent = `Add ${r.bac_ml||2}mL BAC water to your ${r.vial_mg||5}mg vial. Swirl gently.`;
@@ -1857,7 +1867,7 @@ function showProductDetailFallback(p) {
   document.getElementById('cmpd-mechanism').textContent = '';
   document.getElementById('cmpd-delivery').textContent = p.name.toLowerCase().includes('pen') ? '🖊 Peptide Pen (pre-loaded, no reconstitution)' : '💉 Vial + BAC Water + Insulin Syringe';
   document.getElementById('cmpd-storage').textContent = 'Refrigerate after opening. Keep away from light.';
-  document.getElementById('cmpd-confidence').innerHTML = '<span style="color:#f59e0b">● PRODUCT</span>';
+  document.getElementById('cmpd-confidence').innerHTML = '<span style="color:var(--gold)">● PRODUCT</span>';
   document.getElementById('cmpd-benefits').innerHTML = '';
   // Recon section - parse from description
   document.getElementById('cmpd-recon-bac').textContent = reconMatch ? reconMatch[0].replace('.','') : 'See description for reconstitution instructions.';
