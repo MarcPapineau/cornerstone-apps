@@ -8,47 +8,103 @@ let allOrders = [];
 // 2026-04-27 (BUG #6 — restore Gantt cycle-shift): order-page state for the
 // Gantt chart. cycleStartWeek lets Marc shift the cycle window forward/back
 // without rebuilding the order. Default 0 = cycle starts at week 1.
+// 2026-04-27 (BUG — Gantt cycle context): cycleWeeks sets the visible cycle
+// window so a short-supply bar (e.g. 1.5w) renders SHORT against a 12w cycle
+// instead of filling the whole chart. Marc-facing default 12w; user-selectable.
 const orderState = {
   cycleStartWeek: 0,
-  showProtocol: false  // Toggle for protocol panel (BUG #7)
+  cycleWeeks: 12,           // visible cycle window (8/12/16/24)
+  showProtocol: false       // Toggle for protocol panel (BUG #7)
 };
 
 // ─── Supply & Benefit Data ───────────────────────────────────
-const SUPPLY_WEEKS = {
-  // Each entry: perVial by dose tier (low=light/maintenance, mid=recovery, high=optimize)
-  // perVial = weeks of supply per vial at that dose
-  'BPC-157':          { low: { perVial: 17.1, doseNote: '167mcg/day – Light' }, mid: { perVial: 11.4, doseNote: '250mcg/day – Medium' }, high: { perVial: 5.7,  doseNote: '500mcg/day – High' } },
-  'TB-500':           { low: { perVial: 16.7, doseNote: '1.5mg 2x/wk – Light' }, mid: { perVial: 10,   doseNote: '2.5mg 2x/wk – Medium' }, high: { perVial: 5,    doseNote: '5mg 2x/wk – High' } },
-  'GHK-Cu':           { low: { perVial: 20.8, doseNote: '600mcg 4x/wk – Light' }, mid: { perVial: 12.5, doseNote: '1mg 4x/wk – Medium' }, high: { perVial: 8.3,  doseNote: '1.5mg 4x/wk – High' } },
-  'KPV':              { low: { perVial: 20,   doseNote: '357mcg/day – Light' }, mid: { perVial: 14.3, doseNote: '500mcg/day – Medium' }, high: { perVial: 7.1,  doseNote: '1mg/day – High' } },
-  'NAD+':             { low: { perVial: 8.3,  doseNote: '167mg 3x/wk – Light' }, mid: { perVial: 5.6,  doseNote: '250mg 3x/wk – Medium' }, high: { perVial: 3.3,  doseNote: '500mg 3x/wk – High' } },
-  'CJC-1295 DAC':     { low: { perVial: 10,   doseNote: '0.5mg/wk – Light' }, mid: { perVial: 5,    doseNote: '1mg/wk – Medium' }, high: { perVial: 2.5,  doseNote: '2mg/wk – High' } },
-  'Ipamorelin':       { low: { perVial: 7.1,  doseNote: '100mcg/day – Light' }, mid: { perVial: 3.6,  doseNote: '200mcg/day – Medium' }, high: { perVial: 2.4,  doseNote: '300mcg/day – High' } },
-  'Retatrutide':      { low: { perVial: 10,   doseNote: '1mg/wk – Light' }, mid: { perVial: 5,    doseNote: '2mg/wk – Medium' }, high: { perVial: 2.5,  doseNote: '4mg/wk – High' } },
-  'Tesamorelin':      { low: { perVial: 7.1,  doseNote: '1mg/day – Light' }, mid: { perVial: 3.6,  doseNote: '2mg/day – Medium' }, high: { perVial: 1.8,  doseNote: '4mg/day – High' } },
-  'Epitalon':         { low: { perVial: 4.8,  doseNote: '3mg/day (10-day) – Light' }, mid: { perVial: 2.9,  doseNote: '5mg/day (10-day) – Medium' }, high: { perVial: 1.4,  doseNote: '10mg/day (10-day) – High' } },
-  'SS-31':            { low: { perVial: 13.3, doseNote: '2.5mg 3x/wk – Light' }, mid: { perVial: 6.7,  doseNote: '5mg 3x/wk – Medium' }, high: { perVial: 3.3,  doseNote: '10mg 3x/wk – High' } },
-  'MOTS-C':           { low: { perVial: 6.7,  doseNote: '5mg 3x/wk – Light' }, mid: { perVial: 3.3,  doseNote: '10mg 3x/wk – Medium' }, high: { perVial: 1.7,  doseNote: '20mg 3x/wk – High' } },
-  'PT-141':           { low: { perVial: 57.1, doseNote: '0.875mg as needed – Light' }, mid: { perVial: 28.6, doseNote: '1.75mg as needed – Medium' }, high: { perVial: 14.3, doseNote: '3.5mg as needed – High' } },
-  'Kisspeptin':       { low: { perVial: 33.3, doseNote: '50mcg 3x/wk – Light' }, mid: { perVial: 16.6, doseNote: '100mcg 3x/wk – Medium' }, high: { perVial: 8.3,  doseNote: '200mcg 3x/wk – High' } },
-  'Thymosin Alpha-1': { low: { perVial: 31.3, doseNote: '0.8mg 2x/wk – Light' }, mid: { perVial: 15.6, doseNote: '1.6mg 2x/wk – Medium' }, high: { perVial: 7.8,  doseNote: '3.2mg 2x/wk – High' } },
-  'Semax':            { low: { perVial: 8,    doseNote: 'intranasal 1-2x/day – Light' }, mid: { perVial: 4,    doseNote: 'intranasal 2-3x/day – Medium' }, high: { perVial: 2,    doseNote: 'intranasal 3-4x/day – High' } },
-  'Selank':           { low: { perVial: 8,    doseNote: 'intranasal 1-2x/day – Light' }, mid: { perVial: 4,    doseNote: 'intranasal 2-3x/day – Medium' }, high: { perVial: 2,    doseNote: 'intranasal 3-4x/day – High' } },
-  'AOD-9604':         { low: { perVial: 47.6, doseNote: '150mcg/day – Light' }, mid: { perVial: 23.8, doseNote: '300mcg/day – Medium' }, high: { perVial: 11.9, doseNote: '600mcg/day – High' } },
-  'DSIP':             { low: { perVial: 20,   doseNote: '200mcg/day – Light' }, mid: { perVial: 14.3, doseNote: '300mcg/day – Medium' }, high: { perVial: 7.1,  doseNote: '600mcg/day – High' } },
-  'Pinealon':         { low: { perVial: 14.3, doseNote: '5mg 3x/wk – Light' }, mid: { perVial: 7.1,  doseNote: '10mg 3x/wk – Medium' }, high: { perVial: 3.6,  doseNote: '20mg 3x/wk – High' } },
-  'LL-37':            { low: { perVial: 10,   doseNote: '250mcg/day – Light' }, mid: { perVial: 5,    doseNote: '500mcg/day – Medium' }, high: { perVial: 2.5,  doseNote: '1mg/day – High' } },
-  'SLU-PP-332':       { low: { perVial: 6.7,  doseNote: '5mg 3x/wk – Light' }, mid: { perVial: 3.3,  doseNote: '10mg 3x/wk – Medium' }, high: { perVial: 1.7,  doseNote: '20mg 3x/wk – High' } },
-  'Hexarelin':        { low: { perVial: 14.3, doseNote: '100mcg/day – Light' }, mid: { perVial: 7.1,  doseNote: '200mcg/day – Medium' }, high: { perVial: 3.6,  doseNote: '400mcg/day – High' } },
-  'Sermorelin':       { low: { perVial: 14.3, doseNote: '200mcg/day – Light' }, mid: { perVial: 7.1,  doseNote: '400mcg/day – Medium' }, high: { perVial: 3.6,  doseNote: '800mcg/day – High' } },
-  'Dihexa':           { low: { perVial: 10,   doseNote: '5mg/day – Light' }, mid: { perVial: 5,    doseNote: '10mg/day – Medium' }, high: { perVial: 2.5,  doseNote: '20mg/day – High' } },
-  'Melanotan':        { low: { perVial: 20,   doseNote: '500mcg 3x/wk – Light' }, mid: { perVial: 10,   doseNote: '1mg 3x/wk – Medium' }, high: { perVial: 5,    doseNote: '2mg 3x/wk – High' } },
-  'SNAP-8':           { low: { perVial: 20,   doseNote: 'topical 2x/day – Light' }, mid: { perVial: 14.3, doseNote: 'topical 3x/day – Medium' }, high: { perVial: 7.1,  doseNote: 'topical 4x/day – High' } },
-  'HCG':              { low: { perVial: 8.3,  doseNote: '500iu 3x/wk – Light' }, mid: { perVial: 5,    doseNote: '1000iu 3x/wk – Medium' }, high: { perVial: 2.5,  doseNote: '2000iu 3x/wk – High' } },
-  'IGF-1':            { low: { perVial: 10,   doseNote: '40mcg/day – Light' }, mid: { perVial: 5,    doseNote: '80mcg/day – Medium' }, high: { perVial: 2.5,  doseNote: '160mcg/day – High' } },
-  'GHRP':             { low: { perVial: 7.1,  doseNote: '100mcg 3x/day – Light' }, mid: { perVial: 3.6,  doseNote: '200mcg 3x/day – Medium' }, high: { perVial: 1.8,  doseNote: '400mcg 3x/day – High' } },
-  'Cagrilintide':     { low: { perVial: 8.3,  doseNote: '0.3mg/wk – Light' }, mid: { perVial: 5,    doseNote: '0.6mg/wk – Medium' }, high: { perVial: 2.5,  doseNote: '1.2mg/wk – High' } },
-  'Glutathione':      { low: { perVial: 5,    doseNote: '600mg 2x/wk – Light' }, mid: { perVial: 3.3,  doseNote: '900mg 2x/wk – Medium' }, high: { perVial: 1.7,  doseNote: '1200mg 2x/wk – High' } },
+// 2026-04-27 BUG-#10 REWRITE — dose table re-anchored to mg/week
+// (clean math, transparent units, combo-pen support).
+//
+// Marc anchor (2026-04-27): "MOTS-C low is 5, mid is 10, high is 15 mg/week".
+// All other peptides re-derived from common research-use dose ranges.
+// perVial is now computed dynamically in getSupplyData() as
+//   weeks_of_supply = vialMg / sum(mgPerWeek across all matched peptides at this tier)
+// This makes combo pens (TB500+BPC157, SS31+Cardiogen, etc.) work correctly —
+// the matcher sums mg/week consumption across recognized peptides.
+//
+// Each entry: dose tiers expressed as mg PER WEEK consumed by the patient.
+// Doses are research-protocol-typical; final clinical anchor sits with the
+// prescribing practitioner.
+const SUPPLY_DOSING = {
+  'BPC-157':          { low: { mgPerWeek: 1.75, doseNote: '250mcg/day' },  mid: { mgPerWeek: 3.5,  doseNote: '500mcg/day' },  high: { mgPerWeek: 7,    doseNote: '1mg/day' } },
+  'TB-500':           { low: { mgPerWeek: 2,    doseNote: '1mg 2x/wk' },   mid: { mgPerWeek: 5,    doseNote: '2.5mg 2x/wk' }, high: { mgPerWeek: 10,   doseNote: '5mg 2x/wk' } },
+  'GHK-Cu':           { low: { mgPerWeek: 2,    doseNote: '1mg 2x/wk' },   mid: { mgPerWeek: 4,    doseNote: '2mg 2x/wk' },   high: { mgPerWeek: 6,    doseNote: '3mg 2x/wk' } },
+  'KPV':              { low: { mgPerWeek: 1.75, doseNote: '250mcg/day' },  mid: { mgPerWeek: 3.5,  doseNote: '500mcg/day' },  high: { mgPerWeek: 7,    doseNote: '1mg/day' } },
+  'NAD+':             { low: { mgPerWeek: 150,  doseNote: '50mg 3x/wk' },  mid: { mgPerWeek: 300,  doseNote: '100mg 3x/wk' }, high: { mgPerWeek: 600,  doseNote: '200mg 3x/wk' } },
+  'CJC-1295 DAC':     { low: { mgPerWeek: 1,    doseNote: '1mg/wk' },      mid: { mgPerWeek: 2,    doseNote: '2mg/wk' },      high: { mgPerWeek: 4,    doseNote: '4mg/wk' } },
+  'Ipamorelin':       { low: { mgPerWeek: 0.7,  doseNote: '100mcg/day' },  mid: { mgPerWeek: 1.4,  doseNote: '200mcg/day' },  high: { mgPerWeek: 2.1,  doseNote: '300mcg/day' } },
+  'Retatrutide':      { low: { mgPerWeek: 2,    doseNote: '2mg/wk' },      mid: { mgPerWeek: 4,    doseNote: '4mg/wk' },      high: { mgPerWeek: 8,    doseNote: '8mg/wk' } },
+  'Tesamorelin':      { low: { mgPerWeek: 7,    doseNote: '1mg/day' },     mid: { mgPerWeek: 14,   doseNote: '2mg/day' },     high: { mgPerWeek: 28,   doseNote: '4mg/day' } },
+  'Epitalon':         { low: { mgPerWeek: 21,   doseNote: '3mg/day (10d cycle)' }, mid: { mgPerWeek: 35,   doseNote: '5mg/day (10d cycle)' }, high: { mgPerWeek: 70,   doseNote: '10mg/day (10d cycle)' } },
+  'SS-31':            { low: { mgPerWeek: 5,    doseNote: '2.5mg 2x/wk' }, mid: { mgPerWeek: 10,   doseNote: '5mg 2x/wk' },   high: { mgPerWeek: 20,   doseNote: '10mg 2x/wk' } },
+  'MOTS-C':           { low: { mgPerWeek: 5,    doseNote: '5mg/wk' },      mid: { mgPerWeek: 10,   doseNote: '10mg/wk' },     high: { mgPerWeek: 15,   doseNote: '15mg/wk' } },
+  'PT-141':           { low: { mgPerWeek: 1.75, doseNote: '0.875mg 2x/wk' }, mid: { mgPerWeek: 3.5,  doseNote: '1.75mg 2x/wk' }, high: { mgPerWeek: 7,    doseNote: '3.5mg 2x/wk' } },
+  'Kisspeptin':       { low: { mgPerWeek: 0.15, doseNote: '50mcg 3x/wk' }, mid: { mgPerWeek: 0.3,  doseNote: '100mcg 3x/wk' },high: { mgPerWeek: 0.6,  doseNote: '200mcg 3x/wk' } },
+  'Thymosin Alpha-1': { low: { mgPerWeek: 1.6,  doseNote: '0.8mg 2x/wk' }, mid: { mgPerWeek: 3.2,  doseNote: '1.6mg 2x/wk' }, high: { mgPerWeek: 6.4,  doseNote: '3.2mg 2x/wk' } },
+  'Semax':            { low: { mgPerWeek: 2,    doseNote: 'intranasal 1x/day' }, mid: { mgPerWeek: 4,    doseNote: 'intranasal 2x/day' }, high: { mgPerWeek: 6,    doseNote: 'intranasal 3x/day' } },
+  'Selank':           { low: { mgPerWeek: 2,    doseNote: 'intranasal 1x/day' }, mid: { mgPerWeek: 4,    doseNote: 'intranasal 2x/day' }, high: { mgPerWeek: 6,    doseNote: 'intranasal 3x/day' } },
+  'AOD-9604':         { low: { mgPerWeek: 1.05, doseNote: '150mcg/day' },  mid: { mgPerWeek: 2.1,  doseNote: '300mcg/day' },  high: { mgPerWeek: 4.2,  doseNote: '600mcg/day' } },
+  'DSIP':             { low: { mgPerWeek: 1.4,  doseNote: '200mcg/day' },  mid: { mgPerWeek: 2.1,  doseNote: '300mcg/day' },  high: { mgPerWeek: 4.2,  doseNote: '600mcg/day' } },
+  'Pinealon':         { low: { mgPerWeek: 15,   doseNote: '5mg 3x/wk' },   mid: { mgPerWeek: 30,   doseNote: '10mg 3x/wk' },  high: { mgPerWeek: 60,   doseNote: '20mg 3x/wk' } },
+  'LL-37':            { low: { mgPerWeek: 1.75, doseNote: '250mcg/day' },  mid: { mgPerWeek: 3.5,  doseNote: '500mcg/day' },  high: { mgPerWeek: 7,    doseNote: '1mg/day' } },
+  'SLU-PP-332':       { low: { mgPerWeek: 15,   doseNote: '5mg 3x/wk' },   mid: { mgPerWeek: 30,   doseNote: '10mg 3x/wk' },  high: { mgPerWeek: 60,   doseNote: '20mg 3x/wk' } },
+  'Hexarelin':        { low: { mgPerWeek: 0.7,  doseNote: '100mcg/day' },  mid: { mgPerWeek: 1.4,  doseNote: '200mcg/day' },  high: { mgPerWeek: 2.8,  doseNote: '400mcg/day' } },
+  'Sermorelin':       { low: { mgPerWeek: 1.4,  doseNote: '200mcg/day' },  mid: { mgPerWeek: 2.8,  doseNote: '400mcg/day' },  high: { mgPerWeek: 5.6,  doseNote: '800mcg/day' } },
+  'Dihexa':           { low: { mgPerWeek: 35,   doseNote: '5mg/day' },     mid: { mgPerWeek: 70,   doseNote: '10mg/day' },    high: { mgPerWeek: 140,  doseNote: '20mg/day' } },
+  'Melanotan':        { low: { mgPerWeek: 1.5,  doseNote: '500mcg 3x/wk' },mid: { mgPerWeek: 3,    doseNote: '1mg 3x/wk' },   high: { mgPerWeek: 6,    doseNote: '2mg 3x/wk' } },
+  'SNAP-8':           { low: { mgPerWeek: 1,    doseNote: 'topical 1x/day' }, mid: { mgPerWeek: 2,    doseNote: 'topical 2x/day' }, high: { mgPerWeek: 3,    doseNote: 'topical 3x/day' } },
+  'HCG':              { low: { mgPerWeek: 1.5,  doseNote: '500iu 3x/wk (≈0.5mg)' }, mid: { mgPerWeek: 3,    doseNote: '1000iu 3x/wk (≈1mg)' }, high: { mgPerWeek: 6,    doseNote: '2000iu 3x/wk (≈2mg)' } },
+  'IGF-1':            { low: { mgPerWeek: 0.28, doseNote: '40mcg/day' },   mid: { mgPerWeek: 0.56, doseNote: '80mcg/day' },   high: { mgPerWeek: 1.12, doseNote: '160mcg/day' } },
+  'GHRP':             { low: { mgPerWeek: 2.1,  doseNote: '100mcg 3x/day' }, mid: { mgPerWeek: 4.2,  doseNote: '200mcg 3x/day' }, high: { mgPerWeek: 8.4,  doseNote: '400mcg 3x/day' } },
+  'Cagrilintide':     { low: { mgPerWeek: 0.3,  doseNote: '0.3mg/wk' },    mid: { mgPerWeek: 0.6,  doseNote: '0.6mg/wk' },    high: { mgPerWeek: 1.2,  doseNote: '1.2mg/wk' } },
+  'Glutathione':      { low: { mgPerWeek: 1200, doseNote: '600mg 2x/wk' }, mid: { mgPerWeek: 1800, doseNote: '900mg 2x/wk' }, high: { mgPerWeek: 2400, doseNote: '1200mg 2x/wk' } },
+};
+
+// Legacy compatibility: keep SUPPLY_WEEKS export for callers that still
+// reference it directly (e.g. the smoke-test shim). It mirrors SUPPLY_DOSING
+// shape so external matchers still resolve peptide keys correctly.
+const SUPPLY_WEEKS = SUPPLY_DOSING;
+
+// 2026-04-27 LATE-EOD (Marc spec): PAIRED PENS have their own dose convention.
+// Convention per Marc: a pen labeled "15mg" of a paired combo (e.g. TB500+BPC157)
+// contains 15mg of EACH substance — NOT a shared 15mg volume. Total active = 30mg.
+// The combined dose given to the patient is what's listed below; it's split
+// 50/50 across the two peptides, so per-substance consumption = combinedMgPerWeek
+// divided by the number of substances in the pair. Each substance runs out
+// in vialMg / per-substance-mg-per-week weeks; both run out together.
+//
+// Add new paired combos here as Marc specifies them.
+const SUPPLY_PAIRED = {
+  // BPC-157 + TB-500 healing/repair pair. Marc 2026-04-27 spec:
+  //   low  = 2.5mg/wk combined (recovery / maintenance)
+  //   mid  = 5mg/wk combined   (standard recovery)
+  //   high = 7.5mg/wk combined (post-surgery / major repair)
+  // For 15mg-each pen: low=12w · mid=6w · high=4w
+  'BPC-157 + TB-500': {
+    low:  { combinedMgPerWeek: 2.5, doseNote: 'BPC+TB combined 2.5mg/wk – maintenance/light' },
+    mid:  { combinedMgPerWeek: 5,   doseNote: 'BPC+TB combined 5mg/wk – standard recovery' },
+    high: { combinedMgPerWeek: 7.5, doseNote: 'BPC+TB combined 7.5mg/wk – post-surgery/major' },
+  },
+
+  // Ipamorelin + CJC-1295 GH-stimulation pair — PROPOSAL ONLY, awaiting
+  // KRITE 5-axis review + Karis-QA smoke + Marc confirmation on dose tiers.
+  // Until KRITE passes (≥0.82 each axis) this entry is COMMENTED OUT and the
+  // Ipa/CJC combo will fall through to the bottleneck-min fallback path.
+  // First-pass research-protocol numbers (NOT shipped to Marc as authoritative):
+  //   low  = 1.4mg/wk combined  (100mcg each daily — maintenance)
+  //   mid  = 2.8mg/wk combined  (200mcg each daily — standard)
+  //   high = 4.2mg/wk combined  (300mcg each daily — aggressive)
+  // 'CJC-1295 DAC + Ipamorelin': {
+  //   low:  { combinedMgPerWeek: 1.4, doseNote: 'Ipa+CJC combined 1.4mg/wk – maintenance' },
+  //   mid:  { combinedMgPerWeek: 2.8, doseNote: 'Ipa+CJC combined 2.8mg/wk – standard' },
+  //   high: { combinedMgPerWeek: 4.2, doseNote: 'Ipa+CJC combined 4.2mg/wk – aggressive' },
+  // },
 };
 
 const COMPOUND_BENEFITS = {
@@ -102,15 +158,18 @@ function _normalizeForMatch(s) {
   return (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-function _supplyEntryFor(productName) {
-  if (!productName) return null;
-  // 1. Exact match first (cheap)
-  let entry = SUPPLY_WEEKS[productName];
-  if (entry) return entry;
+// Find ALL peptide keys that match the given product name (combo support).
+// Returns an array of canonical SUPPLY_DOSING keys, in insertion order.
+function _supplyEntriesFor(productName) {
+  if (!productName) return [];
+  const matched = [];
+  const seen = new Set();
+  const add = (key) => { if (key && !seen.has(key)) { seen.add(key); matched.push(key); } };
 
-  // 2. Strip "Pen ", "Spray ", trailing mg/sizes — work on each token.
-  // Composite products like "Pen TB500+BPC157 15mg" should match the FIRST
-  // recognized peptide so the timeline at least shows ONE entry per line.
+  // 1. Exact match first
+  if (SUPPLY_DOSING[productName]) { add(productName); return matched; }
+
+  // 2. Strip "Pen ", "Spray ", trailing mg/sizes — tokenize composite names
   const cleaned = productName
     .replace(/^(pen|spray|kit|stack|combo)\s+/i, '')
     .replace(/\s+\d+(mg|mcg|iu|ml)\b/gi, '')
@@ -119,52 +178,154 @@ function _supplyEntryFor(productName) {
 
   for (const token of tokens) {
     const norm = _normalizeForMatch(token);
-    // 2a. Try alias table
-    if (SUPPLY_ALIASES[norm] && SUPPLY_WEEKS[SUPPLY_ALIASES[norm]]) {
-      return SUPPLY_WEEKS[SUPPLY_ALIASES[norm]];
+    if (!norm) continue;
+    if (norm.length < 2) continue;
+    // 2a. Alias table
+    if (SUPPLY_ALIASES[norm] && SUPPLY_DOSING[SUPPLY_ALIASES[norm]]) {
+      add(SUPPLY_ALIASES[norm]);
+      continue;
     }
-    // 2b. Try normalized substring match against SUPPLY_WEEKS keys
-    const matchKey = Object.keys(SUPPLY_WEEKS).find(k => {
+    // 2b. Normalized substring match — accept only when one side is ≥3 chars
+    // to avoid 'mix' matching 'PT-141' or short noise tokens.
+    const matchKey = Object.keys(SUPPLY_DOSING).find(k => {
       const nk = _normalizeForMatch(k);
-      return nk === norm || nk.includes(norm) || norm.includes(nk);
+      if (nk === norm) return true;
+      if (nk.length >= 3 && norm.includes(nk)) return true;
+      if (norm.length >= 3 && nk.includes(norm)) return true;
+      return false;
     });
-    if (matchKey) return SUPPLY_WEEKS[matchKey];
+    if (matchKey) add(matchKey);
   }
 
-  // 3. Last-resort: full-name normalized substring match
-  const fullNorm = _normalizeForMatch(productName);
-  const fallbackKey = Object.keys(SUPPLY_WEEKS).find(k => {
-    const nk = _normalizeForMatch(k);
-    return fullNorm.includes(nk) || nk.includes(fullNorm);
-  });
-  return fallbackKey ? SUPPLY_WEEKS[fallbackKey] : null;
+  // 3. Last-resort: full-name normalized substring match if nothing else hit
+  if (matched.length === 0) {
+    const fullNorm = _normalizeForMatch(productName);
+    const fallbackKey = Object.keys(SUPPLY_DOSING).find(k => {
+      const nk = _normalizeForMatch(k);
+      return fullNorm.includes(nk) || nk.includes(fullNorm);
+    });
+    if (fallbackKey) add(fallbackKey);
+  }
+  return matched;
 }
 
-// 2026-04-27 fix (BUG #2 — Reta pen showing 5wks when 30mg pen at mid = 15wks):
-// SUPPLY_WEEKS is keyed on the 10mg-vial baseline (because that is the most common
-// vial size). Scale weeksPerVial by (totalMg || mg || 10) / 10 so a 30mg pen returns
-// 3x the baseline weeks, a 5mg single vial returns 0.5x, etc. `productOrName` may be
-// either a product object (preferred — has totalMg/mg) or a bare name string (legacy
-// callers — falls back to baseline 10mg).
+// Legacy single-entry resolver (retained for callers that want one peptide).
+function _supplyEntryFor(productName) {
+  const all = _supplyEntriesFor(productName);
+  return all.length ? SUPPLY_DOSING[all[0]] : null;
+}
+
+// 2026-04-27 BUG-#10 REWRITE (Marc: "MOTC light is 5mg/wk, mid 10, high 15.
+// Numbers are wonky. BPC TB numbers are wonky. Length of time and Gantt
+// chart doesn't work."):
+//
+// Re-anchored to mg/week math. perVial = vialMg / sum(mgPerWeek across all
+// matched peptides at this tier). Combo pens (TB500+BPC157, SS31+Cardiogen,
+// Ipamorelin/CJC1295) sum mg/week across BOTH peptides — earlier matcher
+// returned only the first match, which made TB500+BPC157 last twice as long
+// as it actually does because BPC consumption was ignored.
+//
+// productOrName may be a full product object (preferred — has totalMg/mg)
+// or a bare name string. Vial mg falls back to 10 if missing.
 function getSupplyData(productOrName, doseLevel) {
-  const level = doseLevel || 'mid'; // default to medium
+  const level = doseLevel || 'mid';
   const productName = typeof productOrName === 'string'
     ? productOrName
     : (productOrName && productOrName.name) || '';
-  const entry = _supplyEntryFor(productName);
-  if (!entry) return null;
-  // Support both old flat format and new tiered format
-  const tier = entry.low ? (entry[level] || entry.mid) : entry; // legacy flat
-  if (!tier) return null;
-  // Determine mg-per-unit for scaling. Prefer totalMg (a box of 10× 5mg = 50mg total)
-  // then mg, fall back to the SUPPLY_WEEKS baseline (10mg).
-  let mgPerUnit = 10;
+
+  // 1. Find ALL matched peptide keys (combo pens get multiple)
+  const peptideKeys = _supplyEntriesFor(productName);
+  if (peptideKeys.length === 0) return null;
+
+  // 2. Determine vial mg from product (totalMg preferred — handles 10×5mg
+  // boxes; mg fallback for single-vial). Fall back to 10mg baseline.
+  let vialMg = 10;
   if (typeof productOrName === 'object' && productOrName) {
-    mgPerUnit = Number(productOrName.totalMg) || Number(productOrName.mg) || 10;
+    vialMg = Number(productOrName.totalMg) || Number(productOrName.mg) || 10;
   }
-  const scale = mgPerUnit / 10;
-  const scaledPerVial = (tier.perVial || 0) * scale;
-  return { perVial: scaledPerVial, doseNote: tier.doseNote, _baselinePerVial: tier.perVial, _mgPerUnit: mgPerUnit };
+
+  const doseLabel = level.charAt(0).toUpperCase() + level.slice(1);
+
+  // 3a. SINGLE-PEPTIDE pen — straightforward math
+  if (peptideKeys.length === 1) {
+    const entry = SUPPLY_DOSING[peptideKeys[0]];
+    if (!entry) return null;
+    const tier = entry[level] || entry.mid || entry;
+    if (!tier) return null;
+    let mgPerWeek = 0;
+    if (typeof tier.mgPerWeek === 'number') mgPerWeek = tier.mgPerWeek;
+    else if (typeof tier.perVial === 'number' && tier.perVial > 0) mgPerWeek = 10 / tier.perVial;
+    if (mgPerWeek <= 0) return null;
+    return {
+      perVial: vialMg / mgPerWeek,
+      doseNote: `${peptideKeys[0]} ${tier.doseNote || ''} – ${doseLabel}`,
+      _peptidesMatched: peptideKeys,
+      _totalMgPerWeek: mgPerWeek,
+      _vialMg: vialMg,
+    };
+  }
+
+  // 3b. PAIRED PEN — Marc 2026-04-27 LATE-EOD spec: pen labeled "Xmg" contains
+  // X mg of EACH substance (NOT shared X mg volume). Each substance is consumed
+  // at combinedMgPerWeek / N_substances mg/week.
+  //
+  // First check the SUPPLY_PAIRED table for an explicit combined-dose entry
+  // (e.g. BPC+TB has its own combined-dose convention different from running
+  // each peptide at its solo-dose tier).
+  const pairKeyA = peptideKeys.slice().sort().join(' + ');
+  const pairKeyB = peptideKeys.join(' + ');
+  const pairKeyC = peptideKeys.slice().reverse().join(' + ');
+  const pairedEntry = SUPPLY_PAIRED[pairKeyA] || SUPPLY_PAIRED[pairKeyB] || SUPPLY_PAIRED[pairKeyC];
+
+  if (pairedEntry) {
+    const tier = pairedEntry[level] || pairedEntry.mid;
+    if (!tier || !tier.combinedMgPerWeek) return null;
+    const perSubstanceMgPerWeek = tier.combinedMgPerWeek / peptideKeys.length;
+    const supplyWeeks = vialMg / perSubstanceMgPerWeek;
+    return {
+      perVial: supplyWeeks,
+      doseNote: `${tier.doseNote} – ${doseLabel}`,
+      _peptidesMatched: peptideKeys,
+      _isPaired: true,
+      _combinedMgPerWeek: tier.combinedMgPerWeek,
+      _perSubstanceMgPerWeek: perSubstanceMgPerWeek,
+      _vialMgPerSubstance: vialMg,
+    };
+  }
+
+  // 3c. UNKNOWN PAIRED PEN — fall back to running each peptide at its solo
+  // dose tier. Each substance has vialMg available (paired-pen convention),
+  // so each runs out at vialMg / its individual mgPerWeek. The PEN runs out
+  // when the FIRST substance is depleted (bottleneck = min weeks).
+  let bottleneckWeeks = Infinity;
+  let bottleneckPeptide = null;
+  let totalIndividualMgPerWeek = 0;
+  const tierNotes = [];
+  for (const key of peptideKeys) {
+    const entry = SUPPLY_DOSING[key];
+    if (!entry) continue;
+    const tier = entry[level] || entry.mid || entry;
+    if (!tier) continue;
+    let mgPerWeek = 0;
+    if (typeof tier.mgPerWeek === 'number') mgPerWeek = tier.mgPerWeek;
+    else if (typeof tier.perVial === 'number' && tier.perVial > 0) mgPerWeek = 10 / tier.perVial;
+    if (mgPerWeek <= 0) continue;
+    const wks = vialMg / mgPerWeek;
+    if (wks < bottleneckWeeks) { bottleneckWeeks = wks; bottleneckPeptide = key; }
+    totalIndividualMgPerWeek += mgPerWeek;
+    tierNotes.push(`${key} ${tier.doseNote || ''} (${mgPerWeek}mg/wk)`);
+  }
+  if (bottleneckWeeks === Infinity) return null;
+
+  return {
+    perVial: bottleneckWeeks,
+    doseNote: `${peptideKeys.join(' + ')} – ${doseLabel} (${bottleneckPeptide} runs out first)`,
+    _peptidesMatched: peptideKeys,
+    _isPaired: true,
+    _bottleneckPeptide: bottleneckPeptide,
+    _individualMgPerWeek: totalIndividualMgPerWeek,
+    _vialMgPerSubstance: vialMg,
+  };
 }
 
 // 2026-04-27 fix (BUG #1 — discount auto-applying on pens):
@@ -621,7 +782,7 @@ function renderOrderLines() {
 
     // 2026-04-27 FIX (BUG #4): show mg in the row header next to product name.
     const mgValue = l.totalMg || l.mg || null;
-    const mgChip = mgValue ? ` <span class="product-mg-chip" style="background:#3296a4;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;margin-left:6px;">${mgValue}mg</span>` : '';
+    const mgChip = mgValue ? ` <span class="product-mg-chip" style="background:#C4922A;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;margin-left:6px;">${mgValue}mg</span>` : '';
 
     return `<tr>
       <td><div class="product-name" onclick="openCompound('${l.id}')" title="Click for dosing guide">${l.name}${mgChip} <span style="font-size:10px;color:var(--text-muted)">ℹ</span></div><div class="product-sku">${l.sku}</div>${discountHtml}${supplyHtml}${benefitsHtml}</td>
@@ -646,6 +807,17 @@ function renderOrderLines() {
 function shiftCycleStart(delta) {
   orderState.cycleStartWeek = Math.max(0, (orderState.cycleStartWeek || 0) + delta);
   renderSupplyPanel();
+}
+
+// 2026-04-27 (BUG — Gantt cycle context): user-selectable cycle window.
+// Without this, a 1.5w bar fills the whole chart and Marc can't see how
+// short the supply is relative to a typical 12w cycle.
+function setCycleWeeks(weeks) {
+  const n = parseInt(weeks, 10);
+  if (!isNaN(n) && n > 0) {
+    orderState.cycleWeeks = n;
+    renderSupplyPanel();
+  }
 }
 
 function renderSupplyPanel() {
@@ -673,35 +845,62 @@ function renderSupplyPanel() {
   panel.classList.remove('hidden');
 
   const cycleStart = orderState.cycleStartWeek || 0;
+  const cycleWeeks = orderState.cycleWeeks || 12;
   const maxWeeks = Math.max(...linesWithSupply.map(x => x.weeks));
   const minWeeks = Math.min(...linesWithSupply.map(x => x.weeks));
-  // Chart end = furthest "supply running" week from current cycle start.
-  const chartEnd = Math.max(maxWeeks, cycleStart + maxWeeks);
+  // 2026-04-27 (BUG — Gantt cycle context): chart end = full cycle window
+  // PLUS any leftover supply that runs past it. This guarantees a 1.5w bar
+  // on a 12w cycle renders as ~12% width (short), not 100% (deceptive).
+  const chartEnd = Math.max(cycleStart + cycleWeeks, cycleStart + maxWeeks);
   const totalMonthly = linesWithSupply.reduce((s, x) => s + x.monthlyCost, 0);
 
   // Each row: a bar offset by cycleStart, width proportional to that compound's weeks of supply.
   const rows = linesWithSupply.map(x => {
-    const offsetPct = chartEnd > 0 ? Math.round((cycleStart / chartEnd) * 100) : 0;
-    const barPct = chartEnd > 0 ? Math.round((x.weeks / chartEnd) * 100) : 0;
+    const offsetPct = chartEnd > 0 ? (cycleStart / chartEnd) * 100 : 0;
+    const barPct = chartEnd > 0 ? (x.weeks / chartEnd) * 100 : 0;
     const weeksStr = x.weeks % 1 === 0 ? x.weeks.toFixed(0) : x.weeks.toFixed(1);
     const isBottleneck = x.weeks === minWeeks && linesWithSupply.length > 1;
     const barColor = isBottleneck ? 'var(--gold)' : 'var(--green)';
-    return `<div class="gantt-row" style="display:grid;grid-template-columns:120px 1fr 140px;align-items:center;gap:8px;padding:6px 0;">
+    // % of cycle this peptide covers (clamp at 100% for display).
+    const cyclePct = cycleWeeks > 0 ? Math.min(100, Math.round((x.weeks / cycleWeeks) * 100)) : 0;
+    return `<div class="gantt-row" style="display:grid;grid-template-columns:120px 1fr 170px;align-items:center;gap:8px;padding:6px 0;">
       <div class="gantt-name" title="${x.name}" style="font-size:12px;font-weight:600;">${x.name.length > 16 ? x.name.substring(0,15)+'…' : x.name}</div>
       <div class="gantt-bar-wrap" style="position:relative;background:#f3f4f6;border-radius:4px;height:18px;overflow:hidden;">
-        <div class="gantt-bar" style="position:absolute;left:${offsetPct}%;width:${barPct}%;height:100%;background:${barColor};border-radius:4px;"></div>
+        <div class="gantt-bar" style="position:absolute;left:${offsetPct.toFixed(2)}%;width:${barPct.toFixed(2)}%;height:100%;background:${barColor};border-radius:4px;min-width:2px;"></div>
       </div>
-      <div class="gantt-meta" style="display:flex;gap:6px;justify-content:flex-end;font-size:11px;">
+      <div class="gantt-meta" style="display:flex;gap:6px;justify-content:flex-end;font-size:11px;align-items:center;">
         <span class="gantt-weeks" style="color:var(--green);font-weight:700;">${weeksStr}w</span>
+        <span style="color:var(--text-muted);font-weight:600;">(${cyclePct}% of cycle)</span>
         <span class="gantt-monthly" style="color:var(--gold);font-weight:700;">$${x.monthlyCost.toFixed(0)}/mo</span>
-        <span class="gantt-total" style="color:var(--text-muted);font-weight:600;">$${x.cycleTotal.toFixed(0)} total</span>
       </div>
     </div>`;
   }).join('');
 
+  // Build the week-axis ruler. Tick every 4 weeks plus the cycle-end marker.
+  const tickStep = cycleWeeks <= 8 ? 1 : 4;
+  const tickWeeks = [];
+  for (let w = 0; w <= chartEnd; w += tickStep) tickWeeks.push(w);
+  if (!tickWeeks.includes(cycleWeeks)) tickWeeks.push(cycleWeeks);
+  tickWeeks.sort((a, b) => a - b);
+  const ticksHtml = tickWeeks.map(w => {
+    const leftPct = chartEnd > 0 ? (w / chartEnd) * 100 : 0;
+    const isCycleEnd = w === cycleWeeks;
+    const isStart = w === 0;
+    const label = isStart ? 'W1' : `W${w}`;
+    const color = isCycleEnd ? 'var(--gold)' : 'var(--text-muted)';
+    const weight = isCycleEnd ? '700' : '500';
+    return `<div style="position:absolute;left:${leftPct.toFixed(2)}%;transform:translateX(-50%);font-size:10px;color:${color};font-weight:${weight};white-space:nowrap;">${label}${isCycleEnd ? ' (end)' : ''}</div>`;
+  }).join('');
+  // Vertical cycle-end line on the chart.
+  const cycleEndLeftPct = chartEnd > 0 ? (cycleWeeks / chartEnd) * 100 : 100;
+  const cycleEndLine = `<div style="position:absolute;top:0;bottom:0;left:${cycleEndLeftPct.toFixed(2)}%;width:0;border-left:2px dashed var(--gold);pointer-events:none;z-index:2;"></div>`;
+
   const bottleneckWeeks = minWeeks.toFixed(1);
-  const maxWeeksStr = maxWeeks % 1 === 0 ? maxWeeks.toFixed(0) : maxWeeks.toFixed(1);
   const bottleneckLine = linesWithSupply.find(x => x.weeks === minWeeks);
+  const bottleneckPct = cycleWeeks > 0 ? Math.round((minWeeks / cycleWeeks) * 100) : 0;
+  const coverageLabel = minWeeks >= cycleWeeks
+    ? `Covers full ${cycleWeeks}w cycle`
+    : `Covers ${bottleneckPct}% of ${cycleWeeks}w cycle (short by ${(cycleWeeks - minWeeks).toFixed(1)}w)`;
 
   // Per-peptide budget breakdown rows for total cost / monthly cost (BUG #3 / #8)
   const breakdownRows = linesWithSupply.map(x => `
@@ -712,23 +911,50 @@ function renderSupplyPanel() {
       <span style="text-align:right;color:var(--text-muted);">${x.qty}× / ${x.weeks.toFixed(1)}w</span>
     </div>`).join('');
 
+  const cycleOptions = [4, 8, 12, 16, 24].map(n =>
+    `<option value="${n}"${n === cycleWeeks ? ' selected' : ''}>${n}w cycle</option>`
+  ).join('');
+
   panel.innerHTML = `
     <div class="supply-panel-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
       <span class="supply-panel-title" style="font-weight:700;font-size:13px;">Protocol Supply Timeline</span>
       <span class="supply-panel-hint" style="font-size:11px;color:var(--text-muted);">
         Cycle starts: <strong>Week ${cycleStart + 1}</strong> ·
-        Total supply: <strong>${maxWeeksStr} wks</strong> ·
-        Bottleneck: <strong>${bottleneckLine ? bottleneckLine.name : '—'} @ ${bottleneckWeeks}w</strong>
+        Cycle length: <strong>${cycleWeeks}w</strong> ·
+        Protocol lasts: <strong style="color:var(--gold);">${bottleneckWeeks}w</strong> (bottleneck: ${bottleneckLine ? bottleneckLine.name : '—'}) ·
+        ${coverageLabel}
       </span>
-      <div class="cycle-shift-controls" style="display:flex;gap:6px;">
+      <div class="cycle-controls" style="display:flex;gap:6px;align-items:center;">
+        <select onchange="setCycleWeeks(this.value)" title="Set cycle window length"
+          style="padding:4px 8px;border:1px solid #d1d5db;background:#fff;border-radius:4px;font-weight:600;font-size:11px;">
+          ${cycleOptions}
+        </select>
+        <button onclick="shiftCycleStart(-4)" title="Shift cycle start back 4 weeks"
+          style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-weight:700;">&larr;&larr;</button>
         <button onclick="shiftCycleStart(-1)" title="Shift cycle start back 1 week"
           style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-weight:700;">&larr;</button>
         <button onclick="shiftCycleStart(1)" title="Shift cycle start forward 1 week"
           style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-weight:700;">&rarr;</button>
+        <button onclick="shiftCycleStart(4)" title="Shift cycle start forward 4 weeks"
+          style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-weight:700;">&rarr;&rarr;</button>
       </div>
     </div>
-    <div class="gantt-chart" style="margin:10px 0;">
-      ${rows}
+    <div class="gantt-chart" style="margin:10px 0;position:relative;">
+      <!-- Bar rows with cycle-end dashed line overlay -->
+      <div style="position:relative;">
+        <div style="position:absolute;top:0;bottom:0;left:128px;right:178px;pointer-events:none;">
+          ${cycleEndLine}
+        </div>
+        ${rows}
+      </div>
+      <!-- Week-axis ruler -->
+      <div style="display:grid;grid-template-columns:120px 1fr 170px;gap:8px;margin-top:6px;">
+        <div></div>
+        <div style="position:relative;height:16px;border-top:1px solid #e5e7eb;">
+          ${ticksHtml}
+        </div>
+        <div></div>
+      </div>
     </div>
     <div class="supply-budget-breakdown" style="margin-top:10px;border:1px solid #e5e7eb;border-radius:6px;background:#fafafa;padding:8px;">
       <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.8fr 0.8fr;gap:8px;padding:4px 8px;font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;">
@@ -748,7 +974,7 @@ function renderSupplyPanel() {
     </div>
     <div class="protocol-toggle-row" style="margin-top:10px;text-align:center;">
       <button onclick="toggleProtocolPanel()" id="protocol-toggle-btn"
-        style="padding:8px 18px;background:#3296a4;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;">
+        style="padding:8px 18px;background:#C4922A;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;">
         ${orderState.showProtocol ? 'Hide Protocol' : 'Show Protocol'}
       </button>
     </div>
@@ -3504,15 +3730,15 @@ function switchOrderTab(tab) {
   if (tab === 'browse') {
     browsePanel.style.display = '';
     goalsPanel.style.display  = 'none';
-    browseBtn.style.borderBottom = '2px solid #3296a4';
-    browseBtn.style.color        = '#3296a4';
+    browseBtn.style.borderBottom = '2px solid #C4922A';
+    browseBtn.style.color        = '#C4922A';
     goalsBtn.style.borderBottom  = '2px solid transparent';
     goalsBtn.style.color         = '#545454';
   } else {
     browsePanel.style.display = 'none';
     goalsPanel.style.display  = '';
-    goalsBtn.style.borderBottom  = '2px solid #3296a4';
-    goalsBtn.style.color         = '#3296a4';
+    goalsBtn.style.borderBottom  = '2px solid #C4922A';
+    goalsBtn.style.color         = '#C4922A';
     browseBtn.style.borderBottom = '2px solid transparent';
     browseBtn.style.color        = '#545454';
     if (!document.getElementById('bbg-goal-cards').children.length) {
@@ -3538,7 +3764,7 @@ function initBuildByGoal() {
   grid.innerHTML = goals.map(g => `
     <div onclick='selectBbgGoal("${g.id}")'
          style='cursor:pointer;background:#f5f7f9;border:2px solid #e0e6ea;border-radius:10px;padding:14px 10px;text-align:center;transition:border-color 0.2s;'
-         onmouseover='this.style.borderColor="#3296a4"' onmouseout='this.style.borderColor="#e0e6ea"'>
+         onmouseover='this.style.borderColor="#C4922A"' onmouseout='this.style.borderColor="#e0e6ea"'>
       <div style='font-size:28px;margin-bottom:6px;'>${g.emoji}</div>
       <div style='font-size:12px;font-weight:600;color:#1f2933;'>${g.label}</div>
     </div>
@@ -3608,7 +3834,7 @@ function selectBbgGoal(goalId) {
     list.innerHTML = ranked.map(({ name, relevance }) => {
       const isHigh = relevance === 'HIGH';
       const badgeBg    = isHigh ? '#eaf6f8' : '#f5f7f9';
-      const badgeColor = isHigh ? '#3296a4' : '#888';
+      const badgeColor = isHigh ? '#C4922A' : '#888';
       const safeName = name.replace(/"/g, '&quot;');
       return `
         <div style='display:flex;align-items:center;justify-content:space-between;background:#fff;border:1px solid #e0e6ea;border-radius:8px;padding:10px 14px;'>
@@ -3616,7 +3842,7 @@ function selectBbgGoal(goalId) {
             <span style='font-weight:600;font-size:14px;color:#1f2933;'>${name}</span>
             <span style='margin-left:8px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;background:${badgeBg};color:${badgeColor};'>${relevance}</span>
           </div>
-          <button onclick='bbgAddCompound("${safeName}")' style='background:#3296a4;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:600;font-size:13px;'>Add</button>
+          <button onclick='bbgAddCompound("${safeName}")' style='background:#C4922A;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:600;font-size:13px;'>Add</button>
         </div>
       `;
     }).join('');
