@@ -2064,9 +2064,12 @@
   letter-spacing: 0.04em;
 }
 
-/* Stack detail modal */
-.modal { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1100; }
-.modal.hidden { display: none; }
+/* Stack detail modal — scoped to #stack-detail-modal only.
+   2026-04-27 FIX: was `.modal` which clobbered #modal-client / #modal-compound /
+   #modal-send-client centering (top:50%/left:50% + translate(-50%,-50%)) and
+   pushed them off-screen top-left. Bug reported by Marc on dashboard "select client". */
+#stack-detail-modal { position: fixed; inset: 0; transform: none; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1100; max-width: none; width: auto; padding: 0; border: none; }
+#stack-detail-modal.hidden { display: none; }
 .stack-detail-content { background: #fff; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 92%; }
 .sd-header-name { font-size: 22px; font-weight: 800; color: #1f2933; margin: 0; }
 .sd-header-tagline { font-size: 13px; color: #6b7280; margin-top: 4px; }
