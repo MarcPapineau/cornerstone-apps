@@ -38,6 +38,10 @@ const SUPPLY_DOSING = {
   'KPV':              { low: { mgPerWeek: 1.75, doseNote: '250mcg/day' },  mid: { mgPerWeek: 3.5,  doseNote: '500mcg/day' },  high: { mgPerWeek: 7,    doseNote: '1mg/day' } },
   'NAD+':             { low: { mgPerWeek: 150,  doseNote: '50mg 3x/wk' },  mid: { mgPerWeek: 300,  doseNote: '100mg 3x/wk' }, high: { mgPerWeek: 600,  doseNote: '200mg 3x/wk' } },
   'CJC-1295 DAC':     { low: { mgPerWeek: 1,    doseNote: '1mg/wk' },      mid: { mgPerWeek: 2,    doseNote: '2mg/wk' },      high: { mgPerWeek: 4,    doseNote: '4mg/wk' } },
+  // MARC-CONFIRMED 2026-04-28: no-DAC CJC-1295 solo entry. 100/200/300mcg × 5 days/wk weekday schedule.
+  // Math: 100mcg × 5 = 0.5mg/wk · 200mcg × 5 = 1.0mg/wk · 300mcg × 5 = 1.5mg/wk.
+  // 5x/wk weekend-off convention is the most common research-protocol schedule.
+  'CJC-1295':         { low: { mgPerWeek: 0.5,  doseNote: '100mcg 5x/wk (weekday)' }, mid: { mgPerWeek: 1.0,  doseNote: '200mcg 5x/wk (weekday)' }, high: { mgPerWeek: 1.5,  doseNote: '300mcg 5x/wk (weekday)' } },
   'Ipamorelin':       { low: { mgPerWeek: 0.7,  doseNote: '100mcg/day' },  mid: { mgPerWeek: 1.4,  doseNote: '200mcg/day' },  high: { mgPerWeek: 2.1,  doseNote: '300mcg/day' } },
   'Retatrutide':      { low: { mgPerWeek: 2,    doseNote: '2mg/wk' },      mid: { mgPerWeek: 4,    doseNote: '4mg/wk' },      high: { mgPerWeek: 8,    doseNote: '8mg/wk' } },
   'Tesamorelin':      { low: { mgPerWeek: 7,    doseNote: '1mg/day' },     mid: { mgPerWeek: 14,   doseNote: '2mg/day' },     high: { mgPerWeek: 28,   doseNote: '4mg/day' } },
@@ -98,19 +102,25 @@ const SUPPLY_PAIRED = {
     high: { combinedMgPerWeek: 7.5, doseNote: 'BPC+TB draw dose 7.5mg/wk (= 7.5mg of each substance/wk) – post-surgery/major' },
   },
 
-  // Ipamorelin + CJC-1295 GH-stimulation pair — PROPOSAL ONLY, awaiting
-  // KRITE 5-axis review + Karis-QA smoke + Marc confirmation on dose tiers.
-  // Until KRITE passes (≥0.82 each axis) this entry is COMMENTED OUT and the
-  // Ipa/CJC combo will fall through to the bottleneck-min fallback path.
-  // First-pass research-protocol numbers (NOT shipped to Marc as authoritative):
-  //   low  = 1.4mg/wk combined  (100mcg each daily — maintenance)
-  //   mid  = 2.8mg/wk combined  (200mcg each daily — standard)
-  //   high = 4.2mg/wk combined  (300mcg each daily — aggressive)
-  // 'CJC-1295 DAC + Ipamorelin': {
-  //   low:  { combinedMgPerWeek: 1.4, doseNote: 'Ipa+CJC combined 1.4mg/wk – maintenance' },
-  //   mid:  { combinedMgPerWeek: 2.8, doseNote: 'Ipa+CJC combined 2.8mg/wk – standard' },
-  //   high: { combinedMgPerWeek: 4.2, doseNote: 'Ipa+CJC combined 4.2mg/wk – aggressive' },
-  // },
+  // MARC-CONFIRMED 2026-04-28: 0.5 / 1.0 / 1.5 mg/wk per substance · 5x/wk schedule · no-DAC variant
+  // Source: Daniel research brief 2026-04-27 (Perplexity → Opus → Sonnet pipeline). 12 sources cited.
+  // Vitalis catalog confirmed no-DAC at https://www.vitalisbiosciences.ca/products/cjc-1295-ipamorelin-10mg
+  // PubMed Gobburu 1999 anchors safe dose range: pubmed.ncbi.nlm.nih.gov/10496658
+  // Math: 100mcg of each peptide × 5 days/wk = 0.5mg/wk per substance (low) · 200×5 = 1.0 (mid) · 300×5 = 1.5 (high)
+  // 10mg pen (5mg+5mg) at low → 10w supply · mid → 5w · high → 3.3w
+  // Alphabetic sort key resolves to 'CJC-1295 + Ipamorelin' via getSupplyData.
+  //
+  // CRITICAL — vialMgIsTotalSplit: true. The catalog product is "Combo CJC-1295
+  // 5mg + Ipamorelin 5mg" (label "10mg" = 5mg of each substance, not 10mg of each).
+  // BPC+TB convention (15mg = 15mg of each) does NOT apply here. Math:
+  //   effectiveVialMg = vialMg / 2  →  5 / 0.5 = 10w  (low, Marc anchor).
+  // Without this flag, getSupplyData would compute 10/0.5 = 20w and fail Marc's anchor.
+  'CJC-1295 + Ipamorelin': {
+    vialMgIsTotalSplit: true,
+    low:  { combinedMgPerWeek: 0.5, doseNote: 'Ipa+CJC draw dose 0.5mg/wk (= 0.5mg of each substance/wk · 100mcg each, 5x/wk weekday) – maintenance/light' },
+    mid:  { combinedMgPerWeek: 1.0, doseNote: 'Ipa+CJC draw dose 1.0mg/wk (= 1.0mg of each substance/wk · 200mcg each, 5x/wk weekday) – standard recovery' },
+    high: { combinedMgPerWeek: 1.5, doseNote: 'Ipa+CJC draw dose 1.5mg/wk (= 1.5mg of each substance/wk · 300mcg each, 5x/wk weekday) – aggressive' },
+  },
 };
 
 const COMPOUND_BENEFITS = {
@@ -146,7 +156,10 @@ const SUPPLY_ALIASES = {
   'ss31': 'SS-31', 'ss-31': 'SS-31',
   'tb500': 'TB-500', 'tb-500': 'TB-500',
   'bpc157': 'BPC-157', 'bpc-157': 'BPC-157',
-  'cjc1295': 'CJC-1295 DAC', 'cjc-1295': 'CJC-1295 DAC',
+  // MARC-CONFIRMED 2026-04-28: cjc1295 (no-DAC) is the default; cjc1295dac requires explicit "DAC" in name.
+  // Pen products bundling "CJC-1295 + Ipamorelin" resolve to the no-DAC paired entry (5x/wk, 0.5/1.0/1.5 mg/wk).
+  'cjc1295': 'CJC-1295', 'cjc-1295': 'CJC-1295',
+  'cjc1295dac': 'CJC-1295 DAC', 'cjc-1295-dac': 'CJC-1295 DAC', 'cjcdac': 'CJC-1295 DAC',
   'ghkcu': 'GHK-Cu', 'ghk-cu': 'GHK-Cu', 'skinglow': 'GHK-Cu', 'skin-glow': 'GHK-Cu',
   'ackpv': 'KPV', 'ac-kpv': 'KPV', 'kpvnh2': 'KPV', 'kpv-nh2': 'KPV',
   'reta': 'Retatrutide',
@@ -175,6 +188,28 @@ function _supplyEntriesFor(productName) {
   // 1. Exact match first
   if (SUPPLY_DOSING[productName]) { add(productName); return matched; }
 
+  // 1b. MARC-CONFIRMED 2026-04-28 — multi-word key pre-pass.
+  // Some compound names (e.g. 'CJC-1295 DAC') are NOT a single token after
+  // splitting; if we tokenize first, 'CJC-1295' wins via alias and 'DAC'
+  // is dropped, mis-routing real DAC products to the no-DAC entry.
+  // Scan multi-word SUPPLY_DOSING keys (those containing whitespace) and
+  // greedily match by normalized substring against the full product name.
+  // Sort by descending key length so 'CJC-1295 DAC' beats 'CJC-1295'.
+  const fullNormForPrepass = _normalizeForMatch(productName);
+  // Track normalized keys already covered so token-pass doesn't double-add a
+  // base form (e.g. 'CJC-1295' duplicating 'CJC-1295 DAC').
+  const coveredNorms = new Set();
+  const multiWordKeys = Object.keys(SUPPLY_DOSING)
+    .filter(k => /\s/.test(k))
+    .sort((a, b) => _normalizeForMatch(b).length - _normalizeForMatch(a).length);
+  for (const k of multiWordKeys) {
+    const nk = _normalizeForMatch(k);
+    if (nk.length >= 5 && fullNormForPrepass.includes(nk)) {
+      add(k);
+      coveredNorms.add(nk);
+    }
+  }
+
   // 2. Strip "Pen ", "Spray ", trailing mg/sizes — tokenize composite names
   const cleaned = productName
     .replace(/^(pen|spray|kit|stack|combo)\s+/i, '')
@@ -188,7 +223,15 @@ function _supplyEntriesFor(productName) {
     if (norm.length < 2) continue;
     // 2a. Alias table
     if (SUPPLY_ALIASES[norm] && SUPPLY_DOSING[SUPPLY_ALIASES[norm]]) {
-      add(SUPPLY_ALIASES[norm]);
+      const aliasedKey = SUPPLY_ALIASES[norm];
+      const aliasedNorm = _normalizeForMatch(aliasedKey);
+      // Skip if a longer multi-word key already covers this base
+      // (e.g. don't add 'CJC-1295' when 'CJC-1295 DAC' already matched).
+      let shadowed = false;
+      for (const covered of coveredNorms) {
+        if (covered.includes(aliasedNorm) && covered.length > aliasedNorm.length) { shadowed = true; break; }
+      }
+      if (!shadowed) add(aliasedKey);
       continue;
     }
     // 2b. Normalized substring match — accept only when one side is ≥3 chars
@@ -200,7 +243,14 @@ function _supplyEntriesFor(productName) {
       if (norm.length >= 3 && nk.includes(norm)) return true;
       return false;
     });
-    if (matchKey) add(matchKey);
+    if (matchKey) {
+      const matchNorm = _normalizeForMatch(matchKey);
+      let shadowed = false;
+      for (const covered of coveredNorms) {
+        if (covered.includes(matchNorm) && covered.length > matchNorm.length) { shadowed = true; break; }
+      }
+      if (!shadowed) add(matchKey);
+    }
   }
 
   // 3. Last-resort: full-name normalized substring match if nothing else hit
@@ -292,14 +342,23 @@ function getSupplyData(productOrName, doseLevel) {
     if (!tier || !tier.combinedMgPerWeek) return null;
     // combinedMgPerWeek is the DRAW DOSE per week. Drawing N mg of liquid
     // consumes N mg of each substance, so supply = vialMg / tier.combinedMgPerWeek.
-    const supplyWeeks = vialMg / tier.combinedMgPerWeek;
+    //
+    // 2026-04-28 (MARC-CONFIRMED): some pens label the TOTAL combined mg as
+    // the pen size (e.g. "Pen Ipamorelin/CJC1295 10mg" = 5mg of each), while
+    // others label PER-SUBSTANCE (BPC+TB "15mg pen" = 15mg of each). The
+    // pairedEntry can opt-in to total-split convention via vialMgIsTotalSplit.
+    const effectiveVialMg = pairedEntry.vialMgIsTotalSplit
+      ? vialMg / peptideKeys.length
+      : vialMg;
+    const supplyWeeks = effectiveVialMg / tier.combinedMgPerWeek;
     return {
       perVial: supplyWeeks,
       doseNote: `${tier.doseNote} – ${doseLabel}`,
       _peptidesMatched: peptideKeys,
       _isPaired: true,
       _drawDoseMgPerWeek: tier.combinedMgPerWeek,
-      _vialMgPerSubstance: vialMg,
+      _vialMgPerSubstance: effectiveVialMg,
+      _vialMgConvention: pairedEntry.vialMgIsTotalSplit ? 'total-split' : 'per-substance',
     };
   }
 
@@ -1069,50 +1128,158 @@ function renderOrderProtocolPanel(linesWithSupply) {
     </div>`;
 }
 
-// 2026-04-27 (BUG #7): print-friendly protocol output.
+// 2026-04-27 (BUG #7) → 2026-04-28 upgrade (Marc: "needs more meat — frequency,
+// total weekly mg, look nicer"): print-friendly protocol output. Now exposes
+// frequency (1x/wk · daily · 5x/wk · 3x/wk inferred from doseNote), total weekly
+// mg per substance, dose-tier chip (LOW=teal, MID=gold, HIGH=warm-red), and
+// polished typography hierarchy. Cream/beige paper-friendly background retained.
+//
+// Helper: infer frequency string from doseNote text.
+function _inferFrequency(doseNote) {
+  if (!doseNote) return 'See protocol';
+  const n = doseNote.toLowerCase();
+  // Order matters — most specific first.
+  if (/5\s*x\s*\/?\s*wk|5x\s*\/?\s*wk|5\s*days?\s*\/\s*wk|weekday/.test(n)) return '5×/wk (weekday)';
+  if (/3\s*x\s*\/?\s*wk|3x\s*\/?\s*wk|3\s*days?\s*\/\s*wk/.test(n)) return '3×/wk';
+  if (/2\s*x\s*\/?\s*wk|2x\s*\/?\s*wk|twice\s*a?\s*week/.test(n)) return '2×/wk';
+  if (/3\s*x\s*\/?\s*day/.test(n)) return '3×/day';
+  if (/2\s*x\s*\/?\s*day/.test(n)) return '2×/day';
+  if (/1\s*x\s*\/?\s*day|\/\s*day|daily/.test(n)) return 'Daily';
+  if (/1\s*x\s*\/?\s*wk|\/\s*wk|weekly|once\s*a?\s*week/.test(n)) return '1×/wk';
+  if (/topical/.test(n)) return 'Topical';
+  if (/intranasal/.test(n)) return 'Intranasal';
+  if (/cycle/.test(n)) return 'Cycled (see note)';
+  return 'Per protocol';
+}
+
+// Helper: pull total weekly mg from supply-data internals. Paired pens use
+// _drawDoseMgPerWeek (per substance); singles use _totalMgPerWeek; bottleneck
+// fallback uses _individualMgPerWeek (sum across peptides).
+function _totalWeeklyMg(sd) {
+  if (!sd) return null;
+  if (sd._isPaired && typeof sd._drawDoseMgPerWeek === 'number') {
+    return { perSubstance: sd._drawDoseMgPerWeek, peptides: sd._peptidesMatched || [] };
+  }
+  if (typeof sd._totalMgPerWeek === 'number') {
+    return { single: sd._totalMgPerWeek, peptides: sd._peptidesMatched || [] };
+  }
+  if (typeof sd._individualMgPerWeek === 'number') {
+    return { combined: sd._individualMgPerWeek, peptides: sd._peptidesMatched || [] };
+  }
+  return null;
+}
+
 function printOrderProtocol() {
   if (orderLines.length === 0) return showToast('Add products first', 'error');
+  const clientId = document.getElementById('order-client') ? document.getElementById('order-client').value : '';
+  const client = clients.find(c => c.id === clientId);
   const linesWithSupply = orderLines.map(l => {
     const sd = getSupplyData(l, l.doseLevel || 'mid');
     if (!sd) return null;
     const perVial = sd.perVial;
     const weeks = perVial * l.qty;
     const monthlyCost = perVial > 0 ? l.msrp / (perVial / 4.33) : 0;
-    return { name: l.name, weeks, perVial, monthlyCost, cycleTotal: l.lineTotal, qty: l.qty, msrp: l.msrp, doseNote: sd.doseNote };
+    return {
+      name: l.name, weeks, perVial, monthlyCost,
+      cycleTotal: l.lineTotal, qty: l.qty, msrp: l.msrp,
+      doseNote: sd.doseNote, doseLevel: l.doseLevel || 'mid',
+      _supplyMeta: sd
+    };
   }).filter(Boolean);
-  const html = `<!doctype html><html><head><title>Protocol</title>
+
+  const tierChip = (level) => {
+    const t = (level || 'mid').toLowerCase();
+    if (t === 'low')  return '<span class="chip chip-low">LOW</span>';
+    if (t === 'high') return '<span class="chip chip-high">HIGH</span>';
+    return '<span class="chip chip-mid">MID</span>';
+  };
+
+  const compoundBlocks = linesWithSupply.map(x => {
+    const ref = _lookupCompoundInfo(x.name);
+    const fullName = ref ? (ref.full_name || ref.name) : x.name;
+    const purpose = (ref && (ref.summary || ref.purpose || ref.benefit)) ||
+                    ((COMPOUND_BENEFITS && getCompoundBenefits(x.name)) ? getCompoundBenefits(x.name).slice(0,2).join(' · ') : '');
+    let recon = 'Reconstitute per supplier instructions.';
+    if (ref && ref.reconstitution) recon = ref.reconstitution.plain_english || ref.reconstitution.steps || recon;
+    const timing = (ref && ref.dosing && ref.dosing.timing) ? ref.dosing.timing : '';
+    const frequency = _inferFrequency(x.doseNote);
+    const totalWeekly = _totalWeeklyMg(x._supplyMeta);
+    let totalWeeklyStr = '—';
+    if (totalWeekly) {
+      if (totalWeekly.perSubstance != null) {
+        totalWeeklyStr = `${totalWeekly.perSubstance} mg of each substance per week (${totalWeekly.peptides.join(' + ')})`;
+      } else if (totalWeekly.single != null) {
+        totalWeeklyStr = `${totalWeekly.single} mg per week`;
+      } else if (totalWeekly.combined != null) {
+        totalWeeklyStr = `${totalWeekly.combined.toFixed(2)} mg per week (combined)`;
+      }
+    }
+    return `<div class="compound">
+      <div class="cmpd-head">
+        <div class="cmpd-name">${fullName}</div>
+        ${tierChip(x.doseLevel)}
+      </div>
+      ${purpose ? `<div class="cmpd-purpose">${purpose}</div>` : ''}
+      <div class="cmpd-grid">
+        <div class="row"><span class="lbl">Dose:</span> <span class="val">${x.doseNote || '—'}</span></div>
+        <div class="row"><span class="lbl">Frequency:</span> <span class="val">${frequency}</span></div>
+        <div class="row"><span class="lbl">Total weekly:</span> <span class="val mono">${totalWeeklyStr}</span></div>
+        <div class="row"><span class="lbl">Reconstitution:</span> <span class="val">${recon}</span></div>
+        ${timing ? `<div class="row"><span class="lbl">Timing:</span> <span class="val">${timing}</span></div>` : ''}
+        <div class="row"><span class="lbl">Supply:</span> <span class="val mono">${x.qty} vial${x.qty>1?'s':''} × ${x.weeks.toFixed(1)} weeks</span></div>
+        <div class="row"><span class="lbl">Cost:</span> <span class="val mono">$${x.monthlyCost.toFixed(0)}/mo · $${x.cycleTotal.toFixed(0)} cycle</span></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  const totalCycle = linesWithSupply.reduce((s,x)=>s+x.cycleTotal,0);
+  const totalMonthly = linesWithSupply.reduce((s,x)=>s+x.monthlyCost,0);
+
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Peptide Protocol</title>
     <style>
-      body{font-family:-apple-system,Helvetica,Arial,sans-serif;color:#0C0C0C;background:#F0EBE1;padding:24px;max-width:800px;margin:0 auto;}
-      h1{font-size:18px;margin:0 0 6px;color:#0C0C0C;}
-      h2{font-size:14px;margin:18px 0 8px;border-bottom:1px solid #C4922A;padding-bottom:4px;color:#0C0C0C;}
-      .compound{border:1px solid #C4922A;padding:10px;margin-bottom:8px;border-radius:4px;background:#F0EBE1;}
-      .compound .name{font-weight:700;font-size:13px;margin-bottom:4px;color:#0C0C0C;}
-      .compound .row{font-size:12px;margin-bottom:2px;color:#101010;}
-      .totals{margin-top:14px;font-weight:700;font-size:13px;padding:8px;background:#E8DFCD;border-radius:4px;display:flex;justify-content:space-between;color:#0C0C0C;}
-      .disclaimer{font-size:10px;color:#8C8377;margin-top:18px;}
+      *{box-sizing:border-box;}
+      body{font-family:-apple-system,Helvetica,Arial,sans-serif;color:#0C0C0C;background:#F4EFE5;padding:32px 28px;max-width:820px;margin:0 auto;line-height:1.45;}
+      .doc-head{border-bottom:2px solid #C4922A;padding-bottom:10px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:flex-end;}
+      h1{font-size:22px;margin:0;letter-spacing:-0.01em;color:#0C0C0C;font-weight:700;}
+      .doc-meta{font-size:11px;color:#6A6155;text-align:right;line-height:1.4;}
+      h2{font-size:13px;margin:18px 0 10px;color:#5C4715;text-transform:uppercase;letter-spacing:0.08em;font-weight:700;}
+      .compound{border:1px solid #D6C7A1;padding:14px 16px;margin-bottom:10px;border-radius:6px;background:#FBF7EE;}
+      .cmpd-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+      .cmpd-name{font-weight:700;font-size:15px;color:#0C0C0C;letter-spacing:-0.005em;}
+      .cmpd-purpose{font-size:12px;color:#5C4715;font-style:italic;margin-bottom:8px;padding-bottom:6px;border-bottom:1px dashed #D6C7A1;}
+      .cmpd-grid{display:grid;grid-template-columns:1fr;gap:3px;}
+      .row{font-size:12px;color:#101010;display:flex;gap:6px;align-items:baseline;}
+      .lbl{font-weight:600;color:#5C4715;min-width:118px;flex-shrink:0;}
+      .val{color:#0C0C0C;}
+      .mono{font-family:'SF Mono','Monaco','Menlo',monospace;font-size:11.5px;}
+      .chip{font-size:10px;font-weight:700;padding:3px 9px;border-radius:10px;letter-spacing:0.08em;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      .chip-low{background:#1F8E7B;color:#FFFFFF;}
+      .chip-mid{background:#C4922A;color:#FFFFFF;}
+      .chip-high{background:#B5402A;color:#FFFFFF;}
+      .totals{margin-top:18px;padding:14px 16px;background:#E8DDC4;border-radius:6px;display:flex;justify-content:space-between;font-size:13px;font-weight:700;color:#0C0C0C;border:1px solid #C4922A;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      .totals .mono{font-family:'SF Mono','Monaco','Menlo',monospace;}
+      .disclaimer{font-size:10px;color:#8C8377;margin-top:22px;padding-top:10px;border-top:1px solid #D6C7A1;line-height:1.5;}
+      .footer{font-size:10px;color:#6A6155;margin-top:14px;text-align:center;}
+      @media print{ body{padding:18mm 14mm;background:#F4EFE5 !important;} @page{margin:0;size:Letter;} }
     </style></head><body>
-    <h1>Peptide Protocol</h1>
-    <div style="font-size:11px;color:#8C8377;">${new Date().toLocaleDateString()}</div>
-    <h2>Compounds</h2>
-    ${linesWithSupply.map(x => {
-      const ref = _lookupCompoundInfo(x.name);
-      const fullName = ref ? (ref.full_name || ref.name) : x.name;
-      let recon = 'Reconstitute per supplier instructions.';
-      if (ref && ref.reconstitution) recon = ref.reconstitution.plain_english || ref.reconstitution.steps || recon;
-      const timing = (ref && ref.dosing && ref.dosing.timing) ? ref.dosing.timing : '';
-      return `<div class="compound">
-        <div class="name">${fullName}</div>
-        <div class="row"><strong>Dose:</strong> ${x.doseNote || '—'}</div>
-        <div class="row"><strong>Reconstitution:</strong> ${recon}</div>
-        ${timing ? `<div class="row"><strong>Timing:</strong> ${timing}</div>` : ''}
-        <div class="row"><strong>Supply:</strong> ${x.qty}× / ${x.weeks.toFixed(1)} weeks · $${x.monthlyCost.toFixed(0)}/mo · $${x.cycleTotal.toFixed(0)} cycle</div>
-      </div>`;
-    }).join('')}
-    <div class="totals">
-      <span>Cycle total: $${linesWithSupply.reduce((s,x)=>s+x.cycleTotal,0).toFixed(0)}</span>
-      <span>Monthly cost: $${linesWithSupply.reduce((s,x)=>s+x.monthlyCost,0).toFixed(0)}/mo</span>
+    <div class="doc-head">
+      <h1>Peptide Protocol</h1>
+      <div class="doc-meta">
+        ${client?.name ? `<div><strong>${client.name}</strong></div>` : ''}
+        <div>${new Date().toLocaleDateString('en-CA', { year:'numeric', month:'long', day:'numeric' })}</div>
+        <div>Vitalis POS</div>
+      </div>
     </div>
-    <div class="disclaimer">For research purposes only. Not medical advice. Consult a physician before use.</div>
+    <h2>Compounds</h2>
+    ${compoundBlocks}
+    <div class="totals">
+      <span>Cycle total: <span class="mono">$${totalCycle.toFixed(0)}</span></span>
+      <span>Monthly cost: <span class="mono">$${totalMonthly.toFixed(0)}/mo</span></span>
+    </div>
+    <div class="disclaimer">
+      <strong>For research purposes only.</strong> Not medical advice. Consult a licensed physician before use. Doses listed are research-protocol-typical; final clinical decisions rest with the prescribing practitioner.
+    </div>
+    <div class="footer">Cornerstone Research Group · Vitalis Biosciences POS</div>
   </body></html>`;
   const w = window.open('', '_blank');
   if (!w) return showToast('Pop-up blocked — allow pop-ups to print protocol', 'error');
@@ -1416,6 +1583,18 @@ async function saveOrder() {
   }
 }
 
+// 2026-04-28 FIX (Marc: "print invoice doesnt work either"):
+// Root cause — the original implementation POSTed to `/api/pdf/order`, which is
+// an Express endpoint that only exists in the local dev backend. On the deployed
+// Netlify site there is NO `/api/pdf/order` function (see netlify.toml — only
+// `/api/submit-order` is wired). The fetch returned 404, threw, and silently
+// surfaced as "Error generating invoice PDF" toast. The user thought the button
+// did nothing.
+//
+// Fix: render the invoice fully client-side via window.open(), matching the
+// pattern used by Print Protocol. Same paper-friendly cream background, same
+// typography hierarchy. printInvoice is also exposed as a callable handler name.
+function printInvoice() { return printOrderPDF(); }
 async function printOrderPDF() {
   const clientId = document.getElementById('order-client').value;
   if (!clientId || orderLines.length === 0) return showToast('Complete the order first', 'error');
@@ -1427,43 +1606,123 @@ async function printOrderPDF() {
   const discount = subtotal * discountPct;
   const total = subtotal - discount;
 
-  // Pull smart-order protocol data (if smart mode enabled)
-  const smartData = (typeof SmartOrder !== 'undefined' && SmartOrder.getSnapshot) ? SmartOrder.getSnapshot() : null;
+  const orderNumber = 'INV-' + Date.now().toString().slice(-8);
+  const dateStr = new Date().toLocaleDateString('en-CA', { year:'numeric', month:'long', day:'numeric' });
+  const notes = (document.getElementById('order-notes')?.value || '').trim();
 
-  showToast('Generating Invoice PDF…', 'info');
+  // Build invoice line rows with per-line discount detail
+  const lineRows = orderLines.map(l => {
+    const qty = l.qty || 1;
+    const unit = l.msrp || 0;
+    const lineSubtotal = unit * qty;
+    const lineDiscountPct = l.discountPct || 0;
+    const lineDiscountAmt = lineSubtotal * (lineDiscountPct / 100);
+    const lineTotal = l.lineTotal || (lineSubtotal - lineDiscountAmt);
+    const exclusiveTag = l.isExclusive ? ' <span class="tag-excl">EXCL</span>' : '';
+    return `<tr>
+      <td class="td-name">${l.name}${exclusiveTag}<div class="td-sku">${l.sku || ''}</div></td>
+      <td class="td-mono center">${qty}</td>
+      <td class="td-mono right">$${unit.toFixed(2)}</td>
+      <td class="td-mono right">${lineDiscountPct ? '-' + lineDiscountPct + '%' : '—'}</td>
+      <td class="td-mono right strong">$${lineTotal.toFixed(2)}</td>
+    </tr>`;
+  }).join('');
 
-  const payload = {
-    orderNumber: 'INV-' + Date.now().toString().slice(-8),
-    client,
-    clientName: client?.name || 'Research Client',
-    lines: orderLines,
-    items: orderLines,
-    subtotal,
-    discount,
-    discountPct: discountPct * 100,
-    discountLabel: discountPct > 0 ? `${(discountPct*100).toFixed(0)}% Off` : '',
-    total,
-    finalTotal: total,
-    notes: document.getElementById('order-notes')?.value || '',
-    date: new Date().toISOString(),
-    cycleWeeks: smartData?.cycleWeeks || null,
-    doseLevel: smartData?.doseLevel || null,
-    timeline: smartData?.timeline || null,
-    monthlyCost: smartData?.monthlyCost || null
-  };
+  const exclusiveSubtotal = orderLines.reduce((s, l) => s + (l.isExclusive ? (l.lineTotal || l.msrp * l.qty) : 0), 0);
+  const discountableNote = discountPct > 0 && exclusiveSubtotal > 0
+    ? '<div class="totals-note">Order discount excludes pens / sprays / KLOW (exclusive items).</div>'
+    : '';
 
-  try {
-    const res = await fetch('/api/pdf/order', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) throw new Error('PDF failed');
-    const blob = await res.blob();
-    window.open(URL.createObjectURL(blob), '_blank');
-  } catch (e) {
-    showToast('Error generating invoice PDF', 'error');
-  }
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Invoice ${orderNumber}</title>
+    <style>
+      *{box-sizing:border-box;}
+      body{font-family:-apple-system,Helvetica,Arial,sans-serif;color:#0C0C0C;background:#F4EFE5;padding:32px 28px;max-width:820px;margin:0 auto;line-height:1.45;}
+      .doc-head{border-bottom:2px solid #C4922A;padding-bottom:14px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:flex-end;}
+      .brand h1{font-size:24px;margin:0 0 4px;letter-spacing:-0.01em;color:#0C0C0C;font-weight:700;}
+      .brand .tag{font-size:11px;color:#5C4715;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;}
+      .doc-meta{font-size:11px;color:#6A6155;text-align:right;line-height:1.6;}
+      .doc-meta .num{font-family:'SF Mono','Monaco','Menlo',monospace;font-size:13px;font-weight:700;color:#0C0C0C;}
+      .bill-block{background:#FBF7EE;border:1px solid #D6C7A1;border-radius:6px;padding:12px 14px;margin-bottom:18px;font-size:12px;color:#101010;}
+      .bill-block .lbl{font-size:10px;color:#5C4715;text-transform:uppercase;letter-spacing:0.08em;font-weight:700;margin-bottom:4px;}
+      .bill-block .name{font-size:14px;font-weight:700;color:#0C0C0C;margin-bottom:2px;}
+      h2{font-size:13px;margin:0 0 10px;color:#5C4715;text-transform:uppercase;letter-spacing:0.08em;font-weight:700;}
+      table.invoice{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:18px;}
+      table.invoice thead th{background:#E8DDC4;color:#5C4715;text-align:left;padding:8px 10px;border-bottom:2px solid #C4922A;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      table.invoice thead th.center{text-align:center;}
+      table.invoice thead th.right{text-align:right;}
+      table.invoice tbody td{padding:9px 10px;border-bottom:1px solid #E0D5B7;vertical-align:top;}
+      .td-name{color:#0C0C0C;font-weight:600;}
+      .td-sku{font-size:10px;color:#6A6155;font-weight:400;margin-top:2px;font-family:'SF Mono','Monaco','Menlo',monospace;}
+      .td-mono{font-family:'SF Mono','Monaco','Menlo',monospace;}
+      .center{text-align:center;}
+      .right{text-align:right;}
+      .strong{font-weight:700;}
+      .tag-excl{display:inline-block;font-size:9px;font-weight:700;background:#5C4715;color:#FBF7EE;padding:2px 6px;border-radius:3px;letter-spacing:0.08em;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      .totals-block{margin-left:auto;width:340px;font-size:12px;}
+      .totals-row{display:flex;justify-content:space-between;padding:6px 10px;border-bottom:1px solid #E0D5B7;}
+      .totals-row .lbl{color:#5C4715;}
+      .totals-row .val{font-family:'SF Mono','Monaco','Menlo',monospace;font-weight:600;color:#0C0C0C;}
+      .totals-row.discount .val{color:#B5402A;}
+      .totals-row.grand{background:#E8DDC4;border-radius:0 0 6px 6px;padding:12px 10px;margin-top:4px;border-bottom:none;font-size:14px;font-weight:700;border:1px solid #C4922A;border-top:2px solid #C4922A;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+      .totals-row.grand .val{color:#0C0C0C;font-size:15px;}
+      .totals-note{font-size:10px;color:#8C8377;font-style:italic;margin-top:6px;text-align:right;padding:0 10px;}
+      .notes{margin-top:18px;background:#FBF7EE;border:1px solid #D6C7A1;border-radius:6px;padding:12px 14px;font-size:11.5px;color:#101010;}
+      .notes .lbl{font-size:10px;color:#5C4715;text-transform:uppercase;letter-spacing:0.08em;font-weight:700;margin-bottom:4px;}
+      .disclaimer{font-size:10px;color:#8C8377;margin-top:22px;padding-top:10px;border-top:1px solid #D6C7A1;line-height:1.5;}
+      .footer{font-size:10px;color:#6A6155;margin-top:14px;text-align:center;}
+      @media print{ body{padding:18mm 14mm;background:#F4EFE5 !important;} @page{margin:0;size:Letter;} }
+    </style></head><body>
+    <div class="doc-head">
+      <div class="brand">
+        <h1>Invoice</h1>
+        <div class="tag">Vitalis Biosciences POS</div>
+      </div>
+      <div class="doc-meta">
+        <div class="num">${orderNumber}</div>
+        <div>${dateStr}</div>
+        <div>Cornerstone Research Group</div>
+      </div>
+    </div>
+
+    <div class="bill-block">
+      <div class="lbl">Bill to</div>
+      <div class="name">${client?.name || 'Research Client'}</div>
+      ${client?.email ? `<div>${client.email}</div>` : ''}
+      ${client?.phone ? `<div>${client.phone}</div>` : ''}
+    </div>
+
+    <h2>Order detail</h2>
+    <table class="invoice">
+      <thead><tr>
+        <th>Product</th>
+        <th class="center">Qty</th>
+        <th class="right">Unit</th>
+        <th class="right">Disc</th>
+        <th class="right">Line total</th>
+      </tr></thead>
+      <tbody>${lineRows}</tbody>
+    </table>
+
+    <div class="totals-block">
+      <div class="totals-row"><span class="lbl">Subtotal</span><span class="val">$${subtotal.toFixed(2)}</span></div>
+      ${discountPct > 0 ? `<div class="totals-row discount"><span class="lbl">Discount (${(discountPct*100).toFixed(0)}%)</span><span class="val">-$${discount.toFixed(2)}</span></div>` : ''}
+      <div class="totals-row grand"><span class="lbl">Total due</span><span class="val">$${total.toFixed(2)}</span></div>
+      ${discountableNote}
+    </div>
+
+    ${notes ? `<div class="notes"><div class="lbl">Notes</div>${notes.replace(/\n/g, '<br>')}</div>` : ''}
+
+    <div class="disclaimer">
+      <strong>For research purposes only.</strong> Not medical advice. Products listed are research-grade compounds. Consult a licensed physician before use.
+    </div>
+    <div class="footer">Cornerstone Research Group · Vitalis Biosciences POS · Invoice ${orderNumber}</div>
+  </body></html>`;
+
+  const w = window.open('', '_blank');
+  if (!w) return showToast('Pop-up blocked — allow pop-ups to print invoice', 'error');
+  w.document.write(html);
+  w.document.close();
+  setTimeout(() => { try { w.print(); } catch(e){} }, 300);
 }
 
 // ─── Protocol Generator ──────────────────────────────────────
