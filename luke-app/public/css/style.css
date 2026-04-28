@@ -1622,13 +1622,14 @@ textarea.form-control { resize: vertical; min-height: 70px; }
 .klow-opt-sub { font-size:10px; color:var(--muted2); }
 
 /* GANTT — supply-aware */
-.gantt-active { background:rgba(62,207,142,.25) !important; }
-.gantt-extended { background:rgba(100,140,180,0.35) !important; border-right:1px solid rgba(100,140,180,0.5) !important; }
-.gantt-last { border-right:2px solid rgba(62,207,142,.6) !important; }
+.gantt-active { background:rgba(61,214,140,.25) !important; }
+/* Leftover supply (extends past cycle end). Garvis canon: muted gold-dim, not navy. */
+.gantt-extended { background:rgba(143,107,32,0.35) !important; border-right:1px solid rgba(196,146,42,0.45) !important; }
+.gantt-last { border-right:2px solid rgba(61,214,140,.6) !important; }
 .gantt-warning { background:rgba(249,115,22,.35) !important; font-size:9px; text-align:center; color:#fdba74; }
 .gantt-cell { background:var(--surface); height:24px; min-width:32px; }
 .gantt-runout { font-size:9px; font-weight:700; color:var(--red); margin-left:6px; }
-.gantt-extended-label { font-size:9px; font-weight:600; color:#6a9cc8; margin-left:6px; opacity:0.8; }
+.gantt-extended-label { font-size:9px; font-weight:600; color:var(--gold-bright); margin-left:6px; opacity:0.8; }
 .gantt-wk-ext { color:var(--muted2); opacity:0.5; font-style:italic; }
 .gantt-wk-end { border-right:2px solid rgba(62,207,142,.5); }
 .gantt-add-btn { font-size:9px; font-weight:700; background:rgba(62,207,142,.15); border:1px solid rgba(62,207,142,.3); color:var(--green); padding:1px 6px; border-radius:99px; cursor:pointer; font-family:inherit; margin-left:4px; }
@@ -1761,8 +1762,8 @@ textarea.form-control { resize: vertical; min-height: 70px; }
   /* Make gantt readable in print */
   .gantt-scroll { overflow: visible !important; }
   .gantt-table { width: 100% !important; font-size: 9px !important; }
-  .gantt-active { background: #2d8a4e !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .gantt-extended { background: #6a9cc8 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .gantt-active { background: #3DD68C !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .gantt-extended { background: #8F6B20 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 
   /* Print header */
   #stack-result-content::before {

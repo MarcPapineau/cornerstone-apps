@@ -792,7 +792,7 @@ function renderOrderLines() {
 
     // 2026-04-27 FIX (BUG #4): show mg in the row header next to product name.
     const mgValue = l.totalMg || l.mg || null;
-    const mgChip = mgValue ? ` <span class="product-mg-chip" style="background:#C4922A;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;margin-left:6px;">${mgValue}mg</span>` : '';
+    const mgChip = mgValue ? ` <span class="product-mg-chip" style="background:var(--gold);color:var(--ink);font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;margin-left:6px;">${mgValue}mg</span>` : '';
 
     return `<tr>
       <td><div class="product-name" onclick="openCompound('${l.id}')" title="Click for dosing guide">${l.name}${mgChip} <span style="font-size:10px;color:var(--text-muted)">ℹ</span></div><div class="product-sku">${l.sku}</div>${discountHtml}${supplyHtml}${benefitsHtml}</td>
@@ -875,7 +875,7 @@ function renderSupplyPanel() {
     const cyclePct = cycleWeeks > 0 ? Math.min(100, Math.round((x.weeks / cycleWeeks) * 100)) : 0;
     return `<div class="gantt-row" style="display:grid;grid-template-columns:120px 1fr 170px;align-items:center;gap:8px;padding:6px 0;">
       <div class="gantt-name" title="${x.name}" style="font-size:12px;font-weight:600;">${x.name.length > 16 ? x.name.substring(0,15)+'…' : x.name}</div>
-      <div class="gantt-bar-wrap" style="position:relative;background:#f3f4f6;border-radius:4px;height:18px;overflow:hidden;">
+      <div class="gantt-bar-wrap" style="position:relative;background:var(--surface-2);border-radius:4px;height:18px;overflow:hidden;">
         <div class="gantt-bar" style="position:absolute;left:${offsetPct.toFixed(2)}%;width:${barPct.toFixed(2)}%;height:100%;background:${barColor};border-radius:4px;min-width:2px;"></div>
       </div>
       <div class="gantt-meta" style="display:flex;gap:6px;justify-content:flex-end;font-size:11px;align-items:center;">
@@ -936,17 +936,17 @@ function renderSupplyPanel() {
       </span>
       <div class="cycle-controls" style="display:flex;gap:6px;align-items:center;">
         <select onchange="setCycleWeeks(this.value)" title="Set cycle window length"
-          style="padding:4px 8px;border:1px solid #d1d5db;background:#fff;border-radius:4px;font-weight:600;font-size:11px;">
+          style="padding:4px 8px;border:1px solid var(--border-2);background:var(--surface-2);color:var(--bone);border-radius:4px;font-weight:600;font-size:11px;">
           ${cycleOptions}
         </select>
         <button onclick="shiftCycleStart(-4)" title="Shift cycle start back 4 weeks"
-          style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-weight:700;">&larr;&larr;</button>
+          style="padding:4px 10px;border:1px solid var(--border-2);background:var(--surface-2);color:var(--bone);border-radius:4px;cursor:pointer;font-weight:700;">&larr;&larr;</button>
         <button onclick="shiftCycleStart(-1)" title="Shift cycle start back 1 week"
-          style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-weight:700;">&larr;</button>
+          style="padding:4px 10px;border:1px solid var(--border-2);background:var(--surface-2);color:var(--bone);border-radius:4px;cursor:pointer;font-weight:700;">&larr;</button>
         <button onclick="shiftCycleStart(1)" title="Shift cycle start forward 1 week"
-          style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-weight:700;">&rarr;</button>
+          style="padding:4px 10px;border:1px solid var(--border-2);background:var(--surface-2);color:var(--bone);border-radius:4px;cursor:pointer;font-weight:700;">&rarr;</button>
         <button onclick="shiftCycleStart(4)" title="Shift cycle start forward 4 weeks"
-          style="padding:4px 10px;border:1px solid #d1d5db;background:#fff;border-radius:4px;cursor:pointer;font-weight:700;">&rarr;&rarr;</button>
+          style="padding:4px 10px;border:1px solid var(--border-2);background:var(--surface-2);color:var(--bone);border-radius:4px;cursor:pointer;font-weight:700;">&rarr;&rarr;</button>
       </div>
     </div>
     <div class="gantt-chart" style="margin:10px 0;position:relative;">
@@ -960,7 +960,7 @@ function renderSupplyPanel() {
       <!-- Week-axis ruler -->
       <div style="display:grid;grid-template-columns:120px 1fr 170px;gap:8px;margin-top:6px;">
         <div></div>
-        <div style="position:relative;height:16px;border-top:1px solid #e5e7eb;">
+        <div style="position:relative;height:16px;border-top:1px solid var(--border);">
           ${ticksHtml}
         </div>
         <div></div>
@@ -984,7 +984,7 @@ function renderSupplyPanel() {
     </div>
     <div class="protocol-toggle-row" style="margin-top:10px;text-align:center;">
       <button onclick="toggleProtocolPanel()" id="protocol-toggle-btn"
-        style="padding:8px 18px;background:#C4922A;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;">
+        style="padding:8px 18px;background:var(--gold);color:var(--ink);border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;">
         ${orderState.showProtocol ? 'Hide Protocol' : 'Show Protocol'}
       </button>
     </div>
@@ -1025,11 +1025,11 @@ function renderOrderProtocolPanel(linesWithSupply) {
     const timing = (ref && ref.dosing && ref.dosing.timing) ? ref.dosing.timing : (ref && ref.timing) || '—';
     const supplyLine = `Supply: ${line.qty}× = ${line.weeks.toFixed(1)} weeks at this dose. Monthly cost: $${line.monthlyCost.toFixed(0)}.`;
     return `
-      <div class="protocol-compound-card" style="border:1px solid #e5e7eb;border-radius:6px;padding:10px 12px;margin-bottom:8px;background:#fff;">
-        <div style="font-weight:700;font-size:13px;color:#111827;margin-bottom:4px;">${fullName}</div>
-        <div style="font-size:12px;color:#374151;margin-bottom:3px;"><strong>Dose:</strong> ${dose}</div>
-        <div style="font-size:12px;color:#374151;margin-bottom:3px;"><strong>Reconstitution:</strong> ${recon}</div>
-        <div style="font-size:12px;color:#374151;margin-bottom:3px;"><strong>Timing:</strong> ${timing}</div>
+      <div class="protocol-compound-card" style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:8px;background:var(--surface);">
+        <div style="font-weight:700;font-size:13px;color:var(--bone);margin-bottom:4px;">${fullName}</div>
+        <div style="font-size:12px;color:var(--bone-dim);margin-bottom:3px;"><strong>Dose:</strong> ${dose}</div>
+        <div style="font-size:12px;color:var(--bone-dim);margin-bottom:3px;"><strong>Reconstitution:</strong> ${recon}</div>
+        <div style="font-size:12px;color:var(--bone-dim);margin-bottom:3px;"><strong>Timing:</strong> ${timing}</div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">${supplyLine}</div>
       </div>`;
   }).join('');
@@ -1057,12 +1057,12 @@ function renderOrderProtocolPanel(linesWithSupply) {
     <div class="order-protocol-pane" style="border:1px solid var(--border);border-radius:4px;padding:12px;background:var(--surface);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
         <div style="font-weight:700;font-size:13px;color:var(--bone);letter-spacing:0.1em;text-transform:uppercase;">Generated Protocol</div>
-        <button onclick="printOrderProtocol()" style="padding:6px 14px;background:var(--gold);color:#0c0c0c;border:none;border-radius:3px;cursor:pointer;font-weight:700;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;">Print Protocol</button>
+        <button onclick="printOrderProtocol()" style="padding:6px 14px;background:var(--gold);color:var(--ink);border:none;border-radius:3px;cursor:pointer;font-weight:700;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;">Print Protocol</button>
       </div>
       <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">For research purposes only. Not medical advice.</div>
       ${synergyHtml}
       ${compoundCards}
-      <div style="display:flex;justify-content:space-between;padding:10px;background:#fff;border-top:2px solid #e5e7eb;border-radius:0 0 6px 6px;font-size:12px;font-weight:700;">
+      <div style="display:flex;justify-content:space-between;padding:10px;background:var(--surface-2);border-top:2px solid var(--border-2);border-radius:0 0 6px 6px;font-size:12px;font-weight:700;color:var(--bone);">
         <span>Cycle total: <span style="color:var(--green);">$${totalCycle.toFixed(0)}</span></span>
         <span>Monthly cost: <span style="color:var(--gold);">$${totalMonthly.toFixed(0)}/mo</span></span>
       </div>
@@ -1082,17 +1082,17 @@ function printOrderProtocol() {
   }).filter(Boolean);
   const html = `<!doctype html><html><head><title>Protocol</title>
     <style>
-      body{font-family:-apple-system,Helvetica,Arial,sans-serif;color:#111;padding:24px;max-width:800px;margin:0 auto;}
-      h1{font-size:18px;margin:0 0 6px;}
-      h2{font-size:14px;margin:18px 0 8px;border-bottom:1px solid #ccc;padding-bottom:4px;}
-      .compound{border:1px solid #ccc;padding:10px;margin-bottom:8px;border-radius:4px;}
-      .compound .name{font-weight:700;font-size:13px;margin-bottom:4px;}
-      .compound .row{font-size:12px;margin-bottom:2px;}
-      .totals{margin-top:14px;font-weight:700;font-size:13px;padding:8px;background:#f3f4f6;border-radius:4px;display:flex;justify-content:space-between;}
-      .disclaimer{font-size:10px;color:#666;margin-top:18px;}
+      body{font-family:-apple-system,Helvetica,Arial,sans-serif;color:#0C0C0C;background:#F0EBE1;padding:24px;max-width:800px;margin:0 auto;}
+      h1{font-size:18px;margin:0 0 6px;color:#0C0C0C;}
+      h2{font-size:14px;margin:18px 0 8px;border-bottom:1px solid #C4922A;padding-bottom:4px;color:#0C0C0C;}
+      .compound{border:1px solid #C4922A;padding:10px;margin-bottom:8px;border-radius:4px;background:#F0EBE1;}
+      .compound .name{font-weight:700;font-size:13px;margin-bottom:4px;color:#0C0C0C;}
+      .compound .row{font-size:12px;margin-bottom:2px;color:#101010;}
+      .totals{margin-top:14px;font-weight:700;font-size:13px;padding:8px;background:#E8DFCD;border-radius:4px;display:flex;justify-content:space-between;color:#0C0C0C;}
+      .disclaimer{font-size:10px;color:#8C8377;margin-top:18px;}
     </style></head><body>
     <h1>Peptide Protocol</h1>
-    <div style="font-size:11px;color:#666;">${new Date().toLocaleDateString()}</div>
+    <div style="font-size:11px;color:#8C8377;">${new Date().toLocaleDateString()}</div>
     <h2>Compounds</h2>
     ${linesWithSupply.map(x => {
       const ref = _lookupCompoundInfo(x.name);
@@ -1638,7 +1638,7 @@ async function openClientDetail(clientId, clientName) {
           <div style="font-size:10px;color:var(--muted)">Total Spent</div>
         </div>
         <div style="background:var(--card2);border-radius:8px;padding:12px;text-align:center">
-          <div style="font-size:20px;font-weight:800;color:var(--blue)">${protocols.length}</div>
+          <div style="font-size:20px;font-weight:800;color:var(--gold-bright);">${protocols.length}</div>
           <div style="font-size:10px;color:var(--muted)">Protocols</div>
         </div>
       </div>
@@ -2029,9 +2029,9 @@ async function loadRenewalAlerts() {
     }
 
     const urgencyConfig = {
-      LIKELY_OUT:  { label: 'LIKELY OUT',  color: '#ef4444', bg: 'rgba(239,68,68,0.12)' },
-      RUNNING_LOW: { label: 'RUNNING LOW', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
-      FOLLOW_UP:   { label: 'FOLLOW UP',   color: '#3ecf8e', bg: 'rgba(62,207,142,0.12)' }
+      LIKELY_OUT:  { label: 'LIKELY OUT',  color: 'var(--red)',         bg: 'rgba(224,112,112,0.12)' },
+      RUNNING_LOW: { label: 'RUNNING LOW', color: 'var(--gold-bright)', bg: 'rgba(226,176,74,0.12)' },
+      FOLLOW_UP:   { label: 'FOLLOW UP',   color: 'var(--green)',       bg: 'rgba(61,214,140,0.12)' }
     };
 
     container.innerHTML = renewals.map(r => {
@@ -2043,7 +2043,7 @@ async function loadRenewalAlerts() {
             <div class="renewal-meta">${r.daysSince} days since order · Last: ${r.orderDate}</div>
           </div>
           <div class="renewal-center">
-            <span class="renewal-badge" style="background:${cfg.color};color:#020d06">${cfg.label}</span>
+            <span class="renewal-badge" style="background:${cfg.color};color:var(--ink);">${cfg.label}</span>
           </div>
           <div class="renewal-actions">
             <button class="btn-call" onclick="callClient('${r.clientName}', '${r.urgency}')">📞 Call</button>
@@ -2351,7 +2351,8 @@ function renderTierCards() {
   const s = stackState.selectedStack;
   const container = document.getElementById('tier-cards');
   const tiers = ['basic', 'intermediate', 'advanced'];
-  const colors = ['#3ecf8e', '#c8a84b', '#ef4444'];
+  // Tier card top-border colors — Garvis canon: green (basic) / gold (intermediate) / red (advanced)
+  const colors = ['var(--green)', 'var(--gold)', 'var(--red)'];
   container.innerHTML = tiers.map((t, i) => {
     const td = s.tiers[t];
     if (!td) return '';
@@ -2548,7 +2549,7 @@ function renderStackResult(data) {
               <label class="klow-option klow-option-discontinued" style="opacity:0.45;cursor:not-allowed;">
                 <input type="radio" name="klow-format" value="pen" disabled>
                 <div class="klow-opt-content">
-                  <span class="klow-opt-title">🖊️ KLOW Pen <span style="color:#e55;font-size:0.8em;font-weight:600;">(Unavailable — Discontinued)</span></span>
+                  <span class="klow-opt-title">🖊️ KLOW Pen <span style="color:var(--red);font-size:0.8em;font-weight:600;">(Unavailable — Discontinued)</span></span>
                   <span class="klow-opt-sub" style="text-decoration:line-through;">All 4 compounds in 1 pen · 1 injection · most convenient</span>
                 </div>
               </label>
@@ -2871,7 +2872,7 @@ async function fetchAndRenderPricing(stackData, addons, klowFmt) {
             <div class="ps-lbl">Monthly Average</div>
           </div>
           <div class="price-stat">
-            <div class="ps-val" style="color:var(--blue,#60a5fa)">${p.cycleMonths} months</div>
+            <div class="ps-val" style="color:var(--gold-bright);">${p.cycleMonths} months</div>
             <div class="ps-lbl">${p.cycleCategory}</div>
           </div>
         </div>
@@ -3679,14 +3680,14 @@ async function runSymptomSearch() {
     const data = await resp.json();
 
     if (!data.ok || !data.result) {
-      resultsEl.innerHTML = `<div style="color:#e05a7a;padding:20px">Something went wrong. Please try again.</div>`;
+      resultsEl.innerHTML = `<div style="color:var(--red);padding:20px">Something went wrong. Please try again.</div>`;
       return;
     }
 
     renderSymptomResults(query, data.result);
 
   } catch (err) {
-    resultsEl.innerHTML = `<div style="color:#e05a7a;padding:20px">Connection error. Please check your connection and try again.</div>`;
+    resultsEl.innerHTML = `<div style="color:var(--red);padding:20px">Connection error. Please check your connection and try again.</div>`;
   } finally {
     btn.disabled = false;
     btnText.textContent = 'Find Compounds →';
@@ -3696,11 +3697,12 @@ async function runSymptomSearch() {
 function renderSymptomResults(query, result) {
   const el = document.getElementById('symptom-results');
 
-  const priorityColour = { Primary: '#d4af37', Supporting: '#7ac97a', Optional: '#818cf8' };
+  // Garvis canon: Primary = gold, Supporting = green, Optional = bone-dim
+  const priorityColour = { Primary: 'var(--gold)', Supporting: 'var(--green)', Optional: 'var(--bone-dim)' };
   const priorityEmoji  = { Primary: '⭐', Supporting: '➕', Optional: '💡' };
 
   const cards = (result.compounds || []).map((c, i) => {
-    const colour = priorityColour[c.priority] || '#d4af37';
+    const colour = priorityColour[c.priority] || 'var(--gold)';
     const emoji  = priorityEmoji[c.priority]  || '⭐';
     const tags   = (c.tags || []).map(t => `<span class="ss-tag">${t}</span>`).join('');
     return `
@@ -3740,17 +3742,17 @@ function switchOrderTab(tab) {
   if (tab === 'browse') {
     browsePanel.style.display = '';
     goalsPanel.style.display  = 'none';
-    browseBtn.style.borderBottom = '2px solid #C4922A';
-    browseBtn.style.color        = '#C4922A';
+    browseBtn.style.borderBottom = '2px solid var(--gold)';
+    browseBtn.style.color        = 'var(--gold)';
     goalsBtn.style.borderBottom  = '2px solid transparent';
-    goalsBtn.style.color         = '#545454';
+    goalsBtn.style.color         = 'var(--muted)';
   } else {
     browsePanel.style.display = 'none';
     goalsPanel.style.display  = '';
-    goalsBtn.style.borderBottom  = '2px solid #C4922A';
-    goalsBtn.style.color         = '#C4922A';
+    goalsBtn.style.borderBottom  = '2px solid var(--gold)';
+    goalsBtn.style.color         = 'var(--gold)';
     browseBtn.style.borderBottom = '2px solid transparent';
-    browseBtn.style.color        = '#545454';
+    browseBtn.style.color        = 'var(--muted)';
     if (!document.getElementById('bbg-goal-cards').children.length) {
       initBuildByGoal();
     }
@@ -3773,10 +3775,10 @@ function initBuildByGoal() {
   const grid = document.getElementById('bbg-goal-cards');
   grid.innerHTML = goals.map(g => `
     <div onclick='selectBbgGoal("${g.id}")'
-         style='cursor:pointer;background:#f5f7f9;border:2px solid #e0e6ea;border-radius:10px;padding:14px 10px;text-align:center;transition:border-color 0.2s;'
-         onmouseover='this.style.borderColor="#C4922A"' onmouseout='this.style.borderColor="#e0e6ea"'>
+         style='cursor:pointer;background:var(--surface-2);border:2px solid var(--border-2);border-radius:10px;padding:14px 10px;text-align:center;transition:border-color 0.2s;'
+         onmouseover='this.style.borderColor="var(--gold)"' onmouseout='this.style.borderColor="var(--border-2)"'>
       <div style='font-size:28px;margin-bottom:6px;'>${g.emoji}</div>
-      <div style='font-size:12px;font-weight:600;color:#1f2933;'>${g.label}</div>
+      <div style='font-size:12px;font-weight:600;color:var(--bone);'>${g.label}</div>
     </div>
   `).join('');
 }
@@ -3837,22 +3839,22 @@ function selectBbgGoal(goalId) {
 
     const list = document.getElementById('bbg-compound-list');
     if (!ranked.length) {
-      list.innerHTML = '<p style="color:#888;font-size:13px;">No compounds found for this goal.</p>';
+      list.innerHTML = '<p style="color:var(--muted);font-size:13px;">No compounds found for this goal.</p>';
       return;
     }
 
     list.innerHTML = ranked.map(({ name, relevance }) => {
       const isHigh = relevance === 'HIGH';
-      const badgeBg    = isHigh ? '#eaf6f8' : '#f5f7f9';
-      const badgeColor = isHigh ? '#C4922A' : '#888';
+      const badgeBg    = isHigh ? 'rgba(196,146,42,0.18)' : 'rgba(240,235,225,0.06)';
+      const badgeColor = isHigh ? 'var(--gold)' : 'var(--muted)';
       const safeName = name.replace(/"/g, '&quot;');
       return `
-        <div style='display:flex;align-items:center;justify-content:space-between;background:#fff;border:1px solid #e0e6ea;border-radius:8px;padding:10px 14px;'>
+        <div style='display:flex;align-items:center;justify-content:space-between;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;'>
           <div>
-            <span style='font-weight:600;font-size:14px;color:#1f2933;'>${name}</span>
+            <span style='font-weight:600;font-size:14px;color:var(--bone);'>${name}</span>
             <span style='margin-left:8px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;background:${badgeBg};color:${badgeColor};'>${relevance}</span>
           </div>
-          <button onclick='bbgAddCompound("${safeName}")' style='background:#C4922A;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:600;font-size:13px;'>Add</button>
+          <button onclick='bbgAddCompound("${safeName}")' style='background:var(--gold);color:var(--ink);border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:600;font-size:13px;'>Add</button>
         </div>
       `;
     }).join('');
@@ -3869,7 +3871,7 @@ function selectBbgGoal(goalId) {
       })
       .catch(() => {
         document.getElementById('bbg-compound-list').innerHTML =
-          '<p style="color:#c00;font-size:13px;">Failed to load stack library.</p>';
+          '<p style="color:var(--red);font-size:13px;">Failed to load stack library.</p>';
       });
   }
 }
@@ -3937,7 +3939,7 @@ async function appendStackSearchResults(query) {
           <div class="quick-result-stack" onclick="openStackDetail('${s.id}')">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;">
               <div class="qr-stack-name"><span class="qr-stack-emoji">${s.emoji || '🧬'}</span>${s.name}${draftBadge}</div>
-              <span style="font-size:13px;font-weight:800;color:#047857;">${price}</span>
+              <span style="font-size:13px;font-weight:800;color:var(--green);">${price}</span>
             </div>
             <div class="qr-stack-tagline">${s.tagline || ''}</div>
             ${matched ? `<div class="qr-stack-matched">Matches: ${matched}</div>` : ''}
@@ -3953,7 +3955,7 @@ async function openStackDetail(stackId) {
   const bodyEl   = document.getElementById('stack-detail-body');
   if (!modal) return;
   modal.classList.remove('hidden');
-  headerEl.innerHTML = '<div style="font-size:14px;color:#6b7280;">Loading stack…</div>';
+  headerEl.innerHTML = '<div style="font-size:14px;color:var(--muted);">Loading stack…</div>';
   bodyEl.innerHTML = '';
   let data;
   try {
@@ -3961,7 +3963,7 @@ async function openStackDetail(stackId) {
     if (!res.ok) throw new Error('not found');
     data = await res.json();
   } catch {
-    headerEl.innerHTML = '<div style="color:#b91c1c;">Stack not found.</div>';
+    headerEl.innerHTML = '<div style="color:var(--red);">Stack not found.</div>';
     return;
   }
   const s = data.stack;
@@ -4000,7 +4002,7 @@ async function openStackDetail(stackId) {
     ${s.draft ? '<div class="sd-draft-banner">⚠️ DRAFT — pending Marc\'s medical review. Doses, choices, and pricing are placeholders.</div>' : ''}
     <div class="sd-section">
       <h3>Use cases</h3>
-      <div class="sd-use-cases">${useCases || '<em style="color:#9ca3af">—</em>'}</div>
+      <div class="sd-use-cases">${useCases || '<em style="color:var(--muted);">—</em>'}</div>
     </div>
     <div class="sd-section">
       <h3>Compounds & dosing</h3>
