@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Habakkuk v1 — wrapper that ensures the workspace cwd is on PYTHONPATH
+# and forwards args to `python -m habakkuk.run`.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE="$(cd "$HERE/../.." && pwd)"
+export PYTHONPATH="${PYTHONPATH:-}:$WORKSPACE"
+
+exec python3 -m habakkuk.run "$@"
