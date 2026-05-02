@@ -160,6 +160,26 @@ const SUPPLY_ALIASES = {
   // Pen products bundling "CJC-1295 + Ipamorelin" resolve to the no-DAC paired entry (5x/wk, 0.5/1.0/1.5 mg/wk).
   'cjc1295': 'CJC-1295', 'cjc-1295': 'CJC-1295',
   'cjc1295dac': 'CJC-1295 DAC', 'cjc-1295-dac': 'CJC-1295 DAC', 'cjcdac': 'CJC-1295 DAC',
+  // 2026-05-01 (BUG E4 — Pen CJC-no-DAC silently dropping from supply matcher):
+  // Tokenizer at line 218 splits on `[+/&,\s]+` only — hyphens are NOT delimiters.
+  // "Pen CJC-no-DAC" → strip "Pen " → token "CJC-no-DAC" → normalize → "cjcnodac".
+  // SUPPLY_ALIASES had cjcdac/cjc1295dac/cjc1295 but NOT cjcnodac. Substring match
+  // on "cjcnodac" did not contain "cjc1295" (the canonical no-DAC SUPPLY_DOSING key
+  // at line 44), so resolver returned [] → null supply data → $333 SKU showed no
+  // dose tier or supply weeks. Aliases below normalize every reasonable input:
+  //   - "CJC-no-DAC"     → cjcnodac
+  //   - "cjc no dac"     → already split into ["cjc", "no", "dac"]; dac alone
+  //                        could mis-resolve, so we add 'nodac' for the
+  //                        2-tokens-survive-but-don't-form path
+  //   - "CJC-no-Dac"     → case-insensitive normalized → cjcnodac
+  // Wisdom: a pricing app that silently swallows a $333 SKU is worse than one
+  //         that errors loudly. Knowledge: tokenizer regex is the load-bearing
+  //         line; we cannot widen it without re-validating every other peptide.
+  // Understanding: aliases are the safe fix — they short-circuit the resolver
+  //                BEFORE the substring loop runs, with zero collateral.
+  // NOTE: lookup at line 225 is SUPPLY_ALIASES[_normalizeForMatch(token)] —
+  // norm strips everything except a-z0-9, so keys MUST be lowercase alphanumeric.
+  'cjcnodac': 'CJC-1295',  // covers "CJC-no-DAC", "cjc-no-dac", "CJCnoDAC" — all normalize to this
   'ghkcu': 'GHK-Cu', 'ghk-cu': 'GHK-Cu', 'skinglow': 'GHK-Cu', 'skin-glow': 'GHK-Cu',
   'ackpv': 'KPV', 'ac-kpv': 'KPV', 'kpvnh2': 'KPV', 'kpv-nh2': 'KPV',
   'reta': 'Retatrutide',

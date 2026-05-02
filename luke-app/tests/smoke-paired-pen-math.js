@@ -60,6 +60,18 @@ const cases = [
     { name: 'MOTS-C', totalMg: 15 }, 'mid', 1.5],
   ['MOTS-C 15mg pen HIGH (15mg/wk → 1w)',
     { name: 'MOTS-C', totalMg: 15 }, 'high', 1],
+  // 2026-05-01 BUG E4 — "Pen CJC-no-DAC" was silently returning null because
+  // the tokenizer at app.js:218 splits on [+/&,\s]+ only (no hyphens), so the
+  // single token "CJC-no-DAC" normalized to "cjcnodac" — which had no alias
+  // entry. SUPPLY_ALIASES['cjcnodac'] now routes to 'CJC-1295' (the no-DAC
+  // solo entry at line 44, dose tiers 0.5/1.0/1.5 mg/wk). At totalMg=30:
+  // low → 60w · mid → 30w · high → 20w.
+  ['Pen CJC-no-DAC 30mg LOW (E4 fix · 0.5mg/wk → 60w)',
+    { name: 'Pen CJC-no-DAC', totalMg: 30 }, 'low', 60],
+  ['Pen CJC-no-DAC 30mg MID (E4 fix · 1.0mg/wk → 30w)',
+    { name: 'Pen CJC-no-DAC', totalMg: 30 }, 'mid', 30],
+  ['Pen CJC-no-DAC 30mg HIGH (E4 fix · 1.5mg/wk → 20w)',
+    { name: 'Pen CJC-no-DAC', totalMg: 30 }, 'high', 20],
 ];
 
 let pass = 0;

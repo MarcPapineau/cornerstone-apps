@@ -4,9 +4,33 @@ import { useAuth } from '../context/AuthContext';
 
 // ── 5-step primary waterfall nav ────────────────────────────
 // FIX BUG-010: labels match page headers. Step 3 = Personalize (chat widget, no link)
+//
+// 2026-05-01 (BUG E5 — Protocol link goes to broken route):
+//   Previously the Protocol step pointed to '/protocol/' with `partial: true`.
+//   App.jsx route is `path="/protocol/:goal"` — React Router does NOT match
+//   '/protocol/' (trailing slash, missing :goal segment). Click → 404 fallback.
+//   Fix per dispatch: route Protocol step to '/goals' (which renders the same
+//   Landing page as '/' — see App.jsx:91-96). Goals page is the legitimate
+//   "pick a protocol" entry point; once user picks a goal, Landing navigates
+//   to '/protocol/<goal>' which DOES match the route. Match `partial: true`
+//   so deep routes like '/protocol/recovery' still highlight the Protocol step.
+//
+//   Step 3 (Personalize) is rendered inline as a non-link placeholder so the
+//   1→2→3→4→5 sequence reads cleanly and Marc's mental model stays intact.
+//   placeholder=true marks it as non-clickable; the renderer below skips
+//   the <Link> and renders a greyed <span> for placeholders.
+//
+//   Wisdom: a broken nav link is worse than a missing one — users blame
+//           themselves first. Knowledge: React Router 6 requires literal
+//           param-segment match, not trailing-slash partial. Understanding:
+//           '/goals' aliases Landing in App.jsx, so this is a zero-new-component
+//           fix; once a goal is selected, the existing flow continues unchanged.
 const WATERFALL_STEPS = [
   { to: '/',          label: '1 Goals',       step: 1 },
-  { to: '/protocol/', label: '2 Protocol',    step: 2, partial: true },
+  { to: '/goals',     label: '2 Protocol',    step: 2, partial: true,
+    activePathPrefix: '/protocol/' /* highlight when on /protocol/<goal> */ },
+  { to: null,         label: '3 Personalize', step: 3, placeholder: true,
+    title: 'Opens automatically on the Protocol page' },
   { to: '/build',     label: '4 Build',       step: 4 },
   { to: '/book',      label: '5 Book',        step: 5 },
 ];
@@ -33,6 +57,11 @@ export default function Nav() {
   const displayEmail = userEmail.length > 22 ? userEmail.slice(0, 20) + '…' : userEmail;
 
   const isActiveWaterfall = (link) => {
+    if (link.placeholder) return false;
+    // E5: when activePathPrefix is set (e.g. Protocol step routes to /goals
+    // but should highlight when user is on /protocol/<goal>), treat the prefix
+    // as the active-state matcher.
+    if (link.activePathPrefix && location.pathname.startsWith(link.activePathPrefix)) return true;
     if (link.partial) return location.pathname.startsWith(link.to);
     return location.pathname === link.to;
   };
@@ -63,6 +92,31 @@ export default function Nav() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '2px', flexWrap: 'nowrap' }} className="desktop-nav">
 
             {WATERFALL_STEPS.map(link => {
+              // E5: placeholder steps (e.g. step 3 Personalize) render as a
+              // non-clickable greyed <span> so the 1→2→3→4→5 sequence visually
+              // reads clean even when the step isn't independently routable.
+              if (link.placeholder) {
+                return (
+                  <span
+                    key={link.label}
+                    title={link.title || ''}
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: '8px',
+                      fontSize: '0.82rem',
+                      fontWeight: 500,
+                      whiteSpace: 'nowrap',
+                      color: '#475569',          // greyed
+                      background: 'transparent',
+                      border: '1px solid transparent',
+                      cursor: 'default',
+                      opacity: 0.7,
+                    }}
+                  >
+                    {link.label}
+                  </span>
+                );
+              }
               const active = isActiveWaterfall(link);
               return (
                 <Link
@@ -226,21 +280,41 @@ export default function Nav() {
             <div style={{ padding: '8px 0 4px', fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: '#475569' }}>
               Your Journey
             </div>
-            {WATERFALL_STEPS.map(link => (
-              <Link
-                key={link.to}
-                to={link.to}
-                onClick={() => setOpen(false)}
-                style={{
-                  display: 'block', padding: '12px 4px', fontSize: '0.95rem', fontWeight: 600,
-                  textDecoration: 'none',
-                  color: isActiveWaterfall(link) ? '#d4af37' : '#94a3b8',
-                  borderBottom: '1px solid rgba(255,255,255,0.04)',
-                }}
-              >
-                {link.label}
-              </Link>
-            ))}
+            {WATERFALL_STEPS.map(link => {
+              // E5: placeholder rows render as a greyed non-clickable <div>.
+              if (link.placeholder) {
+                return (
+                  <div
+                    key={link.label}
+                    title={link.title || ''}
+                    style={{
+                      display: 'block', padding: '12px 4px', fontSize: '0.95rem', fontWeight: 500,
+                      color: '#475569',
+                      opacity: 0.7,
+                      borderBottom: '1px solid rgba(255,255,255,0.04)',
+                      cursor: 'default',
+                    }}
+                  >
+                    {link.label}
+                  </div>
+                );
+              }
+              return (
+                <Link
+                  key={link.to}
+                  to={link.to}
+                  onClick={() => setOpen(false)}
+                  style={{
+                    display: 'block', padding: '12px 4px', fontSize: '0.95rem', fontWeight: 600,
+                    textDecoration: 'none',
+                    color: isActiveWaterfall(link) ? '#d4af37' : '#94a3b8',
+                    borderBottom: '1px solid rgba(255,255,255,0.04)',
+                  }}
+                >
+                  {link.label}
+                </Link>
+              );
+            })}
 
             <div style={{ padding: '12px 0 4px', fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: '#475569' }}>
               Library

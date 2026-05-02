@@ -829,6 +829,16 @@
 
 <script src="/js/stack-data-inline.js"></script>
 <script src="/js/app.js"></script>
+<!-- 2026-05-01 (E1 / E6 fix — order-ux-v2 was dead code in production):
+     order-ux-v2.js monkey-patches window.renderOrderLines and exposes
+     window.OrderUXv2 (Quick Stacks, auto-tier discount label, save-and-jump
+     to protocol, client autofill). Header comment specifies load order:
+     after app.js so renderOrderLines is defined before the patch runs.
+     Wisdom: tooling silent-failure is worse than loud breakage.
+     Knowledge: app.js declares renderOrderLines globally; module wraps it.
+     Understanding: with this tag in place, all UXv2 features fire on cart
+     mutation; without it, every UXv2 helper is unreachable. -->
+<script src="/js/modules/order-ux-v2.js"></script>
 <script src="/js/modules/compounds-data.js"></script>
 <script src="/js/modules/compounds-extra.js"></script>
 <script src="/js/modules/compare.js"></script>

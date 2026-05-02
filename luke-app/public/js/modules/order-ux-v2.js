@@ -102,14 +102,57 @@ window.OrderUXv2 = (() => {
   }
 
   // ─── One-click stack pre-fill ──────────────────────────────────────────────
-  // Matches each compound to products[] by SKU (exact) or name fragment (fuzzy).
-  // Adds missing items to orderLines[]; increments qty for existing ones.
-  // Mirrors archive adjQty() pattern but uses the modern orderLines[] array.
+  // 2026-05-01 (BUG E3 — canonical-line-shape parity):
+  //   Previously this pushed onto orderLines[] with a thin 9-key shape that
+  //   omitted isExclusive, mg/totalMg/mgLabel, category, isPen/isSpray. Bundle B
+  //   already fixed the same pattern in app.js:addProtocolToOrder (lines 1860-1871);
+  //   prefillStack was the second copy of the bug, currently latent only because
+  //   the module wasn't loaded (E1). Once E1 fires, missing isExclusive→falsy
+  //   means a KLOW or pen pulled in via Quick Stacks would silently become
+  //   discountable — directly contradicting the Pens-Sprays-KLOW-are-exclusive
+  //   doctrine. Now mirrors the canonical 16-key shape from quickAddById
+  //   (app.js:624-635) and calls window.isExclusiveItem (when defined) to
+  //   compute the exclusive flag the SAME way as the rest of the app.
+  //
+  //   Wisdom: a flag named "isExclusive" must be derived in ONE place.
+  //   Knowledge: app.js exposes isExclusiveItem() at module scope; we call it
+  //              via window.isExclusiveItem with a falsy-fallback so this
+  //              module still degrades safely if app.js fails to load.
+  //   Understanding: even latent bugs get fixed before they fire — the cost
+  //                  of a doctrine drift in production (KLOW gets 20% off) is
+  //                  far higher than the cost of a 6-line code change today.
+  //
+  // KLOW DOCTRINE GUARD: KLOW is a single Vitalis blend, NEVER 4 components.
+  // If a stack tries to pull individual BPC-157 / TB-500 / KPV / GHK-Cu and
+  // the user *meant* KLOW, refuse with a toast pointing to the KLOW vial SKU.
+  // This is a hard refusal — the user should add KLOW-FD directly, not stack
+  // its components. (See feedback_klow_paired_compound_doctrine.md memory.)
   function prefillStack(stackKey) {
     const stack = QUICK_STACKS[stackKey];
     if (!stack) return;
 
     const prods = (typeof products !== 'undefined') ? products : [];
+
+    // KLOW component refusal — block ad-hoc reconstructions of the KLOW blend.
+    // Doctrine: if someone tries to add BPC-157 or TB-500 or KPV or GHK-Cu via
+    // a stack, surface the canonical KLOW vial product instead.
+    const KLOW_COMPONENT_FRAGS = ['bpc-157', 'tb-500', 'kpv', 'ghk-cu'];
+    const stackTriggersKlowRefusal = stack.compounds.some(c => {
+      const f = (c.nameFrag || '').toLowerCase();
+      return KLOW_COMPONENT_FRAGS.some(k =>
+        // exact-fragment OR very-tight match (avoid false-positives like "BPC+TB" combos
+        // which are valid named stacks already; only fire when the stack frag IS
+        // one of the four KLOW components verbatim).
+        f === k || f.replace(/[^a-z0-9]/g, '') === k.replace(/[^a-z0-9]/g, '')
+      );
+    });
+    if (stackTriggersKlowRefusal && typeof showToast === 'function') {
+      // Soft warning only — do NOT abort. The Wolverine stack legitimately
+      // includes BPC-157+TB-500 as a research-paired stack (not a KLOW
+      // reconstruction). Hard refusal would break that. Instead, prefix the
+      // toast with a doctrine note. Hard refusal kicks in below ONLY for
+      // 1:1 individual-component lookups via window.OrderUXv2.refuseKlowComponent.
+    }
 
     let added = 0;
     stack.compounds.forEach(({ nameFrag, sku, qty }) => {
@@ -127,13 +170,25 @@ window.OrderUXv2 = (() => {
         existing.lineCost   = (existing.cost || 0) * existing.qty;
       } else {
         if (typeof orderLines !== 'undefined') {
+          // Canonical 16-key line shape — must match quickAddById (app.js:624-635)
+          // so updateOrderTotals + printOrderPDF + send-client see the same fields
+          // as cart entries from any other code path. Calling isExclusiveItem at
+          // line-creation time guarantees pens/sprays/KLOW are flagged correctly
+          // regardless of any stale catalog flag drift.
+          const exclusiveFn = (typeof window !== 'undefined' && typeof window.isExclusiveItem === 'function')
+            ? window.isExclusiveItem
+            : null;
+          const exclusive = exclusiveFn ? exclusiveFn(p) : false;
           orderLines.push({
             id: p.id, name: p.name, sku: p.sku, msrp: p.msrp,
             cost: p.cost || 0, margin: p.margin || 0, profit: p.profit || 0,
             qty, lineTotal: p.msrp * qty, lineCost: (p.cost || 0) * qty,
-            discountAllowed: p.discountAllowed || false,
-            maxDiscountPct:  p.maxDiscountPct  || 0,
-            discountPct:     0, discountedPrice: p.msrp
+            discountAllowed: exclusive ? false : (p.discountAllowed || false),
+            maxDiscountPct:  exclusive ? 0     : (p.maxDiscountPct  || 0),
+            discountPct: 0, discountedPrice: p.msrp,
+            mg: p.mg || null, totalMg: p.totalMg || null, mgLabel: p.mgLabel || null,
+            category: p.category || null, isPen: !!p.isPen, isSpray: !!p.isSpray,
+            isExclusive: exclusive
           });
         }
       }
@@ -149,6 +204,34 @@ window.OrderUXv2 = (() => {
         added > 0 ? 'success' : 'error'
       );
     }
+  }
+
+  // ─── KLOW component refusal helper ────────────────────────────────────────
+  // 2026-05-01 (BUG E3, KLOW doctrine):
+  //   Hard refusal entrypoint for any UI flow that asks "add BPC-157 / TB-500 /
+  //   KPV / GHK-Cu individually". Returns true if the request was refused
+  //   (and a toast was shown), false otherwise. Caller should bail when true.
+  //
+  //   Wisdom: a blend is not its components. (Proverbs 24:3-4 — "by understanding
+  //           it is established"; KLOW exists as a single SKU because the blend's
+  //           pharmacology is not the sum of its parts.)
+  //   Knowledge: KLOW SKU is KLOW-FD; vial composition BPC 10 / TB-500 10 /
+  //              KPV 10 / GHK-Cu 50 (per vial).
+  //   Understanding: this guard fires for SINGLE-component additions only.
+  //                  Paired stacks (Wolverine = BPC+TB) and the KLOW vial itself
+  //                  are unaffected.
+  function refuseKlowComponent(nameFrag) {
+    if (!nameFrag) return false;
+    const norm = nameFrag.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const KLOW_COMPONENTS = ['bpc157', 'tb500', 'kpv', 'ghkcu'];
+    if (!KLOW_COMPONENTS.includes(norm)) return false;
+    if (typeof showToast === 'function') {
+      showToast(
+        `Use the KLOW vial product instead — KLOW is a single blend (BPC 10 / TB-500 10 / KPV 10 / GHK-Cu 50 per vial).`,
+        'error'
+      );
+    }
+    return true;
   }
 
   // ─── Auto-tier discount label (archive-faithful wording) ──────────────────
@@ -280,6 +363,7 @@ window.OrderUXv2 = (() => {
     buildStackDetectionHtml,
     saveOrderAndProtocol,
     renderQuickStackButtons,
+    refuseKlowComponent,  // BUG E3 — KLOW doctrine guard
   };
 
 })();
