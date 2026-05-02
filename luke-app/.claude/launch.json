@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "luke-app",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js"],
+      "port": 3000
+    },
+    {
+      "name": "crg-command",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["-y", "http-server", "/Users/marcpapineau/.openclaw/workspace/cornerstoneregroup-site", "-p", "3737", "-c-1", "--cors"],
+      "port": 3737
+    },
+    {
+      "name": "peptide-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["-y", "http-server", "/Users/marcpapineau/.openclaw/workspace/peptide-resource-app/dist", "-p", "4174", "-c-1", "--cors"],
+      "port": 4174
+    }
+  ]
+}

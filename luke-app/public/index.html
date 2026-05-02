@@ -1,0 +1,2113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MyBioYouth</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<nav class="navbar">
+  <div class="nav-brand"><img src='https://mybioyouth.com/wp-content/uploads/mby-logo-black.png' height='32' alt='MyBioYouth' style='vertical-align:middle;margin-right:8px;'> MyBioYouth</div>
+  <div class="nav-links">
+    <a href="#dashboard" class="nav-link active" onclick="showPage('dashboard')">Dashboard</a>
+    <a href="#order" class="nav-link" onclick="showPage('order')">New Order</a>
+    <a href="#protocol" class="nav-link" onclick="showPage('protocol')">Protocol</a>
+    <a href="#diet" class="nav-link" onclick="showPage('diet')">Diet Plan</a>
+    <a href="#compounds" class="nav-link" onclick="showPage('compounds')">Compounds</a>
+    <a href="#clients" class="nav-link" onclick="showPage('clients')">Clients</a>
+    <a href="#history" class="nav-link" onclick="showPage('history')">History</a>
+    <a href="#stacks" class="nav-link" onclick="showPage('stacks')">🧬 Stacks</a>
+    <a href="#catalog" class="nav-link" onclick="showPage('catalog')">📋 Catalog</a>
+    <a href="#highlights" class="nav-link" onclick="showPage('highlights')">✨ Highlights</a>
+    <a href="#symptom-search" class="nav-link" onclick="showPage('symptom-search')">🔍 Find Compounds</a>
+    <a href="#compare" class="nav-link" onclick="showPage('compare')">⚖️ Compare</a>
+    <a href="#pos" class="nav-link" onclick="showPage('pos')">🛒 POS</a>
+  </div>
+</nav>
+
+<!-- DASHBOARD -->
+<div id="page-dashboard" class="page active">
+  <div class="page-header">
+    <h1>MyBioYouth</h1>
+    <p class="subtitle">Internal Operations — For research purposes only.</p>
+  </div>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-number" id="stat-clients">—</div>
+      <div class="stat-label">Clients</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" id="stat-orders">—</div>
+      <div class="stat-label">Orders</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" id="stat-protocols">—</div>
+      <div class="stat-label">Protocols</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" id="stat-products">—</div>
+      <div class="stat-label">Products</div>
+    </div>
+  </div>
+  <div class="action-grid">
+    <button class="action-btn primary" onclick="showPage('order')">🛒 New Order</button>
+    <button class="action-btn secondary" onclick="showPage('protocol')">🔬 New Protocol</button>
+    <button class="action-btn tertiary" onclick="showPage('clients')">👥 Clients</button>
+    <button class="action-btn tertiary" onclick="showPage('history')">📋 Order History</button>
+  </div>
+
+  <!-- QUICK STACKS -->
+  <div class="section quick-stacks-section">
+    <h2>⚡ Quick Stacks</h2>
+    <p class="section-sub">One-click order pre-fill for top bundles</p>
+    <div class="quick-stacks-grid">
+      <button class="quick-stack-btn" onclick="quickOrderStack('wolverine')">🦾 Wolverine Stack</button>
+      <button class="quick-stack-btn" onclick="quickOrderStack('hollywood')">🎬 Hollywood Shred</button>
+      <button class="quick-stack-btn" onclick="quickOrderStack('longevity')">🌿 Longevity Protocol</button>
+      <button class="quick-stack-btn" onclick="quickOrderStack('libido')">❤️ Libido Lift</button>
+      <button class="quick-stack-btn" onclick="quickOrderStack('goddess')">✨ Goddess Protocol</button>
+      <button class="quick-stack-btn" onclick="quickOrderStack('metabolic')">🔥 Metabolic Reset</button>
+    </div>
+  </div>
+
+  <!-- RENEWAL ALERTS -->
+  <div class="section">
+    <h2>🔔 Renewal Alerts</h2>
+    <div id="renewal-alerts" class="list-container"><div class="loading">Checking renewals...</div></div>
+  </div>
+
+  <div class="section">
+    <h2>Recent Orders</h2>
+    <div id="recent-orders" class="list-container"><div class="loading">Loading...</div></div>
+  </div>
+</div>
+
+<!-- NEW ORDER -->
+<div id="page-order" class="page">
+  <div class="page-header">
+    <h1>New Order</h1>
+  </div>
+
+  <!-- Client Row -->
+  <div class="order-top-bar">
+    <div class="client-row">
+      <select id="order-client" class="form-control" onchange="updateOrderTotals(getSubtotal())">
+        <option value="">Select client...</option>
+      </select>
+      <button class="btn-small" onclick="showNewClientModal()">+ New Client</button>
+    </div>
+  </div>
+
+  <!-- Order Page Tabs -->
+  <div class='order-page-tabs' style='display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--border-2);'>
+    <button id='tab-browse' class='order-tab-btn active' onclick='switchOrderTab("browse")' style='padding:10px 20px;background:none;border:none;cursor:pointer;font-weight:600;font-size:14px;border-bottom:2px solid var(--gold);margin-bottom:-2px;color:var(--gold);'>Browse Products</button>
+    <button id='tab-goals' class='order-tab-btn' onclick='switchOrderTab("goals")' style='padding:10px 20px;background:none;border:none;cursor:pointer;font-weight:600;font-size:14px;border-bottom:2px solid transparent;margin-bottom:-2px;color:var(--muted);'>🎯 Build by Goal</button>
+  </div>
+
+  <div id='order-tab-browse' class='order-tab-panel'>
+    <!-- Quick Stacks — on New Order page -->
+    <div class="section quick-stacks-section" style="margin-bottom:16px;">
+      <div class="section-label" style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted2);margin-bottom:10px;">⚡ Quick Stacks — Click to Pre-Fill Order</div>
+      <div class="quick-stacks-grid">
+        <button class="quick-stack-btn" onclick="quickOrderStack('wolverine')">🦾 Wolverine Stack</button>
+        <button class="quick-stack-btn" onclick="quickOrderStack('hollywood')">🎬 Hollywood Shred</button>
+        <button class="quick-stack-btn" onclick="quickOrderStack('longevity')">🌿 Longevity Protocol</button>
+        <button class="quick-stack-btn" onclick="quickOrderStack('libido')">❤️ Libido Lift</button>
+        <button class="quick-stack-btn" onclick="quickOrderStack('goddess')">✨ Goddess Protocol</button>
+        <button class="quick-stack-btn" onclick="quickOrderStack('metabolic')">🔥 Metabolic Reset</button>
+      </div>
+    </div>
+
+    <!-- Product Picker — always visible -->
+    <div class="product-picker">
+      <input type="text" id="product-search-filter" class="form-control"
+        placeholder="🔍 Search products (e.g. BPC, Retatrutide, Sema...)"
+        oninput="filterProductDropdown(this.value)"
+        style="margin-bottom:8px;">
+      <select id="product-select" class="form-control product-select-large" onchange="quickAddProduct(this)">
+        <option value="">➕ Select product to add...</option>
+      </select>
+      <div id="product-quick-results" class="quick-results hidden"></div>
+    </div>
+  </div>
+
+  <!-- Build by Goal Tab Panel -->
+  <div id='order-tab-goals' class='order-tab-panel' style='display:none;'>
+    <div class='bbg-container'>
+      <p style='font-size:12px;color:var(--muted);margin-bottom:14px;'>Select a research goal — we will show you the most relevant compounds and let you add them directly to the order.</p>
+      <div id='bbg-goal-cards' class='bbg-goal-grid' style='display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:16px;'></div>
+      <div id='bbg-compounds' style='display:none;'>
+        <div style='display:flex;align-items:center;gap:8px;margin-bottom:10px;'>
+          <button onclick='clearBbgSelection()' style='background:none;border:none;cursor:pointer;color:var(--gold);font-size:13px;padding:0;'>← Back to Goals</button>
+          <span id='bbg-selected-goal-label' style='font-weight:700;font-size:15px;'></span>
+        </div>
+        <div id='bbg-compound-list' style='display:flex;flex-direction:column;gap:8px;'></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Order Lines — builds as products are selected -->
+  <div id="order-lines-container" class="order-lines-container">
+    <div id="order-empty" class="order-empty-state">
+      <p>No products added yet</p>
+      <p class="hint">Select a product above to start building your order</p>
+    </div>
+    <table id="order-table" class="order-table hidden">
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th>Qty</th>
+          <th>Unit Price</th>
+          <th>Line Total</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="order-tbody"></tbody>
+    </table>
+  </div>
+
+  <!-- Supply Panel — appears between order lines and actions -->
+  <div id="supply-panel" class="supply-panel hidden"></div>
+
+  <!-- Running Totals — always visible once items added -->
+  <div id="order-summary" class="order-summary-bar hidden">
+    <!-- Discount selector -->
+    <!-- 2026-04-27: discount is opt-IN. Default = No Discount. Pens / sprays / KLOW -->
+    <!-- are exclusive items and never receive a discount, even if a tier is picked. -->
+    <div class="discount-row-manual">
+      <label class="summary-label">Apply Discount</label>
+      <select id="discount-select" class="form-control discount-select" onchange="renderOrderLines()">
+        <option value="0" selected>No Discount</option>
+        <option value="5">5% Off</option>
+        <option value="10">10% Off (5+ units recommended)</option>
+        <option value="15">15% Off</option>
+        <option value="20">20% Off (10+ units recommended)</option>
+      </select>
+      <div style="font-size:10px;color:var(--text-muted,#6b7280);margin-top:4px;">
+        Pens / sprays / KLOW are exclusive items and excluded from discounts.
+      </div>
+    </div>
+    <div class="summary-grid">
+      <div class="summary-item">
+        <span class="summary-label">Subtotal</span>
+        <span class="summary-value" id="order-subtotal">$0.00</span>
+      </div>
+      <div class="summary-item discount-item">
+        <span class="summary-label" id="discount-label">Discount</span>
+        <span class="summary-value discount-value" id="order-discount">-$0.00</span>
+      </div>
+      <div class="summary-item total-item">
+        <span class="summary-label">TOTAL</span>
+        <span class="summary-value total-value" id="order-total">$0.00</span>
+      </div>
+    </div>
+    <!-- Supply-aware summary: monthly cost + duration -->
+    <div id="order-supply-summary" class="summary-grid supply-summary-extra hidden"></div>
+    <div class="order-actions">
+      <button class="btn-primary large" onclick="printOrderPDF()">Print Invoice</button>
+      <button class="btn-primary large" style="background:var(--gold);color:var(--ink);" onclick="printProtocolPack()">Print Protocol Pack</button>
+      <button class="btn-primary large" style="background:var(--gold-bright);color:var(--ink);" onclick="printOrderProtocol()">Print Protocol</button>
+      <button class="btn-secondary" onclick="saveOrder()">Save Order</button>
+      <button class="btn-ghost" onclick="clearOrder()">Clear</button>
+    </div>
+  </div>
+</div>
+
+<!-- NEW PROTOCOL -->
+<div id="page-protocol" class="page">
+  <div class="page-header">
+    <h1>New Protocol</h1>
+    <p class="disclaimer-small">For research purposes only</p>
+  </div>
+  <div class="form-section">
+    <h2>Client</h2>
+    <div class="form-row">
+      <select id="protocol-client" class="form-control">
+        <option value="">Select client...</option>
+      </select>
+    </div>
+  </div>
+  <div class="form-section">
+    <h2>Research Goals</h2>
+    <div class="checkbox-grid">
+      <label class="checkbox-item"><input type="checkbox" value="Fat Loss"> Fat Loss</label>
+      <label class="checkbox-item"><input type="checkbox" value="Muscle Recovery"> Muscle Recovery</label>
+      <label class="checkbox-item"><input type="checkbox" value="Longevity"> Longevity</label>
+      <label class="checkbox-item"><input type="checkbox" value="Hormonal Balance"> Hormonal Balance</label>
+      <label class="checkbox-item"><input type="checkbox" value="Cognitive Enhancement"> Cognitive Enhancement</label>
+      <label class="checkbox-item"><input type="checkbox" value="Healing/Injury"> Healing / Injury</label>
+      <label class="checkbox-item"><input type="checkbox" value="Sleep"> Sleep</label>
+      <label class="checkbox-item"><input type="checkbox" value="Immune Support"> Immune Support</label>
+    </div>
+  </div>
+  <div class="form-section">
+    <h2>Parameters</h2>
+    <label class="form-label">Health flags / notes</label>
+    <textarea id="protocol-flags" class="form-control" placeholder="e.g. knee injury, low energy, poor sleep..." rows="3"></textarea>
+    <label class="form-label">Current stack (if any)</label>
+    <textarea id="protocol-current" class="form-control" placeholder="What they are currently taking..." rows="2"></textarea>
+    <div class="form-row-2">
+      <div>
+        <label class="form-label">Budget</label>
+        <select id="protocol-budget" class="form-control">
+          <option value="under500">Under $500</option>
+          <option value="500to1500" selected>$500 – $1,500</option>
+          <option value="over1500">$1,500+</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">Timeline</label>
+        <select id="protocol-timeline" class="form-control">
+          <option value="4 weeks">4 Weeks</option>
+          <option value="8 weeks">8 Weeks</option>
+          <option value="12 weeks" selected>12 Weeks</option>
+          <option value="ongoing">Ongoing</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn-primary full-width" onclick="generateProtocol()">🔬 Generate Protocol</button>
+  </div>
+
+  <div id="protocol-result" class="protocol-result hidden">
+    <div class="result-header">
+      <h2>Generated Protocol</h2>
+      <div class="disclaimer-banner">⚠️ FOR RESEARCH PURPOSES ONLY — NOT MEDICAL ADVICE</div>
+    </div>
+    <div id="protocol-compounds"></div>
+    <div id="protocol-synergies" class="info-box"></div>
+    <div id="protocol-bloodwork" class="info-box"></div>
+    <div id="protocol-notes" class="info-box"></div>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="saveProtocol()">💾 Save Protocol</button>
+      <button class="btn-secondary" onclick="addProtocolToOrder()">🛒 Add to Order</button>
+      <button class="btn-secondary" onclick="printProtocolPDF()">🖨️ Print PDF</button>
+    </div>
+  </div>
+</div>
+
+<!-- CLIENTS -->
+<div id="page-clients" class="page">
+  <div class="page-header">
+    <h1>Clients</h1>
+    <button class="btn-primary" onclick="showNewClientModal()">+ New Client</button>
+  </div>
+  <div id="clients-list" class="list-container"><div class="loading">Loading...</div></div>
+</div>
+
+<!-- ORDER HISTORY -->
+<div id="page-history" class="page">
+  <div class="page-header">
+    <h1>Order History</h1>
+  </div>
+  <div class="filter-bar">
+    <button class="filter-btn active" onclick="filterOrders('all', this)">All</button>
+    <button class="filter-btn" onclick="filterOrders('Processing', this)">Processing</button>
+    <button class="filter-btn" onclick="filterOrders('Shipped', this)">Shipped</button>
+    <button class="filter-btn" onclick="filterOrders('Delivered', this)">Delivered</button>
+  </div>
+  <div id="orders-list" class="list-container"><div class="loading">Loading...</div></div>
+</div>
+
+<!-- NEW CLIENT MODAL -->
+<div id="modal-client" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>New Client</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <input type="text" id="new-client-name" class="form-control" placeholder="Full Name *">
+    <input type="tel" id="new-client-phone" class="form-control" placeholder="Phone Number">
+    <select id="new-client-source" class="form-control">
+      <option value="Word of Mouth">Word of Mouth</option>
+      <option value="Referral">Referral</option>
+      <option value="Repeat Client">Repeat Client</option>
+    </select>
+    <select id="new-client-type" class="form-control">
+      <option value="Standard">Standard</option>
+      <option value="VIP">VIP</option>
+    </select>
+    <textarea id="new-client-notes" class="form-control" placeholder="Notes..." rows="3"></textarea>
+    <div class="btn-row">
+      <button class="btn-primary" onclick="createClient()">Create Client</button>
+      <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+<!-- DIET PLAN -->
+<div id="page-diet" class="page">
+  <div class="page-header">
+    <h1>Diet Plan Generator</h1>
+    <p class="disclaimer-small">AI-powered nutrition synced to your peptide stack — for research purposes only</p>
+  </div>
+
+  <div class="form-section">
+    <h2>Client Info</h2>
+    <div class="form-row-2">
+      <div>
+        <label class="form-label">Client Name</label>
+        <input type="text" id="diet-client-name" class="form-control" placeholder="Client name...">
+      </div>
+      <div>
+        <label class="form-label">Body Weight (lbs)</label>
+        <input type="number" id="diet-bodyweight" class="form-control" placeholder="e.g. 185" min="80" max="400">
+      </div>
+    </div>
+  </div>
+
+  <div class="form-section">
+    <h2>Goals & Activity</h2>
+    <div class="form-row-2">
+      <div>
+        <label class="form-label">Primary Goal</label>
+        <select id="diet-goal" class="form-control">
+          <option value="fat-loss">🔥 Fat Loss</option>
+          <option value="muscle" selected>💪 Muscle Building</option>
+          <option value="recomp">⚖️ Body Recomposition</option>
+          <option value="longevity">🌿 Longevity / Health</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">Activity Level</label>
+        <select id="diet-activity" class="form-control">
+          <option value="sedentary">🛋️ Sedentary (desk job, minimal exercise)</option>
+          <option value="moderate" selected>🚶 Moderate (3-4x/week training)</option>
+          <option value="active">🏃 Active (5-6x/week training)</option>
+          <option value="athlete">🏋️ Athlete (2x/day or intense daily)</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="form-section">
+    <h2>Stack & Timeline</h2>
+    <label class="form-label">Current Peptide Stack (compounds being used)</label>
+    <textarea id="diet-stack" class="form-control" placeholder="e.g. BPC-157, TB-500, CJC-1295, Ipamorelin..." rows="2"></textarea>
+    <div class="form-row-2" style="margin-top:12px">
+      <div>
+        <label class="form-label">Timeline</label>
+        <select id="diet-timeline" class="form-control">
+          <option value="4 weeks">4 Weeks</option>
+          <option value="8 weeks">8 Weeks</option>
+          <option value="12 weeks" selected>12 Weeks</option>
+          <option value="ongoing">Ongoing</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn-primary full-width" style="margin-top:16px" onclick="generateDietPlan()">🥗 Generate Diet Plan</button>
+  </div>
+
+  <!-- RESULTS -->
+  <div id="diet-result" class="hidden">
+    <div class="result-header">
+      <h2>Your Personalized Diet Plan</h2>
+      <div class="disclaimer-banner">⚠️ FOR RESEARCH PURPOSES ONLY — NOT DIETARY OR MEDICAL ADVICE</div>
+    </div>
+
+    <!-- Macro Overview Cards -->
+    <div class="macro-overview-grid" id="diet-macro-cards"></div>
+
+    <!-- Meal Timing -->
+    <div class="form-section" id="diet-timing-section">
+      <h2>⏰ Meal Timing Guide</h2>
+      <div class="info-box" id="diet-meal-timing"></div>
+    </div>
+
+    <!-- Peptide Synergies -->
+    <div class="form-section" id="diet-synergies-section">
+      <h2>🔬 Peptide Stack Synergies</h2>
+      <div class="info-box synergy-box" id="diet-peptide-synergies"></div>
+    </div>
+
+    <!-- 3-Day Sample Plan -->
+    <div class="form-section">
+      <h2>📅 3-Day Sample Meal Plan</h2>
+      <div id="diet-sample-days"></div>
+    </div>
+
+    <div class="disclaimer-banner" id="diet-disclaimer" style="margin-top:20px"></div>
+  </div>
+</div>
+
+<!-- COMPOUNDS LIBRARY -->
+<div id="page-compounds" class="page">
+  <div class="page-header">
+    <h1>Compound Library</h1>
+    <p class="subtitle">Research reference guide — for educational purposes only</p>
+  </div>
+
+  <!-- Search + Filter Bar -->
+  <div class="compound-controls">
+    <input type="text" id="compound-search" class="form-control compound-search-input"
+      placeholder="🔍 Search compounds..." oninput="filterCompounds()">
+    <div class="compound-filter-pills">
+      <button class="pill active" onclick="filterByCategory('all', this)">All</button>
+      <button class="pill" onclick="filterByCategory('healing', this)">🩹 Healing</button>
+      <button class="pill" onclick="filterByCategory('muscle', this)">💪 Muscle</button>
+      <button class="pill" onclick="filterByCategory('antiaging', this)">✨ Anti-Aging</button>
+      <button class="pill" onclick="filterByCategory('cognitive', this)">🧠 Cognitive</button>
+      <button class="pill" onclick="filterByCategory('weight', this)">🔥 Weight</button>
+      <button class="pill" onclick="filterByCategory('sexual', this)">❤️ Sexual Health</button>
+    </div>
+  </div>
+
+  <!-- Compound Cards Grid -->
+  <div id="compound-grid" class="compound-grid">
+    <div class="loading">Loading compounds...</div>
+  </div>
+
+  <!-- Compound Detail Modal -->
+  <div id="modal-compound" class="modal hidden">
+    <div class="modal-content modal-compound-content">
+      <div class="modal-header compound-modal-header">
+        <div>
+          <h2 id="cmpd-name"></h2>
+          <span id="cmpd-category-badge" class="category-badge"></span>
+        </div>
+        <button class="modal-close" onclick="closeCompoundModal()">✕</button>
+      </div>
+      <div class="compound-modal-body">
+
+        <!-- TABS -->
+        <div class="compound-tabs">
+          <button class="ctab active" onclick="showCompoundTab('overview', this)">Overview</button>
+          <button class="ctab" onclick="showCompoundTab('dosing', this)">📐 Dosing Guide</button>
+          <button class="ctab" onclick="showCompoundTab('sideeffects', this)">⚠️ Side Effects</button>
+          <button class="ctab" onclick="showCompoundTab('faq', this)">❓ Q&amp;A</button>
+          <button class="ctab" onclick="showCompoundTab('research', this)">🔬 Research</button>
+        </div>
+
+        <!-- OVERVIEW TAB -->
+        <div id="ctab-overview" class="ctab-content active">
+          <div class="compound-hero-desc" id="cmpd-description"></div>
+          <div class="benefit-pills" id="cmpd-benefits"></div>
+          <!-- COMPARISON SUGGESTIONS -->
+          <div id="cmpd-compare-suggestions" class="cmpd-compare-suggestions" style="display:none;">
+            <div class="compare-suggest-label">⚖️ Compare with</div>
+            <div id="cmpd-compare-pills" class="compare-suggest-pills"></div>
+          </div>
+          <div class="info-grid">
+            <div class="info-block">
+              <div class="info-label">Mechanism</div>
+              <div class="info-value" id="cmpd-mechanism"></div>
+            </div>
+            <div class="info-block">
+              <div class="info-label">Delivery Track</div>
+              <div class="info-value" id="cmpd-delivery"></div>
+            </div>
+            <div class="info-block">
+              <div class="info-label">Storage</div>
+              <div class="info-value" id="cmpd-storage"></div>
+            </div>
+            <div class="info-block">
+              <div class="info-label">Research Confidence</div>
+              <div class="info-value" id="cmpd-confidence"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DOSING TAB -->
+        <div id="ctab-dosing" class="ctab-content hidden">
+          <div class="dosing-calculator">
+            <h3>📐 Reconstitution & Dosing Calculator</h3>
+            <div class="recon-steps">
+              <div class="recon-step">
+                <div class="step-num">1</div>
+                <div class="step-text">
+                  <strong>Add BAC Water</strong>
+                  <span id="cmpd-recon-bac"></span>
+                </div>
+              </div>
+              <div class="recon-step">
+                <div class="step-num">2</div>
+                <div class="step-text">
+                  <strong>Your concentration</strong>
+                  <span id="cmpd-recon-conc"></span>
+                </div>
+              </div>
+              <div class="recon-step">
+                <div class="step-num">3</div>
+                <div class="step-text">
+                  <strong>Draw your dose</strong>
+                  <span id="cmpd-recon-draw"></span>
+                </div>
+              </div>
+            </div>
+
+            <h4 style="margin-top:20px;">Insulin Syringe Conversion (100-unit syringe)</h4>
+            <div class="syringe-table" id="cmpd-syringe-table"></div>
+
+            <div class="units-explainer">
+              <h4>📏 Understanding the Numbers</h4>
+              <div class="units-grid">
+                <div class="unit-card"><strong>mg</strong><span>Milligram — the weight of the peptide powder in your vial</span></div>
+                <div class="unit-card"><strong>mcg</strong><span>Microgram — 1,000 mcg = 1 mg. Most peptide doses are in mcg.</span></div>
+                <div class="unit-card"><strong>mL</strong><span>Millilitre — the volume of liquid you draw into the syringe</span></div>
+                <div class="unit-card"><strong>IU / Units</strong><span>The markings on an insulin syringe. On a 100-unit syringe: 1 unit = 0.01 mL</span></div>
+                <div class="unit-card"><strong>mg/mL</strong><span>Concentration — how much peptide is in each mL after reconstitution</span></div>
+                <div class="unit-card"><strong>cc</strong><span>Same as mL. 1 cc = 1 mL. Used interchangeably.</span></div>
+              </div>
+            </div>
+
+            <div class="dosing-schedule-block" id="cmpd-dosing-schedule"></div>
+          </div>
+        </div>
+
+        <!-- SIDE EFFECTS TAB -->
+        <div id="ctab-sideeffects" class="ctab-content hidden">
+          <div id="cmpd-side-effects-content"></div>
+
+          <!-- UNIVERSAL SECTION: Histamine Reactions -->
+          <div class="education-block histamine-block">
+            <h3>🧬 Understanding Histamine Reactions</h3>
+            <p>Some people experience redness, mild swelling, itching, or a burning sensation at the injection site — or even flushing elsewhere. This is a <strong>histamine reaction</strong> and it's more common than most people realize.</p>
+
+            <div class="histamine-explainer">
+              <div class="hblock">
+                <h4>Why does it happen?</h4>
+                <p>Peptides are bioactive molecules. Your immune system — particularly mast cells — can release histamine in response to a foreign compound entering the body. This is <em>not</em> an allergic reaction to the peptide itself in most cases. It's your immune system doing its job, sometimes a little too enthusiastically.</p>
+                <p>Compounds that most commonly trigger this response include: <strong>GHK-Cu, MOTS-C, NAD+, BPC-157, TB-500</strong> and some growth hormone secretagogues. The burning sensation with GHK-Cu and NAD+ in particular is well-documented and is related to how these compounds are synthesized — it does not indicate a problem.</p>
+              </div>
+              <div class="hblock">
+                <h4>What the reaction is telling you</h4>
+                <p>Histamine reactions — especially systemic ones (flushing, brain fog, fatigue after dosing) — often signal an <strong>underlying gut dysbiosis or leaky gut</strong> you may not have known about.</p>
+                <p>The gut is the primary site of histamine regulation. When gut integrity is compromised, histamine clearance is reduced, and even small doses of bioactive compounds can trigger outsized responses. Many clients discover a gut issue for the first time through a peptide reaction.</p>
+                <p><strong>This is actually valuable information</strong> — your body is communicating something important.</p>
+              </div>
+              <div class="hblock">
+                <h4>🌟 How KPV helps</h4>
+                <p><strong>KPV (Lys-Pro-Val)</strong> is a tripeptide fragment of alpha-MSH with powerful anti-inflammatory and gut-healing properties. It directly targets intestinal inflammation, reduces mast cell activation, and restores gut barrier integrity.</p>
+                <p>When histamine reactions occur, introducing KPV to the protocol often <strong>eliminates the reaction within days to weeks</strong>. It works by:</p>
+                <ul>
+                  <li>Reducing intestinal inflammation that was driving histamine release</li>
+                  <li>Healing the gut lining (tight junction restoration)</li>
+                  <li>Directly inhibiting NF-κB inflammatory pathway</li>
+                  <li>Calming mast cell overactivation</li>
+                </ul>
+                <p>Think of KPV as the discovery tool: if adding KPV resolves your reaction, you now know your gut needed attention — and you're healing it.</p>
+              </div>
+              <div class="hblock practical-steps">
+                <h4>✅ Practical Steps</h4>
+                <ol>
+                  <li><strong>Local redness/bruising at injection site:</strong> Normal. Rotate injection sites. Use a sharp insulin needle. Ice briefly after if needed.</li>
+                  <li><strong>Burning sensation (GHK-Cu, NAD+, MOTS-C):</strong> Slow down injection speed. Dilute slightly more. This is synthesis-related, not a reaction.</li>
+                  <li><strong>Flushing, itching, hives:</strong> Reduce dose by 50%. Introduce KPV 100–200mcg once daily. Monitor for 72 hours.</li>
+                  <li><strong>Persistent systemic reaction:</strong> Pause the triggering compound. Begin KPV protocol for 2–4 weeks to heal gut. Reintroduce at lower dose.</li>
+                  <li><strong>Needle bruising:</strong> Common — especially with subcutaneous injection. Ensure needle is sharp (never reuse). Pinch skin. Inject slowly. Apply gentle pressure after.</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
+          <div id="cmpd-flags"></div>
+        </div>
+
+        <!-- FAQ TAB -->
+        <div id="ctab-faq" class="ctab-content hidden">
+          <div id="cmpd-faq-content" class="faq-list"></div>
+          <!-- Universal FAQ — General Peptide Questions -->
+          <div style="margin:18px 0 10px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#d4af37;font-weight:700;">🌐 General — What Are Peptides?</div>
+
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">What exactly are peptides? Are they natural? ▾</div>
+            <div class="faq-a">Peptides are short chains of amino acids — the same building blocks that make up every protein in your body. Your body naturally produces thousands of them. Insulin is a peptide. Growth hormone is a peptide. Oxytocin, the "bonding hormone," is a peptide. Most of the compounds in this catalogue are either identical to naturally occurring peptides in the human body or closely derived from them — not foreign chemicals, but signals your biology already knows how to respond to. The research peptides here are synthetically manufactured versions of those natural sequences, produced in laboratories to precise standards.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">How do peptides actually work? ▾</div>
+            <div class="faq-a">Peptides work by binding to specific receptors on cell surfaces and triggering a cascade of internal signals. Think of a receptor as a lock and a peptide as a key — when the right peptide (key) binds its receptor (lock), the cell receives a specific instruction: produce more collagen, release growth hormone, suppress inflammation, increase blood flow, activate DNA repair. The specificity is what makes peptides different from broad-spectrum pharmaceuticals. A well-targeted peptide can send one precise signal to one tissue type without affecting everything else. This is why the side effect profiles of most research peptides are remarkably clean compared to drugs that blunt multiple systems simultaneously.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">Are peptides addictive? Can I become dependent on them? ▾</div>
+            <div class="faq-a">No — peptides are not addictive in any pharmacological sense. They do not interact with dopamine reward pathways, opioid receptors, or any of the neural circuits involved in chemical dependency. You will not experience cravings, compulsive use, or withdrawal in the clinical sense of the word. What some people experience after stopping is simply the absence of the benefits — better sleep, less pain, more energy — which can feel noticeable by contrast. That is not withdrawal; it is the natural return to baseline. The only partial exception is compounds like Selank, which works through the enkephalin system, but even it carries no addiction or dependency risk — a finding that has been specifically studied and confirmed in published research.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">What happens when I stop taking peptides? ▾</div>
+            <div class="faq-a">Most peptides do not create ongoing systemic dependence — when you stop, your body returns to its pre-protocol baseline over days to weeks. For healing compounds like BPC-157 and TB-500, the tissue repairs you achieved are generally permanent — the tendon that healed stays healed. For GH-stimulating compounds like CJC/Ipamorelin, GH levels gradually return to baseline after stopping. For hormonal compounds like Kisspeptin, the restored LH pulsatility may persist for some time but will eventually return to pre-protocol levels without continued use. The general principle: structural repair is permanent; functional optimization requires continued use or cycling to maintain. This is why most protocols are designed as cycles with maintenance phases rather than indefinite daily use.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">What if I accidentally take a double dose? ▾</div>
+            <div class="faq-a">For most peptides at typical research doses, a single accidental double dose is unlikely to be dangerous — but it may intensify side effects. For GH-stimulating compounds (CJC-1295, Ipamorelin), a double dose would produce stronger water retention, more pronounced GH pulse, and possibly stronger fatigue or tingling. For NAD+, a double dose injected too quickly causes intense flushing, nausea, and elevated heart rate — the solution is to inject very slowly over 5-10 minutes if this happens. For GLP-1 compounds (Semaglutide, Retatrutide), a double dose significantly increases nausea risk — eat nothing, hydrate, and rest. For PT-141, a double dose increases nausea substantially. The universal protocol for any accidental overdose: stay calm, hydrate, rest, monitor symptoms. If you experience chest pain, difficulty breathing, or symptoms that concern you, seek medical attention and bring the compound information with you. No fatalities have been attributed to peptides at research doses.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">Has anyone ever died from taking research peptides? ▾</div>
+            <div class="faq-a">There are no documented fatalities attributable to the peptides in this catalogue at research doses in the published literature. The compounds here — BPC-157, TB-500, CJC-1295, Kisspeptin, PT-141, Semaglutide, NAD+, and others — have extensive safety data accumulated over years of animal studies and human research use, and none have produced fatal outcomes at therapeutic doses. The risks in the peptide research space are predominantly from: (1) contaminated or mis-labeled products from unreliable sources — purity and sourcing matter enormously; (2) incorrect dosing through calculation errors — always double-check your math; (3) unrelated pre-existing health conditions aggravated by physiological changes (e.g., someone with severe cardiac disease using high-dose NAD+ without medical supervision). The risk profile of research peptides compares favourably to many over-the-counter supplements and is substantially safer than most pharmaceutical drugs when used correctly at established research doses.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">Are peptides safe? What are the real risks? ▾</div>
+            <div class="faq-a">The honest risk profile: most research peptides have been studied for decades and show a remarkably clean safety record at established doses. The real risks are: (1) Source quality — peptides from unverified suppliers may be contaminated, mis-dosed, or contain wrong compounds entirely. Source matters more than anything. (2) Dosing errors — calculating mcg to units incorrectly is the most common practical risk. The dosing guides in this app exist specifically to eliminate that. (3) Individual variation — some people are sensitive to specific compounds; this is why starting low and titrating is universal protocol. (4) Interactions — peptides can interact with medications, particularly immunosuppressants, insulin, hormonal therapies, and blood thinners. Medical supervision is strongly recommended for anyone on prescription medications. (5) Compound-specific risks — listed in the Side Effects tab for each compound.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">Do peptides require a prescription? Are they legal? ▾</div>
+            <div class="faq-a">The regulatory status of research peptides varies by country and changes frequently. In Canada, most research peptides exist in a grey zone — they are not approved as pharmaceutical drugs, but many are legal to possess and purchase for personal research use. Some (like Semaglutide) have approved pharmaceutical versions that require prescription. In the US, most peptides sold for research are legal to purchase but not legal for human consumption. In the UK and Australia, regulations are stricter. The compounds in this catalogue are sold for research purposes only — not for human use or consumption. Always understand the regulatory environment in your jurisdiction before proceeding with any research protocol.</div>
+          </div>
+
+          <div style="margin:22px 0 10px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#d4af37;font-weight:700;">💉 Practical Use</div>
+
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">Do I need to refrigerate peptides after reconstitution? ▾</div>
+            <div class="faq-a">Yes. Once reconstituted with BAC water, peptides must be refrigerated (2–8°C). Use within 28–30 days. Bacteriostatic water contains 0.9% benzyl alcohol which inhibits bacterial growth — this is what gives reconstituted peptides their shelf life. Never use plain sterile water for storage. Unreconstituted vials can be stored at room temperature for short periods or frozen for longer storage.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">What syringe should I use? ▾</div>
+            <div class="faq-a">Use an insulin syringe — 1mL (100-unit) U-100 is most common. Each small line = 1 unit = 0.01mL. Needle gauge: 28–31G, 6–8mm for SubQ injection. The thinner the gauge number (e.g., 31G vs 25G), the finer the needle and the less discomfort. 29–31G is ideal for daily use. Longer needles (12mm+) are for IM injection and specified in certain protocols.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">Where do I inject? ▾</div>
+            <div class="faq-a">SubQ (subcutaneous) into belly fat is most common — pinch 1–2 inches of skin 2 inches from the navel, insert at 45°, inject slowly, release pinch before withdrawing. Rotate sites daily to prevent lipohypertrophy (tissue buildup). Thighs and upper arms work equally well. Some compounds can be injected near the injury site for enhanced local effects (BPC-157 specifically). Intramuscular (IM) is occasionally specified — your protocol will note this.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">How much BAC water do I add? ▾</div>
+            <div class="faq-a">For a standard 5mg vial: 2mL BAC water = 2.5mg/mL (2,500mcg/mL). On a 100-unit syringe, every 10 units = 250mcg. This is the default for most compounds. Some compounds use different vial sizes or concentrations — always check the Dosing Guide tab for compound-specific instructions. When in doubt, more BAC water = lower concentration = easier to fine-tune small doses.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">I feel a burning sensation when I inject. Is that normal? ▾</div>
+            <div class="faq-a">Depends on the compound. GHK-Cu: yes — consistently causes burning due to the copper complex. Expected, not allergic. Inject slowly (30–60 sec) at room temperature. NAD+: flushing and warmth are expected — inject over 3–5 minutes. GLP-1 compounds: mild sting at injection site is normal. BPC-157, TB-500, Ipamorelin: minimal to no burning expected. If you experience burning with a compound not known for it, check your reconstitution — incorrect BAC water ratio can cause discomfort.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">Can I stack multiple peptides? ▾</div>
+            <div class="faq-a">Yes — stacking is standard practice. Many peptides have complementary mechanisms: BPC-157 + TB-500 for healing, CJC-1295 + Ipamorelin for GH optimization, Semax + Selank for cognitive performance. Introduce one compound at a time (1–2 weeks between additions) so you can isolate which compound causes any reaction. The Stacks tab has fully designed multi-compound protocols with scheduling and rationale built in.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">How long before I notice results? ▾</div>
+            <div class="faq-a">Depends heavily on the compound and the goal. Fastest responders: PT-141 (45–60 min), NAD+ (hours to days — energy/clarity), BPC-157 for acute gut issues (days). Medium term: GHK-Cu for skin (4–6 weeks), CJC/Ipamorelin for sleep quality (2–4 weeks), GH body composition changes (8–12 weeks). Long term: Kisspeptin for fertility/testosterone (8–12 weeks minimum), Epitalon (cycle effects build over months). The single biggest variable is consistency — compounds that are taken irregularly produce inconsistent results.</div>
+          </div>
+          <div class="faq-item">
+            <div class="faq-q" onclick="toggleFaq(this)">For research purposes only — what does that mean? ▾</div>
+            <div class="faq-a">Peptides in this catalogue are sold for laboratory and scientific research purposes. They are not approved by Health Canada or the FDA for human consumption. All information provided is educational and based on existing peer-reviewed scientific literature. This does not constitute medical advice. The research in this field is real, extensive, and growing — but the regulatory status has not yet caught up with the science for most compounds. Always consult a qualified healthcare professional before beginning any research protocol, particularly if you have existing health conditions or are on medications.</div>
+          </div>
+
+          <div id="cmpd-custom-faq"></div>
+        </div>
+
+        <!-- RESEARCH TAB -->
+        <div id="ctab-research" class="ctab-content hidden">
+          <div id="cmpd-research-content"></div>
+          <div class="research-disclaimer">
+            <p>⚗️ References are from publicly available scientific literature. This information is for educational and research purposes only. Not intended as medical advice.</p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- STACK BUILDER -->
+<div id="page-stacks" class="page">
+  <div class="page-header">
+    <h1>Stack Builder</h1>
+    <p class="subtitle">Choose a goal → pick your tier → set your dose level → get your full protocol</p>
+  </div>
+
+  <!-- CYCLE LENGTH SELECTOR — always visible at top of stacks page -->
+  <div class="cycle-selector-bar">
+    <div class="cycle-selector-label">⏱ How long do you want to run?</div>
+    <div class="cycle-options">
+      <button class="cycle-btn" data-weeks="4" onclick="selectCycleLength(4, this)">
+        <span class="cycle-name">🧪 Testing</span>
+        <span class="cycle-sub">~1 month · Try it out</span>
+      </button>
+      <button class="cycle-btn active" data-weeks="12" onclick="selectCycleLength(12, this)">
+        <span class="cycle-name">🔄 Short Cycle</span>
+        <span class="cycle-sub">~3 months · Active recovery</span>
+      </button>
+      <button class="cycle-btn" data-weeks="24" onclick="selectCycleLength(24, this)">
+        <span class="cycle-name">🏗️ Builder</span>
+        <span class="cycle-sub">~6 months · Real change</span>
+      </button>
+      <button class="cycle-btn" data-weeks="36" onclick="selectCycleLength(36, this)">
+        <span class="cycle-name">🚀 Optimal</span>
+        <span class="cycle-sub">9 months · Maximum results</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- STEP 1: Goal Selection -->
+  <div id="stack-step1">
+    <div class="section-label">STEP 1 — Choose Your Goal</div>
+    <div class="goal-grid" id="goal-cards">
+      <!-- Populated by JS from /api/stack-library -->
+    </div>
+  </div>
+
+  <!-- STEP 2: Tier + Dosing -->
+  <div id="stack-step2" style="display:none;">
+    <button class="btn-back" onclick="stackBack()">← Back to Goals</button>
+    <div class="section-label">STEP 2 — Select Your Tier</div>
+    <div class="tier-cards" id="tier-cards"></div>
+    <div id="dosing-selector" style="display:none;margin-top:20px;">
+      <div class="section-label">STEP 3 — Dosing Level</div>
+      <div class="dosing-pills">
+        <button class="dose-pill" data-level="low" onclick="selectDose('low')">🌱 Low — Maintenance</button>
+        <button class="dose-pill active" data-level="mid" onclick="selectDose('mid')">⚡ Mid — Recovery</button>
+        <button class="dose-pill" data-level="high" onclick="selectDose('high')">🔥 High — Optimize</button>
+      </div>
+      <div class="dosing-context" id="dosing-context"></div>
+    </div>
+  </div>
+
+  <!-- STEP 3: Protocol Output -->
+  <div id="stack-output" style="display:none;">
+    <button class="btn-back" onclick="stackBack2()">← Back to Tiers</button>
+    <div id="stack-result-content"></div>
+    <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap;">
+      <button class="btn-primary" onclick="addStackToOrder()">🛒 Add to Order</button>
+      <button class="btn-secondary" onclick="generateDietFromStack()">🥗 Generate Diet Plan</button>
+      <button class="btn-send-client" onclick="openSendToClient()">📤 Send to Client</button>
+    </div>
+  </div>
+</div>
+
+<!-- SEND TO CLIENT MODAL -->
+<div id="modal-send-client" class="modal hidden">
+  <div class="modal-content" style="max-width:520px;">
+    <div class="modal-header">
+      <h2>📤 Send Stack to Client</h2>
+      <button class="modal-close" onclick="closeSendToClient()">&#x2715;</button>
+    </div>
+    <div style="padding:20px 24px 24px;">
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:20px;line-height:1.6;">Send your client a complete research package — stack summary, dosing protocol, supply calculator, pricing breakdown, and cycle chart.</p>
+      <div class="form-group">
+        <label class="form-label">Client Name</label>
+        <input type="text" id="send-client-name" class="form-control" placeholder="Client name" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Client Email</label>
+        <input type="email" id="send-client-email" class="form-control" placeholder="client@email.com" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Personal Note (optional)</label>
+        <textarea id="send-client-note" class="form-control" rows="3" placeholder="Add a personal note to include in the email..."></textarea>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:4px;">
+        <button class="btn-primary" onclick="sendStackToClient()" style="flex:1;">Send Email Package</button>
+        <button class="btn-secondary" onclick="downloadStackPDF()" style="flex:0 0 auto;">&#128196; Download PDF</button>
+      </div>
+      <div id="send-client-status" style="margin-top:12px;font-size:13px;text-align:center;"></div>
+      <p style="font-size:11px;color:var(--text-muted);margin-top:16px;text-align:center;opacity:0.7;">&#x26A0;&#xFE0F; For research purposes only. Not medical advice.</p>
+    </div>
+  </div>
+</div>
+
+<!-- CATALOG PAGE -->
+<div id="page-catalog" class="page">
+  <div class="page-header">
+    <h1>Product Catalog</h1>
+    <p class="subtitle">Biogenix vials, pens, and specialty products — with cost-per-mg analysis</p>
+  </div>
+
+  <div class="catalog-tabs">
+    <button class="ctab active" onclick="switchCatalogTab('vials', this)">🧪 Biogenix Vials</button>
+    <button class="ctab" onclick="switchCatalogTab('pens', this)">🖊️ Pens</button>
+    <button class="ctab" onclick="switchCatalogTab('sprays', this)">💨 Sprays</button>
+    <button class="ctab" onclick="switchCatalogTab('other', this)">💊 Other</button>
+  </div>
+
+  <div id="catalog-vials" class="catalog-section"><!-- populated by JS --></div>
+  <div id="catalog-pens" class="catalog-section" style="display:none;"><!-- populated by JS --></div>
+  <div id="catalog-sprays" class="catalog-section" style="display:none;"><!-- populated by JS --></div>
+  <div id="catalog-other" class="catalog-section" style="display:none;"><!-- populated by JS --></div>
+</div>
+
+<div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal()"></div>
+
+<!-- STACK DETAIL MODAL (added 2026-04-19 — stacks-as-products) -->
+<div id="stack-detail-modal" class="modal hidden" onclick="if(event.target===this) closeStackDetail()">
+  <div class="modal-content stack-detail-content" style="max-width:860px;max-height:90vh;overflow-y:auto;">
+    <div class="modal-header" style="display:flex;justify-content:space-between;align-items:flex-start;padding:18px 22px;border-bottom:1px solid var(--border,#e0e6ea);">
+      <div id="stack-detail-header" style="flex:1;"></div>
+      <button class="modal-close" onclick="closeStackDetail()" style="background:none;border:none;font-size:22px;cursor:pointer;color:#666;">&times;</button>
+    </div>
+    <div id="stack-detail-body" style="padding:20px 22px;"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/js/stack-data-inline.js"></script>
+<script src="/js/app.js"></script>
+<!-- 2026-05-01 (E1 / E6 fix — order-ux-v2 was dead code in production):
+     order-ux-v2.js monkey-patches window.renderOrderLines and exposes
+     window.OrderUXv2 (Quick Stacks, auto-tier discount label, save-and-jump
+     to protocol, client autofill). Header comment specifies load order:
+     after app.js so renderOrderLines is defined before the patch runs.
+     Wisdom: tooling silent-failure is worse than loud breakage.
+     Knowledge: app.js declares renderOrderLines globally; module wraps it.
+     Understanding: with this tag in place, all UXv2 features fire on cart
+     mutation; without it, every UXv2 helper is unreachable. -->
+<script src="/js/modules/order-ux-v2.js"></script>
+<script src="/js/modules/compounds-data.js"></script>
+<script src="/js/modules/compounds-extra.js"></script>
+<script src="/js/modules/compare.js"></script>
+<script src="/js/modules/pos.js"></script>
+<script src="/js/modules/send-client.js"></script>
+<style>
+/* ── SEND TO CLIENT BUTTON ── */
+.btn-send-client {
+  background: linear-gradient(135deg, #1a4a6b, #24476C);
+  color: #fff;
+  border: 1px solid rgba(100,180,255,0.3);
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-send-client:hover { background: linear-gradient(135deg, #24476C, #2d5a8a); border-color: rgba(100,180,255,0.5); }
+
+/* ── COMPARISON SUGGESTIONS IN COMPOUND MODAL ── */
+.cmpd-compare-suggestions {
+  margin: 18px 0 0;
+  padding: 14px 16px;
+  background: rgba(212,175,55,0.06);
+  border: 1px solid rgba(212,175,55,0.18);
+  border-radius: 10px;
+}
+.compare-suggest-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #d4af37;
+  margin-bottom: 10px;
+  opacity: 0.85;
+}
+.compare-suggest-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.compare-suggest-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(212,175,55,0.1);
+  border: 1px solid rgba(212,175,55,0.25);
+  color: #e0c870;
+  padding: 5px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.compare-suggest-pill:hover {
+  background: rgba(212,175,55,0.2);
+  border-color: rgba(212,175,55,0.5);
+  color: #f0d880;
+}
+</style>
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SYMPTOM SEARCH PAGE                                           -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div id="page-symptom-search" class="page">
+  <div class="section">
+    <h2>🔍 Find Your Compounds</h2>
+    <p class="section-sub">Describe what you're dealing with — a health goal, a symptom, a condition, or something you want to improve. Get a research-based compound recommendation in seconds.</p>
+
+    <div class="symptom-search-box">
+      <div class="symptom-examples">
+        <span class="ss-label">Try:</span>
+        <button class="ss-chip" onclick="setSymptomQuery('I have lower back pain and a knee injury from sports')">Lower back pain + knee injury</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I have heart issues and want cardiovascular support')">Heart issues</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I want to lose belly fat but keep my muscle')">Lose belly fat, keep muscle</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I have brain fog and poor focus all day')">Brain fog & poor focus</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I am trying to get pregnant and having fertility issues')">Fertility issues</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I am going through menopause and have hot flashes and low libido')">Menopause symptoms</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I have low testosterone and low energy')">Low testosterone</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I have poor sleep and feel tired every morning')">Poor sleep</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I want to slow aging and feel younger')">Anti-aging & longevity</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I have anxiety and stress that affect my daily life')">Anxiety & stress</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I have type 2 diabetes or pre-diabetes and insulin resistance')">Diabetes / insulin resistance</button>
+        <button class="ss-chip" onclick="setSymptomQuery('I have an autoimmune condition or keep getting sick')">Immune system issues</button>
+      </div>
+
+      <div class="symptom-input-row">
+        <textarea id="symptom-query"
+          class="symptom-textarea"
+          placeholder="Describe your situation... e.g. 'I have chronic lower back pain, I'm 52, and I want more energy and better sleep'"
+          rows="3"
+          onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();runSymptomSearch();}"
+        ></textarea>
+        <button class="symptom-search-btn" onclick="runSymptomSearch()" id="symptom-search-btn">
+          <span id="symptom-btn-text">Find Compounds →</span>
+        </button>
+      </div>
+      <p class="ss-disclaimer">⚠️ For research purposes only. Not medical advice. Always consult a qualified healthcare professional.</p>
+    </div>
+
+    <!-- Results -->
+    <div id="symptom-results" class="symptom-results hidden"></div>
+  </div>
+</div>
+
+<style>
+/* ── SYMPTOM SEARCH ────────────────────────────────────────── */
+.symptom-search-box {
+  background: #12121e;
+  border: 1px solid #2a2a3e;
+  border-radius: 14px;
+  padding: 24px;
+  margin: 20px 0;
+}
+.symptom-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 18px;
+}
+.ss-label {
+  font-size: 12px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+.ss-chip {
+  background: #1a1a2e;
+  border: 1px solid #333;
+  color: #aaa;
+  padding: 5px 12px;
+  border-radius: 16px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.ss-chip:hover { border-color: #d4af37; color: #d4af37; background: #1e1a0a; }
+.symptom-input-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+}
+.symptom-textarea {
+  flex: 1;
+  background: #0d0d1a;
+  border: 1px solid #333;
+  border-radius: 10px;
+  color: #e0e0e0;
+  padding: 14px 16px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 70px;
+  transition: border-color 0.2s;
+}
+.symptom-textarea:focus { outline: none; border-color: #d4af37; }
+.symptom-search-btn {
+  background: linear-gradient(135deg, #d4af37, #b8922e);
+  border: none;
+  border-radius: 10px;
+  color: #0a0a12;
+  font-weight: 800;
+  font-size: 14px;
+  padding: 14px 22px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.symptom-search-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(212,175,55,.4); }
+.symptom-search-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+.ss-disclaimer {
+  font-size: 11px;
+  color: #555;
+  margin-top: 12px;
+  margin-bottom: 0;
+}
+/* Results */
+.symptom-results {
+  margin-top: 28px;
+}
+.ss-query-echo {
+  font-size: 13px;
+  color: #888;
+  margin-bottom: 20px;
+  padding: 10px 14px;
+  background: #0d0d1a;
+  border-radius: 8px;
+  border-left: 3px solid #d4af37;
+}
+.ss-intro {
+  font-size: 15px;
+  color: #ccc;
+  line-height: 1.6;
+  margin-bottom: 24px;
+}
+.ss-compound-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.ss-compound-card {
+  background: #12121e;
+  border: 1px solid #222;
+  border-radius: 12px;
+  padding: 18px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+  overflow: hidden;
+}
+.ss-compound-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #d4af37, #b8922e);
+}
+.ss-compound-card:hover {
+  border-color: #d4af37;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+}
+.ss-card-rank {
+  font-size: 11px;
+  color: #d4af37;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  margin-bottom: 6px;
+}
+.ss-card-name {
+  font-size: 17px;
+  font-weight: 800;
+  color: #f0f0f0;
+  margin-bottom: 6px;
+}
+.ss-card-why {
+  font-size: 13px;
+  color: #999;
+  line-height: 1.55;
+  margin-bottom: 12px;
+}
+.ss-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+.ss-tag {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: rgba(212,175,55,.12);
+  color: #d4af37;
+  border: 1px solid rgba(212,175,55,.2);
+}
+.ss-card-cta {
+  font-size: 12px;
+  color: #d4af37;
+  font-weight: 600;
+}
+.ss-stack-note {
+  background: #0d0d1a;
+  border: 1px solid #2a2a3e;
+  border-radius: 10px;
+  padding: 16px 20px;
+  font-size: 13.5px;
+  color: #aaa;
+  line-height: 1.6;
+  margin-bottom: 16px;
+}
+.ss-stack-note strong { color: #f0f0f0; }
+.ss-disclaimer-result {
+  font-size: 12px;
+  color: #555;
+  padding: 12px;
+  border-top: 1px solid #1a1a2e;
+  margin-top: 8px;
+}
+.ss-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 28px 0;
+  color: #888;
+  font-size: 14px;
+}
+.ss-spinner {
+  width: 22px; height: 22px;
+  border: 2px solid #333;
+  border-top-color: #d4af37;
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- HIGHLIGHTS PAGE                                               -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div id="page-highlights" class="page">
+  <div class="section">
+    <h2>✨ Research Highlights</h2>
+    <p class="section-sub">The most remarkable findings in peptide research — organized by what matters to you. Tap any card to explore the compound.</p>
+
+    <!-- Category filter pills -->
+    <div id="highlights-filter" class="highlights-filter">
+      <button class="hcat-pill active" onclick="filterHighlights('all', this)">All</button>
+      <button class="hcat-pill" onclick="filterHighlights('libido', this)">❤️ Libido & Sexual</button>
+      <button class="hcat-pill" onclick="filterHighlights('fertility', this)">🌱 Fertility</button>
+      <button class="hcat-pill" onclick="filterHighlights('hormonal', this)">⚡ Hormonal</button>
+      <button class="hcat-pill" onclick="filterHighlights('healing', this)">🩹 Healing & Recovery</button>
+      <button class="hcat-pill" onclick="filterHighlights('cardiovascular', this)">❤️‍🔥 Cardiovascular</button>
+      <button class="hcat-pill" onclick="filterHighlights('cognitive', this)">🧠 Cognitive</button>
+      <button class="hcat-pill" onclick="filterHighlights('longevity', this)">⏳ Longevity</button>
+      <button class="hcat-pill" onclick="filterHighlights('fat-loss', this)">🔥 Fat Loss</button>
+      <button class="hcat-pill" onclick="filterHighlights('immune', this)">🛡️ Immune</button>
+      <button class="hcat-pill" onclick="filterHighlights('sleep', this)">🌙 Sleep</button>
+      <button class="hcat-pill" onclick="filterHighlights('menopause', this)">🌸 Menopause</button>
+      <button class="hcat-pill" onclick="filterHighlights('metabolic', this)">🩺 Metabolic</button>
+      <button class="hcat-pill" onclick="filterHighlights('mitochondria', this)">🔋 Mitochondria</button>
+    </div>
+
+    <!-- Cards grid -->
+    <div id="highlights-grid" class="highlights-grid"></div>
+  </div>
+</div>
+
+<style>
+/* ── HIGHLIGHTS PAGE ───────────────────────────────────────── */
+.highlights-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 24px;
+}
+.hcat-pill {
+  background: #1e1e2e;
+  border: 1px solid #333;
+  color: #aaa;
+  padding: 6px 14px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.hcat-pill:hover { border-color: #d4af37; color: #d4af37; }
+.hcat-pill.active { background: #d4af37; border-color: #d4af37; color: #0a0a12; font-weight: 700; }
+
+.highlights-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 18px;
+  margin-top: 8px;
+}
+.highlight-card {
+  background: #12121e;
+  border: 1px solid #222;
+  border-radius: 12px;
+  padding: 20px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: relative;
+  overflow: hidden;
+}
+.highlight-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: var(--card-accent, #d4af37);
+}
+.highlight-card:hover {
+  border-color: var(--card-accent, #d4af37);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+}
+.highlight-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.highlight-compound-emoji { font-size: 22px; }
+.highlight-compound-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--card-accent, #d4af37);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.highlight-category-badge {
+  margin-left: auto;
+  font-size: 11px;
+  background: rgba(255,255,255,0.06);
+  padding: 3px 9px;
+  border-radius: 10px;
+  color: #888;
+  white-space: nowrap;
+}
+.highlight-headline {
+  font-size: 16px;
+  font-weight: 700;
+  color: #f0f0f0;
+  line-height: 1.4;
+}
+.highlight-body {
+  font-size: 13.5px;
+  color: #999;
+  line-height: 1.65;
+}
+.highlight-citation {
+  font-size: 11px;
+  color: #555;
+  font-style: italic;
+  border-top: 1px solid #1e1e2e;
+  padding-top: 8px;
+  margin-top: 4px;
+}
+.highlight-cta {
+  font-size: 12px;
+  color: var(--card-accent, #d4af37);
+  font-weight: 600;
+  margin-top: 2px;
+}
+.highlights-empty {
+  grid-column: 1/-1;
+  text-align: center;
+  color: #555;
+  padding: 60px 0;
+  font-size: 15px;
+}
+</style>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- COMPARE PAGE                                                    -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div id="page-compare" class="page">
+  <div class="page-header">
+    <h1>⚖️ Peptide Comparison Engine</h1>
+    <p class="subtitle">Research-based peptide comparisons. For educational purposes only.</p>
+  </div>
+
+  <!-- Compare Home (default view) -->
+  <div id="compare-home">
+    <div class="compare-search-box">
+      <input type="text" id="compare-search" class="form-control" placeholder="Search peptides to compare (e.g. BPC-157 vs TB-500)..." oninput="compareSearchFilter(this.value)" />
+      <button class="btn-primary" onclick="launchCustomCompare()">Compare</button>
+    </div>
+
+    <div class="compare-goal-pills">
+      <button class="cgoal-pill active" onclick="filterCompareGoal('all', this)">All</button>
+      <button class="cgoal-pill" onclick="filterCompareGoal('healing', this)">🩹 Healing</button>
+      <button class="cgoal-pill" onclick="filterCompareGoal('sleep', this)">💤 Sleep</button>
+      <button class="cgoal-pill" onclick="filterCompareGoal('fat-loss', this)">🔥 Fat Loss</button>
+      <button class="cgoal-pill" onclick="filterCompareGoal('anti-aging', this)">⏳ Anti-Aging</button>
+      <button class="cgoal-pill" onclick="filterCompareGoal('cognitive', this)">🧠 Cognitive</button>
+      <button class="cgoal-pill" onclick="filterCompareGoal('hormonal', this)">⚡ Hormonal</button>
+      <button class="cgoal-pill" onclick="filterCompareGoal('mitochondrial', this)">🔋 Mitochondrial</button>
+      <button class="cgoal-pill" onclick="filterCompareGoal('immune', this)">🛡️ Immune</button>
+    </div>
+
+    <h3 style="color:#d4af37;margin:24px 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:1px;">Popular Comparisons</h3>
+    <div id="compare-popular-grid" class="compare-popular-grid">
+      <div class="loading">Loading comparisons...</div>
+    </div>
+  </div>
+
+  <!-- Comparison Result View -->
+  <div id="compare-result" style="display:none;">
+    <button class="btn-back" onclick="showCompareHome()">&#8592; Back to Compare</button>
+
+    <div id="compare-result-content"></div>
+
+    <div class="compare-qualifier-section">
+      <h3>🎯 What’s Your Situation?</h3>
+      <p style="color:#888;font-size:13px;margin-bottom:12px;">Answer to get a personalized recommendation:</p>
+      <div id="qualifier-questions" class="qualifier-questions"></div>
+      <div id="qualifier-recommendation" class="qualifier-rec" style="display:none;"></div>
+    </div>
+
+    <div class="compare-ai-section" id="compare-ai-section" style="display:none;">
+      <div id="compare-ai-content"></div>
+    </div>
+
+    <!-- Sticky CTA -->
+    <div class="compare-sticky-cta">
+      <button class="btn-compare-cta" onclick="openCompareLeadForm()">📞 Contact My Consultant</button>
+    </div>
+  </div>
+</div>
+
+<!-- Compare Lead Form (bottom sheet) -->
+<div id="compare-lead-overlay" class="compare-lead-overlay" onclick="closeCompareLeadForm()" style="display:none;"></div>
+<div id="compare-lead-sheet" class="compare-lead-sheet" style="display:none;">
+  <div class="compare-lead-header">
+    <h3>Talk to Marc</h3>
+    <button onclick="closeCompareLeadForm()" class="btn-close-sheet">×</button>
+  </div>
+  <div id="compare-lead-context" class="compare-lead-context"></div>
+  <form id="compare-lead-form" onsubmit="submitCompareLead(event)">
+    <input type="text" id="lead-name" class="form-control" placeholder="Your name" required style="margin-bottom:10px;" />
+    <input type="tel" id="lead-phone" class="form-control" placeholder="Phone number" style="margin-bottom:10px;" />
+    <input type="email" id="lead-email" class="form-control" placeholder="Email address" required style="margin-bottom:10px;" />
+    <textarea id="lead-message" class="form-control" rows="3" placeholder="Anything you'd like Marc to know?" style="margin-bottom:14px;"></textarea>
+    <button type="submit" class="btn-primary" style="width:100%;padding:14px;">Send to My Consultant →</button>
+  </form>
+  <div id="compare-lead-success" style="display:none;text-align:center;padding:30px 0;">
+    <div style="font-size:40px;margin-bottom:12px;">✅</div>
+    <h3 style="color:#d4af37;">Message Sent</h3>
+    <p style="color:#aaa;">Marc will be in touch within a few hours.</p>
+  </div>
+</div>
+
+<style>
+/* ── COMPARE PAGE ───────────────────────────────────────── */
+.compare-search-box {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.compare-search-box input { flex: 1; }
+.compare-goal-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.cgoal-pill {
+  background: #1e1e2e;
+  border: 1px solid #333;
+  color: #aaa;
+  padding: 6px 14px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+.cgoal-pill:hover, .cgoal-pill.active {
+  background: #d4af37;
+  color: #f5f7f9;
+  border-color: #d4af37;
+  font-weight: 600;
+}
+.compare-popular-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  margin-bottom: 80px;
+}
+.compare-card {
+  background: #131d2e;
+  border: 1px solid #e0e6ea;
+  border-radius: 12px;
+  padding: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+.compare-card:hover {
+  border-color: #d4af37;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+}
+.compare-card-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #f0f0f0;
+  margin-bottom: 8px;
+}
+.compare-card-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.compare-cat-badge {
+  font-size: 11px;
+  background: rgba(212,175,55,0.12);
+  color: #d4af37;
+  padding: 3px 9px;
+  border-radius: 10px;
+  text-transform: capitalize;
+}
+.compare-synergy-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.compare-synergy-label {
+  font-size: 11px;
+  color: #888;
+  min-width: 70px;
+}
+.compare-synergy-track {
+  flex: 1;
+  height: 6px;
+  background: #1e1e2e;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.compare-synergy-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #d4af37, #f0c040);
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+.compare-synergy-score {
+  font-size: 12px;
+  color: #d4af37;
+  font-weight: 700;
+  min-width: 24px;
+  text-align: right;
+}
+/* Result view */
+.btn-back {
+  background: none;
+  border: 1px solid #333;
+  color: #888;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 20px;
+  font-size: 13px;
+}
+.btn-back:hover { border-color: #d4af37; color: #d4af37; }
+.compare-peptide-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.compare-peptide-card {
+  background: #131d2e;
+  border: 1px solid #e0e6ea;
+  border-radius: 12px;
+  padding: 20px;
+}
+.compare-peptide-name {
+  font-size: 16px;
+  font-weight: 800;
+  color: #d4af37;
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.compare-peptide-mechanism {
+  font-size: 13.5px;
+  color: #bbb;
+  line-height: 1.65;
+  margin-bottom: 12px;
+}
+.compare-best-for {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.compare-best-tag {
+  font-size: 11px;
+  background: #e0e6ea;
+  color: #7eb8d4;
+  padding: 3px 9px;
+  border-radius: 10px;
+  text-transform: capitalize;
+}
+.compare-research-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-bottom: 10px;
+}
+.research-high { background: rgba(80,200,120,0.15); color: #50c878; }
+.research-moderate { background: rgba(212,175,55,0.15); color: #d4af37; }
+.research-emerging { background: rgba(150,150,255,0.15); color: #9696ff; }
+.compare-synergy-section {
+  background: #131d2e;
+  border: 1px solid #e0e6ea;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.compare-synergy-section h3 {
+  color: #d4af37;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 10px;
+}
+.compare-synergy-big {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.compare-synergy-number {
+  font-size: 36px;
+  font-weight: 900;
+  color: #d4af37;
+  line-height: 1;
+}
+.compare-synergy-max {
+  font-size: 14px;
+  color: #555;
+  align-self: flex-end;
+  padding-bottom: 4px;
+}
+.compare-decision-section {
+  background: #131d2e;
+  border: 1px solid #e0e6ea;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.compare-decision-section h3 {
+  color: #d4af37;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 14px;
+}
+.compare-decision-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 10px 0;
+  border-bottom: 1px solid #1e1e2e;
+}
+.compare-decision-row:last-child { border-bottom: none; }
+.compare-decision-pick {
+  min-width: 100px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #f5f7f9;
+  background: #d4af37;
+  padding: 3px 10px;
+  border-radius: 20px;
+  text-align: center;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+.compare-decision-key {
+  font-size: 12px;
+  color: #888;
+  font-style: italic;
+  min-width: 120px;
+  padding-top: 3px;
+  text-transform: capitalize;
+}
+.compare-decision-reason {
+  font-size: 13px;
+  color: #bbb;
+  flex: 1;
+}
+.compare-sticky-cta {
+  position: sticky;
+  bottom: 0;
+  padding: 12px 0;
+  background: linear-gradient(to top, #f5f7f9 60%, transparent);
+  margin-top: 24px;
+  z-index: 10;
+}
+.btn-compare-cta {
+  width: 100%;
+  padding: 16px;
+  background: linear-gradient(135deg, #C4922A, #E2B04A);
+  color: #ffffff;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+  letter-spacing: 0.03em;
+  transition: all 0.2s;
+}
+.btn-compare-cta:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(212,175,55,0.4); }
+.qualifier-questions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.qualifier-btn {
+  background: #1e1e2e;
+  border: 1px solid #333;
+  color: #ccc;
+  padding: 8px 16px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+.qualifier-btn:hover, .qualifier-btn.selected {
+  background: #d4af37;
+  color: #f5f7f9;
+  border-color: #d4af37;
+  font-weight: 600;
+}
+.qualifier-rec {
+  background: rgba(212,175,55,0.08);
+  border: 1px solid rgba(212,175,55,0.3);
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-size: 14px;
+  color: #f0f0f0;
+  line-height: 1.6;
+}
+.compare-qualifier-section {
+  background: #131d2e;
+  border: 1px solid #e0e6ea;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.compare-qualifier-section h3 {
+  color: #d4af37;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+/* Lead sheet */
+.compare-lead-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 100;
+}
+.compare-lead-sheet {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #131d2e;
+  border-top: 2px solid #d4af37;
+  border-radius: 16px 16px 0 0;
+  padding: 24px;
+  z-index: 101;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.compare-lead-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.compare-lead-header h3 { color: #f0f0f0; margin: 0; }
+.btn-close-sheet {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.compare-lead-context {
+  background: rgba(212,175,55,0.08);
+  border: 1px solid rgba(212,175,55,0.2);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #aaa;
+  margin-bottom: 16px;
+}
+</style>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- POINT OF SALE PAGE                                              -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div id="page-pos" class="page">
+  <div class="page-header">
+    <h1>🛒 Point of Sale</h1>
+    <p class="subtitle">Live client ordering — build and process orders in real time.</p>
+  </div>
+
+  <!-- POS layout -->
+  <div class="pos-layout">
+
+    <!-- LEFT: Client + Product Search -->
+    <div class="pos-left">
+
+      <!-- Client Selector -->
+      <div class="pos-section">
+        <div class="pos-section-title">👤 Client</div>
+        <div class="pos-client-search">
+          <input type="text" id="pos-client-input" class="form-control" placeholder="Search client by name or create new..." oninput="posSearchClient(this.value)" />
+          <div id="pos-client-dropdown" class="pos-dropdown" style="display:none;"></div>
+        </div>
+        <div id="pos-client-selected" class="pos-client-selected" style="display:none;"></div>
+        <div id="pos-client-recent" style="display:none;">
+          <div class="pos-section-sub">Recent Orders</div>
+          <div id="pos-client-recent-list"></div>
+        </div>
+      </div>
+
+      <!-- Product Search -->
+      <div class="pos-section">
+        <div class="pos-section-title">🔍 Products</div>
+        <input type="text" id="pos-product-input" class="form-control" placeholder="Search products to add..." oninput="posSearchProduct(this.value)" />
+        <div id="pos-product-results" class="pos-product-results"></div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Cart -->
+    <div class="pos-right">
+      <div class="pos-section">
+        <div class="pos-section-title">🛒 Cart <span id="pos-session-badge" style="font-size:11px;color:#555;margin-left:6px;"></span></div>
+
+        <div id="pos-cart-empty" class="pos-cart-empty">No items yet — search and add products</div>
+        <div id="pos-cart-lines" style="display:none;">
+          <table class="pos-cart-table">
+            <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Total</th><th></th></tr></thead>
+            <tbody id="pos-cart-tbody"></tbody>
+          </table>
+        </div>
+
+        <!-- Discount -->
+        <div class="pos-discount-row">
+          <select id="pos-discount-select" class="form-control" onchange="posApplyDiscount()">
+            <option value="0">No Discount</option>
+            <option value="5">5% Off</option>
+            <option value="10">10% Off</option>
+            <option value="15">15% Off</option>
+            <option value="18">18% Off (Tier 3)</option>
+            <option value="20">20% Off</option>
+          </select>
+        </div>
+
+        <!-- Totals -->
+        <div id="pos-totals" class="pos-totals" style="display:none;">
+          <div class="pos-total-row">
+            <span>Subtotal</span><span id="pos-subtotal">$0.00</span>
+          </div>
+          <div class="pos-total-row discount-row" id="pos-discount-row" style="display:none;">
+            <span id="pos-discount-label">Discount</span><span id="pos-discount-amt" style="color:#50c878;">-$0.00</span>
+          </div>
+          <div class="pos-total-row">
+            <span>HST (13%)</span><span id="pos-hst">$0.00</span>
+          </div>
+          <div class="pos-total-row pos-total-final">
+            <span>TOTAL</span><span id="pos-total-final">$0.00</span>
+          </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="pos-cart-actions">
+          <button class="btn-small" onclick="posClearCart()" style="color:#ff6b6b;border-color:#ff6b6b;">Clear Cart</button>
+          <button class="btn-primary" onclick="posCheckout()" id="pos-checkout-btn" disabled>Checkout →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Receipt View -->
+  <div id="pos-receipt" style="display:none;">
+    <button class="btn-back" onclick="posNewSession()">← New Sale</button>
+    <div class="pos-receipt-paper" id="pos-receipt-content">
+      <div class="pos-receipt-header">
+        <div class="pos-receipt-logo">MyBioYouth</div>
+        <div class="pos-receipt-tagline">Research Order Receipt</div>
+      </div>
+      <div id="pos-receipt-details"></div>
+      <div class="pos-receipt-footer">Thank you for your research order.</div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:10px;">
+      <button class="btn-primary" onclick="window.print()">Print Receipt</button>
+      <button class="btn-small" onclick="posNewSession()">New Sale</button>
+    </div>
+  </div>
+</div>
+
+<style>
+/* ── POS PAGE ──────────────────────────────────────────── */
+.pos-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 40px;
+}
+@media (max-width: 768px) {
+  .pos-layout { grid-template-columns: 1fr; }
+}
+.pos-section {
+  background: #131d2e;
+  border: 1px solid #e0e6ea;
+  border-radius: 12px;
+  padding: 18px;
+  margin-bottom: 14px;
+}
+.pos-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: #d4af37;
+  margin-bottom: 12px;
+}
+.pos-section-sub {
+  font-size: 11px;
+  color: #555;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin: 10px 0 6px;
+}
+.pos-client-search { position: relative; }
+.pos-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0; right: 0;
+  background: #1a2840;
+  border: 1px solid #2a3f5f;
+  border-radius: 8px;
+  z-index: 50;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.pos-dropdown-item {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 14px;
+  border-bottom: 1px solid #e0e6ea;
+}
+.pos-dropdown-item:hover { background: #e0e6ea; }
+.pos-dropdown-item:last-child { border-bottom: none; }
+.pos-client-selected {
+  background: rgba(212,175,55,0.08);
+  border: 1px solid rgba(212,175,55,0.3);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-top: 8px;
+  font-size: 14px;
+  color: #f0f0f0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.pos-product-results { margin-top: 8px; }
+.pos-product-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid #e0e6ea;
+}
+.pos-product-item:last-child { border-bottom: none; }
+.pos-product-name { flex: 1; font-size: 14px; color: #f0f0f0; }
+.pos-product-price { font-size: 13px; color: #d4af37; font-weight: 700; min-width: 60px; text-align: right; }
+.pos-product-add {
+  background: #d4af37;
+  color: #f5f7f9;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 13px;
+}
+.pos-product-add:hover { background: #f0c040; }
+.pos-cart-empty {
+  text-align: center;
+  color: #555;
+  padding: 30px 0;
+  font-size: 14px;
+}
+.pos-cart-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.pos-cart-table th {
+  text-align: left;
+  padding: 8px 6px;
+  color: #888;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  border-bottom: 1px solid #e0e6ea;
+}
+.pos-cart-table td {
+  padding: 10px 6px;
+  border-bottom: 1px solid #131d2e;
+  color: #f0f0f0;
+  vertical-align: middle;
+}
+.pos-qty-input {
+  width: 50px;
+  background: #1a2840;
+  border: 1px solid #2a3f5f;
+  color: #f0f0f0;
+  text-align: center;
+  padding: 4px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+.pos-remove-btn {
+  background: none;
+  border: none;
+  color: #ff6b6b;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 6px;
+}
+.pos-discount-row {
+  margin: 12px 0;
+}
+.pos-totals {
+  margin: 12px 0;
+  border-top: 1px solid #e0e6ea;
+  padding-top: 12px;
+}
+.pos-total-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 0;
+  font-size: 14px;
+  color: #ccc;
+}
+.pos-total-final {
+  font-size: 18px;
+  font-weight: 800;
+  color: #f0f0f0;
+  border-top: 1px solid #2a3f5f;
+  padding-top: 10px;
+  margin-top: 6px;
+}
+.pos-cart-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin-top: 14px;
+  align-items: center;
+}
+.pos-receipt-paper {
+  background: #fff;
+  color: #000;
+  border-radius: 8px;
+  padding: 30px;
+  max-width: 400px;
+  margin: 0 auto;
+  font-family: monospace;
+}
+.pos-receipt-header {
+  text-align: center;
+  border-bottom: 1px dashed #ccc;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+}
+.pos-receipt-logo {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.pos-receipt-tagline {
+  font-size: 12px;
+  color: #666;
+}
+.pos-receipt-footer {
+  text-align: center;
+  font-size: 13px;
+  color: #666;
+  border-top: 1px dashed #ccc;
+  padding-top: 14px;
+  margin-top: 14px;
+}
+@media print {
+  body > *:not(#pos-receipt) { display: none !important; }
+  nav { display: none !important; }
+  #page-pos { display: block !important; }
+  #pos-receipt { display: block !important; }
+  .pos-receipt-paper { box-shadow: none; border: none; }
+  button { display: none !important; }
+}
+
+/* ── STACKS-AS-PRODUCTS (added 2026-04-19) ───────────────── */
+.qr-stacks-section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #d0d6da;
+}
+.qr-stacks-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #C4922A;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 10px 6px;
+}
+.quick-result-stack {
+  cursor: pointer;
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin: 2px 6px;
+  background: linear-gradient(90deg, rgba(196,146,42,0.06), rgba(196,146,42,0.02));
+  border-left: 3px solid #C4922A;
+  transition: background 0.15s;
+}
+.quick-result-stack:hover { background: rgba(196,146,42,0.12); }
+.qr-stack-name { font-weight: 700; color: #1f2933; font-size: 14px; }
+.qr-stack-name .qr-stack-emoji { margin-right: 6px; }
+.qr-stack-tagline { font-size: 12px; color: #6b7280; margin-top: 2px; }
+.qr-stack-matched { font-size: 11px; color: #C4922A; margin-top: 4px; font-weight: 600; }
+.qr-stack-matched .qr-match-pill {
+  display: inline-block;
+  background: rgba(196,146,42,0.15);
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-right: 4px;
+  font-weight: 700;
+}
+.qr-stack-draft {
+  display: inline-block;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  letter-spacing: 0.04em;
+}
+
+/* Stack detail modal — scoped to #stack-detail-modal only.
+   2026-04-27 FIX: was `.modal` which clobbered #modal-client / #modal-compound /
+   #modal-send-client centering (top:50%/left:50% + translate(-50%,-50%)) and
+   pushed them off-screen top-left. Bug reported by Marc on dashboard "select client". */
+#stack-detail-modal { position: fixed; inset: 0; transform: none; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1100; max-width: none; width: auto; padding: 0; border: none; }
+#stack-detail-modal.hidden { display: none; }
+.stack-detail-content { background: #fff; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); width: 92%; }
+.sd-header-name { font-size: 22px; font-weight: 800; color: #1f2933; margin: 0; }
+.sd-header-tagline { font-size: 13px; color: #6b7280; margin-top: 4px; }
+.sd-header-meta { display: flex; gap: 16px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+.sd-price { font-size: 20px; font-weight: 800; color: #047857; }
+.sd-cycle { font-size: 12px; color: #6b7280; background: #f3f4f6; padding: 4px 10px; border-radius: 6px; }
+.sd-section { margin-top: 18px; }
+.sd-section h3 { font-size: 13px; font-weight: 700; color: #C4922A; text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 10px; }
+.sd-use-cases { display: flex; flex-wrap: wrap; gap: 6px; }
+.sd-use-case-pill { background: #ecfdf5; color: #065f46; font-size: 12px; padding: 4px 10px; border-radius: 12px; }
+.sd-contraindications { background: #fef2f2; border: 1px solid #fecaca; padding: 12px 14px; border-radius: 8px; }
+.sd-contraindications ul { margin: 4px 0 0; padding-left: 20px; color: #7f1d1d; font-size: 13px; }
+.sd-compound-table { width: 100%; border-collapse: collapse; }
+.sd-compound-table th { background: #f9fafb; text-align: left; padding: 10px 12px; font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; }
+.sd-compound-table td { padding: 12px; border-top: 1px solid #e5e7eb; vertical-align: top; font-size: 13px; }
+.sd-compound-name { font-weight: 700; color: #1f2933; }
+.sd-compound-aliases { font-size: 11px; color: #9ca3af; margin-top: 2px; font-style: italic; }
+.sd-research-link { color: #C4922A; font-size: 12px; cursor: pointer; text-decoration: underline; }
+.sd-research-pending { color: #d97706; font-size: 11px; font-style: italic; }
+.sd-synthesis { background: #f9fafb; padding: 14px 16px; border-radius: 8px; font-size: 13px; line-height: 1.55; color: #374151; white-space: pre-wrap; }
+.sd-research-detail { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px 14px; margin-top: 8px; font-size: 12px; line-height: 1.5; max-height: 320px; overflow-y: auto; }
+.sd-research-detail .tier-label { display: inline-block; background: #C4922A; color: #fff; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+.sd-add-to-order {
+  background: #C4922A; color: #fff; border: none; padding: 12px 22px; border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer; margin-top: 16px; width: 100%;
+}
+.sd-add-to-order:hover { background: #267383; }
+.sd-draft-banner { background: #fef3c7; color: #92400e; padding: 10px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; margin-bottom: 14px; }
+</style>
+<script src="/js/modules/smart-order.js"></script>
+</body>
+</html>
