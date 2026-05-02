@@ -1985,6 +1985,42 @@ if ('serviceWorker' in navigator) {
     line-height: 1.45;
   }
 
+  /* One-line health summary surfaced from each agent's most recent event
+     payload — sits between description and meta row for at-a-glance reads. */
+  .routine-health-summary {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.04em;
+    color: var(--bone-dim);
+    background: rgba(196,146,42,0.04);
+    border-left: 2px solid rgba(196,146,42,0.35);
+    padding: 4px 8px;
+    border-radius: 0 2px 2px 0;
+    line-height: 1.45;
+    max-width: 680px;
+  }
+
+  /* Langfuse trace link in the status column. Disabled-state placeholder
+     rendered as a chip until consumers emit langfuse_trace_url. */
+  .routine-langfuse-link {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--gold-bright);
+    text-decoration: none;
+    padding: 3px 8px;
+    border: 1px solid rgba(196,146,42,0.30);
+    border-radius: 2px;
+    background: rgba(196,146,42,0.05);
+    white-space: nowrap;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .routine-langfuse-link:hover { border-color: rgba(196,146,42,0.65); color: var(--gold); }
+  .routine-langfuse-link.disabled {
+    color: var(--muted);
+    border-color: rgba(240,235,225,0.10);
+    background: transparent;
+    cursor: help;
+  }
+
   .routines-sub {
     font-size: 12px; color: var(--bone-dim); margin: -4px 0 16px;
     max-width: 760px; line-height: 1.5;
@@ -4702,47 +4738,68 @@ setInterval(tick, 30000);
     } catch(e) { return iso; }
   }
 
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+    });
+  }
+
   function renderRoutine(r) {
     var lastFired = r.last_fired ? fmtTs(r.last_fired) : '—';
     var nextFire  = r.next_fire  ? fmtTs(r.next_fire)  : '—';
     var outputLoc = r.output_location || '';
     var actionHtml = r.marc_action_required
-      ? '<div class="routine-action-needed">&#9888; Marc action: ' + r.marc_action_required + '</div>'
+      ? '<div class="routine-action-needed">&#9888; Marc action: ' + escapeHtml(r.marc_action_required) + '</div>'
       : '';
     var statusDetail = r.status_detail
-      ? '<div class="routine-meta-val muted" style="max-width:300px;white-space:normal;font-size:10px;line-height:1.45;margin-top:4px;">' + r.status_detail + '</div>'
+      ? '<div class="routine-meta-val muted" style="max-width:300px;white-space:normal;font-size:10px;line-height:1.45;margin-top:4px;">' + escapeHtml(r.status_detail) + '</div>'
       : '';
+    // Optional one-line health summary surfaced from the most recent event
+    // payload. Falls back silent if not provided. Sits below the description
+    // for at-a-glance reads (Marc's morning health-dot scan).
+    var healthSummary = r.health_summary
+      ? '<div class="routine-health-summary">&rsaquo; ' + escapeHtml(r.health_summary) + '</div>'
+      : '';
+    // TODO: wire Langfuse trace ID — once consumers emit langfuse_trace_url,
+    // the link below resolves to the live trace. Placeholder href '#' renders
+    // as a disabled-style chip for now.
+    var langfuseLink = r.langfuse_trace_url
+      ? '<a class="routine-langfuse-link" href="' + escapeHtml(r.langfuse_trace_url) + '" target="_blank" rel="noopener">Langfuse trace &rarr;</a>'
+      : '<span class="routine-langfuse-link disabled" title="TODO: wire Langfuse trace ID">Langfuse trace &middot; pending</span>';
 
-    return '<div class="' + cardClass(r.status) + '">' +
+    return '<div class="' + cardClass(r.status) + '" data-routine-id="' + escapeHtml(r.id || '') + '">' +
       '<div class="routine-main">' +
         '<div class="routine-header">' +
-          '<div class="routine-name">' + (r.name || r.id) + '</div>' +
-          '<span class="routine-agent-tag">' + (r.agent || '') + '</span>' +
+          '<div class="routine-name">' + escapeHtml(r.name || r.id) + '</div>' +
+          '<span class="routine-agent-tag">' + escapeHtml(r.agent || '') + '</span>' +
         '</div>' +
-        '<div class="routine-desc">' + (r.description || '') + '</div>' +
+        '<div class="routine-desc">' + escapeHtml(r.description || '') + '</div>' +
+        healthSummary +
         '<div class="routine-meta">' +
           '<div class="routine-meta-item">' +
             '<span class="routine-meta-lbl">Schedule</span>' +
-            '<span class="routine-meta-val gold">' + (r.cron_human || r.cron || '—') + '</span>' +
+            '<span class="routine-meta-val gold">' + escapeHtml(r.cron_human || r.cron || '—') + '</span>' +
           '</div>' +
           '<div class="routine-meta-item">' +
             '<span class="routine-meta-lbl">Cron</span>' +
-            '<span class="routine-meta-val">' + (r.cron || '—') + '</span>' +
+            '<span class="routine-meta-val">' + escapeHtml(r.cron || '—') + '</span>' +
           '</div>' +
           '<div class="routine-meta-item">' +
             '<span class="routine-meta-lbl">Last fired</span>' +
-            '<span class="routine-meta-val ' + (r.last_fired ? '' : 'muted') + '">' + lastFired + '</span>' +
+            '<span class="routine-meta-val ' + (r.last_fired ? '' : 'muted') + '">' + escapeHtml(lastFired) + '</span>' +
           '</div>' +
           '<div class="routine-meta-item">' +
             '<span class="routine-meta-lbl">Next fire</span>' +
-            '<span class="routine-meta-val gold">' + nextFire + '</span>' +
+            '<span class="routine-meta-val gold">' + escapeHtml(nextFire) + '</span>' +
           '</div>' +
         '</div>' +
-        (outputLoc ? '<div class="routine-output"><span class="tkey">output →</span> ' + outputLoc + '</div>' : '') +
+        (outputLoc ? '<div class="routine-output"><span class="tkey">output →</span> ' + escapeHtml(outputLoc) + '</div>' : '') +
         statusDetail +
       '</div>' +
       '<div class="routine-status-col">' +
         statusBadge(r.status) +
+        langfuseLink +
         actionHtml +
       '</div>' +
     '</div>';

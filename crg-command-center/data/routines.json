@@ -1,8 +1,9 @@
 {
   "_meta": {
     "schema": "routines-v1",
-    "last_updated": "2026-04-22",
-    "updated_by": "crg-nightly-research build — Marc authorized 2026-04-22"
+    "last_updated": "2026-05-02",
+    "updated_by": "garvis-cards-may2-cohort build — May 2 master queue Item 13 (Marc-authorized)",
+    "notes": "May 2 cohort added: asher (#19), aaron (#21), habakkuk (#22), martha-vm (#23), apollos-content-rotation (#24 — covered by daily-content / apollos), eod (#25), boaz (#20). All schedules cross-checked against cornerstoneregroup-site/netlify.toml on 2026-05-02. TODO: wire Langfuse trace IDs once consumers emit them."
   },
   "routines": [
     {
@@ -23,7 +24,8 @@
       "cost_cap_usd": 15,
       "cost_cap_deep_usd": 40,
       "trigger_also": "crg:session-closedown (fire-and-forget), manual /crg:nightly-research",
-      "downstream": "crg:morning-brief-builder reads output at 5:30am ET"
+      "downstream": "crg:morning-brief-builder reads output at 5:30am ET",
+      "langfuse_trace_url": null
     },
     {
       "id": "ezra:morning-brief",
@@ -42,7 +44,8 @@
       "skill_file": "skills/crg/morning-brief-builder.md",
       "cost_cap_usd": 5,
       "target_ship_time": "5:45 AM ET",
-      "upstream": "crg:nightly-research writes /research/YYYY-MM-DD/*.md"
+      "upstream": "crg:nightly-research writes /research/YYYY-MM-DD/*.md",
+      "langfuse_trace_url": null
     },
     {
       "id": "samuel:weekly-scorecard-digest",
@@ -60,7 +63,8 @@
       "output_files": ["samuel-digest.json"],
       "skill_file": null,
       "garvis_tile": "Agent Bus · Samuel Digest",
-      "note": "Inner loop only per doctrine_self_learning_loops.md — outer loop (firm, quarterly) deferred to Q3 2026"
+      "note": "Inner loop only per doctrine_self_learning_loops.md — outer loop (firm, quarterly) deferred to Q3 2026",
+      "langfuse_trace_url": null
     },
     {
       "id": "levite:secrets-rotation-check",
@@ -78,7 +82,129 @@
       "output_files": ["secrets.json", "secrets-cache.json"],
       "skill_file": null,
       "marc_action_required": "Sign up for Doppler free tier + run doppler secrets import from TOOLS.md. Then Levite function can be built.",
-      "garvis_tile": "Footer — Vault Keeper status dot"
+      "garvis_tile": "Footer — Vault Keeper status dot",
+      "langfuse_trace_url": null
+    },
+    {
+      "id": "asher:weekly-research",
+      "name": "Asher · Weekly Vitalis Research",
+      "agent": "Asher (Vitalis Research silo)",
+      "description": "Wednesday 7:00 AM ET weekly peptide-research digest — five sections: new literature (last 7 days), clinical trial updates, SKU-spec drift watch, Beaverly content pulse, protocol-library candidates. Voice register: clinical-research-paper. Brand: Vitalis Research only — NO Cornerstone, NO author name. Mandatory footer: 'Strictly for research and educational purposes.' Sibling on-demand endpoint generates 3-doc protocol packages via POST /api/asher/protocol-package.",
+      "cron": "0 11 * * 3",
+      "cron_human": "Every Wednesday at 11:00 UTC (7:00 AM ET)",
+      "timezone": "UTC",
+      "last_fired": null,
+      "next_fire": "2026-05-06T11:00:00Z",
+      "status": "never-fired",
+      "status_detail": "Built 2026-05-02 per cornerstoneregroup-site PR #19 (feat/asher-vitalis-silo-agent). First scheduled fire: Wed May 6 2026 7:00 AM ET. Required env: ANTHROPIC_API_KEY (hard). Optional env: RESEND_API_KEY (digest delivery), TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (protocol-package delivery), ASHER_FROM_EMAIL, ASHER_RECIPIENT_EMAIL.",
+      "output_location": "/.netlify/functions/asher-weekly-research-background",
+      "output_files": ["weekly-digest.html", "events.json (asher.digest.published)"],
+      "skill_file": null,
+      "on_demand_endpoint": "POST /api/asher/protocol-package",
+      "source_of_truth_pr": "https://github.com/MarcPapineau/cornerstoneregroup-site/pull/19",
+      "langfuse_trace_url": null,
+      "health_summary": "Awaiting first scheduled fire — env wired, function deployed."
+    },
+    {
+      "id": "boaz:daily-real-estate",
+      "name": "Boaz · Daily Real Estate Content",
+      "agent": "Boaz (Real Estate silo)",
+      "description": "Mon–Fri 7:00 AM ET daily content for marcpapineau.com — blog brief for Apollos, GHL pipeline-nudge proposal, Marc-review email. Distinct from Solomon (phone qualifier — RTLQ). Companion weekly Sunday intel digest covers structural-shift narrative, neighbourhood movers, rate watch, pipeline-segment warmth, Monday-to-watch.",
+      "cron": "0 11 * * 1-5",
+      "cron_human": "Mon–Fri at 11:00 UTC (7:00 AM ET) + Sun 22:00 UTC (6:00 PM ET) weekly intel",
+      "timezone": "UTC",
+      "last_fired": null,
+      "next_fire": "2026-05-04T11:00:00Z",
+      "status": "never-fired",
+      "status_detail": "Built 2026-05-02 per cornerstoneregroup-site PR #20 (feat/boaz-re-silo-agent). Two functions: boaz-daily-background (Mon-Fri 11 UTC) + boaz-weekly-background (Sun 22 UTC). First daily fire: Mon May 4 2026 7:00 AM ET. First weekly fire: Sun May 4 2026 6:00 PM ET.",
+      "output_location": "/.netlify/functions/boaz-daily-background, /.netlify/functions/boaz-weekly-background",
+      "output_files": ["daily-content.html", "weekly-intel-digest.html", "events.json (boaz.daily.shipped, boaz.weekly.shipped)"],
+      "skill_file": null,
+      "second_cron": "0 22 * * 0",
+      "source_of_truth_pr": "https://github.com/MarcPapineau/cornerstoneregroup-site/pull/20",
+      "langfuse_trace_url": null,
+      "health_summary": "Awaiting first scheduled fire — daily + weekly cron registered."
+    },
+    {
+      "id": "aaron:daily-primerica",
+      "name": "Aaron · Daily Primerica Content",
+      "agent": "Aaron (Primerica silo)",
+      "description": "Mon–Fri 7:30 AM ET daily content for the Primerica/financial-services silo: term life, IUL, segregated funds, RESP/RRSP/TFSA/FHSA. Posture: NEVER individual investment advice — educational + awareness only. Output flows through deterministic compliance-guardrail → KRITE → Marc-review email. Companion weekly regulatory sweep Mon 7:00 AM ET captures CRA / OSFI / FSRA / Bank of Canada / CSA news. Compliance-gate fires are tracked as drift signal.",
+      "cron": "30 11 * * 1-5",
+      "cron_human": "Mon–Fri at 11:30 UTC (7:30 AM ET) + Mon 11:00 UTC weekly regulatory sweep",
+      "timezone": "UTC",
+      "last_fired": null,
+      "next_fire": "2026-05-04T11:30:00Z",
+      "status": "never-fired",
+      "status_detail": "Built 2026-05-02 per cornerstoneregroup-site PR #21 (feat/aaron-primerica-silo-agent). Two functions: aaron-daily-background (Mon-Fri 11:30 UTC) + aaron-weekly-background (Mon 11 UTC). Greenfield — first dedicated Primerica agent. First daily fire: Mon May 4 2026 7:30 AM ET. Required env: ANTHROPIC_API_KEY (hard). Optional env: RESEND_API_KEY, GHL_TOKEN, GHL_LOCATION_PRIMERICA, AARON_FROM_EMAIL.",
+      "output_location": "/.netlify/functions/aaron-daily-background, /.netlify/functions/aaron-weekly-background",
+      "output_files": ["daily-content.html", "weekly-regulatory-sweep.html", "events.json (aaron.daily.shipped, aaron.compliance_gate.fired)"],
+      "skill_file": null,
+      "second_cron": "0 11 * * 1",
+      "source_of_truth_pr": "https://github.com/MarcPapineau/cornerstoneregroup-site/pull/21",
+      "langfuse_trace_url": null,
+      "health_summary": "Greenfield Primerica agent — compliance gate live, awaiting first daily fire."
+    },
+    {
+      "id": "habakkuk:pre-krite-critic",
+      "name": "Habakkuk · Pre-KRITE Critic",
+      "agent": "Habakkuk (universal pre-KRITE critic)",
+      "description": "Universal structural-critique gate that every Builder run hits before KRITE. 6-axis review: shape, claims, evidence, completeness, contradictions, footgun-detection. Triggered per Builder run — NOT on a cron. Internal callers prefer require('./_lib/habakkuk-critic'); HTTP endpoint serves Windmill flows + external runtimes.",
+      "cron": null,
+      "cron_human": "On-demand · POST /api/habakkuk/critique",
+      "timezone": null,
+      "last_fired": null,
+      "next_fire": null,
+      "status": "never-fired",
+      "status_detail": "Built 2026-05-02 per cornerstoneregroup-site PR #22 (feat/habakkuk-universal-critic). HTTP-only — no cron schedule. Health probe: GET /api/habakkuk/critique. Self-test: GET /api/habakkuk/critique?dry=1. Required env: ANTHROPIC_API_KEY (only when caller passes useLLM=true). Tier: green (read-only structural analysis, no Marc-facing side effects).",
+      "output_location": "/.netlify/functions/habakkuk-background",
+      "output_files": ["critique-verdict (returned to caller)", "events.json (habakkuk.critique.run)"],
+      "skill_file": null,
+      "trigger_mode": "on-demand-http",
+      "source_of_truth_pr": "https://github.com/MarcPapineau/cornerstoneregroup-site/pull/22",
+      "langfuse_trace_url": null,
+      "health_summary": "On-demand HTTP critic — runs per Builder request, no cron."
+    },
+    {
+      "id": "martha-vm:weekly-voice-mining",
+      "name": "Martha-VM · Weekly Voice Mining",
+      "agent": "Martha-VM (Gmail voice profile builder)",
+      "description": "Sunday 5:00 AM ET weekly Gmail voice-mining run. Reads marc@teamtoday.ca (last 30 days of professional email), runs Sonnet 4.6 (NEVER Haiku) to extract: tone register, top-30 phrases, objection templates, banned phrases, sentence-length distribution, voice anchors. Output is committed to netlify/functions/_lib/voice-profile.json on main via the GitHub Contents API. Apollos / Boaz / Aaron / Asher / Lydia / Asaph all read this file on cold start (with frozen-baseline fallback). Anti-drift IP for the entire content stack. Lands BEFORE Apollos's Sunday 7pm magazine.",
+      "cron": "0 9 * * 0",
+      "cron_human": "Every Sunday at 09:00 UTC (5:00 AM ET)",
+      "timezone": "UTC",
+      "last_fired": null,
+      "next_fire": "2026-05-03T09:00:00Z",
+      "status": "never-fired",
+      "status_detail": "Built 2026-05-02 per cornerstoneregroup-site PR #23 (feat/martha-vm-voice-mining). Ports n8n workflow IvpMqKNmxhcS27yH (mine_teamtoday_emails). Required env: ANTHROPIC_API_KEY (hard), GITHUB_MASTER_KEY (hard for commit). Required env (Gmail Path A — set on Netlify as of 2026-05-02): GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GMAIL_REFRESH_TOKEN_TEAMTODAY. Without these, function exits clean with 'no-creds' reason — cron does not crash, existing voice-profile.json keeps the content stack live (degraded mode). First fire: Sun May 3 2026 5:00 AM ET. TODO: surface degraded-mode (no-creds exit) as yellow card status — currently rolls up as never-fired.",
+      "output_location": "netlify/functions/_lib/voice-profile.json (on cornerstoneregroup-site main via GitHub Contents API)",
+      "output_files": ["voice-profile.json", "events.json (martha-vm.profile.refreshed, martha-vm.no-creds)"],
+      "skill_file": null,
+      "depends_on_oauth_envs": ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN_TEAMTODAY"],
+      "consumers": ["apollos", "boaz", "aaron", "asher", "lydia", "asaph"],
+      "source_of_truth_pr": "https://github.com/MarcPapineau/cornerstoneregroup-site/pull/23",
+      "langfuse_trace_url": null,
+      "health_summary": "OAuth env set on Netlify — awaiting Sun May 3 first fire; degraded-mode fallback wired."
+    },
+    {
+      "id": "nehemiah:eod-report",
+      "name": "Nehemiah · End of Day Report",
+      "agent": "Nehemiah (Conductor — EOD twin)",
+      "description": "Mon–Fri 7:00 PM ET book-end to the 8 AM ET morning standup. Marc gets a walk-the-wall inspection email summarizing what shipped, what failed, what's awaiting his hand, what's queued for tomorrow, and a one-line health dot per agent. Data sources (best-effort, degrades gracefully): Resend list-emails (last 12h), GitHub PR search (merged today), agent-bus events + queue + Garvis, Marc-decision queue. Manual smoke: GET ?dry_run=1 returns rendered HTML without sending.",
+      "cron": "0 23 * * 1-5",
+      "cron_human": "Mon–Fri at 23:00 UTC (7:00 PM ET during EDT)",
+      "timezone": "UTC",
+      "last_fired": null,
+      "next_fire": "2026-05-04T23:00:00Z",
+      "status": "never-fired",
+      "status_detail": "Built 2026-05-02 per cornerstoneregroup-site PR #25 (feat/eod-reporter). Distinct from nehemiah-conductor (every-15min reaper). DST drift: when DST ends in November, change to '0 0 * * 2-6' (= 7 PM EST = 00:00 UTC the next day). First live fire target: Mon May 4 2026 7:00 PM ET. Lockfile prevents same-day double-send (fix/nehemiah-eod-windmill-lockfile, PR #2).",
+      "output_location": "/.netlify/functions/eod-report-background",
+      "output_files": ["eod-report.html (Resend send)", "events.json (nehemiah.eod.shipped, nehemiah.eod.skipped_lockfile)"],
+      "skill_file": null,
+      "lockfile_pr": "https://github.com/MarcPapineau/cornerstone-apps/pull/2",
+      "source_of_truth_pr": "https://github.com/MarcPapineau/cornerstoneregroup-site/pull/25",
+      "langfuse_trace_url": null,
+      "health_summary": "Lockfile in place (PR #2) — awaiting first Mon-Fri 7 PM ET fire."
     }
   ]
 }
