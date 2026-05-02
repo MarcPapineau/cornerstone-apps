@@ -108,14 +108,40 @@ export async function sendMessage({
 /**
  * Poll the sync router for a background result.
  * Resolves when status is "complete" or "error", rejects on timeout.
+ *
+ * F4 fix (2026-05-01) — patience for cold starts.
+ * WKU rationale (Wisdom·Knowledge·Understanding, Proverbs 24:3-4):
+ *   Wisdom — Marc and real users see "background function may have failed
+ *     to start" as a hard error, then re-send the message. That doubles
+ *     Anthropic spend AND duplicates context for the user. Cold-start error
+ *     theater costs money and trust.
+ *   Knowledge — Netlify Background Function cold starts can take 12-15s
+ *     before the function writes its first blob entry. The prior threshold
+ *     (5 polls × 2000ms = 10s) gave up BEFORE many legitimate cold starts.
+ *     Worse: the counter incremented on every poll regardless of status,
+ *     so a transient `pending` between two `not_found`s did not reset it.
+ *   Understanding — Track CONSECUTIVE not_found polls only. Any other
+ *     status (including pending) means the background function reached the
+ *     blob store and is alive. Extend the consecutive threshold to 20 so
+ *     even a 30-40s cold start is tolerated. The overall POLL_TIMEOUT_MS
+ *     (90s) remains the real backstop. Use a gentle backoff (2/3/5/5/5…)
+ *     so users see fewer redundant spinner flashes early without changing
+ *     the long-tail behavior.
  */
+const NOT_FOUND_GIVEUP_THRESHOLD = 20;
+const BACKOFF_INTERVALS_MS = [2000, 3000, 5000];
+
 async function _pollForResult(runId, onStatus) {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   let pollCount = 0;
+  let consecutiveNotFound = 0;
 
   while (Date.now() < deadline) {
-    // Wait before first poll — background function needs at least a moment to start
-    await _sleep(POLL_INTERVAL_MS);
+    // Wait before each poll — background function needs at least a moment to
+    // start. Backoff array is short; once exhausted we plateau on the last
+    // interval (5000ms) so the long tail is still bounded by POLL_TIMEOUT_MS.
+    const interval = BACKOFF_INTERVALS_MS[Math.min(pollCount, BACKOFF_INTERVALS_MS.length - 1)];
+    await _sleep(interval);
     pollCount++;
 
     if (onStatus) onStatus('polling');
@@ -129,7 +155,9 @@ async function _pollForResult(runId, onStatus) {
       });
 
       if (!pollRes.ok) {
-        // Transient network hiccup — keep trying until deadline
+        // Transient network hiccup — keep trying until deadline.
+        // Don't bump consecutiveNotFound: this is a network failure, not a
+        // confirmed "blob missing" signal from the server.
         console.warn('[vitalis-chat] poll HTTP error', pollRes.status, '— retrying');
         continue;
       }
@@ -165,13 +193,20 @@ async function _pollForResult(runId, onStatus) {
       };
     }
 
-    // status === 'pending' | 'not_found' — keep polling
-    if (status === 'not_found' && pollCount > 5) {
-      // After 10s without the job appearing in Blobs, something went wrong
-      return {
-        ok: false,
-        error: `Chat job ${runId} not found after ${pollCount} polls — background function may have failed to start`,
-      };
+    // F4 — count CONSECUTIVE not_found responses; reset on any other status.
+    // A transient pending between two not_founds proves the bg function is
+    // alive and writing, so we should not treat the next not_found as a
+    // continuation of the cold-start window.
+    if (status === 'not_found') {
+      consecutiveNotFound++;
+      if (consecutiveNotFound >= NOT_FOUND_GIVEUP_THRESHOLD) {
+        return {
+          ok: false,
+          error: `Chat job ${runId} not found after ${consecutiveNotFound} consecutive polls — background function may have failed to start`,
+        };
+      }
+    } else {
+      consecutiveNotFound = 0;
     }
   }
 

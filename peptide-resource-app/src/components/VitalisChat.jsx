@@ -78,6 +78,22 @@ export default function VitalisChat() {
 
   const scrollRef = useRef(null);
 
+  // F2 fix (2026-05-01) — synchronous double-click lock for Send-to-Marc.
+  // WKU rationale:
+  //   Wisdom — Marc has been bitten by duplicate GHL contacts/notes from fast
+  //     double-taps. React state updates (setSendingToMarc(true)) are async,
+  //     so `disabled={sending}` on the button does not commit before a 2nd
+  //     synchronous click fires the handler. Real users tap twice when the
+  //     spinner doesn't appear instantly.
+  //   Knowledge — useRef gives us a mutable container whose `.current` writes
+  //     are synchronous and survive React's render-paint cycle. Setting it
+  //     BEFORE awaiting the network call is the canonical React lock pattern.
+  //   Understanding — `setSendingToMarc(true)` is kept for the visual button
+  //     state (spinner + "Sending…" label). The ref is the truth for whether
+  //     a request is in-flight. Reset in finally so success and error both
+  //     unlock; otherwise a failed send leaves the button permanently dead.
+  const sendingToMarcRef = useRef(false);
+
   // --------- FIX BUG-007: listen for protocol context from Protocol.jsx ------
   useEffect(() => {
     const handler = (e) => {
@@ -219,24 +235,50 @@ export default function VitalisChat() {
 
   // --------- send to marc --------------------------------------------------
   async function handleSendToMarc() {
+    // F2 fix — synchronous double-click guard. Ref check fires BEFORE any
+    // async boundary, so a second click within the React paint window short-
+    // circuits before sendStackToMarc runs. Replaces previously-trustless
+    // reliance on `disabled={sending}` which only updates after the next
+    // render commit.
+    if (sendingToMarcRef.current) return;
+
+    // F3 fix — email is the only callback path Marc has. Without it, the
+    // GHL upsert key falls back to chat-anonymous@vitalis.local and every
+    // anonymous send merges into a single contact with no way for Marc to
+    // reach the user. Refuse to send rather than silently succeeding.
+    // Defense-in-depth: SendToMarcBar also gates on intake.email at render
+    // time, so reaching this branch means intake state changed mid-flight.
+    if (!intake?.email) {
+      setError('Add your email above before sending to Marc — he needs a way to reach you.');
+      return;
+    }
+
     // Find the most recent assistant protocol
     const lastAssistant = [...history].reverse().find(m => m.role === 'assistant' && !m.error);
     if (!lastAssistant) return;
 
+    sendingToMarcRef.current = true;
     setSendingToMarc(true);
-    const res = await sendStackToMarc({
-      intake,
-      protocolMarkdown: lastAssistant.content,
-      protocolId: lastAssistant.protocolId,
-      userEmail: intake?.email || undefined,
-      userName: intake?.name || undefined,
-    });
-    setSendingToMarc(false);
-    if (res.ok) {
-      setSentToMarcOk(true);
-      setTimeout(() => setSentToMarcOk(false), 4000);
-    } else {
-      setError(`Send to Marc failed: ${res.error}`);
+    try {
+      const res = await sendStackToMarc({
+        intake,
+        protocolMarkdown: lastAssistant.content,
+        protocolId: lastAssistant.protocolId,
+        userEmail: intake.email,
+        userName: intake?.name || undefined,
+      });
+      if (res.ok) {
+        setSentToMarcOk(true);
+        setTimeout(() => setSentToMarcOk(false), 4000);
+      } else {
+        setError(`Send to Marc failed: ${res.error}`);
+      }
+    } finally {
+      // F2 — release the lock on BOTH success and error. Without this, a
+      // network failure would leave the button permanently disabled until
+      // page reload. setSendingToMarc(false) handles the visual state.
+      sendingToMarcRef.current = false;
+      setSendingToMarc(false);
     }
   }
 
@@ -310,10 +352,16 @@ export default function VitalisChat() {
             scrollRef={scrollRef}
           />
           {lastProtocolId && history.length > 0 && history[history.length - 1]?.role === 'assistant' && (
+            // F3 fix — gate Send-to-Marc on intake.email being present.
+            // SendToMarcBar internally renders a disabled "Add your email…"
+            // state when hasEmail is false; a clickable button is NEVER
+            // shown without an email, so the chat-anonymous@vitalis.local
+            // fallback in claudeChat.js is unreachable from this UI.
             <SendToMarcBar
               sending={sendingToMarc}
               sentOk={sentToMarcOk}
               onSend={handleSendToMarc}
+              hasEmail={Boolean(intake?.email)}
             />
           )}
           {error && (
@@ -1006,7 +1054,42 @@ function Spinner({ status = 'polling' }) {
   );
 }
 
-function SendToMarcBar({ sending, sentOk, onSend }) {
+function SendToMarcBar({ sending, sentOk, onSend, hasEmail }) {
+  // F3 fix — no clickable button without an email. The previous behavior
+  // sent to chat-anonymous@vitalis.local and the user saw a green "Sent to
+  // Marc" while Marc had no callback path. WKU:
+  //   Wisdom — silent success is the worst UX outcome (user thinks they're
+  //     reachable; Marc has no way to reach them; trust breaks).
+  //   Knowledge — GHL upserts on email; reusing the placeholder collapses
+  //     every anonymous send into one contact.
+  //   Understanding — render a disabled, explicit "Add your email" state.
+  //     The handler also short-circuits if intake.email is missing, but
+  //     the UI guard is the user's primary protection.
+  if (!hasEmail) {
+    return (
+      <div style={{ padding: '8px 14px', borderTop: `1px solid ${T.border}`, background: T.bgRaised }}>
+        <div
+          role="status"
+          aria-live="polite"
+          title="Reset intake (↺ icon at top) and add your email so Marc can follow up."
+          style={{
+            width: '100%',
+            padding: '8px 12px',
+            borderRadius: 6,
+            border: `1px dashed ${T.border}`,
+            background: 'transparent',
+            color: T.textMuted,
+            fontSize: 12,
+            fontWeight: 600,
+            textAlign: 'center',
+            cursor: 'not-allowed',
+          }}
+        >
+          Add your email in intake to send this stack to Marc
+        </div>
+      </div>
+    );
+  }
   return (
     <div style={{ padding: '8px 14px', borderTop: `1px solid ${T.border}`, background: T.bgRaised }}>
       <button

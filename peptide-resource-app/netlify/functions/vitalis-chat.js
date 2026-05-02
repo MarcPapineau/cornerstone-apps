@@ -44,6 +44,7 @@
  */
 
 const { getStore } = require('@netlify/blobs');
+const { randomBytes } = require('crypto');
 const { moderateMessage } = require('../lib/moderation');
 const { sign: signInternal, SIG_HEADER } = require('../lib/internal-sig');
 
@@ -74,13 +75,22 @@ function getBackgroundFunctionUrl() {
 // strings. Both paths must call moderateMessage() before any Anthropic call.
 
 // ---------------------------------------------------------------------------
-// runId generator — crypto-random hex, no dependencies
+// runId generator — true crypto-random hex via Node stdlib `crypto`.
+//
+// WKU rationale (Wisdom·Knowledge·Understanding, Proverbs 24:3-4):
+//   Wisdom — runId is the BLOB KEY that stores chat output. A guessable runId
+//     lets an attacker poll another user's blob, leaking protocol content.
+//   Knowledge — Math.random() is a non-cryptographic PRNG (V8 uses xorshift128+),
+//     seedable + predictable. The prior comment claimed "crypto-random" — theater.
+//     Node's `crypto.randomBytes(16)` reads from the OS CSPRNG (/dev/urandom on
+//     Linux, BCryptGenRandom on Windows). Built into Node 18+ stdlib, no new dep.
+//   Understanding — F1 fix (P1 bug): swap Math.random for randomBytes. 16 bytes
+//     → 32-char hex matches the existing `^[a-f0-9]{32}$` validator at line 159
+//     so no other call sites need to change.
 // ---------------------------------------------------------------------------
 function generateRunId() {
-  // 16 random bytes → 32-char hex string. Works in Node.js without crypto import.
-  const bytes = [];
-  for (let i = 0; i < 16; i++) bytes.push(Math.floor(Math.random() * 256));
-  return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+  // 16 random bytes from the OS CSPRNG → 32-char hex string.
+  return randomBytes(16).toString('hex');
 }
 
 // ---------------------------------------------------------------------------
