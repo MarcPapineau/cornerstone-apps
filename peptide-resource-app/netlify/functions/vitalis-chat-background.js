@@ -29,18 +29,39 @@
  * On failure, writes:
  *   { status: 'error', error: string }
  *
- * Blobs auto-expire at 1 hour (set via metadata.ttl).
+ * Blob retention: each entry is written with metadata.expiresAt = writtenAt + 1h.
+ * Netlify Blobs does NOT auto-delete by metadata — a separate sweep job is
+ * expected to enumerate the store and remove keys past expiresAt.
+ *
+ * Bug #1 fix (2026-05-01): this function now requires a valid x-internal-sig
+ * HMAC header. The sync router signs every dispatch; direct/unauthorized
+ * POSTs are refused with 401 before any Anthropic call.
+ *
+ * Bug #2 fix (2026-05-01): moderation is now executed here as the first
+ * step of the handler, using the SAME shared rules as vitalis-chat.js. A
+ * leaked URL alone cannot bypass minors / self-harm / illegal-substance
+ * refusals.
  */
 
 const { getStore } = require('@netlify/blobs');
+const { moderateMessage } = require('../lib/moderation');
+const { verify: verifyInternal, SIG_HEADER } = require('../lib/internal-sig');
 
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 
+// 1 hour Blob retention (Bug #3 fix).
+const BLOB_TTL_MS = 60 * 60 * 1000;
+
+// CORS — tightened to refuse direct browser calls. Background functions
+// are server-to-server only; the sync router is the public entry point.
+// We keep OPTIONS handling for symmetry/health checks but advertise no
+// allowed origin and no allowed headers, so a browser preflight will fail.
 const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Origin': 'null',
+  'Access-Control-Allow-Headers': '',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Vary': 'Origin',
 };
 
 // ---------------------------------------------------------------------------
@@ -233,10 +254,20 @@ function getBlobsStore() {
 
 async function writeResult(runId, payload) {
   const store = getBlobsStore();
-  await store.setJSON(runId, {
-    ...payload,
-    writtenAt: new Date().toISOString(),
-  });
+  const writtenAt = new Date();
+  const expiresAt = new Date(writtenAt.getTime() + BLOB_TTL_MS);
+  // Bug #3 fix: explicit expiresAt metadata. Netlify Blobs does not auto-
+  // expire — the prior doc-comment ("auto-expire at 1 hour via metadata.ttl")
+  // was theater. A separate sweep job (out of scope) will purge stale keys.
+  await store.setJSON(
+    runId,
+    {
+      ...payload,
+      writtenAt: writtenAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+    },
+    { metadata: { expiresAt: expiresAt.toISOString(), ttlMs: BLOB_TTL_MS } }
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -279,9 +310,61 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'runId is required' }) };
   }
 
+  // -------------------------------------------------------------------------
+  // Bug #1 fix — HMAC signature verification.
+  // Background function is at a public URL. Without auth, anyone can POST
+  // and burn Marc's ANTHROPIC_API_KEY. The sync router signs every internal
+  // dispatch; we verify before doing anything expensive.
+  // Fail closed: missing secret env var → 401, never silent pass-through.
+  // -------------------------------------------------------------------------
+  const internalSecret = process.env.INTERNAL_FN_SECRET;
+  // Header names are lowercased by Netlify; check both forms defensively.
+  const sigHeaderValue =
+    (event.headers && (event.headers[SIG_HEADER] || event.headers[SIG_HEADER.toLowerCase()])) || '';
+  const sigCheck = verifyInternal(internalSecret, sigHeaderValue, runId);
+  if (!sigCheck.ok) {
+    console.warn('[vitalis-chat-background] reject unauthenticated call', {
+      runId,
+      reason: sigCheck.reason,
+      ip: event.headers?.['x-nf-client-connection-ip'] || event.headers?.['x-forwarded-for'] || 'unknown',
+    });
+    return {
+      statusCode: 401,
+      headers: { ...CORS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Unauthorized' }),
+    };
+  }
+
   if (!userMessage || typeof userMessage !== 'string') {
     await writeResult(runId, { status: 'error', error: 'userMessage is required' });
     return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'userMessage is required' }) };
+  }
+
+  // -------------------------------------------------------------------------
+  // Bug #2 fix — moderation runs in BOTH paths (sync router + background).
+  // Defense-in-depth: even if the sig check above is somehow bypassed in a
+  // future regression, the same minors / self-harm / illegal-substance
+  // refusals fire here too. No Anthropic call on a flagged prompt.
+  // -------------------------------------------------------------------------
+  const mod = moderateMessage(userMessage);
+  if (mod.flagged && mod.trigger.severity === 'block') {
+    console.log('[vitalis-chat-background] moderation block:', mod.trigger.id, { runId });
+    await writeResult(runId, {
+      status: 'complete',
+      result: {
+        text: mod.trigger.response,
+        tokensIn: 0,
+        tokensOut: 0,
+        model,
+        protocolId: null,
+        moderation: mod,
+      },
+    });
+    return {
+      statusCode: 200,
+      headers: { ...CORS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runId, status: 'moderation_block', trigger: mod.trigger.id }),
+    };
   }
 
   if (!ANTHROPIC_KEY) {

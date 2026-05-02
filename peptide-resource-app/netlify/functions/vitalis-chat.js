@@ -44,12 +44,21 @@
  */
 
 const { getStore } = require('@netlify/blobs');
+const { moderateMessage } = require('../lib/moderation');
+const { sign: signInternal, SIG_HEADER } = require('../lib/internal-sig');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
+
+// 1 hour — Blob retention window for completed/queued runs.
+// Stored as an `expiresAt` ISO timestamp in metadata (Bug #3 fix).
+// Netlify Blobs do NOT auto-expire; callers should treat anything past
+// expiresAt as eligible for cleanup. A separate sweep job (out of scope
+// for this patch) can enumerate the store and delete stale keys.
+const BLOB_TTL_MS = 60 * 60 * 1000;
 
 // Internal URL to fire the background function. In Netlify, background
 // functions are reachable via the same /.netlify/functions/ path.
@@ -60,22 +69,9 @@ function getBackgroundFunctionUrl() {
   return `${base}/.netlify/functions/vitalis-chat-background`;
 }
 
-// ---------------------------------------------------------------------------
-// Moderation (same triggers as background + client — defense in depth)
-// ---------------------------------------------------------------------------
-const MODERATION_TRIGGERS = [
-  { id: 'minors', severity: 'block', pattern: /\b(my|the|a)\s+(kid|child|daughter|son|teen|teenager|minor)\b|\b(under|below)\s*(13|14|15|16|17|18)\b|\bfor my\s+(\d{1,2})\s*(yo|year old|y\/o)/i, response: 'Peptide protocols are for adults 18+ only. If you are asking on behalf of a minor, please consult a pediatric endocrinologist — we cannot produce guidance here.' },
-  { id: 'self-harm', severity: 'block', pattern: /\b(kill myself|suicide|suicidal|end my life|self-harm|harm myself)\b/i, response: 'If you\'re in crisis, please contact the Suicide and Crisis Lifeline (988 in the US, or your local equivalent). We\'re not equipped to help here, but real support is available right now.' },
-  { id: 'illegal-substances', severity: 'block', pattern: /\b(cocaine|heroin|meth|methamphetamine|fentanyl|crack|ketamine)\b/i, response: 'Vitalis only discusses research peptides and FDA-regulated compounds. For substance-use questions, please consult a licensed clinician.' },
-];
-
-function moderateMessage(text) {
-  if (!text || typeof text !== 'string') return { flagged: false };
-  for (const t of MODERATION_TRIGGERS) {
-    if (t.pattern.test(text)) return { flagged: true, trigger: { id: t.id, severity: t.severity, response: t.response } };
-  }
-  return { flagged: false };
-}
+// Moderation logic lives in netlify/lib/moderation.js so the sync router
+// AND the background function share the exact same trigger set + response
+// strings. Both paths must call moderateMessage() before any Anthropic call.
 
 // ---------------------------------------------------------------------------
 // runId generator — crypto-random hex, no dependencies
@@ -103,10 +99,20 @@ function getBlobsStore() {
 
 async function writeResult(runId, payload) {
   const store = getBlobsStore();
-  await store.setJSON(runId, {
-    ...payload,
-    writtenAt: new Date().toISOString(),
-  });
+  const writtenAt = new Date();
+  const expiresAt = new Date(writtenAt.getTime() + BLOB_TTL_MS);
+  // Bug #3 fix: write explicit expiresAt metadata. Netlify Blobs does not
+  // auto-expire — the prior doc-comment claim was theater. A future sweep
+  // job (out of scope here) can enumerate keys and delete past expiresAt.
+  await store.setJSON(
+    runId,
+    {
+      ...payload,
+      writtenAt: writtenAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+    },
+    { metadata: { expiresAt: expiresAt.toISOString(), ttlMs: BLOB_TTL_MS } }
+  );
 }
 
 async function readResult(runId) {
@@ -236,11 +242,28 @@ exports.handler = async (event) => {
     temperature,
   };
 
+  // Bug #1 fix: sign every internal call so the bg function can refuse
+  // unauthenticated direct invocations. Fail closed if the secret env var
+  // is missing — better to refuse traffic than to ship with auth disabled.
+  const internalSecret = process.env.INTERNAL_FN_SECRET;
+  if (!internalSecret) {
+    console.error('[vitalis-chat] INTERNAL_FN_SECRET not configured — refusing dispatch');
+    return {
+      statusCode: 503,
+      headers: { ...CORS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Chat service misconfigured. Please contact Marc.' }),
+    };
+  }
+  const sigHeader = signInternal(internalSecret, runId);
+
   // Fire-and-forget: background function is non-blocking from the client
   // perspective. We don't await it — we return 202 immediately.
   fetch(bgUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      [SIG_HEADER]: sigHeader,
+    },
     body: JSON.stringify(bgPayload),
   }).catch(err => {
     console.error('[vitalis-chat] background invoke error:', err.message);
