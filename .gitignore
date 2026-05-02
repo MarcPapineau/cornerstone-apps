@@ -1,0 +1,46 @@
+# =====================================================================
+# CRG workspace .gitignore
+# =====================================================================
+
+# === P0 EMERGENCY (added 2026-05-01) ===
+# Untracked scratchpads containing live production secrets.
+# Never commit. Rotate keys via Levite, then delete the dirs entirely.
+deploy-functions-tmp/
+04-PEPTIDES/
+
+# === Scratchpad / backup patterns ===
+*-tmp/
+*-scratch/
+*-WIP/
+**/BACKUP-*/
+**/src-BACKUP-*/
+**/*-BACKUP-*.html
+**/*-BACKUP-*.js
+
+# === Secrets — defense in depth ===
+.env
+.env.local
+.env.production
+.env.*.local
+*.pem
+*.key
+secrets/
+
+# === Local Netlify folder ===
+.netlify
+
+# === Node ===
+node_modules/
+
+# === macOS ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# === IDE / editors ===
+.vscode/
+.idea/
+*.swp
+*.swo
