@@ -1601,9 +1601,20 @@ async function printOrderPDF() {
   const client = clients.find(c => c.id === clientId);
   const subtotal = orderLines.reduce((s, l) => s + (l.lineTotal || (l.msrp * l.qty)), 0);
 
-  // Manual discount from dropdown (matches order summary UI)
+  // 2026-05-01 FIX (P0 BUG #2 — REVENUE LEAK):
+  // Prior code applied `discount = subtotal * discountPct` against the FULL
+  // subtotal (incl. pens/sprays/KLOW). That under-stated the printed total
+  // vs. the on-screen total computed by `updateOrderTotals` (lines 1305-1312),
+  // and the customer paid the lower printed number. Mirror updateOrderTotals
+  // math: discount applies ONLY to the non-exclusive (discountable) base.
+  // Pens, sprays, and KLOW are isExclusive=true (set at add-time by
+  // isExclusiveItem) and pass through at MSRP regardless of order-wide %.
   const discountPct = getDiscountPct ? getDiscountPct() / 100 : 0;
-  const discount = subtotal * discountPct;
+  const discountableSubtotal = orderLines.reduce(
+    (s, l) => s + (l.isExclusive ? 0 : (l.lineTotal || (l.msrp * l.qty))),
+    0
+  );
+  const discount = discountableSubtotal * discountPct;
   const total = subtotal - discount;
 
   const orderNumber = 'INV-' + Date.now().toString().slice(-8);
@@ -1800,17 +1811,78 @@ async function saveProtocol() {
 }
 
 function addProtocolToOrder() {
+  // 2026-05-01 FIX (P0 BUG #3 — 4 defects in 13 lines):
+  //   (a) appended to existing cart silently — now prompts replace vs append
+  //   (b) toast counted total cart instead of items added — now tracks addedCount
+  //   (c) pushed line objects omitted isExclusive/cost/lineCost/margin/
+  //       discountAllowed/maxDiscountPct/discountPct/discountedPrice — required
+  //       by updateOrderTotals (1305-1318) and printOrderPDF (1614-1620).
+  //       Missing isExclusive→falsy meant pens/sprays/KLOW from THIS path
+  //       became silently discountable, contradicting the
+  //       Pens-Sprays-KLOW-are-exclusive doctrine. Now reuses the canonical
+  //       quickAddById shape (lines 624-635), so KLOW=isExclusive:true survives.
+  //   (d) match logic used `name.toLowerCase().split(' ')[0]` substring — now
+  //       uses a stricter contains check on the full compound name, with a
+  //       single-word fallback. Still text-matched (protocol .name is free
+  //       text, not a SKU), but no longer fragmentary on the first space.
   if (!currentProtocol) return showToast('Generate a protocol first', 'error');
-  showPage('order');
-  // Match compounds to products and pre-populate
-  currentProtocol.recommended_compounds.forEach(compound => {
-    const match = products.find(p => p.name.toLowerCase().includes(compound.name.toLowerCase().split(' ')[0]) && p.msrp > 0);
-    if (match) {
-      orderLines.push({ id: match.id, name: match.name, sku: match.sku, msrp: match.msrp, qty: 1, lineTotal: match.msrp });
+  if (!Array.isArray(currentProtocol.recommended_compounds) || currentProtocol.recommended_compounds.length === 0) {
+    return showToast('Protocol has no compounds to add', 'error');
+  }
+
+  // Decide explicitly: append or replace? Prompt only when cart is non-empty.
+  if (orderLines.length > 0) {
+    const replace = confirm(
+      `Cart already has ${orderLines.length} item(s). \n\nOK = Replace cart with protocol compounds.\nCancel = Append protocol compounds to existing cart.`
+    );
+    if (replace) {
+      orderLines.length = 0; // in-place clear so any other reference stays bound
     }
+  }
+
+  showPage('order');
+
+  let addedCount = 0;
+  let skippedCount = 0;
+  currentProtocol.recommended_compounds.forEach(compound => {
+    const cName = (compound.name || '').toLowerCase().trim();
+    if (!cName) { skippedCount++; return; }
+    const firstWord = cName.split(/\s+/)[0];
+    // Prefer a fuller-name contains match; fall back to first-word match.
+    const match =
+      products.find(p => p.msrp > 0 && p.name.toLowerCase().includes(cName))
+      || products.find(p => p.msrp > 0 && p.name.toLowerCase().includes(firstWord));
+    if (!match) { skippedCount++; return; }
+
+    // Skip duplicates already in cart (consistent with quickOrderStack at 2376).
+    if (orderLines.find(l => l.id === match.id)) return;
+
+    const exclusive = isExclusiveItem(match);
+    orderLines.push({
+      id: match.id, name: match.name, sku: match.sku, msrp: match.msrp,
+      cost: match.cost || 0, margin: match.margin || 0, profit: match.profit || 0,
+      qty: 1, lineTotal: match.msrp, lineCost: match.cost || 0,
+      discountAllowed: exclusive ? false : (match.discountAllowed || false),
+      maxDiscountPct: exclusive ? 0 : (match.maxDiscountPct || 0),
+      discountPct: 0, discountedPrice: match.msrp,
+      mg: match.mg || null, totalMg: match.totalMg || null, mgLabel: match.mgLabel || null,
+      category: match.category || null, isPen: !!match.isPen, isSpray: !!match.isSpray,
+      isExclusive: exclusive
+    });
+    addedCount++;
   });
+
   renderOrderLines();
-  showToast(`Added ${orderLines.length} products from protocol`, 'success');
+  if (typeof updateOrderTotals === 'function' && typeof getSubtotal === 'function') {
+    updateOrderTotals(getSubtotal());
+  }
+
+  if (addedCount === 0) {
+    showToast('No matching products found in catalog', 'error');
+  } else {
+    const skipNote = skippedCount > 0 ? ` (${skippedCount} unmatched)` : '';
+    showToast(`Added ${addedCount} product${addedCount === 1 ? '' : 's'} from protocol${skipNote}`, 'success');
+  }
 }
 
 async function printProtocolPDF() {

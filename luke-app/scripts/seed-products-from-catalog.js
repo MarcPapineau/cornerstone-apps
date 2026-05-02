@@ -33,12 +33,19 @@ if (!fs.existsSync(CATALOG_PATH)) {
   process.exit(1);
 }
 const catalog = JSON.parse(fs.readFileSync(CATALOG_PATH, 'utf8'));
+// 2026-05-01 FIX (P0 BUG #1): include `sprays` category.
+// Prior version flattened only vials+pens+other, silently dropping all spray
+// SKUs (Spray BPC, etc.) on every reseed. Runtime code at app.js:478-483 and
+// pos.js:49-54 already merges all 4 catalog categories — only the seeder was
+// out-of-sync with catalog-data.json's actual top-level keys
+// (`vials`, `pens`, `other`, `sprays`).
 const allCatalogItems = [
   ...(catalog.vials  || []),
   ...(catalog.pens   || []),
   ...(catalog.other  || []),
+  ...(catalog.sprays || []),
 ];
-console.log(`Catalog loaded: ${allCatalogItems.length} products (${(catalog.vials||[]).length} vials, ${(catalog.pens||[]).length} pens, ${(catalog.other||[]).length} other)`);
+console.log(`Catalog loaded: ${allCatalogItems.length} products (${(catalog.vials||[]).length} vials, ${(catalog.pens||[]).length} pens, ${(catalog.other||[]).length} other, ${(catalog.sprays||[]).length} sprays)`);
 
 // --- Load current local-db.json ---
 if (!fs.existsSync(SOURCE_DB)) {
