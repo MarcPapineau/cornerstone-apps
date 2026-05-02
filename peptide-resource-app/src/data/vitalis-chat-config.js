@@ -103,6 +103,22 @@ export const MODEL_CONFIG = {
 export const INTAKE_SCHEMA = {
   age: { label: 'Age', type: 'number', required: true, min: 18, max: 120 },
   sex: { label: 'Sex', type: 'select', required: true, options: ['male', 'female', 'intersex', 'prefer not to say'] },
+  // FX1 (Bundle F-Extension) — required email so F3 Send-to-Marc gate is reachable.
+  // WKU: Wisdom — Marc cannot follow up without a real reply path; placeholder
+  // 'chat-anonymous@vitalis.local' contacts in GHL = silent dead-ends. Knowledge —
+  // RFC 5322 simplified regex matches the practitioner-tier email format used
+  // across CRG forms (GHL inquiry-contact, marcpapineau.com lead-cap). Understanding —
+  // schema field appears AFTER age/sex per Builder dispatch, BEFORE goals so users
+  // hit the email blocker early; required:true + validate fn close the loophole at
+  // schema layer (UI gate in IntakeForm + helper gate in claudeChat.js = defense in depth).
+  email: {
+    id: 'email',
+    label: 'Email (so Marc can reach you)',
+    type: 'email',
+    required: true,
+    placeholder: 'you@example.com',
+    validate: (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v).trim()),
+  },
   weight: { label: 'Weight (lbs or kg — specify)', type: 'text', required: true },
   goals: { label: 'Goals', type: 'multiselect', required: true, options: [
     'Fat loss', 'Muscle gain', 'Recovery / injury', 'Anti-aging / longevity',

@@ -539,6 +539,11 @@ function IntakeForm({ onComplete }) {
   const [data, setData] = useState({
     age: '',
     sex: '',
+    // FX1 (Bundle F-Extension) — controlled email field. Mirrors existing string-field
+    // pattern (age/weight/sex). WKU: Wisdom — without email, F3 Send-to-Marc is
+    // unreachable; Knowledge — controlled-input convention used by every other field
+    // here; Understanding — kept as plain string so localStorage round-trip stays simple.
+    email: '',
     weight: '',
     goals: [],
     medications: '',
@@ -550,11 +555,21 @@ function IntakeForm({ onComplete }) {
     cancerType: '',
   });
 
+  // FX1 — email blur error. Validated against INTAKE_SCHEMA.email.validate when
+  // the field loses focus. WKU: Wisdom — silent failure (form looks fine, won't
+  // submit) breaks user trust; Knowledge — blur is the canonical UX moment to
+  // surface format errors without harassing on every keystroke; Understanding —
+  // error string is used by both the inline message AND the gating disabled state.
+  const [emailError, setEmailError] = useState('');
+  const validateEmail = (v) => INTAKE_SCHEMA.email.validate(v);
+
   const valid = useMemo(() => {
     return (
       Number(data.age) >= 18 &&
       Number(data.age) <= 120 &&
       !!data.sex &&
+      // FX1 — gate Start-chat button on a syntactically valid email.
+      validateEmail(data.email) &&
       !!data.weight?.trim() &&
       data.goals.length > 0
     );
@@ -587,6 +602,40 @@ function IntakeForm({ onComplete }) {
           </select>
         </Field>
       </Row>
+
+      {/* FX1 (Bundle F-Extension) — required email field. Placed AFTER age/sex,
+          BEFORE weight/goals per Builder dispatch so users hit it early.
+          Validates format on blur. Disables Start-chat until valid. */}
+      <Field label="Email (so Marc can reach you) *">
+        <input
+          type="email"
+          value={data.email}
+          onChange={e => {
+            setData({ ...data, email: e.target.value });
+            // Clear stale error as soon as the user starts editing again.
+            if (emailError) setEmailError('');
+          }}
+          onBlur={() => {
+            if (!data.email.trim()) {
+              setEmailError('Email is required so Marc can follow up.');
+            } else if (!validateEmail(data.email)) {
+              setEmailError('That doesn’t look like a valid email address.');
+            } else {
+              setEmailError('');
+            }
+          }}
+          style={{
+            ...inputStyle,
+            borderColor: emailError ? '#c0392b' : T.border,
+          }}
+          placeholder={INTAKE_SCHEMA.email.placeholder}
+          autoComplete="email"
+          inputMode="email"
+        />
+        {emailError && (
+          <span style={{ fontSize: 11, color: '#c0392b', marginTop: 2 }}>{emailError}</span>
+        )}
+      </Field>
 
       <Field label="Weight (e.g. 185 lbs or 84 kg) *">
         <input type="text" value={data.weight} onChange={e => setData({ ...data, weight: e.target.value })} style={inputStyle} placeholder="185 lbs" />
@@ -655,7 +704,7 @@ function IntakeForm({ onComplete }) {
         <PrimaryButton disabled={!valid} onClick={() => onComplete(data)}>
           Start chat
         </PrimaryButton>
-        {!valid && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Required: age, sex, weight, at least one goal.</div>}
+        {!valid && <div style={{ fontSize: 11, color: T.textMuted, marginTop: 6 }}>Required: age, sex, email, weight, at least one goal.</div>}
       </div>
     </div>
   );

@@ -255,6 +255,18 @@ function estimateCost(model, tokensIn = 0, tokensOut = 0) {
  * Reuses the existing ghl-proxy function — unchanged.
  */
 export async function sendStackToMarc({ intake, protocolMarkdown, protocolId, userEmail, userName } = {}) {
+  // FX2 (Bundle F-Extension) — defense-in-depth helper-level guard.
+  // WKU: Wisdom — F3 already gates at SendToMarcBar, but background callers
+  // (retry logic, vitalis-chat-background.js, future test harnesses) could
+  // bypass the UI gate and silently create 'chat-anonymous@vitalis.local'
+  // GHL contacts that Marc can never reach. Knowledge — throwing at function
+  // entry forces every caller to surface the missing-email bug at integration
+  // time instead of letting it escape to GHL. Understanding — paired with the
+  // INTAKE_SCHEMA email field (FX1), this closes the loophole at both layers
+  // (UI + API) per CRG defense-in-depth doctrine.
+  if (!userEmail || typeof userEmail !== 'string' || !userEmail.trim()) {
+    throw new Error('sendStackToMarc: userEmail is required (no anonymous fallback — Marc must be able to reply)');
+  }
   if (!protocolMarkdown) {
     return { ok: false, error: 'protocolMarkdown required' };
   }
@@ -284,7 +296,8 @@ export async function sendStackToMarc({ intake, protocolMarkdown, protocolId, us
         action: 'inquiry-contact',
         firstName: userName?.split(' ')[0] || 'Vitalis',
         lastName: userName?.split(' ').slice(1).join(' ') || 'Chat User',
-        email: userEmail || 'chat-anonymous@vitalis.local',
+        // FX2 — fallback string removed; entry-guard above guarantees userEmail.
+        email: userEmail,
         tags: ['vitalis-chat-stack', 'vitalis-protocol'],
         source: 'Vitalis Chat — Protocol Recommendation',
         note,
