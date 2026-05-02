@@ -70,9 +70,37 @@
   to     = "/.netlify/functions/command-samuel-digest"
   status = 200
 
+# Garvis Operations Tab — session browser (cookbook recipe 05).
+# Phase 1 backend endpoints. UI lands in Phase 2.
+[[redirects]]
+  from   = "/api/garvis-sessions-list"
+  to     = "/.netlify/functions/garvis-sessions-list"
+  status = 200
+
+[[redirects]]
+  from   = "/api/garvis-session-info"
+  to     = "/.netlify/functions/garvis-session-info"
+  status = 200
+
+[[redirects]]
+  from   = "/api/garvis-session-fork"
+  to     = "/.netlify/functions/garvis-session-fork"
+  status = 200
+
+[[redirects]]
+  from   = "/api/garvis-session-tag"
+  to     = "/.netlify/functions/garvis-session-tag"
+  status = 200
+
 # Environment variables (set in Netlify UI):
 # WINDMILL_BASE_URL = https://gmbh-lion-mar-epson.trycloudflare.com (flip to api.cornerstoneregroup.ca after DNS)
 # WINDMILL_TOKEN    = BnrlvHahVtlJrGFFA7UVrhmbwP2r1pUJ
 # CRG_AUTONOMY_MODE = off | green | yellow | full  (read by autonomy-mode.js; set by autonomy-mode-set.js via Netlify API)
 # NETLIFY_PERSONAL_ACCESS_TOKEN = <user PAT, site:write>  (needed by autonomy-mode-set.js)
 # NETLIFY_SITE_ID = <site uuid>  (needed by autonomy-mode-set.js)
+#
+# Garvis Ops Tab (cookbook 05) — read-side Langfuse:
+# LANGFUSE_HOST          = https://cloud.langfuse.com  (or self-hosted URL)
+# LANGFUSE_PUBLIC_KEY    = pk-lf-...
+# LANGFUSE_SECRET_KEY    = sk-lf-...
+# LANGFUSE_ENABLED       = "0" to force-disable even if keys present (testing)
