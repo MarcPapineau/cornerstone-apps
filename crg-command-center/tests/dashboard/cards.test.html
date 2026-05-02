@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Garvis · Routines Cards · Regression Tests</title>
+<!--
+  cards.test.html — lightweight regression suite for the Routines tab cards.
+  Run by opening this file in a browser (file:// is fine because we fetch a
+  relative path that resolves against the served crg-command-center root when
+  loaded via `netlify dev` or any static server). The test panel renders a
+  pass/fail grid; results also write to console for headless capture.
+
+  Why a hand-rolled HTML test instead of a framework: the dashboard ships as
+  a single-file static HTML app with no build step. Adding Jest/Vitest would
+  introduce a build pipeline this repo intentionally avoids. This test file
+  shares the exact production data fetch (/data/routines.json) and the same
+  rendering contract — if it passes here, it passes in Garvis.
+-->
+<style>
+  body { font-family: ui-monospace, Menlo, monospace; background: #0c0c0c; color: #f0ebe1; padding: 24px; }
+  h1   { color: #c4922a; font-family: serif; font-weight: 500; }
+  .row { display: grid; grid-template-columns: 30px 1fr 80px; gap: 12px; padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  .pass { color: #46b86a; }
+  .fail { color: #c94a4a; }
+  .name { color: #f0ebe1; }
+  .meta { color: #8b8678; font-size: 11px; margin-top: 24px; }
+  pre { background: rgba(0,0,0,0.4); padding: 8px; border-radius: 2px; max-height: 200px; overflow: auto; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<h1>Garvis · Routines Cards · Regression Tests</h1>
+<div class="meta">May 2 cohort: Asher / Boaz / Aaron / Habakkuk / Martha-VM / EOD Reporter</div>
+
+<div id="results"></div>
+
+<div id="summary" class="meta"></div>
+<pre id="errlog"></pre>
+
+<script>
+'use strict';
+
+(async function runTests() {
+  var results = [];
+  var errlog  = [];
+
+  function record(name, pass, detail) {
+    results.push({ name: name, pass: !!pass, detail: detail || '' });
+    var msg = (pass ? 'PASS' : 'FAIL') + ' · ' + name + (detail ? ' — ' + detail : '');
+    (pass ? console.log : console.error).call(console, msg);
+    if (!pass) errlog.push(msg);
+  }
+
+  function assert(cond, name, detail) { record(name, cond, detail); }
+
+  // Fetch the same data the dashboard uses
+  var data;
+  try {
+    var res = await fetch('/data/routines.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+  } catch (err) {
+    record('fetch /data/routines.json', false, err.message + ' — try `netlify dev` or run from the served root');
+    render();
+    return;
+  }
+
+  var routines = (data && data.routines) || [];
+
+  // ── 1. Schema sanity ──────────────────────────────────────────────────────
+  assert(Array.isArray(routines) && routines.length >= 10,
+    'routines.json has at least 10 entries (4 originals + 6 new cohort)',
+    'count=' + routines.length);
+
+  // ── 2. May 2 cohort presence ──────────────────────────────────────────────
+  var REQUIRED_NEW_IDS = [
+    'asher:weekly-research',
+    'boaz:daily-real-estate',
+    'aaron:daily-primerica',
+    'habakkuk:pre-krite-critic',
+    'martha-vm:weekly-voice-mining',
+    'nehemiah:eod-report'
+  ];
+  var present = REQUIRED_NEW_IDS.filter(function (id) {
+    return routines.some(function (r) { return r.id === id; });
+  });
+  assert(present.length === 6,
+    'all 6 May 2 cohort routines are registered',
+    'present=' + present.length + '/6 missing=' + REQUIRED_NEW_IDS.filter(function(id){return present.indexOf(id) === -1;}).join(','));
+
+  // ── 3. Required fields per cohort entry ───────────────────────────────────
+  var REQUIRED_FIELDS = ['id', 'name', 'agent', 'description', 'cron_human', 'status'];
+  REQUIRED_NEW_IDS.forEach(function (id) {
+    var r = routines.find(function (x) { return x.id === id; });
+    if (!r) return; // already failed in test 2
+    var missing = REQUIRED_FIELDS.filter(function (f) { return !r[f]; });
+    assert(missing.length === 0,
+      'cohort routine ' + id + ' has all required fields',
+      missing.length ? 'missing=' + missing.join(',') : '');
+  });
+
+  // ── 4. Langfuse trace placeholder field present on cohort entries ─────────
+  REQUIRED_NEW_IDS.forEach(function (id) {
+    var r = routines.find(function (x) { return x.id === id; });
+    if (!r) return;
+    assert('langfuse_trace_url' in r,
+      'cohort routine ' + id + ' carries langfuse_trace_url field (placeholder allowed)');
+  });
+
+  // ── 5. Health summary one-liner present on cohort entries ─────────────────
+  REQUIRED_NEW_IDS.forEach(function (id) {
+    var r = routines.find(function (x) { return x.id === id; });
+    if (!r) return;
+    assert(typeof r.health_summary === 'string' && r.health_summary.length > 0 && r.health_summary.length < 200,
+      'cohort routine ' + id + ' has a one-line health_summary',
+      r.health_summary ? '"' + r.health_summary.slice(0, 60) + (r.health_summary.length > 60 ? '…' : '') + '"' : 'empty');
+  });
+
+  // ── 6. Habakkuk is on-demand (no cron) ────────────────────────────────────
+  var hab = routines.find(function (r) { return r.id === 'habakkuk:pre-krite-critic'; });
+  if (hab) {
+    assert(hab.cron === null && /on-demand/i.test(hab.cron_human),
+      'Habakkuk card declares on-demand (no cron schedule)',
+      'cron=' + hab.cron + ' cron_human=' + hab.cron_human);
+  }
+
+  // ── 7. Cron expressions match cornerstoneregroup-site/netlify.toml ────────
+  // Source-of-truth schedules verified against the netlify.toml on
+  // cornerstoneregroup-site main on 2026-05-02.
+  var EXPECTED_CRONS = {
+    'asher:weekly-research':         '0 11 * * 3',
+    'boaz:daily-real-estate':        '0 11 * * 1-5',
+    'aaron:daily-primerica':         '30 11 * * 1-5',
+    'martha-vm:weekly-voice-mining': '0 9 * * 0',
+    'nehemiah:eod-report':           '0 23 * * 1-5'
+  };
+  Object.keys(EXPECTED_CRONS).forEach(function (id) {
+    var r = routines.find(function (x) { return x.id === id; });
+    if (!r) return;
+    assert(r.cron === EXPECTED_CRONS[id],
+      'cron for ' + id + ' matches cornerstoneregroup-site netlify.toml',
+      'expected="' + EXPECTED_CRONS[id] + '" got="' + r.cron + '"');
+  });
+
+  // ── 8. Status maps to the existing renderer's known set ───────────────────
+  var KNOWN_STATUS = ['ok', 'failed', 'never-fired', 'never'];
+  REQUIRED_NEW_IDS.forEach(function (id) {
+    var r = routines.find(function (x) { return x.id === id; });
+    if (!r) return;
+    assert(KNOWN_STATUS.indexOf(r.status) !== -1,
+      'cohort routine ' + id + ' uses a known status value',
+      'status=' + r.status);
+  });
+
+  // ── 9. Source-of-truth PR links present (T1 evidence per Knowledge Tiers) ─
+  REQUIRED_NEW_IDS.forEach(function (id) {
+    var r = routines.find(function (x) { return x.id === id; });
+    if (!r) return;
+    assert(typeof r.source_of_truth_pr === 'string' && /github\.com\/.+\/pull\/\d+/.test(r.source_of_truth_pr),
+      'cohort routine ' + id + ' links to a source-of-truth GitHub PR');
+  });
+
+  // ── 10. Martha-VM declares its OAuth env dependency ───────────────────────
+  var mvm = routines.find(function (r) { return r.id === 'martha-vm:weekly-voice-mining'; });
+  if (mvm) {
+    var oauth = mvm.depends_on_oauth_envs || [];
+    assert(oauth.indexOf('GOOGLE_CLIENT_ID') !== -1 &&
+           oauth.indexOf('GOOGLE_CLIENT_SECRET') !== -1 &&
+           oauth.indexOf('GMAIL_REFRESH_TOKEN_TEAMTODAY') !== -1,
+      'Martha-VM declares all 3 OAuth env vars',
+      'depends_on_oauth_envs=' + JSON.stringify(oauth));
+  }
+
+  render();
+
+  function render() {
+    var root = document.getElementById('results');
+    root.innerHTML = results.map(function (r) {
+      return '<div class="row">' +
+        '<span class="' + (r.pass ? 'pass' : 'fail') + '">' + (r.pass ? '✓' : '✗') + '</span>' +
+        '<span class="name">' + escapeHtml(r.name) + (r.detail ? ' <span style="color:#8b8678">— ' + escapeHtml(r.detail) + '</span>' : '') + '</span>' +
+        '<span class="' + (r.pass ? 'pass' : 'fail') + '" style="text-align:right">' + (r.pass ? 'PASS' : 'FAIL') + '</span>' +
+      '</div>';
+    }).join('');
+    var passed = results.filter(function (r) { return r.pass; }).length;
+    document.getElementById('summary').textContent = passed + ' / ' + results.length + ' tests passed';
+    if (errlog.length) {
+      document.getElementById('errlog').textContent = errlog.join('\n');
+    }
+    // Surface the result for any headless harness checking document state
+    document.title = (passed === results.length ? '[OK] ' : '[FAIL] ') + document.title;
+    window.__GARVIS_TEST_RESULT__ = { total: results.length, passed: passed, failures: errlog };
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+    });
+  }
+})();
+</script>
+</body>
+</html>
