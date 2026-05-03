@@ -2112,85 +2112,92 @@ if ('serviceWorker' in navigator) {
    - Patches window.fetch to send credentials on same-origin calls (cookies).
    - On boot, probes /.netlify/functions/garvis-auth (GET). If 401, blocks the
      UI with a password overlay until the user POSTs a valid password.
-   - After success, the HttpOnly cookie carries auth for all future fetches. */
+   - After success, the HttpOnly cookie carries auth for all future fetches.
+
+   DISABLED 2026-05-02 (Marc instruction: "can you remove the password").
+   Client-side gate disabled; server-side /.netlify/functions/garvis-auth
+   left intact for easy re-enable. To re-enable, change `if (false)` below
+   back to `if (true)` (or remove the wrapper). */
 (function garvisAuthGate() {
   'use strict';
 
-  // Patch fetch: include credentials on every same-origin call so the
-  // garvis_token cookie rides along automatically.
-  var _origFetch = window.fetch.bind(window);
-  window.fetch = function (input, init) {
-    init = init || {};
-    // Only force credentials for same-origin requests (strings starting with
-    // '/' or matching window.origin). Leave absolute cross-origin alone.
-    var url = typeof input === 'string' ? input : (input && input.url) || '';
-    var sameOrigin = !url || url.startsWith('/') || url.startsWith(window.location.origin);
-    if (sameOrigin && !('credentials' in init)) {
-      init.credentials = 'include';
-    }
-    return _origFetch(input, init);
-  };
-
-  var scrim = document.getElementById('garvis-auth-scrim');
-  var form  = document.getElementById('gauth-form');
-  var input = document.getElementById('gauth-password');
-  var btn   = document.getElementById('gauth-submit');
-  var err   = document.getElementById('gauth-err');
-
-  function showOverlay() {
-    scrim.classList.add('open');
-    try { input.focus(); } catch (_) {}
-  }
-  function hideOverlay() {
-    scrim.classList.remove('open');
-  }
-
-  // Retry hook — once auth lands, nudge the live channels to reload.
-  function retryFetches() {
-    try {
-      if (typeof tick === 'function') try { tick(); } catch (_) {}
-    } catch (_) {}
-  }
-
-  form.addEventListener('submit', async function (e) {
-    e.preventDefault();
-    err.textContent = '';
-    btn.disabled = true;
-    try {
-      var res = await _origFetch('/.netlify/functions/garvis-auth', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: input.value })
-      });
-      if (res.ok) {
-        input.value = '';
-        hideOverlay();
-        retryFetches();
-      } else if (res.status === 401) {
-        err.textContent = 'Incorrect password.';
-      } else {
-        err.textContent = 'Server error (' + res.status + '). Try again.';
+  if (false) {
+    // Patch fetch: include credentials on every same-origin call so the
+    // garvis_token cookie rides along automatically.
+    var _origFetch = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      init = init || {};
+      // Only force credentials for same-origin requests (strings starting with
+      // '/' or matching window.origin). Leave absolute cross-origin alone.
+      var url = typeof input === 'string' ? input : (input && input.url) || '';
+      var sameOrigin = !url || url.startsWith('/') || url.startsWith(window.location.origin);
+      if (sameOrigin && !('credentials' in init)) {
+        init.credentials = 'include';
       }
-    } catch (e2) {
-      err.textContent = 'Network error: ' + e2.message;
-    } finally {
-      btn.disabled = false;
-    }
-  });
+      return _origFetch(input, init);
+    };
 
-  // Probe on boot. If unauthenticated, show overlay.
-  (async function probe() {
-    try {
-      var res = await _origFetch('/.netlify/functions/garvis-auth', {
-        method: 'GET',
-        credentials: 'include'
-      });
-      if (!res.ok) showOverlay();
-    } catch (_) {
-      showOverlay();
+    var scrim = document.getElementById('garvis-auth-scrim');
+    var form  = document.getElementById('gauth-form');
+    var input = document.getElementById('gauth-password');
+    var btn   = document.getElementById('gauth-submit');
+    var err   = document.getElementById('gauth-err');
+
+    function showOverlay() {
+      scrim.classList.add('open');
+      try { input.focus(); } catch (_) {}
     }
-  })();
+    function hideOverlay() {
+      scrim.classList.remove('open');
+    }
+
+    // Retry hook — once auth lands, nudge the live channels to reload.
+    function retryFetches() {
+      try {
+        if (typeof tick === 'function') try { tick(); } catch (_) {}
+      } catch (_) {}
+    }
+
+    form.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      err.textContent = '';
+      btn.disabled = true;
+      try {
+        var res = await _origFetch('/.netlify/functions/garvis-auth', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: input.value })
+        });
+        if (res.ok) {
+          input.value = '';
+          hideOverlay();
+          retryFetches();
+        } else if (res.status === 401) {
+          err.textContent = 'Incorrect password.';
+        } else {
+          err.textContent = 'Server error (' + res.status + '). Try again.';
+        }
+      } catch (e2) {
+        err.textContent = 'Network error: ' + e2.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // Probe on boot. If unauthenticated, show overlay.
+    (async function probe() {
+      try {
+        var res = await _origFetch('/.netlify/functions/garvis-auth', {
+          method: 'GET',
+          credentials: 'include'
+        });
+        if (!res.ok) showOverlay();
+      } catch (_) {
+        showOverlay();
+      }
+    })();
+  }
 })();
 </script>
 
