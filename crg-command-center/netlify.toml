@@ -92,6 +92,46 @@
   to     = "/.netlify/functions/garvis-session-tag"
   status = 200
 
+# ─── Garvis Liveness Sprint (feat/garvis-liveness-sprint) ────────────────
+# 8 endpoints powering live silos / system health / agents / routines /
+# coming-up / tasks. Backed by /data/silo-state.json (committed) +
+# Netlify Blobs (garvis-tasks store) + Langfuse (best-effort enrichment).
+
+[[redirects]]
+  from   = "/api/garvis-silo-state"
+  to     = "/.netlify/functions/garvis-silo-state"
+  status = 200
+
+[[redirects]]
+  from   = "/api/garvis-system-health"
+  to     = "/.netlify/functions/garvis-system-health"
+  status = 200
+
+[[redirects]]
+  from   = "/api/garvis-agents-status"
+  to     = "/.netlify/functions/garvis-agents-status"
+  status = 200
+
+[[redirects]]
+  from   = "/api/garvis-routines"
+  to     = "/.netlify/functions/garvis-routines"
+  status = 200
+
+[[redirects]]
+  from   = "/api/garvis-coming-up"
+  to     = "/.netlify/functions/garvis-coming-up"
+  status = 200
+
+[[redirects]]
+  from   = "/api/garvis-tasks"
+  to     = "/.netlify/functions/garvis-tasks"
+  status = 200
+
+[[redirects]]
+  from   = "/api/garvis-tasks-seed"
+  to     = "/.netlify/functions/garvis-tasks-seed"
+  status = 200
+
 # Environment variables (set in Netlify UI):
 # WINDMILL_BASE_URL = https://gmbh-lion-mar-epson.trycloudflare.com (flip to api.cornerstoneregroup.ca after DNS)
 # WINDMILL_TOKEN    = BnrlvHahVtlJrGFFA7UVrhmbwP2r1pUJ
@@ -104,3 +144,7 @@
 # LANGFUSE_PUBLIC_KEY    = pk-lf-...
 # LANGFUSE_SECRET_KEY    = sk-lf-...
 # LANGFUSE_ENABLED       = "0" to force-disable even if keys present (testing)
+#
+# Garvis Liveness Sprint:
+# LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY = optional; enables agent last_run / runs_last_24h enrichment
+# GITHUB_TOKEN = optional; enables open-PRs aggregation in /api/garvis-coming-up

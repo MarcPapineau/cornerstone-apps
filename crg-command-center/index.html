@@ -2034,6 +2034,181 @@ if ('serviceWorker' in navigator) {
     .routine-card { grid-template-columns: 1fr; }
     .routine-status-col { align-items: flex-start; }
   }
+
+  /* ===== AGENT OPERATING DASHBOARD (Liveness sprint) ===== */
+  .agents-table-wrap {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .agents-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 12px;
+  }
+  .agents-table thead th {
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 9px;
+    font-weight: 500;
+    color: var(--muted);
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(196,146,42,0.04);
+  }
+  .agents-table tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s ease;
+  }
+  .agents-table tbody tr:hover { background: rgba(196,146,42,0.06); }
+  .agents-table tbody tr:last-child { border-bottom: none; }
+  .agents-table td {
+    padding: 8px 12px;
+    color: var(--bone-dim);
+    vertical-align: middle;
+  }
+  .agents-table td.col-name { color: var(--bone); font-weight: 500; }
+  .agents-table td.col-silo {
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 9px;
+    color: var(--muted);
+  }
+  .agents-table td.col-model {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--bone-dim);
+  }
+  .agents-table .ad-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .agents-table .ad-badge.GREEN { background: rgba(58,176,113,0.16); color: #6FE3A0; }
+  .agents-table .ad-badge.YELLOW { background: rgba(196,146,42,0.18); color: #E8B547; }
+  .agents-table .ad-badge.RED { background: rgba(220,90,80,0.18); color: #F08075; }
+  .agents-table .ad-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+  }
+  .agents-table .ad-status .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--muted);
+    display: inline-block;
+  }
+  .agents-table .ad-status.ran .dot     { background: #6FE3A0; }
+  .agents-table .ad-status.errored .dot { background: #F08075; }
+  .agents-table .ad-status.idle .dot    { background: var(--muted); }
+  .agents-loading {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted); padding: 16px 4px; text-align: center;
+  }
+
+  /* ===== WHAT'S COMING UP (Liveness sprint) ===== */
+  .coming-up-list {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .coming-up-row {
+    display: grid;
+    grid-template-columns: 90px 1fr auto;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .coming-up-row:hover { border-color: rgba(196,146,42,0.35); background: rgba(196,146,42,0.04); }
+  .coming-up-row .cu-kind {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--gold-bright);
+  }
+  .coming-up-row.kind-pr-open .cu-kind { color: #87CEEB; }
+  .coming-up-row .cu-title {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    color: var(--bone);
+  }
+  .coming-up-row .cu-when {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--bone-dim);
+    text-align: right;
+  }
+  .coming-up-row a.cu-link {
+    color: inherit;
+    text-decoration: none;
+    display: contents;
+  }
+  .coming-up-loading {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted); padding: 16px 4px; text-align: center;
+  }
+
+  /* ===== TASK CREATE MODAL (Liveness sprint) ===== */
+  .gv-task-modal-scrim {
+    position: fixed; inset: 0; z-index: 9000;
+    background: rgba(12,12,12,0.78);
+    display: none; align-items: center; justify-content: center;
+  }
+  .gv-task-modal-scrim.open { display: flex; }
+  .gv-task-modal {
+    background: var(--surface);
+    border: 1px solid var(--border-2);
+    border-radius: 8px;
+    width: min(560px, 90vw);
+    padding: 22px 24px 18px;
+    color: var(--bone);
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+  .gv-task-modal h3 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 22px; font-weight: 500; margin-bottom: 14px;
+    color: var(--gold-bright);
+  }
+  .gv-task-modal label {
+    display: block; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.16em; color: var(--muted); margin: 12px 0 6px;
+  }
+  .gv-task-modal input, .gv-task-modal select, .gv-task-modal textarea {
+    width: 100%; box-sizing: border-box;
+    background: var(--ink); color: var(--bone);
+    border: 1px solid var(--border-2); border-radius: 4px;
+    padding: 8px 10px; font-size: 13px;
+    font-family: inherit;
+  }
+  .gv-task-modal textarea { min-height: 70px; resize: vertical; }
+  .gv-task-modal-actions {
+    display: flex; gap: 8px; justify-content: flex-end;
+    margin-top: 16px;
+  }
+  .gv-task-modal-actions button {
+    padding: 8px 16px; font-size: 12px;
+    border-radius: 4px; border: 1px solid var(--border-2);
+    background: var(--ink); color: var(--bone-dim);
+    cursor: pointer; font-family: inherit;
+  }
+  .gv-task-modal-actions button.primary {
+    background: var(--gold); border-color: var(--gold-bright);
+    color: var(--ink);
+  }
 </style>
 </head>
 <body>
@@ -2284,9 +2459,21 @@ if ('serviceWorker' in navigator) {
     <div class="section-head">
       <h2>Task Queue for Marc</h2>
       <span class="hint" id="task-progress">0 of 0 complete</span>
+      <button id="garvis-task-add" class="rm-btn primary" type="button" style="margin-left:auto;font-size:11px;padding:6px 12px;">+ New Task</button>
     </div>
     <div class="task-grid" id="task-grid">
       <!-- task cards injected by JS -->
+    </div>
+  </section>
+
+  <!-- ============================================= 4.5 AGENT OPERATING DASHBOARD ============================================= -->
+  <section class="section" id="section-agents">
+    <div class="section-head">
+      <h2>Agent Operating Dashboard</h2>
+      <span class="eyebrow">Live &middot; <span id="agents-count">--</span> agents · GREEN <span id="agents-green">0</span> · YELLOW <span id="agents-yellow">0</span> · RED <span id="agents-red">0</span></span>
+    </div>
+    <div class="agents-table-wrap" id="agents-table-wrap">
+      <div class="agents-loading">Loading agents&hellip;</div>
     </div>
   </section>
 
@@ -2758,6 +2945,17 @@ if ('serviceWorker' in navigator) {
     </div>
   </section>
 
+  <!-- ============================================= 10. WHAT'S COMING UP ============================================= -->
+  <section class="section" id="section-coming-up">
+    <div class="section-head">
+      <h2>What's Coming Up</h2>
+      <span class="eyebrow">Next 5 cron firings &middot; open PRs &middot; live</span>
+    </div>
+    <div class="coming-up-list" id="coming-up-list">
+      <div class="coming-up-loading">Loading upcoming events&hellip;</div>
+    </div>
+  </section>
+
 </div>
 
 <!-- ===== MODAL OVERLAY ===== -->
@@ -2853,6 +3051,36 @@ if ('serviceWorker' in navigator) {
   </div>
 </div>
 
+<!-- ===== TASK CREATE MODAL (Liveness sprint) ===== -->
+<div class="gv-task-modal-scrim" id="gv-task-modal-scrim" role="dialog" aria-modal="true" aria-labelledby="gv-task-modal-title">
+  <div class="gv-task-modal">
+    <h3 id="gv-task-modal-title">New Task</h3>
+    <label for="gv-task-title">Title</label>
+    <input id="gv-task-title" type="text" maxlength="200" placeholder="What needs doing?" />
+    <label for="gv-task-priority">Priority</label>
+    <select id="gv-task-priority">
+      <option value="HIGH">HIGH</option>
+      <option value="MEDIUM" selected>MEDIUM</option>
+      <option value="LOW">LOW</option>
+    </select>
+    <label for="gv-task-silo">Silo</label>
+    <select id="gv-task-silo">
+      <option value="cross-cutting" selected>cross-cutting</option>
+      <option value="real-estate">real-estate</option>
+      <option value="peptides">peptides</option>
+      <option value="primerica">primerica</option>
+    </select>
+    <label for="gv-task-eta">ETA (minutes)</label>
+    <input id="gv-task-eta" type="number" min="1" max="999" placeholder="5" />
+    <label for="gv-task-instructions">Instructions (one per line)</label>
+    <textarea id="gv-task-instructions" placeholder="Step 1...&#10;Step 2..."></textarea>
+    <div class="gv-task-modal-actions">
+      <button id="gv-task-cancel" type="button">Cancel</button>
+      <button id="gv-task-save" class="primary" type="button">Create</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== FOOTER ===== -->
 <footer class="cmd-footer">
   <span class="left">
@@ -2867,7 +3095,7 @@ if ('serviceWorker' in navigator) {
       <span class="vk-label">🛡 Vault Keeper · INITIALIZING</span>
     </span>
     <span><span class="k">last refresh:</span> <span class="v" id="last-refresh">--</span></span>
-    <span><span class="k">· build:</span> <span class="hud-build" id="build-id">stark.02</span></span>
+    <span><span class="k">· build:</span> <span class="hud-build" id="build-id">stark.03</span></span>
   </span>
 </footer>
 
@@ -4844,5 +5072,522 @@ setInterval(tick, 30000);
   }
 })();
 </script>
+
+<script>
+/* =========================================================================
+   GARVIS LIVENESS SPRINT — live data wiring
+   feat/garvis-liveness-sprint · build stark.03
+   =========================================================================
+   Replaces hardcoded silos / health / tasks / routines with live endpoint
+   data. Adds Agent Operating Dashboard + What's Coming Up sections.
+
+   Endpoints:
+     /api/garvis-silo-state     → 3 silos (RE / Peptides / Primerica)
+     /api/garvis-system-health  → live URL probes
+     /api/garvis-agents-status  → 17+ agents with last_run + anti-drift
+     /api/garvis-routines       → cron schedule + next-fire + status
+     /api/garvis-coming-up      → next 5 fires + open PRs
+     /api/garvis-tasks          → CRUD on Netlify Blob
+
+   Auto-refresh:
+     30s  — system health, agents
+     60s  — silos, routines, coming-up
+     5min — tasks
+   ========================================================================= */
+(function garvisLiveness() {
+  'use strict';
+
+  const FN = (path) => '/.netlify/functions/' + path;
+
+  /* ─── Helpers ─────────────────────────────────────────────────────── */
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function fmtRelative(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    const diffMs = Date.now() - d.getTime();
+    const m = Math.floor(diffMs / 60000);
+    if (m < 1)  return 'just now';
+    if (m < 60) return m + 'm ago';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ago';
+    const days = Math.floor(h / 24);
+    return days + 'd ago';
+  }
+  function fmtFromNow(iso) {
+    if (!iso) return '—';
+    const t = new Date(iso).getTime();
+    if (isNaN(t)) return '—';
+    const diff = t - Date.now();
+    const sign = diff < 0 ? 'ago' : 'from now';
+    const abs = Math.abs(diff);
+    const h = Math.floor(abs / 3600000);
+    const m = Math.floor((abs % 3600000) / 60000);
+    if (abs < 60000) return 'imminent';
+    if (h < 1) return m + 'm ' + sign;
+    if (h < 24) return h + 'h ' + (m ? m + 'm ' : '') + sign;
+    const d = Math.floor(h / 24);
+    return d + 'd ' + sign;
+  }
+
+  async function fetchJSON(path) {
+    const res = await fetch(FN(path), { cache: 'no-store' });
+    if (!res.ok) throw new Error(path + ' HTTP ' + res.status);
+    return res.json();
+  }
+
+  /* ─── 1. Silos — replace SILOS const with live data ──────────────── */
+  async function loadSiloState() {
+    try {
+      const data = await fetchJSON('garvis-silo-state');
+      if (!Array.isArray(data.silos) || !data.silos.length) return;
+      // Repaint into the existing #silos container using a custom renderer
+      // that matches the current visual language (glyph + eyebrow + name +
+      // apps + drips + objectives lists). We do NOT touch the existing
+      // renderSilos() — we replace its output.
+      renderLiveSilos(data.silos);
+    } catch (err) {
+      console.warn('[Garvis Liveness] silo-state load failed:', err);
+    }
+  }
+
+  function renderLiveSilos(silos) {
+    const root = document.getElementById('silos');
+    if (!root) return;
+    root.innerHTML = '';
+    silos.forEach((silo) => {
+      const card = document.createElement('div');
+      card.className = 'silo';
+
+      const appsHtml = (silo.apps || []).map((a) => `
+        <a class="app-chip" href="${escapeHtml(a.url)}" target="_blank" rel="noopener">
+          <span class="url">${escapeHtml((a.url || '').replace(/^https?:\/\//, ''))}</span>
+          <span class="arrow">&rarr;</span>
+        </a>`).join('');
+
+      const drips = silo.drips || [];
+      const dripsBody = !drips.length
+        ? `<span style="color:var(--muted);font-style:italic;">No drips configured.</span>`
+        : drips.map((d) => `<div><b style="color:var(--gold-bright);">${escapeHtml(d.status)}</b> · ${escapeHtml(d.name)}</div>`).join('');
+
+      const callAgents = silo.call_agents || [];
+      const agentsBody = !callAgents.length
+        ? '<span style="color:var(--muted);">None</span>'
+        : callAgents.map((a) => `${escapeHtml(a.name)} <span style="color:var(--muted);">(${escapeHtml(a.status)})</span>`).join('<br/>');
+
+      const crm = silo.crm || {};
+      const crmStatusClass = crm.status === 'ok' ? 'status-ok' : crm.status === 'bad' ? 'status-bad' : 'status-warn';
+
+      const metHtml   = (silo.objectives_met || []).map((x) => `<li><span class="icon">&#10003;</span><span>${escapeHtml(x)}</span></li>`).join('');
+      const pendHtml  = (silo.objectives_pending || []).map((x) => `<li><span class="icon">&#9744;</span><span>${escapeHtml(x)}</span></li>`).join('');
+
+      // Compute % from objectives_met / total
+      const totalObj = (silo.objectives_met || []).length + (silo.objectives_pending || []).length;
+      const pct = totalObj ? Math.round(((silo.objectives_met || []).length / totalObj) * 100) : 0;
+
+      card.innerHTML = `
+        <div class="silo-head">
+          <div style="display:flex;gap:14px;align-items:flex-start;">
+            <div class="glyph">${escapeHtml(silo.glyph || '')}</div>
+            <div class="silo-title">
+              <div class="eyebrow">${escapeHtml(silo.eyebrow || '')}</div>
+              <h3>${escapeHtml(silo.display_name || silo.id)}</h3>
+            </div>
+          </div>
+          <div class="silo-pct">
+            ${pct}%
+            <span class="sub">Objectives met</span>
+          </div>
+        </div>
+
+        <div class="progress"><div class="bar" style="width:${pct}%"></div></div>
+
+        <div class="silo-group" style="margin-top: 6px; font-size: 11px; color: var(--bone-dim);">
+          ${escapeHtml(silo.tagline || '')}
+        </div>
+
+        <div class="silo-group">
+          <div class="lbl">Apps</div>
+          <div class="body" style="display:flex;flex-direction:column;gap:6px;">${appsHtml || '<span style="color:var(--muted);">None</span>'}</div>
+        </div>
+
+        <div class="silo-group">
+          <div class="lbl">Drip Campaigns</div>
+          <div class="body">${dripsBody}</div>
+        </div>
+
+        <dl class="mini-meta">
+          <dt>Call Agents</dt>
+          <dd>${agentsBody}</dd>
+          <dt>CRM</dt>
+          <dd class="${crmStatusClass}">${escapeHtml(crm.label || '—')}<br/><span style="color:var(--muted);">${escapeHtml(crm.note || '')}</span></dd>
+        </dl>
+
+        <div class="silo-group">
+          <div class="lbl">Objectives Met &#10003;</div>
+          <ul class="obj-list met">${metHtml}</ul>
+        </div>
+
+        <div class="silo-group">
+          <div class="lbl">Objectives Pending &#9744;</div>
+          <ul class="obj-list pending">${pendHtml}</ul>
+        </div>
+      `;
+      root.appendChild(card);
+    });
+    // re-emit reveal-class so any scroll observer picks up new cards
+    root.querySelectorAll('.silo').forEach((el) => el.classList.add('stark-reveal', 'in'));
+  }
+
+  /* ─── 2. System Health — live URL probes ─────────────────────────── */
+  async function loadSystemHealth() {
+    try {
+      const data = await fetchJSON('garvis-system-health');
+      renderLiveHealth(data);
+    } catch (err) {
+      console.warn('[Garvis Liveness] system-health load failed:', err);
+    }
+  }
+
+  function renderLiveHealth(data) {
+    const root = document.getElementById('health-strip');
+    if (!root) return;
+    const results = (data && data.results) || [];
+    if (!results.length) return;
+    root.innerHTML = '';
+    results.forEach((r) => {
+      const dotClass = r.status === 'live' ? 'green'
+                     : r.status === 'degraded' ? 'yellow'
+                     : r.status === 'down' ? 'red' : 'gray';
+      const labelText = (r.status || 'unknown').toUpperCase();
+      const cell = document.createElement('div');
+      cell.className = 'health-cell';
+      cell.title = (r.url || '') + ' · ' + (r.detail || '');
+      cell.innerHTML = `
+        <div class="top">
+          <span class="dot ${dotClass}"></span>
+          <span class="name">${escapeHtml(r.name)}</span>
+        </div>
+        <div class="detail">${escapeHtml(labelText)}${r.latency_ms != null ? ' &middot; ' + r.latency_ms + 'ms' : ''}</div>
+      `;
+      root.appendChild(cell);
+    });
+  }
+
+  /* ─── 3. Agents Operating Dashboard ─────────────────────────────── */
+  async function loadAgents() {
+    try {
+      const data = await fetchJSON('garvis-agents-status');
+      renderAgentsTable(data);
+    } catch (err) {
+      console.warn('[Garvis Liveness] agents-status load failed:', err);
+      const wrap = document.getElementById('agents-table-wrap');
+      if (wrap) wrap.innerHTML = '<div class="agents-loading">Agents endpoint offline — retrying.</div>';
+    }
+  }
+
+  function renderAgentsTable(data) {
+    const wrap = document.getElementById('agents-table-wrap');
+    if (!wrap) return;
+    const agents = (data && data.agents) || [];
+    const counts = (data && data.counts) || { total: 0, green: 0, yellow: 0, red: 0 };
+
+    document.getElementById('agents-count').textContent = counts.total;
+    document.getElementById('agents-green').textContent = counts.green;
+    document.getElementById('agents-yellow').textContent = counts.yellow;
+    document.getElementById('agents-red').textContent = counts.red;
+
+    if (!agents.length) {
+      wrap.innerHTML = '<div class="agents-loading">No agents in registry.</div>';
+      return;
+    }
+
+    const rowsHtml = agents.map((a) => {
+      const ranClass = (a.runs_last_24h && a.runs_last_24h > 0) ? 'ran'
+                      : (a.error_count_24h && a.error_count_24h > 0) ? 'errored'
+                      : 'idle';
+      const ranLabel = a.runs_last_24h && a.runs_last_24h > 0
+        ? `&#10003; ${a.runs_last_24h} runs / 24h`
+        : a.error_count_24h && a.error_count_24h > 0
+          ? `&#9888; ${a.error_count_24h} errors`
+          : '— idle';
+      return `
+        <tr>
+          <td class="col-name">${escapeHtml(a.name || a.id)}</td>
+          <td class="col-silo">${escapeHtml(a.silo || '')}</td>
+          <td class="col-model">${escapeHtml(a.model || '—')}</td>
+          <td><span class="ad-status ${ranClass}"><span class="dot"></span>${ranLabel}</span></td>
+          <td><span class="ad-badge ${escapeHtml(a.anti_drift_status || 'YELLOW')}">${escapeHtml(a.anti_drift_status || 'YELLOW')}</span></td>
+          <td>${escapeHtml(a.memory_store || '—')}</td>
+          <td style="color: var(--bone-dim);">${escapeHtml(a.schedule_human || (a.schedule || 'on-demand'))}</td>
+          <td style="color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 10px;">${a.last_run ? fmtRelative(a.last_run) : '—'}</td>
+        </tr>
+      `;
+    }).join('');
+
+    wrap.innerHTML = `
+      <table class="agents-table">
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th>Silo</th>
+            <th>Model</th>
+            <th>24h</th>
+            <th>Anti-Drift v2</th>
+            <th>Memory</th>
+            <th>Schedule</th>
+            <th>Last Run</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+  }
+
+  /* ─── 4. Routines — live overlay on existing routines section ────── */
+  async function loadLiveRoutines() {
+    try {
+      const data = await fetchJSON('garvis-routines');
+      const routines = (data && data.routines) || [];
+      if (!routines.length) return;
+      // Re-render the existing #routines-grid with live data; preserves the
+      // visual style of the data/routines.json renderer but replaces the
+      // "never-fired" hardcoded badges with computed status.
+      renderLiveRoutines(routines, data.counts);
+    } catch (err) {
+      console.warn('[Garvis Liveness] routines load failed:', err);
+    }
+  }
+
+  function renderLiveRoutines(routines, counts) {
+    const grid = document.getElementById('routines-grid');
+    if (!grid) return;
+    const countEl = document.getElementById('routines-count');
+    if (countEl) countEl.textContent = routines.length;
+
+    const statusLabel = {
+      healthy: 'HEALTHY',
+      'running-soon': 'NEXT FIRE SOON',
+      overdue: 'OVERDUE',
+      'never-fired': 'NEVER FIRED',
+    };
+    const statusColor = {
+      healthy: '#6FE3A0',
+      'running-soon': '#E8B547',
+      overdue: '#F08075',
+      'never-fired': '#8C8377',
+    };
+
+    grid.innerHTML = routines.map((r) => `
+      <article class="routine-card">
+        <div class="routine-head">
+          <div>
+            <div class="eyebrow">${escapeHtml(r.silo || 'cross-cutting')}</div>
+            <h3>${escapeHtml(r.name)}</h3>
+            <div class="role" style="font-size:11px;color:var(--muted);margin-top:2px;">${escapeHtml(r.role || '')}</div>
+          </div>
+          <span class="routine-status" style="color: ${statusColor[r.status] || '#8C8377'};">${escapeHtml(statusLabel[r.status] || r.status)}</span>
+        </div>
+        <dl class="routine-meta">
+          <dt>Cron</dt>
+          <dd><code>${escapeHtml(r.cron)}</code></dd>
+          <dt>Schedule</dt>
+          <dd>${escapeHtml(r.cron_human || '—')}</dd>
+          <dt>Next fire</dt>
+          <dd>${r.next_fire_at ? fmtFromNow(r.next_fire_at) : '—'}</dd>
+          <dt>Last fire</dt>
+          <dd>${r.last_fired_at ? fmtRelative(r.last_fired_at) : '<span style="color:var(--muted);">none</span>'}</dd>
+        </dl>
+      </article>
+    `).join('');
+  }
+
+  /* ─── 5. What's Coming Up ────────────────────────────────────────── */
+  async function loadComingUp() {
+    try {
+      const data = await fetchJSON('garvis-coming-up');
+      renderComingUp(data);
+    } catch (err) {
+      console.warn('[Garvis Liveness] coming-up load failed:', err);
+      const root = document.getElementById('coming-up-list');
+      if (root) root.innerHTML = '<div class="coming-up-loading">Endpoint offline — retrying.</div>';
+    }
+  }
+
+  function renderComingUp(data) {
+    const root = document.getElementById('coming-up-list');
+    if (!root) return;
+    const items = (data && data.items) || [];
+    if (!items.length) {
+      root.innerHTML = '<div class="coming-up-loading">Nothing scheduled in the immediate window.</div>';
+      return;
+    }
+    root.innerHTML = items.map((it) => {
+      const link = it.link ? `<a class="cu-link" href="${escapeHtml(it.link)}" target="_blank" rel="noopener">` : '<div class="cu-link">';
+      const closeLink = it.link ? '</a>' : '</div>';
+      return `
+        <div class="coming-up-row kind-${escapeHtml(it.kind)}">
+          ${link}
+            <span class="cu-kind">${escapeHtml(it.kind === 'cron-fire' ? 'CRON' : 'PR')}</span>
+            <span class="cu-title">${escapeHtml(it.title)}</span>
+            <span class="cu-when">${escapeHtml(it.when_human || '')}</span>
+          ${closeLink}
+        </div>
+      `;
+    }).join('');
+  }
+
+  /* ─── 6. Tasks — replace TASKS const with live CRUD ──────────────── */
+  let _tasksCache = [];
+
+  async function loadTasksLive() {
+    try {
+      const data = await fetchJSON('garvis-tasks');
+      _tasksCache = data.items || [];
+      // If the live store is populated, replace the visible task grid.
+      // The legacy const TASKS = [...] is block-scoped inside the original
+      // <script>, so we render directly with our own minimal renderer that
+      // preserves the existing .task-card visual language.
+      if (_tasksCache.length > 0) {
+        renderTasksFallback(_tasksCache);
+        // Also update the count widget
+        const pending = _tasksCache.filter((t) => t.status !== 'done').length;
+        const high = _tasksCache.filter((t) => t.status !== 'done' && t.priority === 'HIGH').length;
+        const pendingEl = document.getElementById('task-pending-n');
+        const highEl    = document.getElementById('task-high-n');
+        const progEl    = document.getElementById('task-progress');
+        if (pendingEl) pendingEl.textContent = pending;
+        if (highEl)    highEl.textContent = high;
+        if (progEl)    progEl.textContent = (_tasksCache.length - pending) + ' of ' + _tasksCache.length + ' complete';
+      }
+    } catch (err) {
+      console.warn('[Garvis Liveness] tasks load failed:', err);
+    }
+  }
+
+  function renderTasksFallback(items) {
+    const grid = document.getElementById('task-grid');
+    if (!grid) return;
+    if (!items.length) {
+      grid.innerHTML = '<div class="agents-loading">No tasks in queue.</div>';
+      return;
+    }
+    grid.innerHTML = items.map((t) => `
+      <article class="task-card ${escapeHtml((t.priority || 'MEDIUM').toLowerCase())} ${t.status === 'done' ? 'done' : ''}">
+        <div class="task-head">
+          <span class="prio ${escapeHtml(t.priority)}">${escapeHtml(t.priority)}</span>
+          <span class="task-time">${t.eta_minutes ? '~' + t.eta_minutes + ' min' : '—'}</span>
+        </div>
+        <div class="title">${escapeHtml(t.title)}</div>
+        <div class="why">${escapeHtml(t.silo || 'cross-cutting')}</div>
+      </article>
+    `).join('');
+  }
+
+  /* ── Task create modal ── */
+  function openTaskModal() {
+    document.getElementById('gv-task-modal-scrim').classList.add('open');
+    document.getElementById('gv-task-title').value = '';
+    document.getElementById('gv-task-eta').value = '';
+    document.getElementById('gv-task-instructions').value = '';
+    document.getElementById('gv-task-title').focus();
+  }
+  function closeTaskModal() {
+    document.getElementById('gv-task-modal-scrim').classList.remove('open');
+  }
+  async function saveNewTask() {
+    const title = document.getElementById('gv-task-title').value.trim();
+    if (title.length < 3) {
+      alert('Title must be at least 3 characters');
+      return;
+    }
+    const priority = document.getElementById('gv-task-priority').value;
+    const silo = document.getElementById('gv-task-silo').value;
+    const etaRaw = document.getElementById('gv-task-eta').value;
+    const eta_minutes = etaRaw ? parseInt(etaRaw, 10) : null;
+    const insRaw = document.getElementById('gv-task-instructions').value;
+    const instructions = insRaw.split('\n').map((s) => s.trim()).filter(Boolean);
+
+    try {
+      const res = await fetch(FN('garvis-tasks'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, priority, silo, eta_minutes, instructions, source: 'garvis-ui' }),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        alert('Save failed (' + res.status + '): ' + err);
+        return;
+      }
+      closeTaskModal();
+      loadTasksLive();
+    } catch (err) {
+      alert('Save failed: ' + err.message);
+    }
+  }
+
+  /* ─── Wire up auto-refresh + initial load ────────────────────────── */
+  function wireTaskModal() {
+    const addBtn = document.getElementById('garvis-task-add');
+    if (addBtn && !addBtn.dataset.wired) {
+      addBtn.addEventListener('click', openTaskModal);
+      addBtn.dataset.wired = '1';
+    }
+    const cancel = document.getElementById('gv-task-cancel');
+    if (cancel && !cancel.dataset.wired) {
+      cancel.addEventListener('click', closeTaskModal);
+      cancel.dataset.wired = '1';
+    }
+    const save = document.getElementById('gv-task-save');
+    if (save && !save.dataset.wired) {
+      save.addEventListener('click', saveNewTask);
+      save.dataset.wired = '1';
+    }
+    const scrim = document.getElementById('gv-task-modal-scrim');
+    if (scrim && !scrim.dataset.wired) {
+      scrim.addEventListener('click', (e) => { if (e.target === scrim) closeTaskModal(); });
+      scrim.dataset.wired = '1';
+    }
+  }
+
+  function bootAll() {
+    wireTaskModal();
+    loadSiloState();
+    loadSystemHealth();
+    loadAgents();
+    loadLiveRoutines();
+    loadComingUp();
+    loadTasksLive();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootAll);
+  } else {
+    bootAll();
+  }
+
+  // Auto-refresh schedule:
+  setInterval(loadSystemHealth, 30000);   // 30s
+  setInterval(loadAgents,        30000);   // 30s
+  setInterval(loadSiloState,     60000);   // 60s
+  setInterval(loadLiveRoutines,  60000);   // 60s
+  setInterval(loadComingUp,      60000);   // 60s
+  setInterval(loadTasksLive,    300000);   // 5m
+
+  // Expose for Marc's console + smoke tests
+  window.garvisLiveness = {
+    bootAll,
+    loadSiloState, loadSystemHealth, loadAgents,
+    loadLiveRoutines, loadComingUp, loadTasksLive,
+    openTaskModal,
+  };
+})();
+</script>
+
 </body>
 </html>
