@@ -1,0 +1,28 @@
+[
+  {
+    "timestamp": "2026-05-04T03:15:01.588Z",
+    "dryRun": true,
+    "sourceDir": "/Users/marcpapineau/.openclaw/workspace/luke-app/research/peptides",
+    "driveFolder": "Vitalis Research / Master / Peptides",
+    "folderId": "DRY_RUN_PEPTIDES_ID",
+    "fileCount": 79,
+    "created": 79,
+    "updated": 0,
+    "bytesTransferred": 202644,
+    "errors": [],
+    "status": "ok"
+  },
+  {
+    "timestamp": "2026-05-04T03:16:30.240Z",
+    "dryRun": false,
+    "sourceDir": "/Users/marcpapineau/.openclaw/workspace/luke-app/research/peptides",
+    "driveFolder": "Vitalis Research / Master / Peptides",
+    "folderId": "1R8d5StGAVNwXu7eJKK6CB27LENiWuRVG",
+    "fileCount": 79,
+    "created": 79,
+    "updated": 0,
+    "bytesTransferred": 202644,
+    "errors": [],
+    "status": "ok"
+  }
+]

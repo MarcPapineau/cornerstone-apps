@@ -216,36 +216,35 @@ async function shareWith(fileId, email, role = "writer") {
  * Returns the Peptides folder ID.
  */
 async function bootstrapFolders() {
+  // In dry-run mode skip all Drive API calls and return placeholder IDs immediately.
+  // findFolder makes real API calls; passing a fake dry-run parent ID causes a 404
+  // because Google validates the parent folder exists (File not found: .).
+  if (DRY_RUN) {
+    console.log(`[levite:sync] Creating folder: ${DRIVE_ROOT_NAME}`);
+    console.log(`[levite:sync] Creating folder: ${DRIVE_MASTER_NAME}`);
+    console.log(`[levite:sync] Creating folder: ${DRIVE_LEAF_NAME}`);
+    console.log("[levite:sync] Wrote _README.md to Drive folder");
+    return "DRY_RUN_PEPTIDES_ID";
+  }
+
   // Start from Drive root ("root")
   let rootId = await findFolder(DRIVE_ROOT_NAME, "root");
   if (!rootId) {
     console.log(`[levite:sync] Creating folder: ${DRIVE_ROOT_NAME}`);
-    if (!DRY_RUN) {
-      rootId = await createFolder(DRIVE_ROOT_NAME, "root");
-      await shareWith(rootId, process.env.GOOGLE_DRIVE_MARC_EMAIL, "writer");
-    } else {
-      rootId = "DRY_RUN_ROOT_ID";
-    }
+    rootId = await createFolder(DRIVE_ROOT_NAME, "root");
+    await shareWith(rootId, process.env.GOOGLE_DRIVE_MARC_EMAIL, "writer");
   }
 
   let masterId = await findFolder(DRIVE_MASTER_NAME, rootId);
   if (!masterId) {
     console.log(`[levite:sync] Creating folder: ${DRIVE_MASTER_NAME}`);
-    if (!DRY_RUN) {
-      masterId = await createFolder(DRIVE_MASTER_NAME, rootId);
-    } else {
-      masterId = "DRY_RUN_MASTER_ID";
-    }
+    masterId = await createFolder(DRIVE_MASTER_NAME, rootId);
   }
 
   let peptidesId = await findFolder(DRIVE_LEAF_NAME, masterId);
   if (!peptidesId) {
     console.log(`[levite:sync] Creating folder: ${DRIVE_LEAF_NAME}`);
-    if (!DRY_RUN) {
-      peptidesId = await createFolder(DRIVE_LEAF_NAME, masterId);
-    } else {
-      peptidesId = "DRY_RUN_PEPTIDES_ID";
-    }
+    peptidesId = await createFolder(DRIVE_LEAF_NAME, masterId);
     // Write README on first bootstrap
     await uploadReadme(peptidesId);
   }
