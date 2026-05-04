@@ -2034,6 +2034,585 @@ if ('serviceWorker' in navigator) {
     .routine-card { grid-template-columns: 1fr; }
     .routine-status-col { align-items: flex-start; }
   }
+
+  /* =========================================================================
+     OPERATIONS TAB — Phase 2 UI (cookbook recipe 05: session browser)
+     Additive surface. Re-uses the existing palette + tab idiom (.bm-tab pattern).
+     Entry point: garvis-card on the dashboard → opens fullscreen overlay.
+     ========================================================================= */
+
+  /* Entry tile metrics */
+  .gops-entry .gc-stats {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 10px; margin-top: 4px;
+  }
+  .gops-entry .gc-stat {
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 8px 10px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .gops-entry .gc-stat .n {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px; font-weight: 500; color: var(--bone);
+    line-height: 1.1;
+  }
+  .gops-entry .gc-stat .n.gold  { color: var(--gold-bright); }
+  .gops-entry .gc-stat .n.green { color: var(--green); }
+  .gops-entry .gc-stat .n.red   { color: var(--red); }
+  .gops-entry .gc-stat .lbl {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .gops-entry .gops-cta {
+    margin-top: 4px; align-self: flex-start;
+    background: linear-gradient(135deg, var(--gold-bright), var(--gold));
+    color: var(--ink);
+    font-weight: 600; font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    padding: 9px 16px; border-radius: 2px;
+    border: none; cursor: pointer;
+    transition: all 0.15s;
+    box-shadow: 0 4px 14px rgba(196,146,42,0.2);
+  }
+  .gops-entry .gops-cta:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(196,146,42,0.4);
+  }
+
+  /* Fullscreen Operations overlay */
+  .gops-scrim {
+    position: fixed; inset: 0;
+    background: rgba(5,5,5,0.94);
+    backdrop-filter: blur(6px);
+    z-index: 1500;
+    display: none;
+    flex-direction: column;
+  }
+  .gops-scrim.open { display: flex; }
+  .gops-shell {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 0;
+    grid-template-rows: auto 1fr;
+    overflow: hidden;
+    transition: grid-template-columns 220ms ease;
+  }
+  .gops-shell.detail-open { grid-template-columns: minmax(0, 1fr) min(560px, 48vw); }
+  @media (max-width: 980px) {
+    .gops-shell.detail-open { grid-template-columns: 0 minmax(0, 1fr); }
+  }
+
+  .gops-head {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 18px;
+    padding: 18px 28px;
+    border-bottom: 1px solid rgba(196,146,42,0.18);
+    background: linear-gradient(180deg, rgba(20,20,22,0.95), rgba(14,14,16,0.85));
+  }
+  .gops-head .gops-title {
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .gops-head .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--gold);
+  }
+  .gops-head h2 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 26px; font-weight: 500; color: var(--bone);
+    line-height: 1.1;
+  }
+  .gops-head .gops-meta {
+    display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--bone-dim);
+  }
+  .gops-head .gops-meta .pill {
+    padding: 4px 10px;
+    border: 1px solid rgba(196,146,42,0.3);
+    border-radius: 999px;
+    background: rgba(196,146,42,0.06);
+    color: var(--gold-bright);
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  .gops-head .gops-meta .pill.warn { border-color: rgba(226,176,74,0.4); color: var(--yellow); }
+  .gops-head .gops-meta .pill.muted { border-color: var(--border-2); color: var(--muted); background: transparent; }
+  .gops-head .gops-close {
+    background: transparent; border: 1px solid var(--border-2);
+    color: var(--bone-dim); font-size: 18px;
+    width: 32px; height: 32px; border-radius: 2px;
+    cursor: pointer; transition: all 0.2s; flex-shrink: 0;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .gops-head .gops-close:hover { color: var(--red); border-color: var(--red); }
+
+  /* Filter bar */
+  .gops-filters {
+    grid-row: 2;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid var(--border);
+  }
+  .gops-filterbar {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0,0,0,0.25);
+  }
+  .gops-filterbar .grp {
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .gops-filterbar label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--gold);
+  }
+  .gops-filterbar select,
+  .gops-filterbar input {
+    background: #0a0a0a;
+    border: 1px solid var(--border-2);
+    color: var(--bone);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    padding: 6px 10px;
+    border-radius: 2px;
+    outline: none;
+    min-width: 130px;
+  }
+  .gops-filterbar select:focus,
+  .gops-filterbar input:focus {
+    border-color: var(--gold);
+  }
+  .gops-filterbar .btn-refresh {
+    margin-left: auto;
+    border: 1px solid rgba(196,146,42,0.5);
+    background: transparent; color: var(--bone);
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    padding: 8px 14px; border-radius: 2px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .gops-filterbar .btn-refresh:hover { border-color: var(--gold); background: rgba(196,146,42,0.08); color: var(--gold-bright); }
+
+  /* Sessions table */
+  .gops-listwrap {
+    flex: 1; overflow: auto;
+    padding: 0;
+  }
+  .gops-table {
+    width: 100%; border-collapse: collapse;
+    font-size: 12px;
+  }
+  .gops-table thead th {
+    position: sticky; top: 0; z-index: 1;
+    text-align: left;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--gold);
+    padding: 12px 18px;
+    background: linear-gradient(180deg, rgba(20,20,22,0.98), rgba(16,16,18,0.95));
+    border-bottom: 1px solid rgba(196,146,42,0.25);
+    font-weight: 600;
+  }
+  .gops-table tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.12s;
+    cursor: pointer;
+  }
+  .gops-table tbody tr:hover {
+    background: rgba(196,146,42,0.04);
+  }
+  .gops-table tbody tr.active {
+    background: rgba(196,146,42,0.10);
+  }
+  .gops-table td {
+    padding: 12px 18px;
+    color: var(--bone-dim);
+    vertical-align: middle;
+  }
+  .gops-table td.agent {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 16px; color: var(--bone); font-weight: 500;
+  }
+  .gops-table td.when {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .gops-table td.tags {
+    max-width: 280px;
+  }
+  .gops-table td.actions {
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  /* Status badges */
+  .gops-status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+  }
+  .gops-status::before {
+    content: ""; width: 6px; height: 6px;
+    border-radius: 999px; background: currentColor;
+  }
+  .gops-status.running   { color: var(--gold-bright); }
+  .gops-status.completed { color: var(--green); }
+  .gops-status.failed    { color: var(--red); }
+
+  /* Tag chips */
+  .gops-chips {
+    display: flex; gap: 4px; flex-wrap: wrap;
+  }
+  .gops-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: 0.06em;
+    padding: 3px 8px;
+    background: rgba(196,146,42,0.08);
+    border: 1px solid rgba(196,146,42,0.25);
+    color: var(--gold-bright);
+    border-radius: 2px;
+  }
+  .gops-chip .x {
+    cursor: pointer;
+    color: var(--muted);
+    font-weight: 600;
+    margin-left: 2px;
+    transition: color 0.12s;
+  }
+  .gops-chip .x:hover { color: var(--red); }
+  .gops-chip-add {
+    background: transparent;
+    border: 1px dashed rgba(196,146,42,0.3);
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .gops-chip-add:hover { border-color: var(--gold); color: var(--gold-bright); }
+  .gops-chip-input {
+    background: #0a0a0a;
+    border: 1px solid var(--gold);
+    color: var(--bone);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    padding: 3px 6px;
+    border-radius: 2px;
+    outline: none;
+    width: 120px;
+  }
+
+  /* Action buttons in row */
+  .gops-rowbtn {
+    background: transparent;
+    border: 1px solid var(--border-2);
+    color: var(--bone-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
+    padding: 5px 9px; border-radius: 2px;
+    cursor: pointer; transition: all 0.12s;
+    margin-left: 4px;
+  }
+  .gops-rowbtn:hover {
+    border-color: var(--gold);
+    color: var(--gold-bright);
+    background: rgba(196,146,42,0.05);
+  }
+
+  /* Empty / loading / error states */
+  .gops-empty, .gops-loading, .gops-error {
+    padding: 40px 28px;
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .gops-error { color: var(--red); }
+  .gops-skeleton {
+    padding: 0;
+  }
+  .gops-skeleton-row {
+    display: grid; grid-template-columns: 1.4fr 1fr 0.8fr 1.6fr 1fr;
+    gap: 14px; padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .gops-skeleton-row .bar {
+    height: 12px;
+    background: linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.10), rgba(255,255,255,0.04));
+    background-size: 200% 100%;
+    animation: gops-shimmer 1.4s linear infinite;
+    border-radius: 2px;
+  }
+  @keyframes gops-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  /* Pagination foot */
+  .gops-foot {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 28px;
+    border-top: 1px solid var(--border);
+    background: rgba(0,0,0,0.2);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted);
+  }
+  .gops-foot .btn-loadmore {
+    border: 1px solid rgba(196,146,42,0.5);
+    background: transparent; color: var(--bone);
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    padding: 7px 16px; border-radius: 2px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .gops-foot .btn-loadmore:hover {
+    border-color: var(--gold); background: rgba(196,146,42,0.08); color: var(--gold-bright);
+  }
+  .gops-foot .btn-loadmore:disabled {
+    opacity: 0.4; cursor: not-allowed;
+  }
+
+  /* Detail drawer */
+  .gops-detail {
+    grid-column: 2;
+    grid-row: 2;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    background: linear-gradient(180deg, #141416 0%, #0e0e10 100%);
+    border-left: 1px solid rgba(196,146,42,0.25);
+  }
+  .gops-shell.detail-open .gops-detail { display: flex; }
+  .gops-detail-head {
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .gops-detail-head .row {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  }
+  .gops-detail-head h3 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 22px; font-weight: 500; color: var(--bone);
+    line-height: 1.1;
+  }
+  .gops-detail-head .sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--muted); letter-spacing: 0.06em;
+    word-break: break-all;
+  }
+  .gops-detail-head .stat-row {
+    display: flex; gap: 16px; flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+  }
+  .gops-detail-head .stat-row .k { color: var(--muted); margin-right: 4px; letter-spacing: 0.08em; text-transform: uppercase; font-size: 9px; }
+  .gops-detail-head .stat-row .v { color: var(--bone); }
+  .gops-detail-head .stat-row .v.gold  { color: var(--gold-bright); }
+  .gops-detail-head .stat-row .v.red   { color: var(--red); }
+  .gops-detail-head .stat-row .v.green { color: var(--green); }
+
+  .gops-detail-actions {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    padding: 12px 22px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0,0,0,0.18);
+  }
+  .gops-detail-actions .btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    padding: 8px 14px; border-radius: 2px;
+    cursor: pointer; transition: all 0.15s;
+    border: 1px solid rgba(196,146,42,0.5);
+    background: transparent; color: var(--bone);
+  }
+  .gops-detail-actions .btn.primary {
+    background: linear-gradient(135deg, var(--gold-bright), var(--gold));
+    color: var(--ink);
+    border: none;
+    box-shadow: 0 4px 12px rgba(196,146,42,0.2);
+  }
+  .gops-detail-actions .btn.primary:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(196,146,42,0.4); }
+  .gops-detail-actions .btn.ghost:hover { border-color: var(--gold); background: rgba(196,146,42,0.08); color: var(--gold-bright); }
+
+  .gops-detail-body {
+    flex: 1; overflow: auto;
+    padding: 16px 22px 24px;
+  }
+  .gops-detail-body .sub-head {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--gold);
+    margin: 14px 0 8px;
+  }
+  .gops-detail-body .sub-head:first-child { margin-top: 0; }
+
+  .gops-events {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .gops-event {
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--gold);
+    border-radius: 2px;
+    padding: 8px 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .gops-event.memory {
+    border-left-color: var(--yellow);
+    background: rgba(226,176,74,0.06);
+  }
+  .gops-event.error {
+    border-left-color: var(--red);
+    background: rgba(224,112,112,0.06);
+  }
+  .gops-event .row1 {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  }
+  .gops-event .typ {
+    font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--gold-bright);
+  }
+  .gops-event .nm { color: var(--bone); }
+  .gops-event .when { color: var(--muted); margin-left: auto; }
+  .gops-event .msg {
+    color: var(--bone-dim);
+    font-size: 11px;
+    word-break: break-word;
+  }
+  .gops-event.error .typ { color: var(--red); }
+
+  /* Toast */
+  .gops-toast {
+    position: fixed;
+    left: 50%; bottom: 36px;
+    transform: translateX(-50%);
+    background: linear-gradient(180deg, #141416 0%, #0e0e10 100%);
+    border: 1px solid rgba(196,146,42,0.5);
+    border-radius: 4px;
+    padding: 12px 20px;
+    color: var(--bone);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    box-shadow: 0 12px 36px rgba(0,0,0,0.7), 0 0 24px rgba(196,146,42,0.2);
+    opacity: 0;
+    transition: opacity 0.18s, transform 0.18s;
+    pointer-events: none;
+    z-index: 1700;
+  }
+  .gops-toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(-6px);
+  }
+  .gops-toast.error { border-color: rgba(224,112,112,0.6); color: var(--red); }
+  .gops-toast.success { border-color: rgba(61,214,140,0.5); }
+
+  /* Fork sub-modal */
+  .gops-fork-scrim {
+    position: fixed; inset: 0;
+    background: rgba(5,5,5,0.85);
+    backdrop-filter: blur(4px);
+    z-index: 1600;
+    display: none;
+    align-items: center; justify-content: center;
+    padding: 32px 20px;
+  }
+  .gops-fork-scrim.open { display: flex; }
+  .gops-fork-card {
+    background: linear-gradient(180deg, #141416 0%, #0e0e10 100%);
+    border: 1px solid rgba(196,146,42,0.4);
+    border-radius: 6px;
+    width: 100%; max-width: 640px; max-height: 88vh;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.55), 0 0 40px rgba(196,146,42,0.1);
+  }
+  .gops-fork-card .head {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 18px 22px;
+    border-bottom: 1px solid var(--border);
+  }
+  .gops-fork-card .head h3 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 22px; font-weight: 500; color: var(--bone);
+  }
+  .gops-fork-card .head .sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--muted); margin-top: 4px;
+  }
+  .gops-fork-card .body {
+    padding: 18px 22px;
+    flex: 1; overflow: auto;
+  }
+  .gops-fork-card .body label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--gold);
+    display: block; margin-bottom: 6px;
+  }
+  .gops-fork-card .body textarea {
+    width: 100%; box-sizing: border-box;
+    background: #0a0a0a;
+    border: 1px solid var(--border-2);
+    color: var(--bone);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; line-height: 1.5;
+    padding: 10px 12px;
+    border-radius: 3px;
+    outline: none;
+    min-height: 140px;
+    resize: vertical;
+  }
+  .gops-fork-card .body textarea:focus { border-color: var(--gold); }
+  .gops-fork-card .body .hint {
+    margin-top: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--muted); line-height: 1.5;
+  }
+  .gops-fork-card .foot {
+    display: flex; gap: 10px; justify-content: flex-end;
+    padding: 14px 22px;
+    border-top: 1px solid var(--border);
+    background: rgba(0,0,0,0.2);
+  }
+  .gops-fork-card .foot .btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    padding: 9px 16px; border-radius: 2px;
+    cursor: pointer; transition: all 0.15s;
+    border: 1px solid rgba(196,146,42,0.5);
+    background: transparent; color: var(--bone);
+  }
+  .gops-fork-card .foot .btn.primary {
+    background: linear-gradient(135deg, var(--gold-bright), var(--gold));
+    color: var(--ink);
+    border: none;
+  }
+  .gops-fork-card .foot .btn.primary:hover { transform: translateY(-1px); }
+  .gops-fork-card .foot .btn.ghost:hover { border-color: var(--gold); background: rgba(196,146,42,0.08); color: var(--gold-bright); }
+
+  @media (max-width: 760px) {
+    .gops-table thead th:nth-child(3),
+    .gops-table tbody td:nth-child(3),
+    .gops-table thead th:nth-child(4),
+    .gops-table tbody td:nth-child(4) { display: none; }
+    .gops-filterbar { padding: 12px 16px; gap: 8px; }
+    .gops-head { padding: 14px 16px; }
+    .gops-listwrap { padding: 0; }
+    .gops-table td, .gops-table th { padding: 10px 14px; }
+  }
 </style>
 </head>
 <body>
@@ -2739,6 +3318,45 @@ if ('serviceWorker' in navigator) {
 
 </div>
 
+  <!-- ============================================= 8B. OPERATIONS (cookbook recipe 05) ============================================= -->
+  <section class="section" id="section-operations">
+    <div class="section-head">
+      <h2>Operations</h2>
+      <span class="eyebrow">Session browser &middot; Langfuse-backed &middot; cookbook recipe 05</span>
+    </div>
+    <div class="garvis-trio">
+      <article class="garvis-card gops-entry" id="gops-entry-card">
+        <div class="gc-head">
+          <div>
+            <div class="gc-eyebrow">Channel 04</div>
+            <div class="gc-title">Session Browser</div>
+          </div>
+          <span class="gc-meta" id="gops-backend">--</span>
+        </div>
+        <div class="gc-sub">Browse every agent run in the fleet. Filter by agent, status, time. Tag, fork, inspect traces.</div>
+        <div class="gc-stats">
+          <div class="gc-stat">
+            <span class="n" id="gops-stat-total">--</span>
+            <span class="lbl">Sessions / 24h</span>
+          </div>
+          <div class="gc-stat">
+            <span class="n gold" id="gops-stat-running">--</span>
+            <span class="lbl">Running</span>
+          </div>
+          <div class="gc-stat">
+            <span class="n red" id="gops-stat-errors">--</span>
+            <span class="lbl">Errors</span>
+          </div>
+        </div>
+        <button class="gops-cta" type="button" id="gops-open-btn">Open Operations &rarr;</button>
+        <div class="gc-foot">
+          <a class="gc-link" href="/.netlify/functions/garvis-sessions-list?limit=10" target="_blank" rel="noopener">View raw &rarr;</a>
+          <span class="gc-meta" id="gops-updated">--</span>
+        </div>
+      </article>
+    </div>
+  </section>
+
   <!-- ============================================= 9. ROUTINES ============================================= -->
   <section class="section" id="section-routines">
     <div class="section-head">
@@ -2845,6 +3463,135 @@ if ('serviceWorker' in navigator) {
     <div class="bm-status-line" id="bm-status-line" style="display:none;"></div>
   </div>
 </div>
+
+<!-- ===== OPERATIONS OVERLAY (cookbook recipe 05: session browser) ===== -->
+<div class="gops-scrim" id="gops-scrim" role="dialog" aria-modal="true" aria-labelledby="gops-title">
+  <div class="gops-shell" id="gops-shell">
+    <div class="gops-head">
+      <div class="gops-title">
+        <span class="eyebrow">Operations &middot; Cookbook recipe 05</span>
+        <h2 id="gops-title">Session Browser</h2>
+      </div>
+      <div class="gops-meta">
+        <span class="pill" id="gops-pill-backend">backend: --</span>
+        <span class="pill muted" id="gops-pill-count">-- sessions</span>
+      </div>
+      <button class="gops-close" id="gops-close" type="button" aria-label="Close Operations">&times;</button>
+    </div>
+
+    <div class="gops-filters">
+      <div class="gops-filterbar">
+        <div class="grp">
+          <label for="gops-filter-agent">Agent</label>
+          <select id="gops-filter-agent">
+            <option value="">All agents</option>
+          </select>
+        </div>
+        <div class="grp">
+          <label for="gops-filter-status">Status</label>
+          <select id="gops-filter-status">
+            <option value="">All</option>
+            <option value="running">Running</option>
+            <option value="completed">Completed</option>
+            <option value="failed">Failed</option>
+          </select>
+        </div>
+        <div class="grp">
+          <label for="gops-filter-since">Since</label>
+          <select id="gops-filter-since">
+            <option value="24h" selected>Last 24h</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="all">All time</option>
+          </select>
+        </div>
+        <button class="btn-refresh" id="gops-refresh" type="button">Refresh</button>
+      </div>
+
+      <div class="gops-listwrap">
+        <table class="gops-table" id="gops-table">
+          <thead>
+            <tr>
+              <th>Agent</th>
+              <th>Started</th>
+              <th>Status</th>
+              <th>Tags</th>
+              <th style="text-align:right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="gops-tbody">
+            <tr><td colspan="5" class="gops-loading">Loading sessions&hellip;</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="gops-foot">
+        <span id="gops-foot-info">--</span>
+        <button class="btn-loadmore" id="gops-loadmore" type="button" disabled>Load more</button>
+      </div>
+    </div>
+
+    <aside class="gops-detail" id="gops-detail" aria-label="Session detail">
+      <div class="gops-detail-head">
+        <div class="row">
+          <div>
+            <h3 id="gops-detail-agent">--</h3>
+            <div class="sub" id="gops-detail-id">--</div>
+          </div>
+          <button class="gops-close" id="gops-detail-close" type="button" aria-label="Close detail">&times;</button>
+        </div>
+        <div class="stat-row">
+          <span><span class="k">Started</span><span class="v" id="gops-detail-started">--</span></span>
+          <span><span class="k">Completed</span><span class="v" id="gops-detail-completed">--</span></span>
+          <span><span class="k">Status</span><span class="v" id="gops-detail-status">--</span></span>
+          <span><span class="k">Tokens</span><span class="v" id="gops-detail-tokens">--</span></span>
+          <span><span class="k">Errors</span><span class="v" id="gops-detail-errors">--</span></span>
+        </div>
+      </div>
+      <div class="gops-detail-actions">
+        <a class="btn ghost" id="gops-detail-langfuse" href="#" target="_blank" rel="noopener">View in Langfuse &rarr;</a>
+        <button class="btn ghost" id="gops-detail-fork" type="button">Fork session</button>
+      </div>
+      <div class="gops-detail-body">
+        <div class="sub-head">Tags</div>
+        <div class="gops-chips" id="gops-detail-chips"></div>
+
+        <div class="sub-head">Tools used</div>
+        <div class="gops-chips" id="gops-detail-tools"><span class="gops-empty" style="padding:0; text-align:left; font-size:11px;">--</span></div>
+
+        <div class="sub-head">Trace events</div>
+        <ul class="gops-events" id="gops-detail-events"><li class="gops-empty" style="padding:8px; text-align:left; border:1px solid var(--border); border-radius:2px;">No events.</li></ul>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- ===== FORK SUB-MODAL ===== -->
+<div class="gops-fork-scrim" id="gops-fork-scrim" role="dialog" aria-modal="true" aria-labelledby="gops-fork-title">
+  <div class="gops-fork-card">
+    <div class="head">
+      <div>
+        <h3 id="gops-fork-title">Fork session</h3>
+        <div class="sub" id="gops-fork-source">--</div>
+      </div>
+      <button class="gops-close" id="gops-fork-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="body">
+      <label for="gops-fork-prompt">Prompt override (optional)</label>
+      <textarea id="gops-fork-prompt" placeholder="Leave blank to re-run with the original prompt"></textarea>
+      <div class="hint">
+        Phase 1 stub — fork is queued to <code style="color:var(--gold-bright)">garvis-fork-queue</code>. Phase 2 dispatcher (Windmill / Managed Agents) will execute the queued forks and write the new trace to Langfuse.
+      </div>
+    </div>
+    <div class="foot">
+      <button class="btn ghost" id="gops-fork-cancel" type="button">Cancel</button>
+      <button class="btn primary" id="gops-fork-queue" type="button">Queue Fork</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast slot (re-used by Operations actions) -->
+<div class="gops-toast" id="gops-toast" role="status" aria-live="polite">--</div>
 
 <!-- ===== FOOTER ===== -->
 <footer class="cmd-footer">
@@ -4834,6 +5581,639 @@ setInterval(tick, 30000);
     document.addEventListener('DOMContentLoaded', loadRoutines);
   } else {
     loadRoutines();
+  }
+})();
+</script>
+
+<script>
+/* =========================================================================
+   GARVIS OPERATIONS TAB — Phase 2 UI (cookbook recipe 05)
+   https://platform.claude.com/cookbook/claude-agent-sdk-05-building-a-session-browser
+   Phase 1 backend: garvis-{sessions-list,session-info,session-fork,session-tag}
+   This module:
+     - Boots a sessions overview tile on the dashboard (live counts)
+     - Manages the fullscreen Operations overlay with filters + table + drawer
+     - Wires tag add/remove and the fork sub-modal
+   Additive — does not touch existing render fns.
+   ========================================================================= */
+(function garvisOperations() {
+  'use strict';
+
+  /* ----------------------------- helpers ------------------------------ */
+  const FN = (path) => '/.netlify/functions/' + path;
+
+  function $(id) { return document.getElementById(id); }
+
+  function fmtRelative(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    const diffMs = Date.now() - d.getTime();
+    const m = Math.floor(diffMs / 60000);
+    if (m < 1)  return 'just now';
+    if (m < 60) return m + 'm ago';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ago';
+    const days = Math.floor(h / 24);
+    return days + 'd ago';
+  }
+
+  function fmtAbs(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function sinceToTimestamp(value) {
+    if (!value || value === 'all') return null;
+    const now = Date.now();
+    if (value === '24h') return new Date(now - 24*3600*1000).toISOString();
+    if (value === '7d')  return new Date(now - 7*24*3600*1000).toISOString();
+    if (value === '30d') return new Date(now - 30*24*3600*1000).toISOString();
+    return null;
+  }
+
+  function showToast(msg, kind) {
+    const el = $('gops-toast');
+    if (!el) return;
+    el.textContent = msg;
+    el.className = 'gops-toast show' + (kind ? (' ' + kind) : '');
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => {
+      el.className = 'gops-toast';
+    }, 3200);
+  }
+
+  /* --------------------------- API wrappers --------------------------- */
+  async function apiListSessions(params) {
+    const qs = new URLSearchParams();
+    if (params.agent_name) qs.set('agent_name', params.agent_name);
+    if (params.status)     qs.set('status', params.status);
+    if (params.since)      qs.set('since', params.since);
+    if (params.limit)      qs.set('limit', String(params.limit));
+    if (params.page)       qs.set('page', String(params.page));
+    const url = FN('garvis-sessions-list') + '?' + qs.toString();
+    const res = await fetch(url, { credentials: 'include', cache: 'no-store' });
+    if (!res.ok) throw new Error('list_failed_' + res.status);
+    return await res.json();
+  }
+
+  async function apiGetSession(sessionId) {
+    const url = FN('garvis-session-info') + '?session_id=' + encodeURIComponent(sessionId);
+    const res = await fetch(url, { credentials: 'include', cache: 'no-store' });
+    if (!res.ok) {
+      if (res.status === 404) return null;
+      throw new Error('info_failed_' + res.status);
+    }
+    return await res.json();
+  }
+
+  async function apiTagSession(sessionId, tags) {
+    const res = await fetch(FN('garvis-session-tag'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, tags })
+    });
+    if (!res.ok) throw new Error('tag_failed_' + res.status);
+    return await res.json();
+  }
+
+  async function apiForkSession(sessionId, edits) {
+    const res = await fetch(FN('garvis-session-fork'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, edits: edits || {} })
+    });
+    if (!res.ok) throw new Error('fork_failed_' + res.status);
+    return await res.json();
+  }
+
+  /* ------------------------------ state ------------------------------- */
+  const state = {
+    sessions: [],
+    page: 1,
+    limit: 25,
+    hasMore: false,
+    backend: null,
+    selectedId: null,
+    selectedDetail: null,
+    filters: { agent_name: '', status: '', since: '24h' },
+    agentNames: new Set(),
+  };
+
+  /* --------------------------- render: list --------------------------- */
+  function renderSkeletonRows(n) {
+    const tbody = $('gops-tbody');
+    if (!tbody) return;
+    let html = '';
+    for (let i = 0; i < n; i++) {
+      html += `<tr><td colspan="5" class="gops-skeleton">
+        <div class="gops-skeleton-row">
+          <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+        </div>
+      </td></tr>`;
+    }
+    tbody.innerHTML = html;
+  }
+
+  function renderTagChipsInline(tags) {
+    if (!Array.isArray(tags) || !tags.length) return '<span style="color:var(--muted); font-family:JetBrains Mono,monospace; font-size:10px;">—</span>';
+    const visible = tags.slice(0, 4);
+    const extra = tags.length - visible.length;
+    let html = '<div class="gops-chips">';
+    for (const t of visible) {
+      html += '<span class="gops-chip">' + escapeHtml(t) + '</span>';
+    }
+    if (extra > 0) html += '<span class="gops-chip" style="opacity:0.7;">+' + extra + '</span>';
+    html += '</div>';
+    return html;
+  }
+
+  function renderSessionRow(s) {
+    const startedRel = fmtRelative(s.started_at);
+    const startedAbs = fmtAbs(s.started_at);
+    const status = (s.status || 'running').toLowerCase();
+    const isActive = state.selectedId === s.session_id;
+    return `<tr data-session-id="${escapeHtml(s.session_id)}" class="${isActive ? 'active' : ''}">
+      <td class="agent">${escapeHtml(s.agent_name || 'unknown')}</td>
+      <td class="when" title="${escapeHtml(startedAbs)}">${escapeHtml(startedRel)}</td>
+      <td><span class="gops-status ${status}">${escapeHtml(status)}</span></td>
+      <td class="tags">${renderTagChipsInline(s.tags)}</td>
+      <td class="actions">
+        <button class="gops-rowbtn" data-act="view">View</button>
+        <button class="gops-rowbtn" data-act="fork">Fork</button>
+      </td>
+    </tr>`;
+  }
+
+  function renderSessionsList() {
+    const tbody = $('gops-tbody');
+    if (!tbody) return;
+    if (!state.sessions.length) {
+      const note = state.backend === 'langfuse-disabled'
+        ? 'Langfuse env vars not set. Set LANGFUSE_HOST + LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY on this deploy to populate.'
+        : 'No sessions yet — agents will appear here once they run.';
+      tbody.innerHTML = `<tr><td colspan="5" class="gops-empty">${escapeHtml(note)}</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = state.sessions.map(renderSessionRow).join('');
+  }
+
+  function refreshFootInfo() {
+    const info = $('gops-foot-info');
+    const more = $('gops-loadmore');
+    if (info) {
+      info.textContent = `Showing ${state.sessions.length} session${state.sessions.length === 1 ? '' : 's'} · backend: ${state.backend || 'unknown'}`;
+    }
+    if (more) {
+      more.disabled = !state.hasMore;
+      more.textContent = state.hasMore ? 'Load more' : 'No more sessions';
+    }
+  }
+
+  function refreshHeaderPills() {
+    const pillBackend = $('gops-pill-backend');
+    if (pillBackend) {
+      pillBackend.textContent = 'backend: ' + (state.backend || 'unknown');
+      pillBackend.className = 'pill' + (state.backend === 'langfuse-disabled' ? ' warn' : '');
+    }
+    const pillCount = $('gops-pill-count');
+    if (pillCount) {
+      pillCount.textContent = state.sessions.length + ' session' + (state.sessions.length === 1 ? '' : 's');
+    }
+  }
+
+  function refreshAgentDropdown() {
+    const sel = $('gops-filter-agent');
+    if (!sel) return;
+    const current = state.filters.agent_name;
+    const sorted = Array.from(state.agentNames).sort();
+    sel.innerHTML = '<option value="">All agents</option>' +
+      sorted.map(n => `<option value="${escapeHtml(n)}" ${n === current ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('');
+  }
+
+  /* --------------------------- entry tile ----------------------------- */
+  async function refreshEntryTile() {
+    try {
+      const data = await apiListSessions({
+        since: new Date(Date.now() - 24*3600*1000).toISOString(),
+        limit: 100,
+      });
+      const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+      const total = sessions.length;
+      const running = sessions.filter(s => s.status === 'running').length;
+      const errors = sessions.reduce((sum, s) => sum + (s.error_count || 0), 0);
+      const tEl = $('gops-stat-total');     if (tEl) tEl.textContent = total;
+      const rEl = $('gops-stat-running');   if (rEl) rEl.textContent = running;
+      const eEl = $('gops-stat-errors');    if (eEl) eEl.textContent = errors;
+      const bEl = $('gops-backend');        if (bEl) bEl.textContent = data.backend || '--';
+      const uEl = $('gops-updated');        if (uEl) uEl.textContent = 'updated ' + fmtRelative(data.timestamp);
+      // populate dropdown from session userIds
+      for (const s of sessions) {
+        if (s.agent_name && s.agent_name !== 'unknown') state.agentNames.add(s.agent_name);
+      }
+      refreshAgentDropdown();
+    } catch (err) {
+      const bEl = $('gops-backend'); if (bEl) bEl.textContent = 'offline';
+    }
+  }
+
+  /* ----------------------------- list flow ---------------------------- */
+  async function loadSessions(opts) {
+    opts = opts || {};
+    const append = !!opts.append;
+    if (!append) {
+      renderSkeletonRows(6);
+      state.page = 1;
+    }
+    try {
+      const data = await apiListSessions({
+        agent_name: state.filters.agent_name || undefined,
+        status: state.filters.status || undefined,
+        since: sinceToTimestamp(state.filters.since) || undefined,
+        limit: state.limit,
+        page: state.page,
+      });
+      state.backend = data.backend || 'unknown';
+      const incoming = Array.isArray(data.sessions) ? data.sessions : [];
+      if (append) {
+        // dedupe by id
+        const seen = new Set(state.sessions.map(s => s.session_id));
+        for (const s of incoming) if (!seen.has(s.session_id)) state.sessions.push(s);
+      } else {
+        state.sessions = incoming;
+      }
+      // hasMore: if backend reports total_pages > current page, OR returned full page
+      if (typeof data.total_pages === 'number') {
+        state.hasMore = state.page < data.total_pages && incoming.length > 0;
+      } else {
+        state.hasMore = incoming.length >= state.limit;
+      }
+      // collect agent names
+      for (const s of state.sessions) {
+        if (s.agent_name && s.agent_name !== 'unknown') state.agentNames.add(s.agent_name);
+      }
+      refreshAgentDropdown();
+      renderSessionsList();
+      refreshFootInfo();
+      refreshHeaderPills();
+    } catch (err) {
+      const tbody = $('gops-tbody');
+      if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="gops-error">Failed to load sessions: ${escapeHtml(err.message)}</td></tr>`;
+      state.hasMore = false;
+      refreshFootInfo();
+    }
+  }
+
+  /* --------------------------- detail flow ---------------------------- */
+  async function openDetail(sessionId) {
+    state.selectedId = sessionId;
+    // mark active row
+    document.querySelectorAll('#gops-tbody tr').forEach(tr => {
+      tr.classList.toggle('active', tr.getAttribute('data-session-id') === sessionId);
+    });
+    const shell = $('gops-shell');
+    if (shell) shell.classList.add('detail-open');
+
+    // skeleton in drawer
+    $('gops-detail-agent').textContent = 'Loading…';
+    $('gops-detail-id').textContent = sessionId;
+    $('gops-detail-started').textContent = '--';
+    $('gops-detail-completed').textContent = '--';
+    $('gops-detail-status').textContent = '--';
+    $('gops-detail-tokens').textContent = '--';
+    $('gops-detail-errors').textContent = '--';
+    $('gops-detail-events').innerHTML = '<li class="gops-empty" style="padding:8px; text-align:left; border:1px solid var(--border); border-radius:2px;">Loading events…</li>';
+    $('gops-detail-chips').innerHTML = '';
+    $('gops-detail-tools').innerHTML = '';
+
+    try {
+      const data = await apiGetSession(sessionId);
+      if (!data) {
+        showToast('Session not found', 'error');
+        $('gops-detail-agent').textContent = 'Not found';
+        return;
+      }
+      state.selectedDetail = data;
+      renderDetail(data);
+    } catch (err) {
+      showToast('Detail load failed: ' + err.message, 'error');
+      $('gops-detail-agent').textContent = 'Error';
+    }
+  }
+
+  function renderDetail(data) {
+    $('gops-detail-agent').textContent = data.agent_name || 'unknown';
+    $('gops-detail-id').textContent = data.session_id;
+
+    $('gops-detail-started').textContent = fmtAbs(data.started_at);
+    $('gops-detail-completed').textContent = fmtAbs(data.completed_at);
+
+    const statusEl = $('gops-detail-status');
+    statusEl.textContent = data.status || 'unknown';
+    statusEl.className = 'v ' + (data.status === 'failed' ? 'red' : data.status === 'running' ? 'gold' : 'green');
+
+    $('gops-detail-tokens').textContent = data.total_tokens != null ? String(data.total_tokens) : '--';
+    const errEl = $('gops-detail-errors');
+    errEl.textContent = String(data.error_count || 0);
+    errEl.className = 'v ' + ((data.error_count || 0) > 0 ? 'red' : 'green');
+
+    const lf = $('gops-detail-langfuse');
+    if (lf) {
+      if (data.langfuse_url) {
+        lf.href = data.langfuse_url;
+        lf.style.display = '';
+      } else {
+        lf.removeAttribute('href');
+        lf.style.opacity = '0.5';
+        lf.style.pointerEvents = 'none';
+      }
+    }
+
+    renderTagChips(data.tags || []);
+    renderToolChips(data.tools_used || []);
+    renderEvents(data.trace_events || []);
+  }
+
+  function renderTagChips(tags) {
+    const root = $('gops-detail-chips');
+    if (!root) return;
+    let html = '';
+    for (const t of tags) {
+      html += `<span class="gops-chip">${escapeHtml(t)}<span class="x" data-tag="${escapeHtml(t)}" title="Remove tag">&times;</span></span>`;
+    }
+    html += '<button class="gops-chip-add" id="gops-chip-add-btn" type="button">+ add tag</button>';
+    root.innerHTML = html;
+  }
+
+  function renderToolChips(tools) {
+    const root = $('gops-detail-tools');
+    if (!root) return;
+    if (!tools.length) {
+      root.innerHTML = '<span class="gops-empty" style="padding:0; text-align:left; font-size:11px;">No tool calls recorded.</span>';
+      return;
+    }
+    root.innerHTML = tools.map(t => `<span class="gops-chip">${escapeHtml(t)}</span>`).join('');
+  }
+
+  function renderEvents(events) {
+    const root = $('gops-detail-events');
+    if (!root) return;
+    if (!events.length) {
+      root.innerHTML = '<li class="gops-empty" style="padding:8px; text-align:left; border:1px solid var(--border); border-radius:2px;">No events recorded.</li>';
+      return;
+    }
+    root.innerHTML = events.map(ev => {
+      const isMemory = (ev.name || '').toLowerCase().includes('memory') ||
+                       (ev.type || '').toLowerCase() === 'memory';
+      const isError = (ev.level || '').toUpperCase() === 'ERROR';
+      const klass = isError ? 'gops-event error' : isMemory ? 'gops-event memory' : 'gops-event';
+      const startRel = fmtRelative(ev.start);
+      const msg = ev.status_message ? `<div class="msg">${escapeHtml(ev.status_message)}</div>` : '';
+      return `<li class="${klass}">
+        <div class="row1">
+          <span class="typ">${escapeHtml(ev.type || '?')}</span>
+          <span class="nm">${escapeHtml(ev.name || '—')}</span>
+          <span class="when">${escapeHtml(startRel)}</span>
+        </div>
+        ${msg}
+      </li>`;
+    }).join('');
+  }
+
+  function closeDetail() {
+    state.selectedId = null;
+    state.selectedDetail = null;
+    const shell = $('gops-shell');
+    if (shell) shell.classList.remove('detail-open');
+    document.querySelectorAll('#gops-tbody tr').forEach(tr => tr.classList.remove('active'));
+  }
+
+  /* ----------------------------- tag flow ----------------------------- */
+  async function addTagPrompt() {
+    if (!state.selectedDetail) return;
+    const root = $('gops-detail-chips');
+    if (!root) return;
+    // Replace "+ add tag" button with an inline input
+    const btn = $('gops-chip-add-btn');
+    if (!btn) return;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'gops-chip-input';
+    input.placeholder = 'tag name…';
+    input.maxLength = 64;
+    btn.replaceWith(input);
+    input.focus();
+    let resolved = false;
+    const finish = async (commit) => {
+      if (resolved) return;
+      resolved = true;
+      const v = input.value.trim();
+      if (commit && v) {
+        try {
+          const merged = await apiTagSession(state.selectedDetail.session_id, [v]);
+          state.selectedDetail.tags = merged.tags || [];
+          // Reflect back into list state
+          const ix = state.sessions.findIndex(s => s.session_id === state.selectedDetail.session_id);
+          if (ix >= 0) state.sessions[ix].tags = merged.tags;
+          renderTagChips(state.selectedDetail.tags);
+          renderSessionsList();
+          showToast('Tag added: ' + v, 'success');
+          return;
+        } catch (err) {
+          showToast('Tag add failed: ' + err.message, 'error');
+        }
+      }
+      // restore button if not committed
+      renderTagChips(state.selectedDetail.tags);
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+  }
+
+  async function removeTag(tag) {
+    if (!state.selectedDetail) return;
+    const remaining = (state.selectedDetail.tags || []).filter(t => t !== tag);
+    // Tag endpoint is merge-only — write the removed-set as the new full set isn't supported;
+    // fallback: re-write with the desired set (the helper's setTags would; here addTags merges).
+    // Phase 2 limitation: removing a tag requires a setTags endpoint we don't have.
+    // Workaround: surface a notice and refresh from server.
+    try {
+      // Best-effort: optimistic update + warn the user.
+      state.selectedDetail.tags = remaining;
+      renderTagChips(remaining);
+      const ix = state.sessions.findIndex(s => s.session_id === state.selectedDetail.session_id);
+      if (ix >= 0) state.sessions[ix].tags = remaining;
+      renderSessionsList();
+      showToast('Tag removed locally — Phase 2 endpoint adds set-tags for permanent removal');
+    } catch (err) {
+      showToast('Tag remove failed: ' + err.message, 'error');
+    }
+  }
+
+  /* ----------------------------- fork flow ---------------------------- */
+  function openForkModal(sessionId) {
+    const scrim = $('gops-fork-scrim');
+    if (!scrim) return;
+    scrim.classList.add('open');
+    $('gops-fork-source').textContent = 'source: ' + sessionId;
+    $('gops-fork-prompt').value = '';
+    $('gops-fork-queue').dataset.sessionId = sessionId;
+  }
+
+  function closeForkModal() {
+    const scrim = $('gops-fork-scrim');
+    if (scrim) scrim.classList.remove('open');
+  }
+
+  async function submitFork() {
+    const btn = $('gops-fork-queue');
+    const sessionId = btn.dataset.sessionId;
+    if (!sessionId) return;
+    const prompt = $('gops-fork-prompt').value.trim();
+    const edits = prompt ? { prompt_override: prompt } : {};
+    btn.disabled = true;
+    btn.textContent = 'Queueing…';
+    try {
+      const res = await apiForkSession(sessionId, edits);
+      showToast('Queued: ' + (res.forked_session_id || 'unknown'), 'success');
+      closeForkModal();
+    } catch (err) {
+      showToast('Fork failed: ' + err.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Queue Fork';
+    }
+  }
+
+  /* ---------------------------- modal open ---------------------------- */
+  function openOps() {
+    const scrim = $('gops-scrim');
+    if (!scrim) return;
+    scrim.classList.add('open');
+    document.body.style.overflow = 'hidden';
+    loadSessions();
+  }
+
+  function closeOps() {
+    const scrim = $('gops-scrim');
+    if (scrim) scrim.classList.remove('open');
+    document.body.style.overflow = '';
+    closeDetail();
+  }
+
+  /* ----------------------------- wire-up ------------------------------ */
+  function wire() {
+    const openBtn  = $('gops-open-btn');
+    const scrim    = $('gops-scrim');
+    const closeBtn = $('gops-close');
+    const refresh  = $('gops-refresh');
+    const loadMore = $('gops-loadmore');
+    const detailClose = $('gops-detail-close');
+    const detailFork  = $('gops-detail-fork');
+    const tbody    = $('gops-tbody');
+    const fAgent   = $('gops-filter-agent');
+    const fStatus  = $('gops-filter-status');
+    const fSince   = $('gops-filter-since');
+    const forkScrim = $('gops-fork-scrim');
+    const forkClose = $('gops-fork-close');
+    const forkCancel = $('gops-fork-cancel');
+    const forkQueue = $('gops-fork-queue');
+    const detailChips = $('gops-detail-chips');
+
+    if (openBtn)  openBtn.addEventListener('click', openOps);
+    if (closeBtn) closeBtn.addEventListener('click', closeOps);
+    if (scrim)    scrim.addEventListener('click', (e) => { if (e.target === scrim) closeOps(); });
+    if (refresh)  refresh.addEventListener('click', () => loadSessions());
+    if (loadMore) loadMore.addEventListener('click', () => {
+      state.page += 1;
+      loadSessions({ append: true });
+    });
+    if (detailClose) detailClose.addEventListener('click', closeDetail);
+    if (detailFork)  detailFork.addEventListener('click', () => {
+      if (state.selectedDetail) openForkModal(state.selectedDetail.session_id);
+    });
+
+    if (fAgent)  fAgent.addEventListener('change',  () => { state.filters.agent_name = fAgent.value; loadSessions(); });
+    if (fStatus) fStatus.addEventListener('change', () => { state.filters.status = fStatus.value; loadSessions(); });
+    if (fSince)  fSince.addEventListener('change',  () => { state.filters.since = fSince.value; loadSessions(); });
+
+    if (tbody) {
+      tbody.addEventListener('click', (e) => {
+        const tr = e.target.closest('tr[data-session-id]');
+        if (!tr) return;
+        const sessionId = tr.getAttribute('data-session-id');
+        const btn = e.target.closest('button[data-act]');
+        if (btn) {
+          const act = btn.getAttribute('data-act');
+          if (act === 'fork') {
+            e.stopPropagation();
+            openForkModal(sessionId);
+            return;
+          }
+          if (act === 'view') {
+            e.stopPropagation();
+            openDetail(sessionId);
+            return;
+          }
+        }
+        // Default click on row → open detail
+        openDetail(sessionId);
+      });
+    }
+
+    if (detailChips) {
+      detailChips.addEventListener('click', (e) => {
+        if (e.target.id === 'gops-chip-add-btn') {
+          addTagPrompt();
+          return;
+        }
+        const x = e.target.closest('.x');
+        if (x) {
+          const tag = x.getAttribute('data-tag');
+          if (tag) removeTag(tag);
+        }
+      });
+    }
+
+    if (forkClose)  forkClose.addEventListener('click', closeForkModal);
+    if (forkCancel) forkCancel.addEventListener('click', closeForkModal);
+    if (forkScrim)  forkScrim.addEventListener('click', (e) => { if (e.target === forkScrim) closeForkModal(); });
+    if (forkQueue)  forkQueue.addEventListener('click', submitFork);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (forkScrim && forkScrim.classList.contains('open')) { closeForkModal(); return; }
+      if (state.selectedId) { closeDetail(); return; }
+      if (scrim && scrim.classList.contains('open')) { closeOps(); return; }
+    });
+  }
+
+  /* ------------------------------ init -------------------------------- */
+  function init() {
+    wire();
+    refreshEntryTile();
+    setInterval(refreshEntryTile, 60000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
   }
 })();
 </script>
