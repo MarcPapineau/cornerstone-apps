@@ -2,6 +2,19 @@
   functions = "netlify/functions"
   publish = "."
 
+# Bundle the committed data/ JSONs (silo-state.json, routines.json, etc.)
+# into every Netlify Function. Without this, fs.readFile("./data/...") from
+# inside a function returns ENOENT because Netlify only ships the function's
+# own JS by default. silo-state-loader.js walks several path candidates from
+# the function bundle root, all of which require the data/ tree to ship.
+#
+# Affected endpoints (all 3 read silo-state.json directly or via loader):
+#   - garvis-silo-state    (returns silos[] / agents[] / apps_canon[])
+#   - garvis-agents-status (downstream — derives from silo-state)
+#   - garvis-routines      (downstream — also reads routines.json)
+[functions]
+  included_files = ["data/**"]
+
 [[headers]]
   for = "/*"
   [headers.values]
