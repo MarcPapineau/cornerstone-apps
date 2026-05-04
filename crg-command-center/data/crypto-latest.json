@@ -1,0 +1,365 @@
+{
+  "_status": "awaiting_first_obadiah_run",
+  "_note": "Seed data populated by Builder 4. Prices and F&G are placeholders as of 2026-05-04. OBADIAH live run will overwrite on first 5:55am ET cron fire.",
+  "schema": "obadiah-output@1.0",
+  "generated_at": "2026-05-04T00:00:00Z",
+  "market_regime": "chop",
+  "regime_confidence": 0.5,
+  "regime_commentary": "OBADIAH initializing — first synthesis run pending. Dashboard rendering with placeholder data. Live regime scoring will begin on first 5:55am ET Windmill cron fire.",
+  "fear_greed": {
+    "value": 40,
+    "classification": "fear",
+    "trend_24h": "stable",
+    "_source": "alternative.me/fng live query 2026-05-04"
+  },
+  "top_assets": [
+    {
+      "symbol": "BTC",
+      "name": "Bitcoin",
+      "price_usd": 97420,
+      "change_24h_pct": 2.3,
+      "change_7d_pct": 5.1,
+      "volume_24h_usd": 38000000000,
+      "market_cap_usd": 1900000000000,
+      "ohlcv_7d": [
+        [1746057600, 92100, 93800, 91500, 93200, 35000000000],
+        [1746144000, 93200, 95500, 92800, 94800, 37000000000],
+        [1746230400, 94800, 96200, 94100, 95600, 36500000000],
+        [1746316800, 95600, 97100, 95000, 96800, 38000000000],
+        [1746403200, 96800, 98200, 96100, 97400, 40000000000],
+        [1746489600, 97400, 98800, 96900, 97200, 39000000000],
+        [1746576000, 97200, 98100, 96800, 97420, 38000000000]
+      ]
+    },
+    {
+      "symbol": "ETH",
+      "name": "Ethereum",
+      "price_usd": 3840,
+      "change_24h_pct": 1.8,
+      "change_7d_pct": 7.2,
+      "volume_24h_usd": 18000000000,
+      "market_cap_usd": 462000000000,
+      "ohlcv_7d": [
+        [1746057600, 3500, 3580, 3480, 3540, 16000000000],
+        [1746144000, 3540, 3650, 3520, 3620, 17000000000],
+        [1746230400, 3620, 3720, 3600, 3700, 17500000000],
+        [1746316800, 3700, 3800, 3680, 3760, 18000000000],
+        [1746403200, 3760, 3880, 3740, 3820, 19000000000],
+        [1746489600, 3820, 3900, 3800, 3810, 18500000000],
+        [1746576000, 3810, 3870, 3800, 3840, 18000000000]
+      ]
+    },
+    {
+      "symbol": "SOL",
+      "name": "Solana",
+      "price_usd": 178.40,
+      "change_24h_pct": 3.2,
+      "change_7d_pct": 11.5,
+      "volume_24h_usd": 4200000000,
+      "market_cap_usd": 82000000000,
+      "ohlcv_7d": [
+        [1746057600, 154, 158, 152, 156, 3500000000],
+        [1746144000, 156, 163, 155, 161, 3700000000],
+        [1746230400, 161, 168, 160, 166, 3900000000],
+        [1746316800, 166, 172, 165, 170, 4000000000],
+        [1746403200, 170, 178, 169, 175, 4200000000],
+        [1746489600, 175, 181, 174, 177, 4300000000],
+        [1746576000, 177, 180, 176, 178.40, 4200000000]
+      ]
+    },
+    {
+      "symbol": "BNB",
+      "name": "BNB",
+      "price_usd": 612.80,
+      "change_24h_pct": 0.9,
+      "change_7d_pct": 3.4,
+      "volume_24h_usd": 1800000000,
+      "market_cap_usd": 86000000000,
+      "ohlcv_7d": []
+    },
+    {
+      "symbol": "XRP",
+      "name": "Ripple",
+      "price_usd": 2.34,
+      "change_24h_pct": -0.7,
+      "change_7d_pct": 2.1,
+      "volume_24h_usd": 2900000000,
+      "market_cap_usd": 134000000000,
+      "ohlcv_7d": []
+    },
+    {
+      "symbol": "ADA",
+      "name": "Cardano",
+      "price_usd": 0.812,
+      "change_24h_pct": 1.4,
+      "change_7d_pct": 6.8,
+      "volume_24h_usd": 620000000,
+      "market_cap_usd": 28000000000,
+      "ohlcv_7d": []
+    },
+    {
+      "symbol": "AVAX",
+      "name": "Avalanche",
+      "price_usd": 42.80,
+      "change_24h_pct": 2.1,
+      "change_7d_pct": 8.9,
+      "volume_24h_usd": 580000000,
+      "market_cap_usd": 17500000000,
+      "ohlcv_7d": []
+    },
+    {
+      "symbol": "LINK",
+      "name": "Chainlink",
+      "price_usd": 18.24,
+      "change_24h_pct": -1.2,
+      "change_7d_pct": 4.3,
+      "volume_24h_usd": 480000000,
+      "market_cap_usd": 11200000000,
+      "ohlcv_7d": []
+    },
+    {
+      "symbol": "DOT",
+      "name": "Polkadot",
+      "price_usd": 9.68,
+      "change_24h_pct": 0.4,
+      "change_7d_pct": 1.8,
+      "volume_24h_usd": 280000000,
+      "market_cap_usd": 14200000000,
+      "ohlcv_7d": []
+    },
+    {
+      "symbol": "MATIC",
+      "name": "Polygon",
+      "price_usd": 0.94,
+      "change_24h_pct": 3.8,
+      "change_7d_pct": 12.4,
+      "volume_24h_usd": 420000000,
+      "market_cap_usd": 9200000000,
+      "ohlcv_7d": []
+    }
+  ],
+  "recommendations": [
+    {
+      "asset": "BTC",
+      "direction": "long",
+      "time_horizon": "1m",
+      "conviction": 4,
+      "factor_scores": {
+        "onchain": 4, "technical": 4, "sentiment": 3,
+        "fundamentals": 4, "macro": 3, "catalysts": 5
+      },
+      "weighted_score": 3.85,
+      "catalyst": "ETF inflows +$1.2B wk; LTH accumulation rising; BlackRock IBIT AUM $52B",
+      "why_now": "MVRV-Z 3.1 off peak with strong demand confirmation; 200D MA held; Halving supply shock compounding",
+      "invalidation": "Close below $88,000 daily; MVRV-Z crosses 3.5; ETF outflows 3 consecutive days"
+    },
+    {
+      "asset": "ETH",
+      "direction": "long",
+      "time_horizon": "1q",
+      "conviction": 4,
+      "factor_scores": {
+        "onchain": 3, "technical": 4, "sentiment": 4,
+        "fundamentals": 5, "macro": 3, "catalysts": 4
+      },
+      "weighted_score": 3.75,
+      "catalyst": "Pectra upgrade live; staking yield rising; ETH/BTC ratio improving",
+      "why_now": "P/F ratio compressing post-Pectra; L2 fee revenue growing; institutional staking demand",
+      "invalidation": "ETH/BTC fails to hold 0.038; close below $3,400; staking yield drops below 3%"
+    },
+    {
+      "asset": "SOL",
+      "direction": "long",
+      "time_horizon": "1w",
+      "conviction": 3,
+      "factor_scores": {
+        "onchain": 3, "technical": 4, "sentiment": 4,
+        "fundamentals": 4, "macro": 2, "catalysts": 3
+      },
+      "weighted_score": 3.40,
+      "catalyst": "Mindshare spike; DEX volume reaching ATH; meme cycle reinflating",
+      "why_now": "Breakout from $170 resistance with volume; DeFi TVL $12B; validator count growing",
+      "invalidation": "Close below $168; BTC sharp selloff; major protocol exploit"
+    },
+    {
+      "asset": "AVAX",
+      "direction": "long",
+      "time_horizon": "1m",
+      "conviction": 3,
+      "factor_scores": {
+        "onchain": 3, "technical": 3, "sentiment": 3,
+        "fundamentals": 4, "macro": 2, "catalysts": 3
+      },
+      "weighted_score": 3.10,
+      "catalyst": "Institutional subnet deployments; gaming vertical expanding",
+      "why_now": "Subnet ecosystem growing; staking APY 8%; TVL up 22% MoM",
+      "invalidation": "Lose $38 support; macro risk-off; subnet cancellations"
+    },
+    {
+      "asset": "LINK",
+      "direction": "neutral",
+      "time_horizon": "1w",
+      "conviction": 2,
+      "factor_scores": {
+        "onchain": 2, "technical": 3, "sentiment": 2,
+        "fundamentals": 3, "macro": 2, "catalysts": 2
+      },
+      "weighted_score": 2.45,
+      "catalyst": "CCIP adoption growing; staking v0.2 live",
+      "why_now": "Underperforming majors; awaiting catalyst; range-bound $16-22",
+      "invalidation": "Break below $16 support; BTC dominance spike"
+    }
+  ],
+  "news": [
+    {
+      "headline": "BlackRock IBIT records $850M single-day inflow — largest since January",
+      "source": "CoinDesk",
+      "url": "https://www.coindesk.com/",
+      "published_at": "2026-05-04T08:30:00Z",
+      "impact": "high",
+      "affected_assets": ["BTC"],
+      "summary": "BlackRock's IBIT ETF recorded its largest single-day inflow since January, signaling renewed institutional appetite at current price levels."
+    },
+    {
+      "headline": "ETH staking yield rising post-Pectra to 4.2% annualized",
+      "source": "CoinDesk",
+      "url": "https://www.coindesk.com/",
+      "published_at": "2026-05-04T07:15:00Z",
+      "impact": "medium",
+      "affected_assets": ["ETH"],
+      "summary": "Ethereum staking yields have climbed to 4.2% post-Pectra upgrade as validator count stabilizes and MEV rewards normalize."
+    },
+    {
+      "headline": "Senate CLARITY Act scheduled for committee vote June 12",
+      "source": "The Block",
+      "url": "https://www.theblock.co/",
+      "published_at": "2026-05-04T06:00:00Z",
+      "impact": "high",
+      "affected_assets": ["BTC", "ETH", "SOL"],
+      "summary": "The market structure bill that would provide regulatory clarity for crypto is moving to committee vote, a major milestone for institutional adoption."
+    },
+    {
+      "headline": "Solana DEX volume hits all-time high of $8.2B in 24 hours",
+      "source": "DeFiLlama",
+      "url": "https://defillama.com/",
+      "published_at": "2026-05-03T22:00:00Z",
+      "impact": "medium",
+      "affected_assets": ["SOL"],
+      "summary": "Solana's decentralized exchange ecosystem set a new daily volume record, driven by meme coin trading and Raydium's concentrated liquidity pools."
+    },
+    {
+      "headline": "Fed officials signal pause at May FOMC — crypto markets rally",
+      "source": "Reuters",
+      "url": "https://www.reuters.com/",
+      "published_at": "2026-05-03T19:45:00Z",
+      "impact": "high",
+      "affected_assets": ["BTC", "ETH"],
+      "summary": "Federal Reserve officials in public remarks suggested a pause at the upcoming FOMC meeting, lifting risk assets including crypto broadly."
+    },
+    {
+      "headline": "Coinbase reports record institutional custody AUM of $180B",
+      "source": "Bloomberg",
+      "url": "https://www.bloomberg.com/",
+      "published_at": "2026-05-03T16:30:00Z",
+      "impact": "medium",
+      "affected_assets": ["BTC", "ETH"],
+      "summary": "Coinbase Prime custody hit $180B in assets under management, with institutional client count growing 34% year-over-year."
+    },
+    {
+      "headline": "ARB unlock cliff of 92M tokens approaching May 8",
+      "source": "Messari",
+      "url": "https://messari.io/",
+      "published_at": "2026-05-03T14:00:00Z",
+      "impact": "medium",
+      "affected_assets": ["ARB"],
+      "summary": "Arbitrum faces a 92M ARB token unlock on May 8, representing approximately $108M at current prices — near-term sell pressure expected."
+    },
+    {
+      "headline": "Bitcoin miner revenue hits 3-month high on transaction fee surge",
+      "source": "CoinMetrics",
+      "url": "https://coinmetrics.io/",
+      "published_at": "2026-05-03T11:30:00Z",
+      "impact": "low",
+      "affected_assets": ["BTC"],
+      "summary": "On-chain data shows BTC miner revenue reaching a 3-month high as ordinals activity and mempool congestion push fees higher."
+    },
+    {
+      "headline": "MicroStrategy acquires additional 1,800 BTC at $96,200 average",
+      "source": "MicroStrategy IR",
+      "url": "https://www.microstrategy.com/",
+      "published_at": "2026-05-02T20:00:00Z",
+      "impact": "low",
+      "affected_assets": ["BTC"],
+      "summary": "Michael Saylor's MicroStrategy disclosed acquisition of 1,800 additional BTC, bringing total corporate holdings to 234,000 BTC."
+    },
+    {
+      "headline": "Avalanche announces major gaming studio partnership for subnet",
+      "source": "Avalanche Blog",
+      "url": "https://www.avax.network/",
+      "published_at": "2026-05-02T15:00:00Z",
+      "impact": "low",
+      "affected_assets": ["AVAX"],
+      "summary": "Avalanche Foundation announced a partnership with a major gaming studio to build a dedicated gaming subnet, expected to launch Q3 2026."
+    }
+  ],
+  "events": [
+    {
+      "name": "FOMC Meeting (May)",
+      "date": "2026-05-06",
+      "category": "macro",
+      "impact": "high",
+      "description": "Federal Open Market Committee two-day meeting concludes May 7 with rate decision and press conference. Fed commentary on disinflation pace is primary crypto catalyst.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "Babylon (BABY) Token Unlock — Linear Start",
+      "date": "2026-05-10",
+      "category": "unlock",
+      "impact": "medium",
+      "description": "Babylon Genesis first monthly linear unlock: 1/36th of locked supply monthly over 36 months. Estimated ~$80-120M USD.",
+      "affected_assets": ["BABY"],
+      "_uncertainty": "verify before alert — USD value depends on BABY price at unlock date"
+    },
+    {
+      "name": "Hyperliquid (HYPE) Cliff Unlock",
+      "date": "2026-05-11",
+      "category": "unlock",
+      "impact": "high",
+      "description": "Major HYPE cliff unlock estimated ~$411M USD. Team/foundation allocation vesting cliff. High sell pressure risk.",
+      "affected_assets": ["HYPE"],
+      "_uncertainty": "verify before alert — date approximate from tokenomist.ai 2026-05-04"
+    },
+    {
+      "name": "US CPI Print (April data)",
+      "date": "2026-05-13",
+      "category": "macro",
+      "impact": "high",
+      "description": "Bureau of Labor Statistics releases April 2026 Consumer Price Index. Expected ~2.7% YoY. Print below 2.5% is risk-on bullish.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "13F ETF Holdings Report (Q1 2026)",
+      "date": "2026-05-15",
+      "category": "etf",
+      "impact": "high",
+      "description": "SEC 13F filing deadline for institutional managers holding spot Bitcoin and Ethereum ETFs as of March 31, 2026. Reveals new institutional entrants.",
+      "affected_assets": ["BTC", "ETH"]
+    },
+    {
+      "name": "CLARITY Act — Senate Banking Committee Vote (Expected)",
+      "date": "2026-06-15",
+      "category": "regulatory",
+      "impact": "high",
+      "description": "US Digital Asset Market Structure (CLARITY Act) expected Senate Banking Committee markup and vote. Full Senate floor vote anticipated Q3 2026 if committee clears.",
+      "affected_assets": ["BTC", "ETH", "SOL", "XRP"],
+      "_uncertainty": "verify before alert — date is analyst consensus estimate; not formally scheduled as of 2026-05-04"
+    }
+  ],
+  "data_freshness": {
+    "coindesk": "2026-05-04T00:00:00Z",
+    "coinglass": "2026-05-04T00:00:00Z",
+    "coin_metrics": "2026-05-04T00:00:00Z",
+    "defillama": "2026-05-04T00:00:00Z",
+    "fear_greed": "2026-05-04T00:00:00Z"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "schema": "obadiah-history@1.0",
+  "rolling_window_days": 90,
+  "history": []
+}
