@@ -1,0 +1,178 @@
+{
+  "_meta": {
+    "schema": "silo-state-v1",
+    "as_of": "2026-05-02T21:30:00-04:00",
+    "doctrine_ref": "doctrine_crg_internal_focus.md",
+    "notes": "CRG = parent holding company only. The 3 silos below are Marc's three operating businesses per the 2026-04-25 doctrine ratification. Do NOT add 'Mortgage Brokers' or 'Financial Advisors' silos here — those were the old sales-theater framing.",
+    "source_pointers": {
+      "apps_canon": "cornerstone-apps/APPS-CANON.md",
+      "doctrine":   "~/.claude/projects/-Users-marcpapineau--openclaw-workspace/memory/doctrine_crg_internal_focus.md",
+      "crons":      "cornerstoneregroup-site/netlify.toml",
+      "agents":     "cornerstoneregroup-site/agents/scorecards/*.json"
+    }
+  },
+  "silos": [
+    {
+      "id": "real-estate",
+      "glyph": "RE",
+      "eyebrow": "Silo 01",
+      "display_name": "Real Estate",
+      "tagline": "Cornerstone RE Group · marcpapineau.com · listings + nurture",
+      "objectives_met": [
+        "RE silo page live at cornerstoneregroup.netlify.app/real-estate/",
+        "marcpapineau.com pulls CRG branding (attribution rule live)",
+        "Boaz Daily (5x/wk) running through Managed Agents (PR #39 merged 2026-05-02)",
+        "Boaz Weekly (Sunday 22:00 ET) materialized",
+        "Lydia Marketing Manager weekly migrated to Managed Agents (PR #40)",
+        "Asaph SEO Manager weekly migrated to Managed Agents (PR #34)",
+        "9-topic magazine rotation locked (PR #29 merged 2026-05-02)",
+        "5-pillar daily content rotation live (PR #24)"
+      ],
+      "objectives_pending": [
+        "Reactivation drip for past clients + dormant leads",
+        "Wire RE-specific call agent (Abigail mode for inbound listings)",
+        "Replace placeholder testimonials with real pilot quotes",
+        "RE calendar booking URL on /book/",
+        "CREZO commercial-zoning daily cron output review (PR shipped)"
+      ],
+      "apps": [
+        { "name": "Cornerstone RE silo", "url": "https://cornerstoneregroup.netlify.app/real-estate/", "kind": "silo-page" },
+        { "name": "marcpapineau.com",      "url": "https://www.marcpapineau.com/",                       "kind": "client-site" },
+        { "name": "Cornerstone parent",    "url": "https://cornerstoneregroup.netlify.app/",             "kind": "parent-site" }
+      ],
+      "agents": ["boaz-daily", "boaz-weekly", "lydia", "asaph", "apollos", "crezo"],
+      "drips": [
+        { "name": "RE Reactivation drip",        "status": "none",     "ghl_workflow_id": null }
+      ],
+      "call_agents": [
+        { "name": "Abigail (RE inbound)",        "status": "spec",     "vapi_assistant_id": null }
+      ],
+      "crm": {
+        "label": "Marc Papineau Real Estate",
+        "ghl_location_id": "OaIjyU9hKEG9lu2PRrSH",
+        "status": "warn",
+        "note": "Partial scopes — review Custom Fields permission"
+      }
+    },
+    {
+      "id": "peptides",
+      "glyph": "PX",
+      "eyebrow": "Silo 02",
+      "display_name": "Peptides · Vitalis Research",
+      "tagline": "Vitalis (educational) · Vitalis POS · KLOW catalog · protocol packages",
+      "objectives_met": [
+        "Vitalis Research site (peptide-resource-app) live with vitalis-chat agent",
+        "Asher Weekly Research running Wed 11:00 ET (managed-agent ready)",
+        "3-doc Vitalis protocol package pattern locked 2026-05-01 (Shawn C., Al, Dana reference builds)",
+        "Format-Ask Rule live (catalog-data.json → preference table → ask Marc)",
+        "KLOW Paired Compound 10/10/10/50 doctrine ratified 2026-04-29",
+        "Section 07 = product menu (no doses) rule locked 2026-05-02",
+        "Vitalis POS (luke-app, Express) running locally at :3000 — cloud handoff in flight"
+      ],
+      "objectives_pending": [
+        "KLOW catalog data file currently splits component doses — flag for Builder pipeline cleanup (do NOT inline-fix)",
+        "Vitalis POS Railway deploy (handoff doc shipped)",
+        "Asher protocol-package on-demand endpoint review",
+        "Vitalis chat lead capture → GHL sync verification",
+        "Catalog reconciliation: NAD+ 1000mg vial, Selank SubQ vial, MOTS-c 2-site split, Reta 1mL recon"
+      ],
+      "apps": [
+        { "name": "Vitalis Research site",   "url": "https://peptide-resource-app.netlify.app/", "kind": "client-site" },
+        { "name": "Vitalis POS (Marc-only)", "url": "http://localhost:3000/",                    "kind": "internal-tool" }
+      ],
+      "agents": ["asher-weekly-research", "asher-protocol-package", "luke", "apollos"],
+      "drips": [
+        { "name": "Vitalis quarterly refill",    "status": "building", "ghl_workflow_id": null }
+      ],
+      "call_agents": [
+        { "name": "Abigail (Vitalis client Q&A)", "status": "spec",    "vapi_assistant_id": null }
+      ],
+      "crm": {
+        "label": "Vitalis Research (under CRG ghl)",
+        "ghl_location_id": "9Z3U7KnyQSbbnaKyTS2e",
+        "status": "ok",
+        "note": "Shares CRG location · acceptable for now"
+      }
+    },
+    {
+      "id": "primerica",
+      "glyph": "PF",
+      "eyebrow": "Silo 03",
+      "display_name": "Primerica · Vault OS",
+      "tagline": "Marc's financial advisory book · Vault OS toolkit · NorthLend planning",
+      "objectives_met": [
+        "Vault OS deployed at papineau-family-finance.netlify.app",
+        "Financial Advisors silo page live",
+        "NorthLend Calculator embedded at /intake/jason/",
+        "Lazarus Voice agent (Vapi) running daily 13:00 ET",
+        "BDM Vapi v1 (Business Development Manager) running daily 13:00 ET",
+        "Joseph (Bookkeeper) spec ratified — Xero/QBO sync target"
+      ],
+      "objectives_pending": [
+        "FA-specific drip (Vanguard 24.4% churn signal triggers)",
+        "Wire FA-specific call agent (Lazarus mode for warm prospects)",
+        "FNA-specific calculator (financial needs analysis)",
+        "Joseph build (bookkeeper agent, currently spec)",
+        "Jim Beaulne warm-prospect activation (Marc to signal)"
+      ],
+      "apps": [
+        { "name": "Vault OS",          "url": "https://papineau-family-finance.netlify.app/",          "kind": "internal-tool" },
+        { "name": "FA silo page",      "url": "https://cornerstoneregroup.netlify.app/financial-advisors/", "kind": "silo-page" },
+        { "name": "NorthLend Calc",    "url": "https://cornerstoneregroup.netlify.app/calculators/mortgage/", "kind": "calculator" }
+      ],
+      "agents": ["lazarus", "bdm-vapi", "solomon", "joseph"],
+      "drips": [
+        { "name": "Primerica weekly drip",       "status": "ready",    "ghl_workflow_id": null }
+      ],
+      "call_agents": [
+        { "name": "Lazarus (warm prospects)",     "status": "live",     "vapi_assistant_id": "lazarus-v1" },
+        { "name": "BDM Vapi v1",                   "status": "live",     "vapi_assistant_id": "bdm-v1" }
+      ],
+      "crm": {
+        "label": "Cornerstone Re Group (shared)",
+        "ghl_location_id": "9Z3U7KnyQSbbnaKyTS2e",
+        "status": "ok",
+        "note": "Inherits parent location · sub-pipeline by tag"
+      }
+    }
+  ],
+  "agents": [
+    { "id": "boaz-daily",              "silo": "real-estate", "name": "Boaz (Daily)",          "role": "RE daily content", "model": "claude-sonnet-4.6",  "memory_store": "boaz-content-history", "managed_agent_pr": 39, "schedule": "0 11 * * 1-5",  "schedule_human": "11:00 AM ET · Mon-Fri" },
+    { "id": "boaz-weekly",             "silo": "real-estate", "name": "Boaz (Weekly)",         "role": "RE weekly recap",  "model": "claude-sonnet-4.6",  "memory_store": "boaz-content-history", "managed_agent_pr": 39, "schedule": "0 22 * * 0",    "schedule_human": "10:00 PM ET · Sunday" },
+    { "id": "lydia",                    "silo": "real-estate", "name": "Lydia",                  "role": "Marketing Manager","model": "claude-sonnet-4.6",  "memory_store": "lydia-strategy-history", "managed_agent_pr": 40, "schedule": "0 14 * * 1",    "schedule_human": "2:00 PM ET · Monday" },
+    { "id": "asaph",                    "silo": "real-estate", "name": "Asaph",                  "role": "SEO Manager",       "model": "claude-sonnet-4.6",  "memory_store": "asaph-keyword-history",  "managed_agent_pr": 34, "schedule": "0 15 * * 1",    "schedule_human": "3:00 PM ET · Monday" },
+    { "id": "apollos",                  "silo": "real-estate", "name": "Apollos",                "role": "Content Writer",    "model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": 35, "schedule": "0 13,17 * * 1-5", "schedule_human": "1:00 PM + 5:00 PM ET · Mon-Fri" },
+    { "id": "asher-weekly-research",  "silo": "peptides",     "name": "Asher (Weekly Research)","role": "Peptide research",  "model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": null, "schedule": "0 11 * * 3",    "schedule_human": "11:00 AM ET · Wed" },
+    { "id": "asher-protocol-package", "silo": "peptides",     "name": "Asher (Protocol Pkg)",   "role": "On-demand 3-doc protocol package", "model": "claude-sonnet-4.6", "memory_store": null,            "managed_agent_pr": null, "schedule": null,            "schedule_human": "On-demand" },
+    { "id": "luke",                     "silo": "peptides",     "name": "Luke",                   "role": "Peptide Research Lead", "model": "claude-sonnet-4.6", "memory_store": null,                  "managed_agent_pr": null, "schedule": null,            "schedule_human": "On-demand" },
+    { "id": "lazarus",                  "silo": "primerica",    "name": "Lazarus",                "role": "Voice agent (Vapi)","model": "vapi-gpt-4o-mini",   "memory_store": null,                       "managed_agent_pr": null, "schedule": "0 13 * * *",     "schedule_human": "1:00 PM ET · Daily" },
+    { "id": "bdm-vapi",                 "silo": "primerica",    "name": "BDM Vapi",               "role": "Outbound counterpart to ISA", "model": "vapi-gpt-4o-mini", "memory_store": null,             "managed_agent_pr": null, "schedule": "0 13 * * *",     "schedule_human": "1:00 PM ET · Daily" },
+    { "id": "solomon",                  "silo": "primerica",    "name": "Solomon",                "role": "Strategy & Pricing","model": "claude-opus-4.7",  "memory_store": null,                       "managed_agent_pr": null, "schedule": null,            "schedule_human": "On-demand" },
+    { "id": "joseph",                   "silo": "primerica",    "name": "Joseph",                 "role": "Bookkeeper",        "model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": null, "schedule": null,            "schedule_human": "Spec — not built" },
+    { "id": "daniel",                   "silo": "cross-cutting","name": "Daniel",                 "role": "Research Lead",     "model": "claude-opus-4.7",  "memory_store": "daniel-research-cache",  "managed_agent_pr": 36, "schedule": "0 9 * * *",     "schedule_human": "9:00 AM ET · Daily" },
+    { "id": "ezra",                     "silo": "cross-cutting","name": "Ezra",                   "role": "Daily Brief Editor","model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": null, "schedule": "0 10 * * *",    "schedule_human": "10:00 AM ET · Daily" },
+    { "id": "krite",                    "silo": "cross-cutting","name": "KRITE",                  "role": "4-axis quality gate","model": "claude-opus-4.7", "memory_store": null,                       "managed_agent_pr": null, "schedule": null,            "schedule_human": "On-demand (pre-send)" },
+    { "id": "habakkuk",                 "silo": "cross-cutting","name": "Habakkuk",               "role": "Pre-KRITE structural critic", "model": "claude-sonnet-4.6", "memory_store": null,             "managed_agent_pr": 42, "schedule": null,            "schedule_human": "On-demand" },
+    { "id": "karis",                    "silo": "cross-cutting","name": "Karis",                  "role": "QA verdict (30-min cron)", "model": "claude-sonnet-4.6", "memory_store": "karis-verdicts", "managed_agent_pr": 37, "schedule": "*/30 * * * *",   "schedule_human": "Every 30 min" },
+    { "id": "samuel",                   "silo": "cross-cutting","name": "Samuel",                 "role": "Self-learning loops","model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": null, "schedule": "0 6 * * 1",     "schedule_human": "6:00 AM ET · Monday" },
+    { "id": "martha-daily",            "silo": "cross-cutting","name": "Martha (Daily)",         "role": "Office Manager",    "model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": null, "schedule": "0 12 * * *",    "schedule_human": "12:00 PM ET · Daily" },
+    { "id": "martha-weekly",           "silo": "cross-cutting","name": "Martha (Weekly)",        "role": "Office Manager weekly review","model": "claude-sonnet-4.6", "memory_store": null,           "managed_agent_pr": null, "schedule": "0 13 * * 1",    "schedule_human": "1:00 PM ET · Monday" },
+    { "id": "martha-vm",                "silo": "cross-cutting","name": "Martha (Voice Mining)", "role": "Voice profile extractor","model": "claude-sonnet-4.6", "memory_store": null,                  "managed_agent_pr": null, "schedule": "0 9 * * 0",     "schedule_human": "9:00 AM ET · Sunday" },
+    { "id": "nehemiah",                 "silo": "cross-cutting","name": "Nehemiah",               "role": "Workflow conductor","model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": null, "schedule": "*/15 * * * *",  "schedule_human": "Every 15 min" },
+    { "id": "eod",                      "silo": "cross-cutting","name": "EOD Reporter",           "role": "End-of-day summary","model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": null, "schedule": "0 23 * * 1-5",  "schedule_human": "11:00 PM UTC · Mon-Fri" },
+    { "id": "levite",                   "silo": "cross-cutting","name": "Levite (Vault Keeper)", "role": "Secrets rotation",  "model": null,                "memory_store": null,                       "managed_agent_pr": null, "schedule": null,            "schedule_human": "DISABLED 2026-05-02 emergency (spam loop)" },
+    { "id": "abigail",                  "silo": "cross-cutting","name": "Abigail",                "role": "Voice Concierge",   "model": "vapi-gpt-4o",       "memory_store": null,                       "managed_agent_pr": null, "schedule": null,            "schedule_human": "Real-time" }
+  ],
+  "apps_canon": [
+    { "name": "Garvis",            "url": "https://crg-command.netlify.app/",                  "kind": "internal-tool",  "silo": "cross-cutting" },
+    { "name": "Cornerstone parent","url": "https://cornerstoneregroup.netlify.app/",            "kind": "parent-site",    "silo": "cross-cutting" },
+    { "name": "RE silo",           "url": "https://cornerstoneregroup.netlify.app/real-estate/", "kind": "silo-page",     "silo": "real-estate" },
+    { "name": "FA silo",           "url": "https://cornerstoneregroup.netlify.app/financial-advisors/", "kind": "silo-page", "silo": "primerica" },
+    { "name": "MB silo",           "url": "https://cornerstoneregroup.netlify.app/mortgage-brokers/", "kind": "silo-page",  "silo": "primerica" },
+    { "name": "Vault OS",          "url": "https://papineau-family-finance.netlify.app/",       "kind": "internal-tool",  "silo": "primerica" },
+    { "name": "Vitalis Research",  "url": "https://peptide-resource-app.netlify.app/",          "kind": "client-site",    "silo": "peptides" },
+    { "name": "Script Evaluator",  "url": "https://crg-script-evaluator.netlify.app/",          "kind": "tool",           "silo": "cross-cutting" },
+    { "name": "Compliance Engine", "url": "https://crg-compliance-engine.netlify.app/",         "kind": "tool",           "silo": "cross-cutting" },
+    { "name": "Learning Dashboard","url": "https://crg-learning-dashboard.netlify.app/",        "kind": "tool",           "silo": "cross-cutting" }
+  ]
+}
