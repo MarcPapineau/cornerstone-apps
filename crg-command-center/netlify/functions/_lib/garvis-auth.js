@@ -43,6 +43,20 @@ function readCookie(event, name) {
 }
 
 function checkAuth(event) {
+  // Garvis password gate disabled 2026-05-03 (Marc instruction "remove the password").
+  // Backend auth bypass matches client-side `if (false)` wrapper in crg-command-center/index.html
+  // (see PR #6 — client-side password gate removal). Without this bypass, dashboard fetches
+  // returned HTTP 401 (no valid garvis_token cookie) and silos fell back to legacy static data.
+  //
+  // Default behavior: BYPASS (returns ok). To re-enable auth:
+  //   1. Set GARVIS_AUTH_DISABLED=false in Netlify env vars
+  //   2. Re-enable client-side password gate in crg-command-center/index.html (~line 2124)
+  //   3. Confirm GARVIS_AUTH_TOKEN env var is still set
+  if (process.env.GARVIS_AUTH_DISABLED !== "false") {
+    return true;
+  }
+
+  // Original auth logic (only runs when GARVIS_AUTH_DISABLED=false):
   const expected = getToken();
   if (!expected) return false;
   const presented = readCookie(event, COOKIE_NAME);
