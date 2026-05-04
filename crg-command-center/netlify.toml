@@ -148,3 +148,14 @@
 # Garvis Liveness Sprint:
 # LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY = optional; enables agent last_run / runs_last_24h enrichment
 # GITHUB_TOKEN = optional; enables open-PRs aggregation in /api/garvis-coming-up
+#
+# Garvis Auth Bypass (2026-05-03 — matches client-side password removal, PR #6):
+# GARVIS_AUTH_DISABLED = unset (default) → backend auth BYPASSED. Dashboard endpoints return
+#                        200 without a garvis_token cookie. Set to "false" to re-enable the
+#                        original cookie auth check (also requires GARVIS_AUTH_TOKEN +
+#                        GARVIS_PASSWORD set + client-side password gate flipped on in
+#                        crg-command-center/index.html ~line 2124). See _lib/garvis-auth.js
+#                        header comment for full re-enable instructions.
+# GARVIS_AUTH_TOKEN    = 32-byte hex opaque token (only enforced when GARVIS_AUTH_DISABLED=false)
+# GARVIS_PASSWORD      = password used by /.netlify/functions/garvis-auth POST endpoint
+#                        (only meaningful when GARVIS_AUTH_DISABLED=false)
