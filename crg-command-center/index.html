@@ -3119,117 +3119,66 @@ const SYSTEM_LABELS = {
 };
 
 /* ---------- SILO DATA ---------- */
-// TEMP: these %s are authored not fetched. See backlog: wire to live build state.
+// Skeleton-loader: 3 silo cards in canonical order (Real Estate / Peptides / Primerica)
+// per CRG Internal Focus Doctrine 2026-04-25. Live data is fetched from
+// /.netlify/functions/garvis-silo-state via loadSiloState() and replaces this
+// skeleton in renderLiveSilos(). DO NOT add 'Mortgage Brokers' or 'Financial
+// Advisors' silos here — those were the old sales-theater framing.
+// See data/silo-state.json for source of truth.
 const SILOS = [
   {
     id: 'real-estate',
     glyph: 'RE',
     eyebrow: 'Silo 01',
     name: 'Real Estate',
-    pct: 30,
-    pctNote: 'Objectives met',
-    apps: [
-      { label: 'RE Silo Page', url: 'https://cornerstoneregroup.netlify.app/real-estate/' }
-    ],
+    pct: 0,
+    pctNote: 'Loading…',
+    apps: [],
     drips: { count: 0, list: [] },
-    agents: 'None wired yet',
-    agentsStatus: 'bad',
-    crm: 'Marc Papineau Real Estate',
-    crmNote: 'Location OaIjyU9hKEG9lu2PRrSH &middot; partial scopes',
+    agents: 'Loading…',
+    agentsStatus: 'warn',
+    crm: 'Loading…',
+    crmNote: '',
     crmStatus: 'warn',
-    met: [
-      'RE silo page live (new today 2026-04-18)',
-      'Homepage silo router fixed',
-      'Footer links corrected across all silo pages'
-    ],
-    pending: [
-      'Build RE-specific drip (nurture past clients + reactivate dormant leads)',
-      'Wire Reactivation AI Agent',
-      'Replace placeholder testimonials with real pilot quotes',
-      'Add RE calendar booking URL'
-    ],
+    met: [],
+    pending: [],
     prospects: []
   },
   {
-    id: 'mortgage-brokers',
-    glyph: 'MB',
+    id: 'peptides',
+    glyph: 'PX',
     eyebrow: 'Silo 02',
-    name: 'Mortgage Brokers',
-    pct: 70,
-    pctNote: 'Objectives met',
-    apps: [
-      { label: 'MB Silo Page', url: 'https://cornerstoneregroup.netlify.app/mortgage-brokers/' },
-      { label: 'Licensing Landing', url: 'https://cornerstoneregroup.netlify.app/licensing/' },
-      { label: 'Script Evaluator', url: 'https://crg-script-evaluator.netlify.app/' },
-      { label: 'Compliance Engine', url: 'https://crg-compliance-engine.netlify.app/' }
-    ],
-    drips: { count: 1, list: ['Licensing Inquiry — Mortgage Broker (7 emails)'] },
-    agents: '1 spec-ready (Alex — Licensing Inquiry Vapi)',
+    name: 'Peptides · Vitalis Research',
+    pct: 0,
+    pctNote: 'Loading…',
+    apps: [],
+    drips: { count: 0, list: [] },
+    agents: 'Loading…',
     agentsStatus: 'warn',
-    crm: 'Cornerstone Re Group',
-    crmNote: 'Location 9Z3U7KnyQSbbnaKyTS2e &middot; live',
-    crmStatus: 'ok',
-    met: [
-      'Mortgage silo page live',
-      'Licensing landing page live w/ end-to-end GHL contact creation (contact 720PrLejF4v7q5bb6yEn confirmed)',
-      'All 7 drip emails drafted',
-      'Vapi call script drafted',
-      'GHL key rotated (pit-f36f03f4&hellip;)',
-      'Windmill system_status_v1 updated'
-    ],
-    pending: [
-      'Paste 7 emails into GHL',
-      'Build GHL workflow for the drip',
-      'Wire Vapi assistant',
-      'Replace book-page calendar slug',
-      'Set up Jason Anbara custom presentation page'
-    ],
-    prospects: [
-      {
-        name: 'Jason Anbara',
-        company: 'Mortgage Alliance / NorthLend Financial',
-        relationship: 'Cold discovery · intro via [source TBD]',
-        status: 'Research complete · Custom presentation building · Email queued in BENAIAH',
-        next_step: "Send Michael email via BENAIAH, book one of the 3 proposed slots, deliver custom presentation week of Apr 27"
-      }
-    ]
+    crm: 'Loading…',
+    crmNote: '',
+    crmStatus: 'warn',
+    met: [],
+    pending: [],
+    prospects: []
   },
   {
-    id: 'financial-advisors',
-    glyph: 'FA',
+    id: 'primerica',
+    glyph: 'PF',
     eyebrow: 'Silo 03',
-    name: 'Financial Advisors',
-    pct: 25,
-    pctNote: 'Objectives met',
-    apps: [
-      { label: 'FA Silo Page', url: 'https://cornerstoneregroup.netlify.app/financial-advisors/' },
-      { label: 'Vault OS', url: 'https://papineau-family-finance.netlify.app/' }
-    ],
+    name: 'Primerica · Vault OS',
+    pct: 0,
+    pctNote: 'Loading…',
+    apps: [],
     drips: { count: 0, list: [] },
-    agents: 'None',
-    agentsStatus: 'bad',
-    crm: 'Inherits from Cornerstone Re Group',
-    crmNote: 'Same subaccount &middot; acceptable for now',
+    agents: 'Loading…',
+    agentsStatus: 'warn',
+    crm: 'Loading…',
+    crmNote: '',
     crmStatus: 'warn',
-    met: [
-      'FA silo page live',
-      'Vault OS deployed and working'
-    ],
-    pending: [
-      'Build FA-specific drip (signal triggers for Vanguard 24.4% churn data)',
-      'Wire an FA-specific call agent',
-      'Add FNA-specific calculator',
-      'Downgrade M-006 LUKE status in catalog'
-    ],
-    prospects: [
-      {
-        name: 'Jim Beaulne',
-        company: 'Primerica',
-        relationship: 'Close friend + fellow Christian · warm prospect',
-        status: 'Not yet ready · Marc will signal when to initiate',
-        next_step: 'When Marc signals: commission deep-research brief → custom presentation → Alex-sent outreach. Same treatment as Jason Anbara.'
-      }
-    ]
+    met: [],
+    pending: [],
+    prospects: []
   }
 ];
 

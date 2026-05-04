@@ -6,11 +6,11 @@
  *
  * Probes (in display order):
  *   - cornerstoneregroup.netlify.app          (parent CRG site)
- *   - cornerstoneregroup.netlify.app/real-estate/        (RE silo)
- *   - cornerstoneregroup.netlify.app/financial-advisors/ (FA silo)
- *   - cornerstoneregroup.netlify.app/mortgage-brokers/   (MB silo)
+ *   - cornerstoneregroup.netlify.app/real-estate/        (Real Estate silo)
+ *   - cornerstoneregroup.netlify.app/financial-advisors/ (Primerica silo)
+ *   - cornerstoneregroup.netlify.app/mortgage-brokers/   (Mortgage Broker page — sub-feature of Primerica, NOT a silo)
  *   - papineau-family-finance.netlify.app/    (Vault OS)
- *   - peptide-resource-app.netlify.app/        (Vitalis)
+ *   - peptide-resource-app.netlify.app/        (Peptides · Vitalis Research silo)
  *   - crg-command.netlify.app/                 (Garvis itself)
  *   - crg-script-evaluator.netlify.app/        (Script Engine)
  *   - crg-compliance-engine.netlify.app/       (Compliance)
@@ -37,9 +37,9 @@ const WINDMILL_BASE = process.env.WINDMILL_BASE_URL || "https://gmbh-lion-mar-ep
 const PROBES = [
   { id: "garvis",            name: "Garvis",                url: "https://crg-command.netlify.app/",                            kind: "internal",   silo: "cross-cutting" },
   { id: "cornerstone-parent",name: "Cornerstone (parent)",  url: "https://cornerstoneregroup.netlify.app/",                     kind: "site",       silo: "cross-cutting" },
-  { id: "re-silo",           name: "RE silo page",          url: "https://cornerstoneregroup.netlify.app/real-estate/",         kind: "silo-page",  silo: "real-estate" },
-  { id: "fa-silo",           name: "FA silo page",          url: "https://cornerstoneregroup.netlify.app/financial-advisors/",  kind: "silo-page",  silo: "primerica" },
-  { id: "mb-silo",           name: "MB silo page",          url: "https://cornerstoneregroup.netlify.app/mortgage-brokers/",    kind: "silo-page",  silo: "primerica" },
+  { id: "re-silo",           name: "Real Estate silo page", url: "https://cornerstoneregroup.netlify.app/real-estate/",         kind: "silo-page",  silo: "real-estate" },
+  { id: "fa-silo",           name: "Primerica silo page",   url: "https://cornerstoneregroup.netlify.app/financial-advisors/",  kind: "silo-page",  silo: "primerica" },
+  { id: "mb-silo",           name: "Mortgage broker page",  url: "https://cornerstoneregroup.netlify.app/mortgage-brokers/",    kind: "sub-page",   silo: "primerica" },
   { id: "vault-os",          name: "Vault OS",              url: "https://papineau-family-finance.netlify.app/",                kind: "internal",   silo: "primerica" },
   { id: "vitalis-research",  name: "Vitalis Research",      url: "https://peptide-resource-app.netlify.app/",                   kind: "client",     silo: "peptides" },
   { id: "script-evaluator",  name: "Script Evaluator",      url: "https://crg-script-evaluator.netlify.app/",                   kind: "tool",       silo: "cross-cutting" },
