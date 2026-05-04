@@ -398,7 +398,6 @@ def _call_opus_tier_pass(api_key: str, system: str, user: str) -> dict[str, Any]
     body = {
         "model": "claude-opus-4-7",
         "max_tokens": 2500,
-        "temperature": 0.2,
         "system": system,
         "messages": [{"role": "user", "content": user}],
     }
@@ -516,7 +515,6 @@ def luke_synthesize(
     body = {
         "model": "claude-sonnet-4-6",
         "max_tokens": 3500,
-        "temperature": 0.3,
         "system": LUKE_SYNTHESIS_SYSTEM,
         "messages": [
             {
@@ -716,6 +714,8 @@ def build_weekly_report(per_compound_results: list[dict[str, Any]], today_iso: s
 
 ## Top 5 changes this week
 """
+    if not top5:
+        body += "_None this week._\n"
     for r in top5:
         lr = r.get("luke_result") or {}
         body += f"\n### {r['compound']}\n"
@@ -724,6 +724,13 @@ def build_weekly_report(per_compound_results: list[dict[str, Any]], today_iso: s
             body += f"- {kc}\n"
         for spu in lr.get("suggested_protocol_updates", [])[:2]:
             body += f"- Protocol implication: {spu.get('protocol')} — {spu.get('change')}\n"
+
+    # Reviewed-and-held list (proof Luke ran, not silence)
+    held = [r for r in per_compound_results if not r.get("_skipped") and not (r.get("luke_result") or {}).get("changed")]
+    if held:
+        body += "\n## Reviewed and held (no new T1/T2 in window)\n"
+        held_names = ", ".join(sorted(r.get("compound", "?") for r in held))
+        body += f"_{len(held)} compounds checked, no monograph changes warranted:_ {held_names}\n"
 
     body += "\n## Deprecation candidates\n"
     if deps:
