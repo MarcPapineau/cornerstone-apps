@@ -1,0 +1,1285 @@
+[
+  {
+    "schema": "obadiah-output@1.0",
+    "generated_at": "2026-05-04T23:13:17.433Z",
+    "market_regime": "chop",
+    "regime_confidence": 0.55,
+    "regime_commentary": "Bitcoin trades at $79,904, roughly 36.6% below its October 2025 ATH of $126,080, showing modest +1.07% 24h and +3.68% 7d gains after building a base in the $75,100-$80,500 range over the past week. Fear and Greed dropped from 47 (Neutral) yesterday to 40 (Fear) today, indicating sentiment deterioration even as price edges higher. Altcoin performance is mixed with DOGE outperforming (+11.45% 7d) while SOL, XRP, and BNB lag, a pattern consistent with choppy price discovery rather than confirmed bull resumption. [T1]",
+    "fear_greed": {
+      "value": 40,
+      "classification": "fear",
+      "trend_24h": "falling"
+    },
+    "top_assets": [
+      {
+        "symbol": "BTC",
+        "name": "Bitcoin",
+        "price_usd": 79904,
+        "change_24h_pct": 1.06873,
+        "change_7d_pct": 3.6791312437285235,
+        "volume_24h_usd": 56010830272,
+        "market_cap_usd": 1600706579375,
+        "ohlcv_7d": [
+          [
+            1777334400000,
+            76884,
+            77361,
+            76798,
+            77361
+          ],
+          [
+            1777348800000,
+            77312,
+            77432,
+            76700,
+            76794
+          ],
+          [
+            1777363200000,
+            76805,
+            77088,
+            76481,
+            76855
+          ],
+          [
+            1777377600000,
+            76872,
+            76937,
+            76138,
+            76183
+          ],
+          [
+            1777392000000,
+            76207,
+            76366,
+            75706,
+            76041
+          ],
+          [
+            1777406400000,
+            76041,
+            76340,
+            75904,
+            76340
+          ],
+          [
+            1777420800000,
+            76396,
+            76458,
+            76204,
+            76345
+          ],
+          [
+            1777435200000,
+            76343,
+            77068,
+            76239,
+            76961
+          ],
+          [
+            1777449600000,
+            76935,
+            77343,
+            76900,
+            77024
+          ],
+          [
+            1777464000000,
+            77042,
+            77808,
+            76960,
+            77580
+          ],
+          [
+            1777478400000,
+            77521,
+            77521,
+            75758,
+            75858
+          ],
+          [
+            1777492800000,
+            75973,
+            76046,
+            75103,
+            75469
+          ],
+          [
+            1777507200000,
+            75635,
+            75976,
+            75538,
+            75775
+          ],
+          [
+            1777521600000,
+            75803,
+            76365,
+            75567,
+            75910
+          ],
+          [
+            1777536000000,
+            75853,
+            76085,
+            75391,
+            76085
+          ],
+          [
+            1777550400000,
+            76067,
+            76207,
+            75914,
+            76006
+          ],
+          [
+            1777564800000,
+            76065,
+            76529,
+            76065,
+            76456
+          ],
+          [
+            1777579200000,
+            76382,
+            76477,
+            76094,
+            76392
+          ],
+          [
+            1777593600000,
+            76388,
+            76497,
+            76189,
+            76287
+          ],
+          [
+            1777608000000,
+            76412,
+            77345,
+            76380,
+            77085
+          ],
+          [
+            1777622400000,
+            77067,
+            77147,
+            76944,
+            77096
+          ],
+          [
+            1777636800000,
+            77032,
+            77435,
+            77032,
+            77434
+          ],
+          [
+            1777651200000,
+            77472,
+            78773,
+            77430,
+            78435
+          ],
+          [
+            1777665600000,
+            78571,
+            78582,
+            78150,
+            78424
+          ],
+          [
+            1777680000000,
+            78344,
+            78388,
+            77797,
+            78172
+          ],
+          [
+            1777694400000,
+            78256,
+            78438,
+            78174,
+            78438
+          ],
+          [
+            1777708800000,
+            78397,
+            78397,
+            78050,
+            78194
+          ],
+          [
+            1777723200000,
+            78186,
+            78361,
+            78095,
+            78128
+          ],
+          [
+            1777737600000,
+            78106,
+            78462,
+            78106,
+            78462
+          ],
+          [
+            1777752000000,
+            78467,
+            78554,
+            78314,
+            78448
+          ],
+          [
+            1777766400000,
+            78442,
+            79005,
+            78415,
+            78655
+          ],
+          [
+            1777780800000,
+            78666,
+            78713,
+            78106,
+            78188
+          ],
+          [
+            1777795200000,
+            78174,
+            78420,
+            78095,
+            78351
+          ],
+          [
+            1777809600000,
+            78376,
+            78788,
+            78361,
+            78652
+          ],
+          [
+            1777824000000,
+            78717,
+            78806,
+            78591,
+            78649
+          ],
+          [
+            1777838400000,
+            78672,
+            78790,
+            78571,
+            78773
+          ],
+          [
+            1777852800000,
+            78766,
+            79322,
+            78553,
+            78563
+          ],
+          [
+            1777867200000,
+            78543,
+            80311,
+            78329,
+            80254
+          ],
+          [
+            1777881600000,
+            80394,
+            80529,
+            79615,
+            79736
+          ],
+          [
+            1777896000000,
+            79689,
+            79865,
+            78359,
+            78795
+          ],
+          [
+            1777910400000,
+            78764,
+            80387,
+            78603,
+            79961
+          ],
+          [
+            1777924800000,
+            80007,
+            80624,
+            79715,
+            80052
+          ]
+        ]
+      },
+      {
+        "symbol": "ETH",
+        "name": "Ethereum",
+        "price_usd": 2349.19,
+        "change_24h_pct": 0.50615,
+        "change_7d_pct": 2.380911631239231,
+        "volume_24h_usd": 24126325111,
+        "market_cap_usd": 283721451407,
+        "ohlcv_7d": [
+          [
+            1777334400000,
+            2292.27,
+            2299.77,
+            2287.43,
+            2299.77
+          ],
+          [
+            1777348800000,
+            2303.32,
+            2309.06,
+            2283.16,
+            2290.08
+          ],
+          [
+            1777363200000,
+            2288.91,
+            2294.76,
+            2272.43,
+            2287
+          ],
+          [
+            1777377600000,
+            2286.21,
+            2288.92,
+            2271.53,
+            2274.29
+          ],
+          [
+            1777392000000,
+            2274.71,
+            2282.13,
+            2263.65,
+            2279.11
+          ],
+          [
+            1777406400000,
+            2278.66,
+            2302.42,
+            2274.82,
+            2302.42
+          ],
+          [
+            1777420800000,
+            2303.04,
+            2303.04,
+            2285.19,
+            2289.17
+          ],
+          [
+            1777435200000,
+            2289.49,
+            2312.73,
+            2281.46,
+            2310.42
+          ],
+          [
+            1777449600000,
+            2310.16,
+            2336.29,
+            2309.8,
+            2322.6
+          ],
+          [
+            1777464000000,
+            2323.49,
+            2344.02,
+            2322.51,
+            2331.22
+          ],
+          [
+            1777478400000,
+            2327.97,
+            2327.97,
+            2265.82,
+            2271.05
+          ],
+          [
+            1777492800000,
+            2275.08,
+            2276.88,
+            2224.38,
+            2231.98
+          ],
+          [
+            1777507200000,
+            2238.7,
+            2258.9,
+            2231.97,
+            2253.46
+          ],
+          [
+            1777521600000,
+            2254.09,
+            2275.05,
+            2239.08,
+            2253.65
+          ],
+          [
+            1777536000000,
+            2251.22,
+            2258.64,
+            2236,
+            2258.41
+          ],
+          [
+            1777550400000,
+            2256.59,
+            2268.64,
+            2255.64,
+            2257.51
+          ],
+          [
+            1777564800000,
+            2258.93,
+            2268.13,
+            2251.3,
+            2265.73
+          ],
+          [
+            1777579200000,
+            2263.97,
+            2265.56,
+            2251.83,
+            2261.23
+          ],
+          [
+            1777593600000,
+            2261.07,
+            2265.31,
+            2252.42,
+            2255.98
+          ],
+          [
+            1777608000000,
+            2261.17,
+            2289.71,
+            2258.13,
+            2281.88
+          ],
+          [
+            1777622400000,
+            2281.45,
+            2285.03,
+            2273.73,
+            2278.39
+          ],
+          [
+            1777636800000,
+            2277.14,
+            2286.65,
+            2277.14,
+            2285.95
+          ],
+          [
+            1777651200000,
+            2286.94,
+            2322.35,
+            2286.09,
+            2306.77
+          ],
+          [
+            1777665600000,
+            2311.11,
+            2311.79,
+            2298.48,
+            2305.87
+          ],
+          [
+            1777680000000,
+            2303.92,
+            2303.92,
+            2282.89,
+            2294.66
+          ],
+          [
+            1777694400000,
+            2295.47,
+            2305.23,
+            2293.29,
+            2304.77
+          ],
+          [
+            1777708800000,
+            2303.83,
+            2305.34,
+            2297.4,
+            2300.63
+          ],
+          [
+            1777723200000,
+            2300.16,
+            2306.65,
+            2299.89,
+            2301.1
+          ],
+          [
+            1777737600000,
+            2301.44,
+            2310.34,
+            2301.44,
+            2308.41
+          ],
+          [
+            1777752000000,
+            2308.35,
+            2311.88,
+            2305.16,
+            2310.58
+          ],
+          [
+            1777766400000,
+            2309.92,
+            2334.38,
+            2309.32,
+            2316.33
+          ],
+          [
+            1777780800000,
+            2316.46,
+            2316.46,
+            2299.79,
+            2301.55
+          ],
+          [
+            1777795200000,
+            2300.82,
+            2312.08,
+            2299.38,
+            2308.84
+          ],
+          [
+            1777809600000,
+            2309.45,
+            2324.6,
+            2307.4,
+            2319.53
+          ],
+          [
+            1777824000000,
+            2322.17,
+            2330.84,
+            2320.97,
+            2327.13
+          ],
+          [
+            1777838400000,
+            2329.01,
+            2335.17,
+            2323.49,
+            2335.17
+          ],
+          [
+            1777852800000,
+            2335.69,
+            2348.65,
+            2320.3,
+            2324.13
+          ],
+          [
+            1777867200000,
+            2322.1,
+            2383.65,
+            2310.43,
+            2383.65
+          ],
+          [
+            1777881600000,
+            2385.65,
+            2393.2,
+            2358.96,
+            2363.82
+          ],
+          [
+            1777896000000,
+            2362.73,
+            2369.27,
+            2317.43,
+            2337.45
+          ],
+          [
+            1777910400000,
+            2335.06,
+            2375.27,
+            2327.79,
+            2348.39
+          ],
+          [
+            1777924800000,
+            2347.96,
+            2376.5,
+            2340.1,
+            2356.45
+          ]
+        ]
+      },
+      {
+        "symbol": "USDT",
+        "name": "Tether",
+        "price_usd": 0.999793,
+        "change_24h_pct": 0.0031,
+        "change_7d_pct": -0.018824414895579667,
+        "volume_24h_usd": 88133888317,
+        "market_cap_usd": 189552185311,
+        "ohlcv_7d": []
+      },
+      {
+        "symbol": "XRP",
+        "name": "XRP",
+        "price_usd": 1.39,
+        "change_24h_pct": -0.33859,
+        "change_7d_pct": -0.29046422377328784,
+        "volume_24h_usd": 2501606622,
+        "market_cap_usd": 86050497596,
+        "ohlcv_7d": []
+      },
+      {
+        "symbol": "BNB",
+        "name": "BNB",
+        "price_usd": 623.02,
+        "change_24h_pct": 0.32674,
+        "change_7d_pct": -0.33321838734163056,
+        "volume_24h_usd": 1693529732,
+        "market_cap_usd": 84024441016,
+        "ohlcv_7d": []
+      },
+      {
+        "symbol": "USDC",
+        "name": "USDC",
+        "price_usd": 0.999815,
+        "change_24h_pct": -0.00309,
+        "change_7d_pct": -0.008134911542936987,
+        "volume_24h_usd": 18381344454,
+        "market_cap_usd": 77829582501,
+        "ohlcv_7d": []
+      },
+      {
+        "symbol": "SOL",
+        "name": "Solana",
+        "price_usd": 84.1,
+        "change_24h_pct": -0.49381,
+        "change_7d_pct": -0.5107644243556588,
+        "volume_24h_usd": 4533815686,
+        "market_cap_usd": 48471369925,
+        "ohlcv_7d": [
+          [
+            1777334400000,
+            84.15,
+            84.77,
+            84.15,
+            84.77
+          ],
+          [
+            1777348800000,
+            84.71,
+            84.87,
+            83.97,
+            84.09
+          ],
+          [
+            1777363200000,
+            84.14,
+            84.39,
+            83.71,
+            83.98
+          ],
+          [
+            1777377600000,
+            84,
+            84.11,
+            83.33,
+            83.37
+          ],
+          [
+            1777392000000,
+            83.38,
+            83.86,
+            83.05,
+            83.41
+          ],
+          [
+            1777406400000,
+            83.48,
+            83.94,
+            83.34,
+            83.94
+          ],
+          [
+            1777420800000,
+            83.92,
+            84.07,
+            83.63,
+            84.03
+          ],
+          [
+            1777435200000,
+            84.05,
+            84.65,
+            83.85,
+            84.57
+          ],
+          [
+            1777449600000,
+            84.58,
+            84.95,
+            84.5,
+            84.72
+          ],
+          [
+            1777464000000,
+            84.69,
+            85.46,
+            84.42,
+            84.88
+          ],
+          [
+            1777478400000,
+            84.89,
+            84.89,
+            83.13,
+            83.17
+          ],
+          [
+            1777492800000,
+            83.38,
+            83.53,
+            81.57,
+            82.18
+          ],
+          [
+            1777507200000,
+            82.38,
+            83.06,
+            82.29,
+            83.01
+          ],
+          [
+            1777521600000,
+            83.14,
+            83.91,
+            82.76,
+            83.06
+          ],
+          [
+            1777536000000,
+            82.99,
+            83.21,
+            82.31,
+            83.21
+          ],
+          [
+            1777550400000,
+            83.28,
+            83.35,
+            82.9,
+            82.95
+          ],
+          [
+            1777564800000,
+            83.02,
+            83.51,
+            82.77,
+            83.33
+          ],
+          [
+            1777579200000,
+            83.33,
+            83.33,
+            82.87,
+            83.05
+          ],
+          [
+            1777593600000,
+            83,
+            83.13,
+            82.78,
+            83.01
+          ],
+          [
+            1777608000000,
+            83.19,
+            84.17,
+            83.15,
+            83.88
+          ],
+          [
+            1777622400000,
+            83.89,
+            84.14,
+            83.71,
+            83.89
+          ],
+          [
+            1777636800000,
+            83.9,
+            84.16,
+            83.77,
+            83.96
+          ],
+          [
+            1777651200000,
+            83.99,
+            84.67,
+            83.95,
+            84.37
+          ],
+          [
+            1777665600000,
+            84.54,
+            84.54,
+            83.8,
+            83.86
+          ],
+          [
+            1777680000000,
+            83.86,
+            83.86,
+            83.42,
+            83.7
+          ],
+          [
+            1777694400000,
+            83.7,
+            84.11,
+            83.54,
+            83.77
+          ],
+          [
+            1777708800000,
+            83.79,
+            83.79,
+            83.55,
+            83.71
+          ],
+          [
+            1777723200000,
+            83.7,
+            84.04,
+            83.58,
+            83.66
+          ],
+          [
+            1777737600000,
+            83.67,
+            84,
+            83.67,
+            84
+          ],
+          [
+            1777752000000,
+            84.01,
+            84.26,
+            83.95,
+            84.2
+          ],
+          [
+            1777766400000,
+            84.16,
+            84.78,
+            84.13,
+            84.35
+          ],
+          [
+            1777780800000,
+            84.27,
+            84.27,
+            83.59,
+            83.66
+          ],
+          [
+            1777795200000,
+            83.64,
+            83.97,
+            83.6,
+            83.91
+          ],
+          [
+            1777809600000,
+            83.86,
+            84.08,
+            83.77,
+            83.95
+          ],
+          [
+            1777824000000,
+            84.03,
+            84.36,
+            84.01,
+            84.11
+          ],
+          [
+            1777838400000,
+            84.12,
+            84.41,
+            84.02,
+            84.38
+          ],
+          [
+            1777852800000,
+            84.37,
+            84.77,
+            83.89,
+            83.89
+          ],
+          [
+            1777867200000,
+            83.75,
+            85.49,
+            83.38,
+            85.36
+          ],
+          [
+            1777881600000,
+            85.41,
+            85.81,
+            84.66,
+            84.88
+          ],
+          [
+            1777896000000,
+            84.81,
+            85.13,
+            83.4,
+            83.95
+          ],
+          [
+            1777910400000,
+            83.95,
+            85.18,
+            83.72,
+            84.4
+          ],
+          [
+            1777924800000,
+            84.45,
+            84.99,
+            84.1,
+            84.41
+          ]
+        ]
+      },
+      {
+        "symbol": "TRX",
+        "name": "TRON",
+        "price_usd": 0.340852,
+        "change_24h_pct": 0.81132,
+        "change_7d_pct": 4.717343052022035,
+        "volume_24h_usd": 598511142,
+        "market_cap_usd": 32296225714,
+        "ohlcv_7d": []
+      },
+      {
+        "symbol": "FIGR_HELOC",
+        "name": "Figure Heloc",
+        "price_usd": 1.029,
+        "change_24h_pct": -0.77213,
+        "change_7d_pct": -0.11627024686784326,
+        "volume_24h_usd": 20921282,
+        "market_cap_usd": 17557669859,
+        "ohlcv_7d": []
+      },
+      {
+        "symbol": "DOGE",
+        "name": "Dogecoin",
+        "price_usd": 0.110043,
+        "change_24h_pct": 0.74004,
+        "change_7d_pct": 11.45184773748717,
+        "volume_24h_usd": 2507397558,
+        "market_cap_usd": 16962162565,
+        "ohlcv_7d": []
+      }
+    ],
+    "recommendations": [
+      {
+        "asset": "BTC",
+        "direction": "long",
+        "time_horizon": "1m",
+        "conviction": 3,
+        "factor_scores": {
+          "onchain": 3,
+          "technical": 3,
+          "sentiment": 2,
+          "fundamentals": 4,
+          "macro": 3,
+          "catalysts": 4
+        },
+        "weighted_score": 3.05,
+        "catalyst": "Clarity Act legislative progress driving crypto equity rally; BTC testing $80k psychological level with institutional demand signals including GameStop BTC treasury and DTCC tokenization platform announcement. [T1]",
+        "why_now": "BTC 7d OHLCV confirms base formation in $75,100-$78,800 range followed by breakout above $80,000 intraday. Fear and Greed at 40 historically represents asymmetric entry zone in base-building regimes. Aave V3 TVL +7.54% 7d and Morpho Blue +10.5% 7d signal DeFi capital reactivation. Regulatory clarity tailwind from Clarity Act provides fundamental support. Conviction capped at 3 due to chop regime and missing Coin Metrics and Coinglass data. [T1/T2]",
+        "invalidation": "Daily close below $78,000 would confirm false breakout and re-entry into prior consolidation range. Fear and Greed drop below 25 or adverse Clarity Act legislative news would reduce conviction. [T2]",
+        "sources": [
+          "CoinGecko BTC OHLCV 2026-05-04T23:12:39Z [T1]",
+          "Fear and Greed Index 40 falling from 47 [T1]",
+          "CoinDesk Clarity Act headline 2026-05-04T17:34:28Z [T1]",
+          "DeFiLlama Aave V3 TVL +7.54% 7d Morpho Blue +10.5% 7d [T1]",
+          "Coin Metrics UNAVAILABLE HTTP 403 [T4]",
+          "Coinglass funding and OI UNAVAILABLE 401 error [T4]"
+        ]
+      },
+      {
+        "asset": "ETH",
+        "direction": "long",
+        "time_horizon": "1m",
+        "conviction": 3,
+        "factor_scores": {
+          "onchain": 3,
+          "technical": 3,
+          "sentiment": 3,
+          "fundamentals": 4,
+          "macro": 3,
+          "catalysts": 4
+        },
+        "weighted_score": 3.25,
+        "catalyst": "Largest Ethereum treasury entity purchased $238M in ETH per CoinDesk 2026-05-04T14:23Z. DTCC tokenized securities platform with October 2026 launch benefits Ethereum as settlement layer. Tom Lee declared crypto spring started. [T1]",
+        "why_now": "ETH 7d OHLCV shows range compression between $2,224-$2,393 with intraday push to $2,383 signaling renewed buying pressure. At 52.5% below ATH of $4,946 valuation is historically suppressed. Major institutional $238M accumulation event provides demand confirmation. Lido TVL stable at $21.3B and SSV Network TVL +2.88% 7d indicate sustained staking demand. Conviction capped at 3 per chop regime rule and missing derivatives data. [T1/T2]",
+        "invalidation": "Daily close below $2,310 would signal breakout rejection. Adverse Ethereum staking regulatory action or protocol failure would invalidate thesis. [T2]",
+        "sources": [
+          "CoinGecko ETH OHLCV 2026-05-04T23:12:40Z [T1]",
+          "CoinDesk ETH treasury $238M purchase 2026-05-04T14:23:18Z [T1]",
+          "CoinDesk DTCC tokenization platform 2026-05-04T15:16:06Z [T1]",
+          "DeFiLlama Lido $21.3B Aave V3 +7.54% 7d Morpho Blue +10.5% 7d [T1]",
+          "Coin Metrics UNAVAILABLE [T4]",
+          "Coinglass UNAVAILABLE [T4]"
+        ]
+      },
+      {
+        "asset": "SOL",
+        "direction": "neutral",
+        "time_horizon": "1w",
+        "conviction": 2,
+        "factor_scores": {
+          "onchain": 2,
+          "technical": 2,
+          "sentiment": 2,
+          "fundamentals": 3,
+          "macro": 3,
+          "catalysts": 1
+        },
+        "weighted_score": 2.2,
+        "catalyst": "No SOL-specific positive catalyst identified in snapshot. Asset is 71.3% below ATH of $293.31 from January 2025 with near-flat 7d performance of -0.51%. [T1]",
+        "why_now": "SOL 7d OHLCV shows extreme compression in $81.57-$85.81 band indicating coiling but no directional edge without derivatives data. Flat 7d performance versus BTC +3.68% and DOGE +11.45% suggests capital rotation away from SOL. No news catalyst identified. Neutral until $85.82 cleared with volume or $81.57 breaks down. Conviction capped at 2 per chop regime and absent Coinglass data. [T2]",
+        "invalidation": "Break above $85.82 with volume shifts to cautious long. Break below $81.57 shifts to short consideration. [T2]",
+        "sources": [
+          "CoinGecko SOL OHLCV 2026-05-04T23:12:41Z [T1]",
+          "Fear and Greed 40 falling [T1]",
+          "Coinglass UNAVAILABLE 401 [T4]",
+          "Coin Metrics UNAVAILABLE [T4]"
+        ]
+      },
+      {
+        "asset": "DOGE",
+        "direction": "neutral",
+        "time_horizon": "1w",
+        "conviction": 2,
+        "factor_scores": {
+          "onchain": 1,
+          "technical": 3,
+          "sentiment": 3,
+          "fundamentals": 1,
+          "macro": 2,
+          "catalysts": 1
+        },
+        "weighted_score": 2,
+        "catalyst": "DOGE +11.45% 7d is top performer in snapshot driven by speculative rotation. No fundamental catalyst identified in news headlines. [T1/T2]",
+        "why_now": "DOGE outperformance in a Fear 40 environment with falling sentiment historically signals short-duration speculative activity rather than sustained trend. Asset remains 84.96% below May 2021 ATH. No derivatives data available to confirm momentum or identify crowding risk. Meme-asset outperformance late in a chop regime is a contrarian warning signal. Not actionable without clearer regime confirmation. [T2/T3]",
+        "invalidation": "Confirmed BTC breakout above $82k with broad altcoin participation and volume could justify short-term trading long entry on DOGE. [T2]",
+        "sources": [
+          "CoinGecko DOGE price 2026-05-04T23:12:35Z [T1]",
+          "Fear and Greed 40 falling from 47 [T1]",
+          "Coinglass UNAVAILABLE [T4]"
+        ]
+      }
+    ],
+    "news": [
+      {
+        "headline": "Circle, Coinbase lead crypto stocks rally amid Clarity Act progress, bitcoin hitting $80,000",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/markets/2026/05/04/circle-coinbase-lead-crypto-stock-rally-amid-clarity-act-progress-bitcoin-above-usd80-000",
+        "published_at": "2026-05-04T17:34:28.000Z",
+        "impact": "high",
+        "affected_assets": [
+          "BTC",
+          "ETH",
+          "USDC"
+        ],
+        "summary": "Crypto-related equities rallied as the U.S. Clarity Act digital asset regulatory framework advances in Congress. Bitcoin touched $80,000 with Circle and Coinbase among beneficiaries. Represents a major regulatory clarity tailwind for the sector. [T1]"
+      },
+      {
+        "headline": "Tom Lee says crypto spring started as largest Ethereum treasury buys $238 million in ether",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/business/2026/05/04/tom-lee-says-crypto-spring-started-as-largest-ethereum-treasury-buys-usd238-million-in-ether",
+        "published_at": "2026-05-04T14:23:18.000Z",
+        "impact": "high",
+        "affected_assets": [
+          "ETH"
+        ],
+        "summary": "Fundstrat's Tom Lee declared a crypto spring as the largest Ethereum treasury entity purchased $238M in ETH. Major institutional demand confirmation for Ethereum in a choppy market. [T1]"
+      },
+      {
+        "headline": "Wall Street giant DTCC plans tokenized securities platform with July pilot, October launch",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/business/2026/05/04/wall-street-giant-dtcc-plans-tokenized-securities-platform-with-july-pilot-october-launch",
+        "published_at": "2026-05-04T15:16:06.000Z",
+        "impact": "high",
+        "affected_assets": [
+          "ETH",
+          "BTC"
+        ],
+        "summary": "DTCC announced a tokenized securities settlement platform with July 2026 pilot and October 2026 full launch. Represents significant TradFi adoption of blockchain infrastructure with Ethereum as likely beneficiary settlement layer. [T1]"
+      },
+      {
+        "headline": "Kraken parent Payward closes $550 million Bitnomial deal, securing full CFTC derivatives stack",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/business/2026/05/04/kraken-parent-payward-closes-usd550-million-bitnomial-deal-securing-full-cftc-derivatives-stack",
+        "published_at": "2026-05-04T12:01:48.000Z",
+        "impact": "medium",
+        "affected_assets": [
+          "BTC",
+          "ETH"
+        ],
+        "summary": "Kraken parent Payward acquired Bitnomial for $550M giving it a full CFTC-regulated derivatives stack. Signals continued institutional buildout of regulated crypto derivatives infrastructure. [T1]"
+      },
+      {
+        "headline": "Shopify and National Bank of Canada back new digital currency for 24/7 trade settlement",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/business/2026/05/04/shopify-and-national-bank-of-canada-are-among-backers-of-a-new-digital-currency-built-to-settle-trades-24-7",
+        "published_at": "2026-05-04T16:20:48.000Z",
+        "impact": "medium",
+        "affected_assets": [
+          "BTC",
+          "ETH"
+        ],
+        "summary": "Shopify and National Bank of Canada are backing a new digital currency designed for 24/7 trade settlement. Adds to the institutional digital asset adoption narrative supporting broader crypto markets. [T1]"
+      },
+      {
+        "headline": "GameStop $55.5 billion eBay takeover bid puts its $368 million bitcoin stash in the crosshairs",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/business/2026/05/04/gamestop-s-usd55-5-billion-ebay-takeover-bid-puts-its-usd368-million-bitcoin-stash-in-the-crosshairs",
+        "published_at": "2026-05-04T20:16:04.000Z",
+        "impact": "medium",
+        "affected_assets": [
+          "BTC"
+        ],
+        "summary": "GameStop's potential $55.5B eBay acquisition raises questions about the future of its $368M Bitcoin treasury position. Could signal forced BTC liquidation risk if deal proceeds though outcome remains uncertain. [T1]"
+      },
+      {
+        "headline": "Hut 8 swaps Coinbase loan for cheaper FalconX deal, slashing borrowing costs as it bets big on AI",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/markets/2026/04/28/hut-8-swaps-coinbase-credit-line-for-cheaper-falconx-deal-slashing-borrowing-costs-as-it-bets-big-on-ai",
+        "published_at": "2026-05-04T18:31:44.000Z",
+        "impact": "low",
+        "affected_assets": [
+          "BTC"
+        ],
+        "summary": "Bitcoin miner Hut 8 refinanced its Coinbase credit facility with a cheaper FalconX deal while expanding into AI. Indicates cost optimization in Bitcoin mining sector and diversification trend. [T1]"
+      },
+      {
+        "headline": "Trump-affiliated World Liberty sues Justin Sun for defamation after Tron creator lawsuit",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/policy/2026/05/04/trump-affiliated-world-liberty-sues-justin-sun-for-defamation-after-tron-creator-s-lawsuit",
+        "published_at": "2026-05-04T13:25:16.000Z",
+        "impact": "medium",
+        "affected_assets": [
+          "TRX"
+        ],
+        "summary": "World Liberty Financial filed a defamation suit against Justin Sun following Sun's lawsuit against the Trump-affiliated entity. Escalating legal conflict introduces headline risk for TRON ecosystem despite TRX showing +4.72% 7d performance. [T1]"
+      },
+      {
+        "headline": "Binance launching withdrawal lock to deter crypto wrench attacks",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/business/2026/05/04/binance-is-launching-a-withdrawal-lock-to-help-deter-crypto-wrench-attacks",
+        "published_at": "2026-05-04T14:00:00.000Z",
+        "impact": "low",
+        "affected_assets": [
+          "BNB"
+        ],
+        "summary": "Binance announced a new withdrawal lock security feature to protect users from physical coercion attacks. Positive security development for the exchange with marginal positive sentiment for BNB. [T1]"
+      },
+      {
+        "headline": "Kraken parent Payward alleges $25 million crypto custody fraud against Etana",
+        "source": "CoinDesk",
+        "url": "https://www.coindesk.com/business/2026/05/04/kraken-s-parent-company-payward-alleges-usd25-million-crypto-custody-fraud-in-lawsuit-against-etana-and-firm-s-ceo",
+        "published_at": "2026-05-04T13:00:00.000Z",
+        "impact": "low",
+        "affected_assets": [
+          "BTC",
+          "ETH"
+        ],
+        "summary": "Kraken parent Payward filed a lawsuit alleging $25M crypto custody fraud against Etana Custody and its CEO. Limited direct market impact but adds to custody risk awareness in the sector. [T1]"
+      }
+    ],
+    "events": [
+      {
+        "name": "DTCC Tokenized Securities Platform July Pilot",
+        "date": "2026-07-01",
+        "category": "protocol",
+        "impact": "high",
+        "description": "DTCC plans a July 2026 pilot for its tokenized securities settlement platform with full October 2026 launch. Major TradFi infrastructure milestone for blockchain adoption. [T1]",
+        "affected_assets": [
+          "ETH",
+          "BTC"
+        ]
+      },
+      {
+        "name": "DTCC Tokenized Securities Full Launch",
+        "date": "2026-10-01",
+        "category": "protocol",
+        "impact": "high",
+        "description": "Full launch of DTCC tokenized securities platform following July pilot. Could establish Ethereum or other blockchains as institutional settlement infrastructure. [T1]",
+        "affected_assets": [
+          "ETH",
+          "BTC"
+        ]
+      },
+      {
+        "name": "U.S. Clarity Act Legislative Progress",
+        "date": "2026-05-04",
+        "category": "regulatory",
+        "impact": "high",
+        "description": "The Clarity Act digital asset regulatory framework is advancing in U.S. Congress providing potential legal clarity for crypto markets. Circle and Coinbase equities rallied on the news. [T1]",
+        "affected_assets": [
+          "BTC",
+          "ETH",
+          "USDC"
+        ]
+      },
+      {
+        "name": "World Liberty vs Justin Sun Defamation Lawsuit",
+        "date": "2026-05-04",
+        "category": "regulatory",
+        "impact": "medium",
+        "description": "Trump-affiliated World Liberty Financial filed defamation suit against TRON founder Justin Sun following his earlier lawsuit against World Liberty. Ongoing legal conflict creates headline risk for TRX. [T1]",
+        "affected_assets": [
+          "TRX"
+        ]
+      },
+      {
+        "name": "Kraken Bitnomial Acquisition Close",
+        "date": "2026-05-04",
+        "category": "regulatory",
+        "impact": "medium",
+        "description": "Kraken parent Payward closed its $550M acquisition of Bitnomial securing a full CFTC-regulated derivatives stack. Strengthens regulated derivatives infrastructure in the U.S. [T1]",
+        "affected_assets": [
+          "BTC",
+          "ETH"
+        ]
+      }
+    ],
+    "data_freshness": {
+      "coingecko": "2026-05-04T23:13:17.643Z",
+      "coinglass": "2026-05-04T23:13:18.192Z — UNAVAILABLE 401 Upgrade Plan error funding and OI data absent",
+      "coin_metrics": "null — UNAVAILABLE HTTP 403 Forbidden on-chain metrics absent",
+      "defillama": "2026-05-04T23:13:18.192Z",
+      "fear_greed": "2026-05-04T23:13:17.643Z",
+      "coindesk_rss": "2026-05-04T23:13:18.430Z"
+    }
+  }
+]
