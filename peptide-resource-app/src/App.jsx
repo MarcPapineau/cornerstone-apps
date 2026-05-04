@@ -82,6 +82,14 @@ function AppRoutes() {
         {/* /login deprecated — auth removed 2026-05-04. Redirect to home. */}
         <Route path="/login" element={<Navigate to="/" replace />} />
 
+        {/* Stale-route 301 redirects (Marc 2026-05-04 — Judge-Playwright P2-001/003) */}
+        <Route path="/matrix" element={<Navigate to="/compounds" replace />} />
+        <Route path="/find" element={<Navigate to="/compounds" replace />} />
+        <Route path="/library" element={<Navigate to="/compounds" replace />} />
+        <Route path="/admin" element={<Navigate to="/" replace />} />
+        <Route path="/about" element={<Navigate to="/" replace />} />
+        <Route path="/protocol" element={<Navigate to="/goals" replace />} />
+
         {/* ── 5-Step Waterfall — Primary Nav ── */}
         <Route path="/" element={
           <RequireAuth><Landing /></RequireAuth>
@@ -153,7 +161,7 @@ function AppRoutes() {
               Educational resource for Marc Papineau's research clients. Not medical advice.
             </p>
             <p style={{ margin: 0, fontSize: '0.72rem', color: '#475569' }}>
-              © {new Date().getFullYear()} Cornerstone RE Health — Research Education Platform
+              © {new Date().getFullYear()} Vitalis Research — Research Education Platform
             </p>
           </div>
         </footer>

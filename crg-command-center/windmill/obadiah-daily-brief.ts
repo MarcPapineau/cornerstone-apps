@@ -102,6 +102,7 @@ interface ObadiahOutput {
 
 interface MainResult {
   ok: boolean;
+  mode?: "production_disabled" | "live";
   date: string;
   obadiah_path: string;
   json_written: boolean;
@@ -109,6 +110,8 @@ interface MainResult {
   git_committed: boolean;
   telegram_sent: boolean;
   dry_run: boolean;
+  production_enabled?: boolean;
+  dry_run_log?: string[];
   error?: string;
   telegram_brief_preview?: string;
 }
@@ -186,7 +189,24 @@ export async function main(args: MainArgs = {}): Promise<MainResult> {
   const runDate = new Date().toISOString().split("T")[0];
   const generatedAt = now();
 
-  console.log(`[OBADIAH] Starting daily brief — ${generatedAt} — dry_run=${dry_run}`);
+  // -------------------------------------------------------------------------
+  // 0. PRODUCTION GATE — belt-and-suspenders guard (independent of --dry-run)
+  //
+  //    Set Windmill variable u/admin/OBADIAH_PRODUCTION_ENABLED = "true"
+  //    ONLY after Gate G + orchestrator greenlight + merge to main.
+  //    Default: "false" (safe). Bun bundle cache cannot bypass this — the
+  //    value is read from Windmill variables at runtime, not compile time.
+  // -------------------------------------------------------------------------
+  let PRODUCTION_ENABLED = false;
+  try {
+    const prodFlag = await wmill.getVariable("u/admin/OBADIAH_PRODUCTION_ENABLED");
+    PRODUCTION_ENABLED = prodFlag?.trim() === "true";
+  } catch {
+    // Variable not set → default safe (false)
+    console.log("[OBADIAH] OBADIAH_PRODUCTION_ENABLED variable not found — defaulting to production_disabled mode");
+  }
+
+  console.log(`[OBADIAH] Starting daily brief — ${generatedAt} — dry_run=${dry_run} — production_enabled=${PRODUCTION_ENABLED}`);
 
   // -------------------------------------------------------------------------
   // 1. Pull secrets from Windmill variables (Doppler mirrors)
@@ -612,6 +632,43 @@ OUTPUT SCHEMA (obadiah-output@1.0):
   console.log(`[OBADIAH] Output schema: ${obadiahOutput!.schema}, regime: ${obadiahOutput!.market_regime}, confidence: ${obadiahOutput!.regime_confidence}`);
 
   // -------------------------------------------------------------------------
+  // PRODUCTION GATE CHECK — independent of --dry-run (belt + suspenders)
+  //
+  //    When OBADIAH_PRODUCTION_ENABLED !== "true", we skip ALL side effects:
+  //    - No fetch to api.telegram.org (zero Telegram sends)
+  //    - No GitHub commit API calls (no crypto-latest.json / crypto-history.json writes)
+  //    We log a preview so the orchestrator can verify the brief looks correct
+  //    before flipping the flag.
+  // -------------------------------------------------------------------------
+  if (!PRODUCTION_ENABLED) {
+    const briefPreview = JSON.stringify(obadiahOutput).slice(0, 200);
+    const skippedFiles = ["data/crypto-latest.json", "data/crypto-history.json"];
+    const dryRunLog = [
+      `[OBADIAH] PRODUCTION DISABLED — would have sent: ${briefPreview}`,
+      `[OBADIAH] PRODUCTION DISABLED — would have committed: ${skippedFiles.join(", ")}`,
+      `[OBADIAH] PRODUCTION DISABLED — Telegram send: SKIPPED (not calling api.telegram.org)`,
+      `[OBADIAH] Set Windmill variable u/admin/OBADIAH_PRODUCTION_ENABLED = "true" to enable live mode`,
+    ];
+    for (const line of dryRunLog) {
+      console.log(line);
+    }
+    return {
+      ok: true,
+      mode: "production_disabled",
+      date: runDate,
+      obadiah_path: obadiahPath!,
+      json_written: false,
+      history_written: false,
+      git_committed: false,
+      telegram_sent: false,
+      dry_run,
+      production_enabled: false,
+      dry_run_log: dryRunLog,
+      telegram_brief_preview: briefPreview,
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // 7. Write outputs via GitHub API (Windmill worker is a Docker container;
   //    no access to host filesystem. GitHub API writes directly to the repo,
   //    triggering Netlify auto-deploy. This is the canonical V1 approach.)
@@ -843,6 +900,7 @@ ${JSON.stringify(obadiahOutput, null, 2)}`;
   // -------------------------------------------------------------------------
   const result: MainResult = {
     ok: true,
+    mode: "live",
     date: runDate,
     obadiah_path: obadiahPath,
     json_written: jsonWritten,
@@ -850,6 +908,7 @@ ${JSON.stringify(obadiahOutput, null, 2)}`;
     git_committed: gitCommitted,
     telegram_sent: telegramSent,
     dry_run,
+    production_enabled: true,
     telegram_brief_preview: telegramBriefText.slice(0, 500),
   };
 
