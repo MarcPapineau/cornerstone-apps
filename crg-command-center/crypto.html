@@ -1,0 +1,1421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="theme-color" content="#0C0C0C" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>OBADIAH — Crypto Intelligence · CRG</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --ink:        #0C0C0C;
+    --ink-2:      #101010;
+    --stone:      #1A1A1A;
+    --slate:      #222222;
+    --surface:    #141416;
+    --surface-2:  #1c1c1f;
+    --border:     rgba(240,235,225,0.08);
+    --border-2:   rgba(240,235,225,0.14);
+    --bone:       #F0EBE1;
+    --bone-dim:   rgba(240,235,225,0.75);
+    --muted:      #8C8377;
+    --gold:       #C4922A;
+    --gold-bright:#E2B04A;
+    --gold-dim:   #8F6B20;
+    --green:      #3DD68C;
+    --yellow:     #E2B04A;
+    --red:        #E07070;
+  }
+  html { scroll-behavior: smooth; }
+  body {
+    background-color: var(--ink);
+    color: var(--bone);
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+    padding: 24px 28px 96px;
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    position: relative;
+    overflow-x: hidden;
+  }
+
+  /* =========================================================================
+     STARK HUD — animated grid + particulate background
+     ========================================================================= */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: -20vh -20vw;
+    pointer-events: none;
+    z-index: 0;
+    background-image:
+      linear-gradient(to right,  rgba(226,176,74,0.075) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(226,176,74,0.075) 1px, transparent 1px);
+    background-size: 52px 52px, 52px 52px;
+    animation: stark-grid-drift 60s linear infinite;
+    mask-image: radial-gradient(ellipse at 50% 40%, black 40%, transparent 88%);
+    -webkit-mask-image: radial-gradient(ellipse at 50% 40%, black 40%, transparent 88%);
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background-image:
+      radial-gradient(1px 1px at 12% 18%, rgba(226,176,74,0.32) 100%, transparent),
+      radial-gradient(1px 1px at 37% 62%, rgba(226,176,74,0.22) 100%, transparent),
+      radial-gradient(1px 1px at 69% 28%, rgba(226,176,74,0.28) 100%, transparent),
+      radial-gradient(1px 1px at 82% 78%, rgba(226,176,74,0.20) 100%, transparent),
+      radial-gradient(1px 1px at 54% 44%, rgba(226,176,74,0.24) 100%, transparent),
+      radial-gradient(1px 1px at 23% 82%, rgba(226,176,74,0.18) 100%, transparent),
+      radial-gradient(1px 1px at 91% 12%, rgba(226,176,74,0.22) 100%, transparent),
+      radial-gradient(1px 1px at  7% 52%, rgba(226,176,74,0.16) 100%, transparent);
+    animation: stark-particulate 32s ease-in-out infinite;
+    opacity: 0.55;
+  }
+  @keyframes stark-grid-drift {
+    0%   { background-position: 0 0, 0 0; }
+    100% { background-position: 520px 520px, 520px 520px; }
+  }
+  @keyframes stark-particulate {
+    0%   { transform: translate3d(0, 0, 0); }
+    50%  { transform: translate3d(22px, -16px, 0); }
+    100% { transform: translate3d(0, 0, 0); }
+  }
+
+  /* all content above HUD */
+  .wrap, .oba-header, .section, .oba-footer { position: relative; z-index: 1; }
+
+  /* =========================================================================
+     TYPOGRAPHY
+     ========================================================================= */
+  h1, h2, h3, .serif { font-family: 'Cormorant Garamond', serif; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .wrap { max-width: 1400px; margin: 0 auto; }
+
+  /* =========================================================================
+     SECTION HEADINGS
+     ========================================================================= */
+  .section { margin-top: 36px; }
+  .section-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 24px; margin-bottom: 16px; padding-bottom: 12px;
+    border-bottom: none;
+    position: relative;
+  }
+  .section-head::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 1px;
+    background: linear-gradient(to right, var(--gold) 0%, rgba(196,146,42,0.25) 40%, transparent 100%);
+    transform-origin: left;
+    transform: scaleX(0);
+    animation: stark-draw 700ms cubic-bezier(0.2, 0.7, 0.1, 1) forwards;
+  }
+  @keyframes stark-draw { to { transform: scaleX(1); } }
+  .section-head h2 {
+    font-size: 20px; font-weight: 500; letter-spacing: 0.01em; color: var(--bone);
+    padding-left: 16px; position: relative;
+  }
+  .section-head h2::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 50%; transform: translateY(-50%);
+    width: 6px; height: 6px;
+    background: var(--gold-bright);
+    box-shadow: 0 0 10px rgba(226,176,74,0.6);
+  }
+  .section-head .eyebrow {
+    font-size: 10px; letter-spacing: 0.28em; text-transform: uppercase; color: var(--gold);
+    font-family: 'Inter', sans-serif; font-weight: 600;
+  }
+  .section-head .hint { font-size: 11px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+
+  /* =========================================================================
+     REVEAL ON SCROLL
+     ========================================================================= */
+  .stark-reveal {
+    opacity: 0; transform: translateY(20px);
+    transition: opacity 600ms ease-out, transform 600ms ease-out;
+    will-change: opacity, transform;
+  }
+  .stark-reveal.in { opacity: 1; transform: translateY(0); }
+
+  /* =========================================================================
+     SHIMMER SKELETON (loading state)
+     ========================================================================= */
+  @keyframes shimmer {
+    0%   { background-position: -400px 0; }
+    100% { background-position: 400px 0; }
+  }
+  .skeleton {
+    background: linear-gradient(90deg, rgba(240,235,225,0.05) 25%, rgba(240,235,225,0.1) 37%, rgba(240,235,225,0.05) 63%);
+    background-size: 800px 100%;
+    animation: shimmer 1.4s ease infinite;
+    border-radius: 3px;
+  }
+  .skeleton-block { height: 18px; margin: 6px 0; border-radius: 3px; }
+  .skeleton-tall  { height: 200px; border-radius: 4px; }
+  .skeleton-card  {
+    background: linear-gradient(180deg, rgba(26,26,26,0.8), rgba(15,15,15,0.6));
+    border: 1px solid var(--border);
+    border-radius: 4px; padding: 16px; min-height: 80px;
+  }
+
+  /* =========================================================================
+     FADE-IN ONCE DATA ARRIVES
+     ========================================================================= */
+  .data-ready { transition: opacity 250ms ease; }
+  .data-loading { opacity: 0; pointer-events: none; }
+  .data-visible { opacity: 1; }
+
+  /* =========================================================================
+     HEADER STRIP — Widget 1
+     ========================================================================= */
+  .oba-header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    flex-wrap: wrap; gap: 20px;
+    padding: 22px 28px;
+    background: linear-gradient(180deg, rgba(26,26,26,0.9) 0%, rgba(15,15,15,0.65) 100%);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    position: relative; overflow: hidden;
+    margin-bottom: 0;
+  }
+  .oba-header::before {
+    content: ""; position: absolute; inset: 0; padding: 1px;
+    background: linear-gradient(135deg, rgba(196,146,42,0.5), rgba(196,146,42,0) 60%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    pointer-events: none;
+  }
+  .oba-brand { display: flex; align-items: center; gap: 14px; }
+  .oba-brand-mark {
+    width: 34px; height: 34px;
+    border: 1px solid var(--gold); transform: rotate(45deg);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .oba-brand-mark > span { width: 12px; height: 12px; background: var(--gold); display: block; }
+  .oba-brand-text h1 {
+    font-size: 24px; font-weight: 600; line-height: 1; letter-spacing: -0.01em;
+    color: var(--gold-bright);
+  }
+  .oba-brand-text .eyebrow {
+    font-size: 9px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--muted); margin-top: 5px;
+  }
+  .oba-header-chips {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 6px 12px; border-radius: 3px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid transparent;
+  }
+  .chip-regime-bull  { background: rgba(61,214,140,0.1);  border-color: rgba(61,214,140,0.35); color: var(--green); }
+  .chip-regime-chop  { background: rgba(226,176,74,0.1);  border-color: rgba(226,176,74,0.35); color: var(--gold-bright); }
+  .chip-regime-bear  { background: rgba(224,112,112,0.1); border-color: rgba(224,112,112,0.35); color: var(--red); }
+  .chip-fg           { background: rgba(240,235,225,0.05); border-color: var(--border-2); color: var(--bone); }
+  .chip-live         {
+    background: rgba(226,176,74,0.06); border-color: rgba(226,176,74,0.35);
+    color: var(--gold-bright); position: relative;
+  }
+  .chip-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--gold-bright);
+    box-shadow: 0 0 0 0 rgba(226,176,74,0.7);
+    animation: stark-live-pulse 2s ease-out infinite;
+  }
+  @keyframes stark-live-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(226,176,74,0.7); }
+    50%  { box-shadow: 0 0 0 8px rgba(226,176,74,0); }
+    100% { box-shadow: 0 0 0 0 rgba(226,176,74,0); }
+  }
+  .oba-header-meta {
+    display: flex; flex-direction: column; gap: 4px;
+    align-items: flex-end; font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--muted);
+  }
+  .oba-header-meta .date-line { color: var(--bone); font-size: 12px; }
+  .oba-header-meta .updated-line { font-size: 10px; color: var(--muted); }
+  .nav-back {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--muted); text-decoration: none;
+    border: 1px solid var(--border); padding: 5px 10px; border-radius: 2px;
+    transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px;
+    white-space: nowrap;
+  }
+  .nav-back:hover { color: var(--gold-bright); border-color: rgba(196,146,42,0.4); }
+
+  /* =========================================================================
+     PRICE STRIP — Widget 2
+     ========================================================================= */
+  .price-strip {
+    display: flex; gap: 10px;
+    overflow-x: auto; padding-bottom: 6px;
+    scrollbar-width: thin; scrollbar-color: rgba(196,146,42,0.25) transparent;
+  }
+  .price-strip::-webkit-scrollbar { height: 4px; }
+  .price-strip::-webkit-scrollbar-track { background: transparent; }
+  .price-strip::-webkit-scrollbar-thumb { background: rgba(196,146,42,0.3); border-radius: 2px; }
+  .price-card {
+    background: linear-gradient(180deg, rgba(26,26,26,0.85), rgba(15,15,15,0.65));
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 14px 16px;
+    min-width: 120px; flex-shrink: 0;
+    display: flex; flex-direction: column; gap: 6px;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .price-card:hover { border-color: rgba(196,146,42,0.4); transform: translateY(-2px); }
+  .price-card .sym {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 500; color: var(--gold-bright);
+    letter-spacing: 0.1em;
+  }
+  .price-card .name-label {
+    font-size: 10px; color: var(--muted); letter-spacing: 0; margin-top: -2px;
+  }
+  .price-card .price {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px; font-weight: 500; color: var(--bone);
+    white-space: nowrap;
+  }
+  .price-card .chg {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 600;
+  }
+  .chg.pos { color: var(--green); }
+  .chg.neg { color: var(--red); }
+  .chg.flat { color: var(--muted); }
+
+  /* =========================================================================
+     FEAR & GREED DIAL — Widget 3
+     ========================================================================= */
+  .fg-widget {
+    display: flex; flex-direction: column; align-items: center; gap: 20px;
+    background: linear-gradient(180deg, rgba(26,26,26,0.8), rgba(15,15,15,0.6));
+    border: 1px solid var(--border);
+    border-radius: 4px; padding: 28px 24px;
+  }
+  .fg-dial-wrap { position: relative; width: 260px; height: 150px; }
+  #fg-canvas { width: 100%; height: 100%; }
+  .fg-dial-center {
+    position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+    text-align: center; pointer-events: none;
+  }
+  .fg-value {
+    font-family: 'JetBrains Mono', monospace; font-size: 40px; font-weight: 500;
+    color: var(--bone); line-height: 1;
+  }
+  .fg-class {
+    font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--muted); margin-top: 4px;
+  }
+  .fg-trend {
+    font-family: 'JetBrains Mono', monospace; font-size: 18px; margin-top: 4px;
+  }
+  .fg-meta {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px 24px;
+    font-size: 11px; color: var(--muted); text-align: center;
+  }
+  .fg-meta .zone-label { font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase; }
+  .fg-meta .zone-range { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--bone-dim); }
+
+  /* =========================================================================
+     CONVICTION TABLE — Widget 4
+     ========================================================================= */
+  .conv-table-wrap { overflow-x: auto; }
+  .conv-table {
+    width: 100%; border-collapse: collapse;
+    font-size: 12px;
+  }
+  .conv-table thead tr {
+    border-bottom: 1px solid var(--border);
+  }
+  .conv-table th {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--muted); font-weight: 500;
+    padding: 8px 12px; text-align: left; white-space: nowrap;
+  }
+  .conv-table tbody tr {
+    border-bottom: 1px solid rgba(240,235,225,0.04);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .conv-table tbody tr:hover {
+    background: rgba(196,146,42,0.04);
+    border-color: rgba(226,176,74,0.3);
+    box-shadow: inset 2px 0 0 var(--gold-bright);
+  }
+  .conv-table td {
+    padding: 12px 12px; vertical-align: top; color: var(--bone-dim); line-height: 1.4;
+  }
+  .conv-table td.asset-col {
+    font-family: 'JetBrains Mono', monospace; font-size: 13px;
+    color: var(--bone); font-weight: 500; white-space: nowrap;
+  }
+  .dir-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+  }
+  .dir-long    { background: rgba(61,214,140,0.1);  border: 1px solid rgba(61,214,140,0.35); color: var(--green); }
+  .dir-short   { background: rgba(224,112,112,0.1); border: 1px solid rgba(224,112,112,0.35); color: var(--red); }
+  .dir-neutral { background: rgba(196,146,42,0.1);  border: 1px solid rgba(196,146,42,0.35); color: var(--gold-bright); }
+  .stars { color: var(--gold-bright); font-size: 13px; letter-spacing: 1px; white-space: nowrap; }
+  .stars .dim { opacity: 0.2; }
+  .horizon-chip {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--muted); letter-spacing: 0.1em;
+    border: 1px solid var(--border); padding: 2px 7px; border-radius: 2px;
+  }
+  .conv-text { font-size: 11px; max-width: 200px; line-height: 1.45; color: var(--bone-dim); }
+  .invalid-text { font-size: 10px; color: var(--red); opacity: 0.75; max-width: 180px; }
+
+  /* =========================================================================
+     CHARTS GRID — Widget 5
+     ========================================================================= */
+  .charts-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  }
+  .chart-card {
+    background: linear-gradient(180deg, rgba(26,26,26,0.85), rgba(15,15,15,0.65));
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 16px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .chart-card:hover { border-color: rgba(196,146,42,0.35); }
+  .chart-card-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 8px; margin-bottom: 12px;
+  }
+  .chart-card-head .sym {
+    font-family: 'JetBrains Mono', monospace; font-size: 14px;
+    font-weight: 500; color: var(--bone);
+  }
+  .chart-card-head .price-chg { text-align: right; }
+  .chart-card-head .price-chg .p {
+    font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--bone);
+  }
+  .chart-card-head .price-chg .c {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    display: block; margin-top: 2px;
+  }
+  .chart-holder { height: 220px; width: 100%; }
+
+  /* =========================================================================
+     NEWS FEED — Widget 6
+     ========================================================================= */
+  .news-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;
+  }
+  .news-card {
+    background: linear-gradient(180deg, rgba(26,26,26,0.8), rgba(15,15,15,0.6));
+    border: 1px solid var(--border);
+    border-radius: 4px; padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 8px;
+    transition: border-color 0.2s;
+    text-decoration: none; color: inherit;
+  }
+  .news-card:hover { border-color: rgba(196,146,42,0.4); }
+  .news-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .impact-chip {
+    font-family: 'JetBrains Mono', monospace; font-size: 9px;
+    font-weight: 600; letter-spacing: 0.15em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 2px;
+    flex-shrink: 0;
+  }
+  .impact-high   { background: rgba(224,112,112,0.15); border: 1px solid rgba(224,112,112,0.4); color: var(--red); }
+  .impact-medium { background: rgba(226,176,74,0.12);  border: 1px solid rgba(226,176,74,0.4);  color: var(--gold-bright); }
+  .impact-low    { background: rgba(240,235,225,0.05); border: 1px solid var(--border-2);       color: var(--muted); }
+  .news-source { font-size: 10px; color: var(--muted); letter-spacing: 0.05em; }
+  .news-age    { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .news-headline {
+    font-family: 'Cormorant Garamond', serif; font-size: 17px; font-weight: 500;
+    line-height: 1.25; color: var(--bone);
+  }
+  .news-summary { font-size: 12px; color: var(--bone-dim); line-height: 1.5; }
+  .news-assets { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 2px; }
+  .asset-pill {
+    font-family: 'JetBrains Mono', monospace; font-size: 9px;
+    color: var(--gold); border: 1px solid rgba(196,146,42,0.25);
+    padding: 1px 6px; border-radius: 2px; letter-spacing: 0.1em;
+  }
+
+  /* =========================================================================
+     COUNTDOWN CALENDAR — Widget 7
+     ========================================================================= */
+  .calendar-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
+  }
+  .cal-card {
+    background: linear-gradient(180deg, rgba(26,26,26,0.85), rgba(15,15,15,0.65));
+    border: 1px solid var(--border);
+    border-radius: 4px; padding: 18px;
+    display: flex; flex-direction: column; gap: 10px;
+    transition: border-color 0.2s;
+  }
+  .cal-card:hover { border-color: rgba(196,146,42,0.35); }
+  .cal-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .cat-chip {
+    font-family: 'JetBrains Mono', monospace; font-size: 8px;
+    font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase;
+    padding: 3px 7px; border-radius: 2px; flex-shrink: 0;
+  }
+  .cat-regulatory { background: rgba(224,112,112,0.12); border: 1px solid rgba(224,112,112,0.35); color: var(--red); }
+  .cat-macro      { background: rgba(226,176,74,0.12);  border: 1px solid rgba(226,176,74,0.35);  color: var(--gold-bright); }
+  .cat-protocol   { background: rgba(61,214,140,0.1);   border: 1px solid rgba(61,214,140,0.3);   color: var(--green); }
+  .cat-unlock     { background: rgba(240,235,225,0.05); border: 1px solid var(--border-2);        color: var(--muted); }
+  .cat-etf        { background: rgba(196,146,42,0.08);  border: 1px solid rgba(196,146,42,0.25);  color: var(--gold); }
+  .impact-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 4px;
+  }
+  .impact-dot.high   { background: var(--red); box-shadow: 0 0 6px rgba(224,112,112,0.6); }
+  .impact-dot.medium { background: var(--yellow); }
+  .impact-dot.low    { background: var(--muted); }
+  .cal-name {
+    font-family: 'Cormorant Garamond', serif; font-size: 18px; font-weight: 500;
+    line-height: 1.2; color: var(--bone);
+  }
+  .cal-date {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);
+  }
+  .cal-countdown {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 22px; font-weight: 500; color: var(--gold-bright);
+    letter-spacing: 0.05em;
+    animation: countdown-pulse 3s ease-in-out infinite;
+  }
+  .cal-countdown.urgent { color: var(--red); animation: countdown-urgent 1.5s ease-in-out infinite; }
+  @keyframes countdown-pulse {
+    0%, 100% { text-shadow: 0 0 8px rgba(226,176,74,0.2); }
+    50%       { text-shadow: 0 0 16px rgba(226,176,74,0.5); }
+  }
+  @keyframes countdown-urgent {
+    0%, 100% { text-shadow: 0 0 8px rgba(224,112,112,0.2); opacity: 1; }
+    50%       { text-shadow: 0 0 16px rgba(224,112,112,0.6); opacity: 0.85; }
+  }
+  .cal-desc { font-size: 11px; color: var(--bone-dim); line-height: 1.45; }
+  .cal-assets { display: flex; gap: 5px; flex-wrap: wrap; }
+
+  /* =========================================================================
+     REGIME COMMENTARY BLOCK
+     ========================================================================= */
+  .regime-bar {
+    background: linear-gradient(180deg, rgba(26,26,26,0.8), rgba(15,15,15,0.6));
+    border: 1px solid var(--border);
+    border-radius: 4px; padding: 16px 22px;
+    display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+    font-size: 13px; color: var(--bone-dim); line-height: 1.55;
+    margin-top: 12px;
+  }
+  .regime-bar .label {
+    font-family: 'JetBrains Mono', monospace; font-size: 9px;
+    letter-spacing: 0.22em; text-transform: uppercase; color: var(--gold); font-weight: 600;
+    flex-shrink: 0;
+  }
+  .regime-bar .conf {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--muted); flex-shrink: 0;
+  }
+
+  /* =========================================================================
+     ERROR STATE
+     ========================================================================= */
+  .error-state {
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    gap: 20px; padding: 60px 40px; text-align: center;
+    background: linear-gradient(180deg, rgba(26,26,26,0.8), rgba(15,15,15,0.6));
+    border: 1px solid rgba(224,112,112,0.25); border-radius: 4px; margin-top: 24px;
+  }
+  .error-state.visible { display: flex; }
+  .error-glyph {
+    font-family: 'Cormorant Garamond', serif; font-size: 48px; color: var(--muted); font-weight: 600;
+  }
+  .error-title { font-family: 'Cormorant Garamond', serif; font-size: 26px; font-weight: 500; color: var(--bone); }
+  .error-sub { font-size: 12px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+  .btn-retry {
+    background: transparent; border: 1px solid rgba(196,146,42,0.5);
+    color: var(--bone); font-family: 'Inter', sans-serif;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
+    padding: 10px 20px; border-radius: 2px; cursor: pointer; transition: all 0.15s;
+  }
+  .btn-retry:hover { border-color: var(--gold); background: rgba(196,146,42,0.08); color: var(--gold-bright); }
+
+  /* =========================================================================
+     FOOTER
+     ========================================================================= */
+  .oba-footer {
+    margin-top: 60px; padding: 20px 28px;
+    border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted);
+    letter-spacing: 0.08em;
+  }
+  .oba-footer a { color: var(--muted); text-decoration: none; transition: color 0.15s; }
+  .oba-footer a:hover { color: var(--gold-bright); }
+
+  /* =========================================================================
+     MOBILE RESPONSIVE — 768px breakpoint
+     ========================================================================= */
+  @media (max-width: 768px) {
+    body { padding: 16px 14px 72px; }
+    body::before { background-size: 40px 40px, 40px 40px; }
+
+    .oba-header { padding: 16px 18px; }
+    .oba-brand-text h1 { font-size: 20px; }
+    .oba-header-chips { gap: 8px; }
+    .oba-header-meta { align-items: flex-start; }
+
+    .price-strip { gap: 8px; }
+    .price-card { min-width: 105px; padding: 11px 12px; }
+
+    .fg-widget { padding: 20px 16px; }
+    .fg-dial-wrap { width: 220px; height: 128px; }
+    .fg-value { font-size: 32px; }
+
+    .conv-table th, .conv-table td { padding: 10px 8px; }
+    .conv-text { max-width: 140px; font-size: 10px; }
+    .invalid-text { max-width: 120px; }
+
+    .charts-grid { grid-template-columns: 1fr; }
+    .chart-holder { height: 200px; }
+
+    .news-grid { grid-template-columns: 1fr; }
+
+    .calendar-grid { grid-template-columns: 1fr; }
+
+    .section { margin-top: 28px; }
+    .section-head h2 { font-size: 18px; }
+  }
+
+  /* =========================================================================
+     REDUCED MOTION
+     ========================================================================= */
+  @media (prefers-reduced-motion: reduce) {
+    body::before, body::after { animation: none !important; }
+    .stark-reveal { opacity: 1 !important; transform: none !important; }
+    .section-head::after { transform: scaleX(1) !important; animation: none !important; }
+    .chip-dot { animation: none !important; }
+    .cal-countdown, .cal-countdown.urgent { animation: none !important; }
+    .skeleton { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <!-- ============================================================
+       HEADER STRIP — Widget 1
+       ============================================================ -->
+  <header class="oba-header">
+    <div class="oba-brand">
+      <div class="oba-brand-mark"><span></span></div>
+      <div class="oba-brand-text">
+        <h1>OBADIAH the Prophet</h1>
+        <div class="eyebrow">Crypto Market Intelligence · CRG Internal</div>
+      </div>
+    </div>
+
+    <div class="oba-header-chips data-ready data-loading" id="header-chips">
+      <!-- Skeleton loading state -->
+      <div class="skeleton skeleton-block" style="width:80px;height:28px;border-radius:3px;" id="skel-regime"></div>
+      <div class="skeleton skeleton-block" style="width:90px;height:28px;border-radius:3px;" id="skel-fg"></div>
+      <!-- Chips populated by JS -->
+      <span class="chip chip-regime-bull" id="chip-regime" style="display:none"></span>
+      <span class="chip chip-fg" id="chip-fg" style="display:none"></span>
+      <span class="chip chip-live" id="chip-live" style="display:none">
+        <span class="chip-dot"></span>
+        <span id="chip-live-text">LIVE</span>
+      </span>
+    </div>
+
+    <div class="oba-header-meta" style="gap:6px">
+      <div class="date-line mono" id="hdr-date">——</div>
+      <div class="updated-line" id="hdr-updated">Loading…</div>
+      <a href="/" class="nav-back">← Command</a>
+    </div>
+  </header>
+
+  <!-- Regime commentary bar -->
+  <div class="regime-bar stark-reveal data-ready data-loading" id="regime-bar">
+    <div class="skeleton skeleton-block" style="width:100%;height:16px;" id="skel-regime-text"></div>
+    <span class="label" id="regime-label" style="display:none">REGIME READ</span>
+    <span id="regime-commentary" style="display:none"></span>
+    <span class="conf" id="regime-conf" style="display:none"></span>
+  </div>
+
+  <!-- ============================================================
+       PRICE STRIP — Widget 2
+       ============================================================ -->
+  <div class="section stark-reveal">
+    <div class="section-head">
+      <h2>Market Prices</h2>
+      <span class="eyebrow">Top 10 Assets · 24h Change</span>
+    </div>
+    <div class="price-strip data-ready data-loading" id="price-strip">
+      <!-- skeleton -->
+      <div class="price-card skeleton-card" id="price-skel">
+        <div class="skeleton skeleton-block" style="width:50px"></div>
+        <div class="skeleton skeleton-block" style="width:70px;height:22px"></div>
+        <div class="skeleton skeleton-block" style="width:40px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       MAIN TWO-COLUMN LAYOUT (F&G + Conviction Table)
+       ============================================================ -->
+  <div class="section stark-reveal">
+    <div style="display:grid;grid-template-columns:300px 1fr;gap:20px;align-items:start;">
+
+      <!-- FEAR & GREED DIAL — Widget 3 -->
+      <div>
+        <div class="section-head" style="margin-bottom:14px">
+          <h2>Fear &amp; Greed</h2>
+        </div>
+        <div class="fg-widget data-ready data-loading" id="fg-widget">
+          <div class="skeleton skeleton-tall" style="width:260px;height:150px;" id="fg-skel"></div>
+          <div id="fg-content" style="display:none;flex-direction:column;align-items:center;gap:14px;width:100%">
+            <div class="fg-dial-wrap">
+              <canvas id="fg-canvas"></canvas>
+              <div class="fg-dial-center">
+                <div class="fg-value" id="fg-number">—</div>
+                <div class="fg-class" id="fg-class">—</div>
+                <div class="fg-trend" id="fg-trend"></div>
+              </div>
+            </div>
+            <div class="fg-meta">
+              <div><div class="zone-label" style="color:#e07070">Extreme Fear</div><div class="zone-range">0–24</div></div>
+              <div><div class="zone-label" style="color:#e2b04a">Neutral</div><div class="zone-range">45–55</div></div>
+              <div><div class="zone-label" style="color:#3dd68c">Extreme Greed</div><div class="zone-range">76–100</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CONVICTION TABLE — Widget 4 -->
+      <div>
+        <div class="section-head" style="margin-bottom:14px">
+          <h2>Conviction Table</h2>
+          <span class="hint">Top 5 by score</span>
+        </div>
+        <div class="conv-table-wrap data-ready data-loading" id="conv-wrap">
+          <div class="skeleton skeleton-block" style="width:100%;height:200px;" id="conv-skel"></div>
+          <table class="conv-table" id="conv-table" style="display:none">
+            <thead>
+              <tr>
+                <th>Asset</th>
+                <th>Direction</th>
+                <th>Horizon</th>
+                <th>Conviction</th>
+                <th>Catalyst</th>
+                <th>Why Now</th>
+                <th>Invalidation</th>
+              </tr>
+            </thead>
+            <tbody id="conv-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Mobile: stack F&G above conviction (handled by CSS grid override at 768px) -->
+
+  <!-- ============================================================
+       PRICE CHARTS — Widget 5
+       ============================================================ -->
+  <div class="section stark-reveal">
+    <div class="section-head">
+      <h2>7-Day Price Charts</h2>
+      <span class="eyebrow">Top 3 Assets · Daily Candles</span>
+    </div>
+    <div class="charts-grid data-ready data-loading" id="charts-grid">
+      <div class="chart-card skeleton-card" id="chart-skel-1"><div class="skeleton skeleton-tall"></div></div>
+      <div class="chart-card skeleton-card" id="chart-skel-2"><div class="skeleton skeleton-tall"></div></div>
+      <div class="chart-card skeleton-card" id="chart-skel-3"><div class="skeleton skeleton-tall"></div></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       NEWS FEED — Widget 6
+       ============================================================ -->
+  <div class="section stark-reveal">
+    <div class="section-head">
+      <h2>News &amp; Intelligence</h2>
+      <span class="eyebrow">Impact-Tagged · Latest 10</span>
+    </div>
+    <div class="news-grid data-ready data-loading" id="news-grid">
+      <div class="news-card skeleton-card" id="news-skel-1"><div class="skeleton skeleton-block" style="height:80px"></div></div>
+      <div class="news-card skeleton-card" id="news-skel-2"><div class="skeleton skeleton-block" style="height:80px"></div></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       COUNTDOWN CALENDAR — Widget 7
+       ============================================================ -->
+  <div class="section stark-reveal">
+    <div class="section-head">
+      <h2>Countdown Calendar</h2>
+      <span class="eyebrow">Next 6 Catalysts</span>
+    </div>
+    <div class="calendar-grid data-ready data-loading" id="calendar-grid">
+      <div class="cal-card skeleton-card" id="cal-skel-1"><div class="skeleton skeleton-block" style="height:100px"></div></div>
+      <div class="cal-card skeleton-card" id="cal-skel-2"><div class="skeleton skeleton-block" style="height:100px"></div></div>
+      <div class="cal-card skeleton-card" id="cal-skel-3"><div class="skeleton skeleton-block" style="height:100px"></div></div>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       ERROR STATE
+       ============================================================ -->
+  <div class="error-state" id="error-state">
+    <div class="error-glyph">⊗</div>
+    <div class="error-title">OBADIAH Offline</div>
+    <div class="error-sub" id="error-sub">Last known brief: —</div>
+    <button class="btn-retry" onclick="bootDashboard()">Retry Connection</button>
+  </div>
+
+</div><!-- /.wrap -->
+
+<!-- FOOTER -->
+<footer class="oba-footer">
+  <div>OBADIAH the Prophet · Crypto Intelligence · CRG Internal Use Only</div>
+  <div id="footer-freshness" class="mono" style="font-size:9px;color:var(--muted)"></div>
+  <a href="/">← Cornerstone Command</a>
+</footer>
+
+<script>
+// ==========================================================================
+// OBADIAH Dashboard — vanilla JS, no build step
+// ==========================================================================
+
+const DATA_URL     = '/data/crypto-latest.json';
+const HISTORY_URL  = '/data/crypto-history.json';
+
+// ──────────────────────────────────────────────────────────────────────────
+// Utility helpers
+// ──────────────────────────────────────────────────────────────────────────
+function fmtPrice(n) {
+  if (n >= 1000) return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (n >= 1)    return '$' + n.toFixed(2);
+  return '$' + n.toFixed(4);
+}
+
+function fmtPct(n) {
+  const sign = n >= 0 ? '+' : '';
+  return sign + n.toFixed(2) + '%';
+}
+
+function relTime(isoStr) {
+  const diff = Date.now() - new Date(isoStr).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1)   return 'just now';
+  if (m < 60)  return m + 'm ago';
+  const h = Math.floor(m / 60);
+  if (h < 24)  return h + 'h ago';
+  return Math.floor(h / 24) + 'd ago';
+}
+
+function parseDate(isoStr) {
+  // Parse YYYY-MM-DD or ISO string as UTC midnight to avoid timezone shift
+  if (/^\d{4}-\d{2}-\d{2}$/.test(isoStr)) {
+    const [y, m, d] = isoStr.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d));
+  }
+  return new Date(isoStr);
+}
+
+function fmtCountdown(targetDate) {
+  const diff = targetDate.getTime() - Date.now();
+  if (diff <= 0) return 'TODAY';
+  const totalMin = Math.floor(diff / 60000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if (d > 99) return d + 'd';
+  return d + 'd ' + String(h).padStart(2,'0') + 'h ' + String(m).padStart(2,'0') + 'm';
+}
+
+function fgColor(val) {
+  if (val < 25)  return '#E07070';
+  if (val < 45)  return '#D4944A';
+  if (val < 55)  return '#8C8377';
+  if (val < 75)  return '#7FCE9A';
+  return '#3DD68C';
+}
+
+function fgClass(classification) {
+  const map = {
+    extreme_fear: 'EXTREME FEAR',
+    fear: 'FEAR',
+    neutral: 'NEUTRAL',
+    greed: 'GREED',
+    extreme_greed: 'EXTREME GREED'
+  };
+  return map[classification] || classification;
+}
+
+function starsHTML(n, max) {
+  max = max || 5;
+  let s = '';
+  for (let i = 0; i < max; i++) {
+    s += i < n ? '★' : '<span class="dim">★</span>';
+  }
+  return s;
+}
+
+function dirChip(direction) {
+  if (direction === 'long')    return '<span class="dir-chip dir-long">▲ Long</span>';
+  if (direction === 'short')   return '<span class="dir-chip dir-short">▼ Short</span>';
+  return '<span class="dir-chip dir-neutral">◆ Neutral</span>';
+}
+
+function fmtHorizon(h) {
+  const map = { '1w': '1 Week', '1m': '1 Month', '1q': '1 Quarter' };
+  return map[h] || h;
+}
+
+function catClass(cat) {
+  const map = {
+    regulatory: 'cat-regulatory',
+    macro: 'cat-macro',
+    protocol: 'cat-protocol',
+    unlock: 'cat-unlock',
+    etf: 'cat-etf'
+  };
+  return map[cat] || 'cat-macro';
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Skeleton → visible transition
+// ──────────────────────────────────────────────────────────────────────────
+function reveal(el) {
+  el.classList.remove('data-loading');
+  el.classList.add('data-visible');
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Widget 1 — Header strip
+// ──────────────────────────────────────────────────────────────────────────
+function renderHeader(d) {
+  // Date + timestamp
+  const genDate = new Date(d.generated_at);
+  const dateStr = genDate.toLocaleDateString('en-CA', {
+    year: 'numeric', month: 'long', day: 'numeric',
+    timeZone: 'America/Toronto'
+  });
+  document.getElementById('hdr-date').textContent = dateStr;
+  document.getElementById('hdr-updated').textContent = 'Updated ' + relTime(d.generated_at);
+
+  // Regime chip
+  const regimeChip = document.getElementById('chip-regime');
+  const regime = d.market_regime || 'chop';
+  regimeChip.className = 'chip chip-regime-' + regime;
+  regimeChip.textContent = regime.toUpperCase();
+  regimeChip.style.display = 'inline-flex';
+
+  // F&G chip
+  const fgChip = document.getElementById('chip-fg');
+  const fg = d.fear_greed;
+  fgChip.textContent = 'F&G ' + fg.value + ' · ' + fgClass(fg.classification);
+  fgChip.style.display = 'inline-flex';
+
+  // Live chip
+  document.getElementById('chip-live').style.display = 'inline-flex';
+  document.getElementById('chip-live-text').textContent = 'OBADIAH LIVE';
+
+  // Hide skeletons
+  document.getElementById('skel-regime').style.display = 'none';
+  document.getElementById('skel-fg').style.display = 'none';
+  reveal(document.getElementById('header-chips'));
+
+  // Regime bar
+  const commentary = d.regime_commentary || '';
+  const conf = d.regime_confidence ? Math.round(d.regime_confidence * 100) + '% confidence' : '';
+  document.getElementById('skel-regime-text').style.display = 'none';
+  document.getElementById('regime-label').style.display = 'inline';
+  const commEl = document.getElementById('regime-commentary');
+  commEl.textContent = commentary;
+  commEl.style.display = 'inline';
+  document.getElementById('regime-conf').textContent = conf;
+  document.getElementById('regime-conf').style.display = 'inline';
+  reveal(document.getElementById('regime-bar'));
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Widget 2 — Price strip
+// ──────────────────────────────────────────────────────────────────────────
+function renderPriceStrip(assets) {
+  const strip = document.getElementById('price-strip');
+  strip.innerHTML = '';
+  assets.slice(0, 10).forEach(a => {
+    const chg = a.change_24h_pct;
+    const chgClass = chg > 0 ? 'pos' : chg < 0 ? 'neg' : 'flat';
+    const arrow = chg > 0 ? '▲' : chg < 0 ? '▼' : '—';
+    const card = document.createElement('div');
+    card.className = 'price-card';
+    card.innerHTML = `
+      <div class="sym">${a.symbol}</div>
+      <div class="name-label">${a.name}</div>
+      <div class="price">${fmtPrice(a.price_usd)}</div>
+      <div class="chg ${chgClass}">${arrow} ${fmtPct(Math.abs(chg))}</div>
+    `;
+    strip.appendChild(card);
+  });
+  reveal(strip);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Widget 3 — Fear & Greed SVG dial (Canvas arc)
+// ──────────────────────────────────────────────────────────────────────────
+function renderFGDial(fg) {
+  const canvas = document.getElementById('fg-canvas');
+  const wrap   = document.querySelector('.fg-dial-wrap');
+  const dpr    = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth  || 260;
+  const H = wrap.clientHeight || 150;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const cx = W / 2;
+  const cy = H - 10;
+  const r  = Math.min(cx, cy) * 0.88;
+  const rIn = r * 0.62;
+
+  // arc start = π, end = 0 (left to right, semicircle)
+  // Gradient arc segments
+  const zones = [
+    { from: 0,  to: 25,  color: '#E07070' },
+    { from: 25, to: 45,  color: '#D4944A' },
+    { from: 45, to: 55,  color: '#8C8377' },
+    { from: 55, to: 75,  color: '#7FCE9A' },
+    { from: 75, to: 100, color: '#3DD68C' }
+  ];
+
+  function valToAngle(v) { return Math.PI + (v / 100) * Math.PI; }
+
+  // Track arc (background)
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, Math.PI, 2 * Math.PI);
+  ctx.arc(cx, cy, rIn, 2 * Math.PI, Math.PI, true);
+  ctx.fillStyle = 'rgba(240,235,225,0.04)';
+  ctx.fill();
+
+  // Colored zone arcs
+  zones.forEach(z => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r,   valToAngle(z.from), valToAngle(z.to));
+    ctx.arc(cx, cy, rIn, valToAngle(z.to),   valToAngle(z.from), true);
+    ctx.fillStyle = z.color;
+    ctx.globalAlpha = 0.75;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+
+  // Needle
+  const val   = fg.value;
+  const angle = valToAngle(val);
+  const needleLen = r * 0.78;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(angle - Math.PI / 2);
+  // needle body
+  ctx.beginPath();
+  ctx.moveTo(0, needleLen * 0.12);
+  ctx.lineTo(-3, 0);
+  ctx.lineTo(0, -needleLen);
+  ctx.lineTo(3, 0);
+  ctx.closePath();
+  ctx.fillStyle = '#E2B04A';
+  ctx.shadowColor = 'rgba(226,176,74,0.6)';
+  ctx.shadowBlur = 10;
+  ctx.fill();
+  ctx.restore();
+
+  // Center dot
+  ctx.beginPath();
+  ctx.arc(cx, cy, 7, 0, 2 * Math.PI);
+  ctx.fillStyle = '#E2B04A';
+  ctx.shadowColor = 'rgba(226,176,74,0.8)';
+  ctx.shadowBlur = 12;
+  ctx.fill();
+
+  // Tick marks at 25, 45, 55, 75
+  [25, 45, 55, 75].forEach(v => {
+    const a = valToAngle(v);
+    const x1 = cx + Math.cos(a) * rIn;
+    const y1 = cy + Math.sin(a) * rIn;
+    const x2 = cx + Math.cos(a) * (r + 4);
+    const y2 = cy + Math.sin(a) * (r + 4);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    ctx.strokeStyle = 'rgba(240,235,225,0.2)'; ctx.lineWidth = 1;
+    ctx.shadowBlur = 0; ctx.stroke();
+  });
+
+  // Update text
+  document.getElementById('fg-number').textContent = val;
+  document.getElementById('fg-class').textContent  = fgClass(fg.classification);
+  document.getElementById('fg-class').style.color  = fgColor(val);
+
+  const trendMap = { rising: '↑', stable: '→', falling: '↓' };
+  const trendEl  = document.getElementById('fg-trend');
+  trendEl.textContent  = trendMap[fg.trend_24h] || '';
+  trendEl.style.color  = fg.trend_24h === 'rising' ? '#3DD68C' : fg.trend_24h === 'falling' ? '#E07070' : '#8C8377';
+
+  // Show content
+  document.getElementById('fg-skel').style.display = 'none';
+  const contentEl = document.getElementById('fg-content');
+  contentEl.style.display = 'flex';
+  reveal(document.getElementById('fg-widget'));
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Widget 4 — Conviction Table
+// ──────────────────────────────────────────────────────────────────────────
+function renderConvictionTable(recs) {
+  const sorted = recs.slice().sort((a, b) => b.weighted_score - a.weighted_score).slice(0, 5);
+  const tbody  = document.getElementById('conv-tbody');
+  tbody.innerHTML = '';
+  sorted.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="asset-col">${r.asset}</td>
+      <td>${dirChip(r.direction)}</td>
+      <td><span class="horizon-chip">${fmtHorizon(r.time_horizon)}</span></td>
+      <td><span class="stars">${starsHTML(r.conviction, 5)}</span></td>
+      <td><div class="conv-text">${r.catalyst || '—'}</div></td>
+      <td><div class="conv-text">${r.why_now || '—'}</div></td>
+      <td><div class="invalid-text">${r.invalidation || '—'}</div></td>
+    `;
+    tbody.appendChild(tr);
+  });
+  document.getElementById('conv-skel').style.display = 'none';
+  document.getElementById('conv-table').style.display = 'table';
+  reveal(document.getElementById('conv-wrap'));
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Widget 5 — TradingView Lightweight Charts
+// ──────────────────────────────────────────────────────────────────────────
+function renderCharts(assets) {
+  const grid = document.getElementById('charts-grid');
+  grid.innerHTML = '';
+  assets.slice(0, 3).forEach(asset => {
+    const card = document.createElement('div');
+    card.className = 'chart-card';
+    const chg     = asset.change_24h_pct;
+    const chgClass = chg >= 0 ? 'pos' : 'neg';
+    const arrow    = chg >= 0 ? '▲' : '▼';
+    card.innerHTML = `
+      <div class="chart-card-head">
+        <div class="sym">${asset.symbol} <span style="font-size:11px;color:var(--muted);font-weight:400">${asset.name}</span></div>
+        <div class="price-chg">
+          <span class="p">${fmtPrice(asset.price_usd)}</span>
+          <span class="c ${chgClass}">${arrow} ${fmtPct(Math.abs(chg))}</span>
+        </div>
+      </div>
+      <div class="chart-holder" id="chart-${asset.symbol}"></div>
+    `;
+    grid.appendChild(card);
+
+    // Initialize TradingView chart after DOM insertion
+    requestAnimationFrame(() => {
+      const holder = card.querySelector('.chart-holder');
+      if (!holder) return;
+      if (typeof LightweightCharts === 'undefined') return;
+
+      try {
+        const chart = LightweightCharts.createChart(holder, {
+          width: holder.clientWidth,
+          height: 220,
+          layout: {
+            background: { type: 'solid', color: '#0C0C0C' },
+            textColor: '#8C8377',
+          },
+          grid: {
+            vertLines: { color: 'rgba(240,235,225,0.04)' },
+            horzLines: { color: 'rgba(240,235,225,0.04)' },
+          },
+          crosshair: {
+            vertLine: { color: 'rgba(226,176,74,0.4)', width: 1, style: 1 },
+            horzLine: { color: 'rgba(226,176,74,0.4)', width: 1, style: 1 },
+          },
+          rightPriceScale: {
+            borderColor: 'rgba(240,235,225,0.06)',
+            textColor: '#8C8377',
+          },
+          timeScale: {
+            borderColor: 'rgba(240,235,225,0.06)',
+            textColor: '#8C8377',
+            timeVisible: true,
+            secondsVisible: false,
+          },
+          handleScroll: { mouseWheel: false, pressedMouseMove: false },
+          handleScale: { mouseWheel: false, pinch: false },
+        });
+
+        const series = chart.addCandlestickSeries({
+          upColor:          '#3DD68C',
+          downColor:        '#E07070',
+          borderUpColor:    '#3DD68C',
+          borderDownColor:  '#E07070',
+          wickUpColor:      '#3DD68C',
+          wickDownColor:    '#E07070',
+        });
+
+        if (asset.ohlcv_7d && asset.ohlcv_7d.length > 0) {
+          const candles = asset.ohlcv_7d.map(row => ({
+            time: row[0],
+            open:  row[1],
+            high:  row[2],
+            low:   row[3],
+            close: row[4],
+          }));
+          series.setData(candles);
+          chart.timeScale().fitContent();
+        }
+
+        // Responsive resize
+        const ro = new ResizeObserver(() => {
+          if (holder.clientWidth > 0) chart.resize(holder.clientWidth, 220);
+        });
+        ro.observe(holder);
+      } catch (e) {
+        console.warn('[OBADIAH] chart error for ' + asset.symbol, e);
+        holder.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:11px">Chart unavailable</div>';
+      }
+    });
+  });
+  reveal(grid);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Widget 6 — News Feed
+// ──────────────────────────────────────────────────────────────────────────
+function renderNews(news) {
+  const grid  = document.getElementById('news-grid');
+  grid.innerHTML = '';
+  const sorted = news.slice().sort((a, b) => new Date(b.published_at) - new Date(a.published_at)).slice(0, 10);
+  sorted.forEach(n => {
+    const card = document.createElement('a');
+    card.className = 'news-card';
+    card.href      = n.url || '#';
+    card.target    = '_blank';
+    card.rel       = 'noopener noreferrer';
+    const impactLevel = (n.impact || 'low').toLowerCase();
+    const assets  = (n.affected_assets || []).map(a => `<span class="asset-pill">${a}</span>`).join('');
+    card.innerHTML = `
+      <div class="news-card-head">
+        <span class="impact-chip impact-${impactLevel}">${impactLevel.toUpperCase()}</span>
+        <span class="news-source">${n.source || ''}</span>
+        <span class="news-age">${relTime(n.published_at)}</span>
+      </div>
+      <div class="news-headline">${n.headline || ''}</div>
+      <div class="news-summary">${n.summary || ''}</div>
+      ${assets ? '<div class="news-assets">' + assets + '</div>' : ''}
+    `;
+    grid.appendChild(card);
+  });
+  reveal(grid);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Widget 7 — Countdown Calendar
+// ──────────────────────────────────────────────────────────────────────────
+var countdownTimers = [];
+
+function renderCalendar(events) {
+  // Clear any existing timers
+  countdownTimers.forEach(t => clearInterval(t));
+  countdownTimers = [];
+
+  const now = Date.now();
+  const future = events
+    .filter(e => parseDate(e.date).getTime() >= now - 86400000)
+    .sort((a, b) => parseDate(a.date) - parseDate(b.date))
+    .slice(0, 6);
+
+  const grid = document.getElementById('calendar-grid');
+  grid.innerHTML = '';
+
+  future.forEach((e, i) => {
+    const targetDate = parseDate(e.date);
+    const daysAway   = Math.ceil((targetDate.getTime() - now) / 86400000);
+    const isUrgent   = daysAway <= 3;
+    const catCls     = catClass(e.category);
+    const impactLvl  = (e.impact || 'medium').toLowerCase();
+    const assets     = (e.affected_assets || []).map(a => `<span class="asset-pill">${a}</span>`).join('');
+    const dateStr    = targetDate.toLocaleDateString('en-CA', {
+      month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC'
+    });
+
+    const card = document.createElement('div');
+    card.className = 'cal-card';
+    const countdownId = 'cal-cd-' + i;
+    card.innerHTML = `
+      <div class="cal-card-head">
+        <div>
+          <span class="cat-chip ${catCls}">${(e.category || '').toUpperCase()}</span>
+        </div>
+        <span class="impact-dot ${impactLvl}"></span>
+      </div>
+      <div class="cal-name">${e.name}</div>
+      <div class="cal-date mono">${dateStr}</div>
+      <div class="cal-countdown ${isUrgent ? 'urgent' : ''}" id="${countdownId}">${fmtCountdown(targetDate)}</div>
+      <div class="cal-desc">${e.description || ''}</div>
+      ${assets ? '<div class="cal-assets">' + assets + '</div>' : ''}
+    `;
+    grid.appendChild(card);
+
+    // Live countdown update every minute
+    const timer = setInterval(() => {
+      const el = document.getElementById(countdownId);
+      if (!el) { clearInterval(timer); return; }
+      el.textContent = fmtCountdown(targetDate);
+    }, 60000);
+    countdownTimers.push(timer);
+  });
+
+  reveal(grid);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Footer freshness
+// ──────────────────────────────────────────────────────────────────────────
+function renderFooter(d) {
+  const parts = [];
+  if (d.data_freshness) {
+    const f = d.data_freshness;
+    if (f.coindesk)    parts.push('CoinDesk ' + relTime(f.coindesk));
+    if (f.coin_metrics) parts.push('CoinMetrics ' + relTime(f.coin_metrics));
+    if (f.fear_greed)  parts.push('F&G ' + relTime(f.fear_greed));
+  }
+  if (parts.length) {
+    document.getElementById('footer-freshness').textContent = 'Data: ' + parts.join(' · ');
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Error state
+// ──────────────────────────────────────────────────────────────────────────
+function showError(fallbackTs) {
+  document.getElementById('error-state').classList.add('visible');
+  if (fallbackTs) {
+    document.getElementById('error-sub').textContent = 'Last known brief: ' + new Date(fallbackTs).toLocaleString('en-CA');
+  }
+  // Hide all loading skeletons
+  document.querySelectorAll('.data-ready').forEach(el => { el.style.opacity = '0.3'; });
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Main data load
+// ──────────────────────────────────────────────────────────────────────────
+async function bootDashboard() {
+  document.getElementById('error-state').classList.remove('visible');
+  // Reset skeleton visibility
+  document.querySelectorAll('.data-ready').forEach(el => {
+    el.style.opacity = '1';
+    el.classList.add('data-loading');
+    el.classList.remove('data-visible');
+  });
+
+  let data;
+  try {
+    const res = await fetch(DATA_URL + '?t=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+
+    // Basic schema validation
+    if (!data.schema || !data.top_assets || !data.recommendations) {
+      throw new Error('Invalid schema');
+    }
+  } catch (err) {
+    console.warn('[OBADIAH] primary fetch failed:', err);
+    // Try history fallback
+    let fallbackTs = null;
+    try {
+      const histRes = await fetch(HISTORY_URL);
+      if (histRes.ok) {
+        const history = await histRes.json();
+        if (Array.isArray(history) && history.length) {
+          fallbackTs = history[0].generated_at;
+        }
+      }
+    } catch(e2) {}
+    showError(fallbackTs);
+    return;
+  }
+
+  // Render all 7 widgets
+  try { renderHeader(data); }           catch(e) { console.error('[OBADIAH] header:', e); }
+  try { renderPriceStrip(data.top_assets); }        catch(e) { console.error('[OBADIAH] price strip:', e); }
+  try { renderFGDial(data.fear_greed); }            catch(e) { console.error('[OBADIAH] fg dial:', e); }
+  try { renderConvictionTable(data.recommendations); } catch(e) { console.error('[OBADIAH] conv table:', e); }
+  try { renderCharts(data.top_assets); }            catch(e) { console.error('[OBADIAH] charts:', e); }
+  try { renderNews(data.news); }                    catch(e) { console.error('[OBADIAH] news:', e); }
+  try { renderCalendar(data.events); }              catch(e) { console.error('[OBADIAH] calendar:', e); }
+  try { renderFooter(data); }                       catch(e) { console.error('[OBADIAH] footer:', e); }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Intersection Observer — reveal on scroll
+// ──────────────────────────────────────────────────────────────────────────
+const revealObserver = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      e.target.classList.add('in');
+      revealObserver.unobserve(e.target);
+    }
+  });
+}, { threshold: 0.08 });
+
+document.querySelectorAll('.stark-reveal').forEach(el => revealObserver.observe(el));
+
+// ──────────────────────────────────────────────────────────────────────────
+// Responsive two-column layout
+// ──────────────────────────────────────────────────────────────────────────
+function applyLayout() {
+  const twoCol = document.querySelector('.section div[style*="grid-template-columns:300px"]');
+  if (!twoCol) return;
+  if (window.innerWidth <= 768) {
+    twoCol.style.gridTemplateColumns = '1fr';
+  } else {
+    twoCol.style.gridTemplateColumns = '300px 1fr';
+  }
+}
+window.addEventListener('resize', applyLayout);
+applyLayout();
+
+// Boot
+bootDashboard();
+</script>
+</body>
+</html>
