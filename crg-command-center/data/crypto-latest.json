@@ -1,0 +1,301 @@
+{
+  "_status": "awaiting_first_obadiah_run",
+  "_note": "Seed data by Builder 4. Prices are realistic placeholders as of 2026-05-04. F&G value=40 (Fear) is LIVE from alternative.me query 2026-05-04T00:00:00Z. OBADIAH cron will overwrite on first 5:55am ET run.",
+  "schema": "obadiah-output@1.0",
+  "generated_at": "2026-05-04T00:00:00Z",
+  "market_regime": "chop",
+  "regime_confidence": 0.5,
+  "regime_commentary": "OBADIAH initializing — first synthesis run pending. Dashboard rendering with placeholder data. Live regime scoring begins on first 5:55am ET Windmill cron fire.",
+  "fear_greed": {
+    "value": 40,
+    "classification": "fear",
+    "trend_24h": "stable",
+    "_source": "alternative.me/fng live query 2026-05-04",
+    "_note": "Live value at seed time. OBADIAH updates each run."
+  },
+  "top_assets": [
+    {
+      "symbol": "BTC",
+      "name": "Bitcoin",
+      "price_usd": 96800,
+      "change_24h_pct": 1.2,
+      "change_7d_pct": -3.1,
+      "volume_24h_usd": 34500000000,
+      "market_cap_usd": 1915000000000,
+      "dominance_pct": 54.3,
+      "ohlcv_7d": [
+        [
+          1746230400,
+          98200,
+          99800,
+          97100,
+          98500,
+          36200000000
+        ],
+        [
+          1746316800,
+          98500,
+          99200,
+          97400,
+          97800,
+          31800000000
+        ],
+        [
+          1746403200,
+          97800,
+          98900,
+          96200,
+          97100,
+          33100000000
+        ],
+        [
+          1746489600,
+          97100,
+          98400,
+          95800,
+          96400,
+          35400000000
+        ],
+        [
+          1746576000,
+          96400,
+          97800,
+          95200,
+          97200,
+          38200000000
+        ],
+        [
+          1746662400,
+          97200,
+          97900,
+          95600,
+          96100,
+          32700000000
+        ],
+        [
+          1746748800,
+          96100,
+          97500,
+          95000,
+          96800,
+          34500000000
+        ]
+      ]
+    },
+    {
+      "symbol": "ETH",
+      "name": "Ethereum",
+      "price_usd": 1840,
+      "change_24h_pct": 0.8,
+      "change_7d_pct": -4.2,
+      "volume_24h_usd": 12800000000,
+      "market_cap_usd": 222000000000,
+      "dominance_pct": 9.8,
+      "ohlcv_7d": [
+        [
+          1746230400,
+          1910,
+          1940,
+          1870,
+          1900,
+          13200000000
+        ],
+        [
+          1746316800,
+          1900,
+          1920,
+          1860,
+          1875,
+          11800000000
+        ],
+        [
+          1746403200,
+          1875,
+          1895,
+          1840,
+          1852,
+          12100000000
+        ],
+        [
+          1746489600,
+          1852,
+          1870,
+          1820,
+          1831,
+          13400000000
+        ],
+        [
+          1746576000,
+          1831,
+          1865,
+          1818,
+          1855,
+          14100000000
+        ],
+        [
+          1746662400,
+          1855,
+          1870,
+          1830,
+          1822,
+          11900000000
+        ],
+        [
+          1746748800,
+          1822,
+          1858,
+          1815,
+          1840,
+          12800000000
+        ]
+      ]
+    },
+    {
+      "symbol": "SOL",
+      "name": "Solana",
+      "price_usd": 148.0,
+      "change_24h_pct": 2.1,
+      "change_7d_pct": -5.8,
+      "volume_24h_usd": 4200000000,
+      "market_cap_usd": 73000000000,
+      "dominance_pct": 3.2,
+      "ohlcv_7d": [
+        [
+          1746230400,
+          158,
+          162,
+          154,
+          157,
+          5100000000
+        ],
+        [
+          1746316800,
+          157,
+          159,
+          152,
+          153,
+          4600000000
+        ],
+        [
+          1746403200,
+          153,
+          156,
+          149,
+          151,
+          4800000000
+        ],
+        [
+          1746489600,
+          151,
+          154,
+          147,
+          149,
+          5200000000
+        ],
+        [
+          1746576000,
+          149,
+          153,
+          146,
+          152,
+          5800000000
+        ],
+        [
+          1746662400,
+          152,
+          155,
+          148,
+          145,
+          4400000000
+        ],
+        [
+          1746748800,
+          145,
+          150,
+          143,
+          148,
+          4200000000
+        ]
+      ]
+    }
+  ],
+  "recommendations": [],
+  "news": [],
+  "events": [
+    {
+      "name": "US Jobs Report (May — April data)",
+      "date": "2026-05-01",
+      "category": "macro",
+      "impact": "high",
+      "description": "BLS non-farm payrolls for April 2026. First-Friday release. Strong jobs data may push back rate-cut expectations, pressuring risk assets.",
+      "affected_assets": [
+        "BTC",
+        "ETH"
+      ]
+    },
+    {
+      "name": "FOMC Meeting (May)",
+      "date": "2026-05-06",
+      "category": "macro",
+      "impact": "high",
+      "description": "FOMC two-day meeting concludes May 7. Source: federalreserve.gov confirmed. Market pricing ~80% hold at 4.25-4.50%. Fed commentary on disinflation pace is primary crypto catalyst.",
+      "affected_assets": [
+        "BTC",
+        "ETH",
+        "SOL"
+      ]
+    },
+    {
+      "name": "Babylon (BABY) Token Unlock — Linear Start",
+      "date": "2026-05-10",
+      "category": "unlock",
+      "impact": "medium",
+      "description": "Babylon Genesis first monthly linear unlock: 1/36th of locked supply released monthly over 36 months. Estimated $80-120M USD. Ongoing monthly thereafter.",
+      "affected_assets": [
+        "BABY"
+      ],
+      "_uncertainty": "verify before alert — USD value depends on BABY price at unlock date; date from tokenomist.ai"
+    },
+    {
+      "name": "Hyperliquid (HYPE) Cliff Unlock",
+      "date": "2026-05-11",
+      "category": "unlock",
+      "impact": "high",
+      "description": "Major HYPE cliff unlock ~$411M USD per tokenomist.ai 2026-05-04. Team/foundation vesting cliff. High sell pressure risk.",
+      "affected_assets": [
+        "HYPE"
+      ],
+      "_uncertainty": "verify before alert — exact date approximate from 7-day forward window on tokenomist.ai"
+    },
+    {
+      "name": "US CPI Print (April data)",
+      "date": "2026-05-13",
+      "category": "macro",
+      "impact": "high",
+      "description": "BLS April 2026 CPI release. Expected ~2.7% YoY. Below 2.5% is risk-asset bullish; above 3.0% pressures crypto alongside equities.",
+      "affected_assets": [
+        "BTC",
+        "ETH",
+        "SOL"
+      ]
+    },
+    {
+      "name": "Arbitrum (ARB) Monthly Cliff Unlock",
+      "date": "2026-05-15",
+      "category": "unlock",
+      "impact": "medium",
+      "description": "Arbitrum monthly investor/team vesting cliff. Historically $70-120M per month in ARB tokens.",
+      "affected_assets": [
+        "ARB"
+      ],
+      "_uncertainty": "verify before alert — exact USD value depends on ARB price and current tranche schedule"
+    }
+  ],
+  "data_freshness": {
+    "coindesk": "2026-05-04T00:00:00Z",
+    "coinglass": "2026-05-04T00:00:00Z",
+    "coin_metrics": "2026-05-04T00:00:00Z",
+    "defillama": "2026-05-04T00:00:00Z",
+    "fear_greed": "2026-05-04T00:00:00Z"
+  }
+}
