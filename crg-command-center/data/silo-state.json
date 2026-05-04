@@ -1,9 +1,9 @@
 {
   "_meta": {
     "schema": "silo-state-v1",
-    "as_of": "2026-05-03T00:00:00-04:00",
+    "as_of": "2026-05-04T00:30:00-04:00",
     "doctrine_ref": "doctrine_crg_internal_focus.md",
-    "notes": "CRG = parent holding company only. The 3 silos below are Marc's three operating businesses per the 2026-04-25 doctrine ratification. Do NOT add 'Mortgage Brokers' or 'Financial Advisors' silos here — those were the old sales-theater framing. memory_store column refreshed 2026-05-03 to reflect the fleet self-improvement memstore rollout (PRs #58, #60, #61, #62, #63, #64 in cornerstoneregroup-site). Comma-separated values mean primary memstore + self-improvement memstore; renderer is a string consumer.",
+    "notes": "CRG = parent holding company only. The 3 silos below are Marc's three operating businesses per the 2026-04-25 doctrine ratification. Do NOT add 'Mortgage Brokers' or 'Financial Advisors' silos here — those were the old sales-theater framing. memory_store column refreshed 2026-05-03 to reflect the fleet self-improvement memstore rollout (PRs #58, #60, #61, #62, #63, #64 in cornerstoneregroup-site). Comma-separated values mean primary memstore + self-improvement memstore; renderer is a string consumer. Registry expanded 2026-05-04 — added morning-brief + aaron-daily + aaron-weekly (25 → 28 agents) per Validator follow-up to PR #14.",
     "source_pointers": {
       "apps_canon": "cornerstone-apps/APPS-CANON.md",
       "doctrine":   "~/.claude/projects/-Users-marcpapineau--openclaw-workspace/memory/doctrine_crg_internal_focus.md",
@@ -120,7 +120,7 @@
         { "name": "FA silo page",      "url": "https://cornerstoneregroup.netlify.app/financial-advisors/", "kind": "silo-page" },
         { "name": "NorthLend Calc",    "url": "https://cornerstoneregroup.netlify.app/calculators/mortgage/", "kind": "calculator" }
       ],
-      "agents": ["lazarus", "bdm-vapi", "solomon", "joseph"],
+      "agents": ["lazarus", "bdm-vapi", "solomon", "joseph", "aaron-daily", "aaron-weekly"],
       "drips": [
         { "name": "Primerica weekly drip",       "status": "ready",    "ghl_workflow_id": null }
       ],
@@ -149,8 +149,11 @@
     { "id": "bdm-vapi",                 "silo": "primerica",    "name": "BDM Vapi",               "role": "Outbound counterpart to ISA", "model": "vapi-gpt-4o-mini", "memory_store": null,             "managed_agent_pr": null, "schedule": "0 13 * * *",     "schedule_human": "1:00 PM ET · Daily" },
     { "id": "solomon",                  "silo": "primerica",    "name": "Solomon",                "role": "Strategy & Pricing","model": "claude-opus-4.7",  "memory_store": null,                       "managed_agent_pr": null, "schedule": null,            "schedule_human": "On-demand" },
     { "id": "joseph",                   "silo": "primerica",    "name": "Joseph",                 "role": "Bookkeeper",        "model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": null, "schedule": null,            "schedule_human": "Spec — not built" },
+    { "id": "aaron-daily",             "silo": "primerica",    "name": "Aaron (Daily)",          "role": "FA daily regulatory monitor (CRA/OSFI/FSRA/BoC/StatCan)", "model": "claude-sonnet-4.6", "memory_store": "aaron-regulatory-history, aaron-daily-self-improvement",  "managed_agent_pr": 44, "schedule": "30 11 * * 1-5", "schedule_human": "7:30 AM ET · Mon-Fri" },
+    { "id": "aaron-weekly",            "silo": "primerica",    "name": "Aaron (Weekly)",         "role": "FA weekly regulatory horizon scan + delta", "model": "claude-sonnet-4.6", "memory_store": "aaron-regulatory-history, aaron-weekly-self-improvement", "managed_agent_pr": 44, "schedule": "0 11 * * 1",    "schedule_human": "7:00 AM ET · Monday" },
     { "id": "daniel",                   "silo": "cross-cutting","name": "Daniel",                 "role": "Research Lead",     "model": "claude-opus-4.7",  "memory_store": "daniel-research-cache, daniel-self-improvement",  "managed_agent_pr": 36, "schedule": "0 9 * * *",     "schedule_human": "9:00 AM ET · Daily" },
     { "id": "ezra",                     "silo": "cross-cutting","name": "Ezra",                   "role": "Daily Brief Editor","model": "claude-sonnet-4.6", "memory_store": null,                       "managed_agent_pr": null, "schedule": "0 10 * * *",    "schedule_human": "10:00 AM ET · Daily" },
+    { "id": "morning-brief",           "silo": "cross-cutting","name": "Morning Brief (Ezra)",   "role": "Magazine-style morning brief composer (9 topics, T1-T4 tiered)", "model": "claude-sonnet-4.6", "memory_store": "morning-brief-self-improvement", "managed_agent_pr": 61, "schedule": "0 10 * * *",    "schedule_human": "6:00 AM ET · Daily" },
     { "id": "krite",                    "silo": "cross-cutting","name": "KRITE",                  "role": "4-axis quality gate","model": "claude-opus-4.7", "memory_store": null,                       "managed_agent_pr": null, "schedule": null,            "schedule_human": "On-demand (pre-send)" },
     { "id": "habakkuk",                 "silo": "cross-cutting","name": "Habakkuk",               "role": "Pre-KRITE structural critic", "model": "claude-sonnet-4.6", "memory_store": "habakkuk-self-improvement",             "managed_agent_pr": 42, "schedule": null,            "schedule_human": "On-demand" },
     { "id": "karis",                    "silo": "cross-cutting","name": "Karis",                  "role": "QA verdict (30-min cron)", "model": "claude-sonnet-4.6", "memory_store": "karis-verdicts, karis-self-improvement", "managed_agent_pr": 37, "schedule": "*/30 * * * *",   "schedule_human": "Every 30 min" },
