@@ -1,6 +1,6 @@
 """Build Agent v1 — drift-proof orchestrator for CRG agent builds.
 
-Runtime: Windmill Cloud (workspace=crg, path=u/marc/build-agent-v1)
+Runtime: Windmill Cloud (workspace=crg, path=u/admin/build-agent-v1)
 Author: Claude (Nehemiah-spirit orchestrator) for Marc Papineau
 Date: 2026-04-26 (recursive bootstrap)
 
@@ -112,7 +112,7 @@ OUTPUT RULES (non-negotiable):
 - Output ONLY runnable Python code. No prose. No markdown fences. No "Here is the code..." preamble.
 - The first line of your response must be valid Python (a docstring, import, or comment).
 - Every script must have a top-level `def main(...)` function returning a dict.
-- Use `wmill.get_variable("u/marc/<KEY>")` to fetch secrets — NEVER hardcode API keys.
+- Use `wmill.get_variable("u/admin/<KEY>")` to fetch secrets — NEVER hardcode API keys.
 - Use `urllib.request` and `urllib.error` for HTTP calls (no external deps available at Windmill runtime).
 - The only allowed third-party import is `wmill` (the Windmill SDK).
 
@@ -173,7 +173,7 @@ CANON SYNTHESIS DISCIPLINE (Patch 1 reinforcement):
 CROSS-AGENT WIRING (Patch 4 reinforcement):
 - The DEPLOYED CRG AGENTS block in your user message lists agents that already exist on Windmill.
 - If your generated agent needs review/scoring/research, generate code that POSTs to that agent's run URL and polls for completion. NEVER reimplement those capabilities inline.
-- Concretely: if your agent does any artifact production, it MUST call u/marc/krite-agent-v1 for pre-scoring before returning. The string "u/marc/krite-agent-v1" MUST appear in your generated code.
+- Concretely: if your agent does any artifact production, it MUST call u/admin/krite-agent-v1 for pre-scoring before returning. The string "u/admin/krite-agent-v1" MUST appear in your generated code.
 
 OUTPUT LENGTH: 200-500 lines is the typical range for a real agent. An 11-line stub is a build failure. Long is fine — clarity beats brevity here."""
 
@@ -321,7 +321,7 @@ HARD RULES:
 - NO renaming variables, functions, or files unless that rename is the fix. Style-only edits are out of scope.
 - NO reformatting (indent changes, blank-line shuffles, import reordering) unless the formatting itself causes the bug.
 - NO third-party deps you did not see in the original file. Match the file's existing dependency surface exactly.
-- NO secrets in code. If the original used `process.env.X` or `wmill.get_variable("u/marc/X")`, the patched version uses the same pattern.
+- NO secrets in code. If the original used `process.env.X` or `wmill.get_variable("u/admin/X")`, the patched version uses the same pattern.
 
 MATCH THE FILE'S EXISTING STYLE:
 - Indent (2-space vs. 4-space vs. tabs) — match what the file already uses.
@@ -747,12 +747,12 @@ def krite_review(artifact_text: str, artifact_kind: str, anthropic_key: str,
 # Inline `krite_review` above is kept as fallback only when the deployed call
 # errors. Deployed KRITE has the full canon-backed rubric with hard-fails.
 # ----------------------------------------------------------------------------
-DEPLOYED_KRITE_PATH = "u/marc/krite-agent-v1"
+DEPLOYED_KRITE_PATH = "u/admin/krite-agent-v1"
 DEPLOYED_KRITE_RUN_URL = (
-    "https://app.windmill.dev/api/w/crg/jobs/run/p/u/marc/krite-agent-v1"
+    "http://localhost:8000/api/w/admin/jobs/run/p/u/admin/krite-agent-v1"
 )
 DEPLOYED_KRITE_POLL_URL_TPL = (
-    "https://app.windmill.dev/api/w/crg/jobs_u/completed/get/{job_id}"
+    "http://localhost:8000/api/w/admin/jobs_u/completed/get/{job_id}"
 )
 DEPLOYED_KRITE_TIMEOUT_S = 90
 DEPLOYED_KRITE_POLL_INTERVAL_S = 2
@@ -782,7 +782,7 @@ def krite_review_via_deployed_agent(
     artifact_text: str, artifact_kind: str, anthropic_key: str,
     lf_pub: str, lf_sec: str, lf_host: str,
 ) -> dict:
-    """POST to u/marc/krite-agent-v1, poll for completion, return scores.
+    """POST to u/admin/krite-agent-v1, poll for completion, return scores.
 
     On any failure (network, timeout, malformed response), the caller MUST
     fall through to the inline `krite_review` and mark the result with
@@ -910,44 +910,45 @@ def krite_review_combined(
     artifact_text: str, artifact_kind: str, anthropic_key: str,
     lf_pub: str, lf_sec: str, lf_host: str,
 ) -> dict:
-    """Try deployed KRITE first; fall back to inline KRITE on failure.
-    The result always carries `_via` to make the source obvious in logs.
-    Per repair-2 instruction: deployed-call errors are warnings, not crashes."""
-    deployed = krite_review_via_deployed_agent(
-        artifact_text, artifact_kind, anthropic_key, lf_pub, lf_sec, lf_host,
-    )
-    if not deployed.get("_error"):
-        deployed["_via"] = "deployed-krite-agent-v1"
-        return deployed
-    # Fallback to inline — but mark the deployed error so it's visible
+    """Inline-only KRITE per Sprint 1 (2026-05-05).
+
+    Sprint 1 disabled the deployed-KRITE call: u/admin/krite-agent-v1 is FICTIONAL
+    per 2026-05-04 theater audit (no agent_id, no bootstrap, no runtime file at
+    that path). Skip the deployed call entirely; do not simulate it.
+
+    Inline KRITE is Opus 4.7 per rule_model_selection. Future sprint may wire a
+    real deployed-KRITE if Marc decides to build one (Decision A1/A3 from audit
+    report Section 7).
+    """
     inline = krite_review(
         artifact_text, artifact_kind, anthropic_key, lf_pub, lf_sec, lf_host,
     )
-    inline["_via"] = "inline-fallback"
-    inline["_deployed_krite_error"] = deployed.get(
-        "_deployed_krite_error", "unknown"
+    inline["_via"] = "inline-only-sprint1"
+    inline["_deployed_krite_disabled_reason"] = (
+        "u/admin/krite-agent-v1 is FICTIONAL per 2026-05-04 audit; "
+        "deployed call disabled in Sprint 1 to prevent fake-call attempts"
     )
     return inline
 
 
 # ----------------------------------------------------------------------------
 # PATCH 4 — DEPLOYED-AGENT REGISTRY (cross-agent wiring at generation time)
-# Fetches u/marc/* scripts from Windmill at gen time and injects a known list
+# Fetches u/admin/* scripts from Windmill at gen time and injects a known list
 # into the gen prompt so generated agents call existing capabilities instead
 # of reinventing them. Falls back to a hard-coded baseline list if the API
 # call fails (e.g. no WM_TOKEN, network blip).
 # ----------------------------------------------------------------------------
-WINDMILL_LIST_URL = "https://app.windmill.dev/api/w/crg/scripts/list"
+WINDMILL_LIST_URL = "http://localhost:8000/api/w/admin/scripts/list"
 KNOWN_AGENT_DESCRIPTIONS = {
-    "u/marc/krite-agent-v1": "5-axis quality review (voice / compliance / research / tone / wku); hard-fails per EVALUATION-GRADING-FRAMEWORK-v1.md",
-    "u/marc/build-agent-v1": "ORCHESTRATOR — never call from a built agent",
-    "u/marc/daniel-research": "Perplexity-backed research engine (T1-T4 tier-cited briefs)",
-    "u/marc/apollos-content-v2": "Real-Estate magazine content engine — blog/LinkedIn/newsletter, KRITE-pre-scored",
+    "u/admin/krite-agent-v1": "5-axis quality review (voice / compliance / research / tone / wku); hard-fails per EVALUATION-GRADING-FRAMEWORK-v1.md",
+    "u/admin/build-agent-v1": "ORCHESTRATOR — never call from a built agent",
+    "u/admin/daniel-research": "Perplexity-backed research engine (T1-T4 tier-cited briefs)",
+    "u/admin/apollos-content-v2": "Real-Estate magazine content engine — blog/LinkedIn/newsletter, KRITE-pre-scored",
 }
 
 
 def fetch_deployed_agents() -> list[str]:
-    """Return list of u/marc/* paths currently deployed on Windmill.
+    """Return list of u/admin/* paths currently deployed on Windmill.
     On any failure, returns the hard-coded known list."""
     wm_token = os.environ.get("WM_TOKEN", "")
     if not wm_token:
@@ -963,7 +964,7 @@ def fetch_deployed_agents() -> list[str]:
     paths = []
     for item in items if isinstance(items, list) else []:
         path = item.get("path") if isinstance(item, dict) else None
-        if path and path.startswith("u/marc/"):
+        if path and path.startswith("u/admin/"):
             paths.append(path)
     if not paths:
         return list(KNOWN_AGENT_DESCRIPTIONS.keys())
@@ -986,8 +987,8 @@ def build_agent_registry_block() -> str:
         "When your generated agent needs review, scoring, research, or any "
         "capability another deployed agent has, generate code that POSTs to "
         "that agent's Windmill run URL "
-        "(https://app.windmill.dev/api/w/crg/jobs/run/p/<path>) and polls "
-        "https://app.windmill.dev/api/w/crg/jobs_u/completed/get/<job_id> "
+        "(http://localhost:8000/api/w/admin/jobs/run/p/<path>) and polls "
+        "http://localhost:8000/api/w/admin/jobs_u/completed/get/<job_id> "
         "for completion. Use `os.environ.get('WM_TOKEN')` for auth. "
         "Do NOT reimplement existing agent capabilities."
     )
@@ -1091,7 +1092,7 @@ def run_functional_test(
             "error": "WM_TOKEN not available — cannot fire functional test",
             "markers_found": [], "markers_missing": list(expected_markers or []),
         }
-    run_url = f"https://app.windmill.dev/api/w/crg/jobs/run/p/{agent_path}"
+    run_url = f"http://localhost:8000/api/w/admin/jobs/run/p/{agent_path}"
     headers = {
         "Authorization": f"Bearer {wm_token}",
         "Content-Type": "application/json",
@@ -1115,7 +1116,7 @@ def run_functional_test(
             "error": f"no job id; raw='{str(start_resp.get('_raw'))[:200]}'",
             "markers_found": [], "markers_missing": list(expected_markers or []),
         }
-    poll_url = f"https://app.windmill.dev/api/w/crg/jobs_u/completed/get/{job_id_raw}"
+    poll_url = f"http://localhost:8000/api/w/admin/jobs_u/completed/get/{job_id_raw}"
     deadline = time.time() + 180  # functional tests can be longer (real LLM calls)
     last_poll = None
     while time.time() < deadline:
@@ -1553,11 +1554,11 @@ def main(intake: dict | None = None) -> dict:
 
     # ---- Step 1: secret hydration --------------------------------------
     try:
-        anthropic_key = wmill.get_variable("u/marc/ANTHROPIC_API_KEY")
-        perplexity_key = wmill.get_variable("u/marc/PERPLEXITY_API_KEY")
-        lf_host = wmill.get_variable("u/marc/LANGFUSE_HOST")
-        lf_pub = wmill.get_variable("u/marc/LANGFUSE_PUBLIC_KEY")
-        lf_sec = wmill.get_variable("u/marc/LANGFUSE_SECRET_KEY")
+        anthropic_key = wmill.get_variable("u/admin/ANTHROPIC_API_KEY")
+        perplexity_key = wmill.get_variable("u/admin/PERPLEXITY_API_KEY")
+        lf_host = wmill.get_variable("u/admin/LANGFUSE_HOST")
+        lf_pub = wmill.get_variable("u/admin/LANGFUSE_PUBLIC_KEY")
+        lf_sec = wmill.get_variable("u/admin/LANGFUSE_SECRET_KEY")
     except Exception as e:
         return {
             "build_status": "HONEST-FAILED",
@@ -1565,7 +1566,7 @@ def main(intake: dict | None = None) -> dict:
             "marc_facing_summary": (
                 "Build Agent could not read its own credentials from Windmill. "
                 "This is a setup issue, not a build issue. Check workspace variables "
-                "u/marc/ANTHROPIC_API_KEY, PERPLEXITY_API_KEY, LANGFUSE_*."
+                "u/admin/ANTHROPIC_API_KEY, PERPLEXITY_API_KEY, LANGFUSE_*."
             ),
         }
 
@@ -1576,8 +1577,8 @@ def main(intake: dict | None = None) -> dict:
             "reason": "ANTHROPIC_API_KEY in Windmill is a placeholder",
             "marc_facing_summary": (
                 "Build Agent is wired up but cannot call Claude until you paste a real "
-                "Anthropic API key into the Windmill variable u/marc/ANTHROPIC_API_KEY. "
-                "Open https://app.windmill.dev/crg/variables, find that row, click edit, paste."
+                "Anthropic API key into the Windmill variable u/admin/ANTHROPIC_API_KEY. "
+                "Open http://localhost:8000/admin/variables, find that row, click edit, paste."
             ),
         }
 
@@ -1931,7 +1932,7 @@ def main(intake: dict | None = None) -> dict:
             output_language = "Python"
             output_requirements_block = (
                 f"=== OUTPUT REQUIREMENTS ===\n"
-                f"- A complete, runnable Python file for Windmill (workspace=crg, path=u/marc/{agent_name}).\n"
+                f"- A complete, runnable Python file for Windmill (workspace=crg, path=u/admin/{agent_name}).\n"
                 f"- `def main(...)` entrypoint returning a dict matching success_criteria.\n"
                 f"- Real implementation — no stubs, no TODOs, no placeholders.\n"
                 f"- Secrets via wmill.get_variable. HTTP via urllib.request.\n"
@@ -1939,7 +1940,7 @@ def main(intake: dict | None = None) -> dict:
                 f"- Defensive parsing of model responses (strip fences, handle missing content).\n"
                 f"- Plain-English `marc_facing_summary` field in the return dict.\n"
                 f"- Synthesize specific named voices from the canon content above (e.g. Sherrard, Buffini, Serhant for real-estate; Cardone, Bet-David, Mashore for cross-cutting). Cite them by name in the agent's system prompt.\n"
-                f"- If your agent needs review/scoring, call u/marc/krite-agent-v1 via Windmill API. Do NOT inline a KRITE rubric.\n"
+                f"- If your agent needs review/scoring, call u/admin/krite-agent-v1 via Windmill API. Do NOT inline a KRITE rubric.\n"
                 f"- Include a `_load_doctrine()` helper that reads doctrine files at runtime AND have your agent reference doctrine in its actual behavior (e.g. model selection cites rule_model_selection.md, output formats cite feedback_communication_style.md).\n"
                 f"- Include a WKU block (Wisdom · Knowledge · Understanding per rule_wku_framework.md) in every system prompt the generated agent uses.\n\n"
                 f"Output ONLY the Python code. First character of your response must start the Python file."
@@ -2148,13 +2149,13 @@ def main(intake: dict | None = None) -> dict:
                     wm_token = os.environ.get("WM_TOKEN", "")
                     if wm_token:
                         create_resp = _http_post(
-                            "https://app.windmill.dev/api/w/crg/scripts/create",
+                            "http://localhost:8000/api/w/admin/scripts/create",
                             headers={
                                 "Authorization": f"Bearer {wm_token}",
                                 "Content-Type": "application/json",
                             },
                             body={
-                                "path": f"u/marc/{agent_name}",
+                                "path": f"u/admin/{agent_name}",
                                 "summary": f"{agent_name} (built by build-agent-v1)",
                                 "description": (
                                     f"Generated by build-agent-v1 via Sonnet 4.6 on "
@@ -2171,7 +2172,7 @@ def main(intake: dict | None = None) -> dict:
                         runtime_create_response = create_resp
                         if (not create_resp.get("_error")) and create_resp.get("_ok"):
                             runtime_path = (
-                                f"https://app.windmill.dev/api/w/crg/jobs/run/p/u/marc/{agent_name}"
+                                f"http://localhost:8000/api/w/admin/jobs/run/p/u/admin/{agent_name}"
                             )
                     else:
                         runtime_create_response = {
@@ -2234,7 +2235,7 @@ def main(intake: dict | None = None) -> dict:
             test_input = functional_test_design.get("test_input", {}) or {}
             expected_markers = functional_test_design.get("expected_markers", []) or []
             functional_test_result = run_functional_test(
-                f"u/marc/{agent_name}", test_input, expected_markers,
+                f"u/admin/{agent_name}", test_input, expected_markers,
                 lf_pub, lf_sec, lf_host,
             )
             if not functional_test_result.get("ok"):
