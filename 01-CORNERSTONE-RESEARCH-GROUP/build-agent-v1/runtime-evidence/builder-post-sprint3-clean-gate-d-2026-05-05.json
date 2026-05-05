@@ -1,0 +1,12 @@
+{
+  "gate": "D",
+  "status": "INCOMPLETE",
+  "runtime_id": "windmill:u/admin/build-agent-v1",
+  "trace_id": "build-agent-v1-1777944148864",
+  "timestamp": "2026-05-05T01:18:00Z",
+  "evidence_paths": [
+    "windmill-job:019df5b9-2e4d-404b-b350-0891015a2b09",
+    "file:/Users/marcpapineau/.openclaw/workspace/01-CORNERSTONE-RESEARCH-GROUP/build-agent-v1/main.py:2599"
+  ],
+  "notes": "Sprint 3 verification self-test (post gen-prompt hardening). Builder hash c3e6d6916b207c94. Patch G+F passed (Sonnet emitted no banned phrases AND included agentGuard). Patches D/E/H all executed: D claimed success (wrote to /workspace/... in container) but file does NOT persist to host (mount mismatch); E returned INCOMPLETE (looks for agents-registry.json, actual filename is managed-agents-registry.json — Builder code carries the wrong name); H returned INCOMPLETE (habakkuk script not accessible from runtime container). All 4 patches exercised or explicitly INCOMPLETE per Sprint 3 spec."
+}

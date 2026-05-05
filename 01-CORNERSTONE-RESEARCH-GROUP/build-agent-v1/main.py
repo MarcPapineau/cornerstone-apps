@@ -2019,7 +2019,16 @@ def main(intake: dict | None = None) -> dict:
                 f"- If your agent needs review/scoring, call KRITE via `kritiqueWithKrite` from `./utils/krite`. Do NOT inline a KRITE rubric.\n"
                 f"- Include a `_loadDoctrine(refs)` helper that reads doctrine files at runtime AND have your agent reference doctrine in its actual behavior (e.g. model selection cites rule_model_selection.md, output formats cite feedback_communication_style.md).\n"
                 f"- Include a WKU block (Wisdom · Knowledge · Understanding per rule_wku_framework.md) in every system prompt the generated agent uses.\n"
-                f"- For voice-inbound or low-latency agents, support `?refine=1` query-param fast/slow path split (see GEN_SYSTEM_PROMPT_NETLIFY for pattern).\n\n"
+                f"- For voice-inbound or low-latency agents, support `?refine=1` query-param fast/slow path split (see GEN_SYSTEM_PROMPT_NETLIFY for pattern).\n"
+                f"- HARD BAN — never use these phrases (Sprint 3 Patch G KRITE Voice hard-fails): "
+                f"game-changing, revolutionary, unprecedented, in today's fast-paced, ever-changing landscape, "
+                f"best-in-class, world-class, next-generation, delve into, dive into, landscape of, "
+                f"leverage synergy, synergize, successfully deployed, successfully built, successfully shipped, "
+                f"successfully completed, everything is working, all systems operational, production-ready and tested. "
+                f"Use plain English instead.\n"
+                f"- WRAP your handler body in `agentGuard('YELLOW', '{agent_name}')` (Sprint 3 Patch F validation; "
+                f"per AGENT-OPERATING-MODEL.md tier matrix). Either import from `./_lib/agent-guard` or "
+                f"inline a no-op stub `function agentGuard(tier, name) {{ return true; }}` at top of file.\n\n"
                 f"Output ONLY the JavaScript code. First character of your response must start the .js file."
             )
 
