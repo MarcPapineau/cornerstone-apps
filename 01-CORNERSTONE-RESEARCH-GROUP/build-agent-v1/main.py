@@ -2648,6 +2648,24 @@ def main(intake: dict | None = None) -> dict:
         "sprint3_habakkuk_status": sprint3_habakkuk_status if 'sprint3_habakkuk_status' in dir() else "skipped",
         "sprint3_habakkuk_verdict": sprint3_habakkuk_verdict if 'sprint3_habakkuk_verdict' in dir() else None,
         "sprint3_failures": sprint3_failures if 'sprint3_failures' in dir() else [],
+        # Sprint 3 boundary contract (2026-05-05): Builder produces, orchestrator-side
+        # apply-builder-artifact.js consumes. Builder surfaces the artifact content
+        # + registry entry + target_path so the apply script can write to host repo,
+        # update registry, run Habakkuk, and commit. Builder runtime no longer attempts
+        # those persistence steps directly (it cannot — host FS not visible from Windmill).
+        "generated_artifact_content": (generated if 'generated' in dir() and isinstance(generated, str) and generated else None),
+        "target_path": (sprint3_target_subpath if 'sprint3_target_subpath' in dir() else None),
+        "registry_entry": ({
+            "name": agent_name,
+            "silo": silo,
+            "runtime_host": runtime_host,
+            "runtime_id": f"{runtime_host}:{agent_name}",
+            "source_path": (sprint3_target_subpath if 'sprint3_target_subpath' in dir() else None),
+            "trace_id": final_trace_id if 'final_trace_id' in dir() else None,
+            "build_status": final_status,
+            "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "memory_status": "not_yet_bootstrapped",
+        } if final_status in ("BUILT", "INCOMPLETE") and 'sprint3_target_subpath' in dir() else None),
         "marc_facing_summary": marc_summary(
             final_status, agent_name, runtime_path,
             krite_scores, len(krite_iterations), trace_ids,
