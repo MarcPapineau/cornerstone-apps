@@ -128,6 +128,21 @@ ANTHROPIC API DISCIPLINE:
 - Always parse the response's content[0].text block defensively (it may not exist on errors).
 - Strip markdown code fences from any model output you re-parse as JSON.
 
+ENV VAR DISCIPLINE (Builder generation hardening 2026-05-05 — non-negotiable):
+- BANNED: silent fallback patterns. NEVER write any of these in generated code:
+    os.environ.get("X", "")
+    os.environ.get("X", "default")
+    os.environ.get("X") or ""
+    os.environ.get("X") or "default"
+    os.getenv("X", "")
+    os.getenv("X", "default")
+- REQUIRED: every secret/env var fetch MUST go through `wmill.get_variable("u/admin/X")`. If the variable is missing, let it raise — Windmill surfaces it as a Marc-actionable failure. Do NOT swallow with `try/except: return ""`.
+- For genuinely OPTIONAL config (non-secret), use a guarded conditional with an explicit return on missing:
+    val = os.environ.get("OPTIONAL_KEY")
+    if not val:
+        return {"build_status": "INCOMPLETE", "reason": "Missing required env var: OPTIONAL_KEY", "marc_action_required": True}
+- Why: silent fallbacks produce malformed configs and ghost-API calls that fail in production with no Marc-actionable signal.
+
 LANGFUSE TRACES (mandatory on every Claude call):
 - POST to {LANGFUSE_HOST}/api/public/ingestion with HTTP Basic auth from public:secret.
 - Trace name should identify the agent + stage (e.g. "krite-agent-v1.score-artifact").
@@ -204,6 +219,30 @@ NETLIFY HELPERS (use these — do NOT reinvent):
 - `const { tracedAnthropicCall } = require("./_lib/langfuse");`
   * Wraps `POST https://api.anthropic.com/v1/messages` and emits a Langfuse trace per call. Use this for EVERY Claude invocation; never call the raw endpoint inline.
 
+ENV VAR DISCIPLINE (Builder generation hardening 2026-05-05 — non-negotiable):
+- BANNED: silent fallback patterns. NEVER write any of these in generated code:
+    process.env.X || ""
+    process.env.X || "default"
+    process.env.X ?? ""
+    process.env.X ?? "default"
+    (process.env.X || "") + "..."
+    process.env.X without a guard or helper
+- REQUIRED: every `process.env.X` reference for a required env var MUST be guarded by an explicit Marc-action gate that returns BEFORE the missing value is used. Canonical form:
+    if (!process.env.REQUIRED_KEY) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({
+          status: "INCOMPLETE",
+          reason: "Missing required environment variable: REQUIRED_KEY",
+          marc_action_required: true
+        })
+      };
+    }
+- Equivalently, fetching via `requireEnv("REQUIRED_KEY")` from `./_lib/env` satisfies the rule (the helper throws at cold start; same fail-fast semantics).
+- For genuinely OPTIONAL env vars where a default is fine, use `optionalEnv("KEY", "default")` from `./_lib/env`. Do NOT inline `process.env.KEY || "default"` — route the default through the helper so the intent is unambiguous.
+- Why: silent fallbacks produce malformed paths (e.g. "/.claude/projects/...") and ghost-API requests (e.g. POST to "/v1/messages" with empty Authorization) that fail in production with no Marc-actionable signal. Habakkuk Pattern B rejects builds containing these patterns.
+- META-COMMENT BAN: do NOT write comments, docstrings, or string literals that contain the substring `process.env.` followed by an env var name in your generated code. The Habakkuk Pattern B regex does not strip comments before scanning, so a justification comment like "// no process.env.X branch — banned" still trips it. If you need to explain why an env var is intentionally absent, phrase it abstractly ("env-var-derived branch removed", "uses only hardcoded absolute paths") without quoting the literal `process.env.NAME`.
+
 MODEL SELECTION (per rule_model_selection.md):
 - `claude-opus-4-7` for reasoning, judgment, scoring, review tasks.
 - `claude-sonnet-4-6` for fast, deterministic generation tasks.
@@ -249,7 +288,6 @@ DOCTRINE INVOCATION AT RUNTIME (Patch 5 — non-negotiable, Node.js variant):
     const DOCTRINE_ROOTS = [
       "/workspace/memory",
       "/Users/marcpapineau/.claude/projects/-Users-marcpapineau--openclaw-workspace/memory",
-      (process.env.HOME || "") + "/.claude/projects/-Users-marcpapineau--openclaw-workspace/memory",
     ];
     function _loadDoctrine(refs) {
       const out = {};
@@ -262,6 +300,7 @@ DOCTRINE INVOCATION AT RUNTIME (Patch 5 — non-negotiable, Node.js variant):
       }
       return out;
     }
+- DOCTRINE_ROOTS uses ONLY the hardcoded absolute paths above. Do NOT add an env-var-derived branch.
 - Generated agents MUST reference doctrine in their actual runtime behavior:
   * Model selection MUST cite rule_model_selection.md ("// per rule_model_selection.md — Opus 4.7 for review, Sonnet 4.6 for generation, never Haiku")
   * Output formats MUST cite feedback_communication_style.md ("// per feedback_communication_style.md — outcomes-first plain English in marc_facing_summary")
@@ -1998,7 +2037,11 @@ def main(intake: dict | None = None) -> dict:
                 f"- Synthesize specific named voices from the canon content above (e.g. Sherrard, Buffini, Serhant for real-estate; Cardone, Bet-David, Mashore for cross-cutting). Cite them by name in the agent's system prompt.\n"
                 f"- If your agent needs review/scoring, call u/admin/krite-agent-v1 via Windmill API. Do NOT inline a KRITE rubric.\n"
                 f"- Include a `_load_doctrine()` helper that reads doctrine files at runtime AND have your agent reference doctrine in its actual behavior (e.g. model selection cites rule_model_selection.md, output formats cite feedback_communication_style.md).\n"
-                f"- Include a WKU block (Wisdom · Knowledge · Understanding per rule_wku_framework.md) in every system prompt the generated agent uses.\n\n"
+                f"- Include a WKU block (Wisdom · Knowledge · Understanding per rule_wku_framework.md) in every system prompt the generated agent uses.\n"
+                f"- ENV VAR DISCIPLINE (Builder hardening 2026-05-05): NO silent env fallbacks. "
+                f"Banned: `os.environ.get(\"X\", \"\")`, `os.environ.get(\"X\", \"default\")`, `os.getenv(\"X\", \"\")`, `os.environ.get(\"X\") or \"\"`. "
+                f"Use `wmill.get_variable(\"u/admin/X\")` for secrets — let it raise on missing. "
+                f"For optional config, guard explicitly and return INCOMPLETE with marc_action_required: True.\n\n"
                 f"Output ONLY the Python code. First character of your response must start the Python file."
             )
         else:  # runtime_host == "netlify-fn"
@@ -2028,7 +2071,14 @@ def main(intake: dict | None = None) -> dict:
                 f"Use plain English instead.\n"
                 f"- WRAP your handler body in `agentGuard('YELLOW', '{agent_name}')` (Sprint 3 Patch F validation; "
                 f"per AGENT-OPERATING-MODEL.md tier matrix). Either import from `./_lib/agent-guard` or "
-                f"inline a no-op stub `function agentGuard(tier, name) {{ return true; }}` at top of file.\n\n"
+                f"inline a no-op stub `function agentGuard(tier, name) {{ return true; }}` at top of file.\n"
+                f"- ENV VAR DISCIPLINE (Builder hardening 2026-05-05): NO silent env fallbacks. "
+                f"Banned: `process.env.X || \"\"`, `process.env.X || \"default\"`, `process.env.X ?? \"\"`, "
+                f"`(process.env.X || \"\") + \"...\"`. Required env vars MUST use an explicit Marc-action gate: "
+                f"`if (!process.env.REQUIRED_KEY) {{ return {{ statusCode: 500, body: JSON.stringify({{ status: \"INCOMPLETE\", "
+                f"reason: \"Missing required environment variable: REQUIRED_KEY\", marc_action_required: true }}) }}; }}`. "
+                f"Equivalently use `requireEnv(\"KEY\")` from `./_lib/env`. For optional vars use `optionalEnv(\"KEY\", \"default\")`. "
+                f"Habakkuk Pattern B rejects silent fallbacks.\n\n"
                 f"Output ONLY the JavaScript code. First character of your response must start the .js file."
             )
 
