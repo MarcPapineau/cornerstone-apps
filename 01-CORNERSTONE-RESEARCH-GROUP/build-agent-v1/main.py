@@ -1905,6 +1905,37 @@ def main(intake: dict | None = None) -> dict:
     # loading + KRITE iteration; language-specific gen-prompt + validation +
     # deploy gating below.
     if final_status == "BUILT" and runtime_host in ("windmill", "netlify-fn"):
+        # ---- Sprint 2 (2026-05-05): Daniel research-first phase ----
+        # Per rule_research_first_build_process.md: every build MUST identify
+        # industry winners (with T1/T2 citations) before code generation.
+        # If research fails, return INCOMPLETE — do not proceed.
+        sprint2_research_question = (
+            f"What are the top 2-3 industry winners (with T1/T2-cited sources) "
+            f"for an agent with this scope? Be specific, cite URLs.\n\n"
+            f"Silo: {silo}\nScope: {scope}\nSuccess criteria: {success_criteria}"
+        )
+        sprint2_research = daniel_research(
+            question=sprint2_research_question,
+            perplexity_key=perplexity_key,
+            lf_pub=lf_pub, lf_sec=lf_sec, lf_host=lf_host,
+        )
+        sprint2_research_trace_id = (sprint2_research or {}).get("trace_id")
+        if not (sprint2_research and sprint2_research.get("ok")):
+            err_msg = (sprint2_research or {}).get("error", "no response")
+            return {
+                "build_status": "INCOMPLETE",
+                "reason": "Sprint 2: research-first phase failed before code generation",
+                "agent_name": agent_name,
+                "silo": silo,
+                "research_error": str(err_msg)[:500],
+                "research_trace_ids": [sprint2_research_trace_id] if sprint2_research_trace_id else [],
+                "marc_facing_summary": (
+                    f"{agent_name} build refused before code generation. The Daniel/Perplexity "
+                    f"research-first phase failed. Per rule_research_first_build_process.md, every "
+                    f"build MUST identify industry winners + their templates before code is generated."
+                ),
+            }
+
         # Build the generation prompt: scope + success criteria + canon synthesis
         # + doctrine refs as load-bearing instructions.
         # Patch 1 — load actual canon + doctrine FILE CONTENT, not just paths
@@ -1914,6 +1945,31 @@ def main(intake: dict | None = None) -> dict:
         doctrine_content_intake = intake.get("doctrine_content") or []
         canon_content_block, canon_manifest = load_canon_blocks(canon_refs, canon_content_intake)
         doctrine_content_block, doctrine_manifest = load_doctrine_blocks(doctrine_refs, doctrine_content_intake)
+
+        # ---- Sprint 2 (2026-05-05): refuse on missing canon/doctrine refs ----
+        # Per Marc directive: no [FILE NOT FOUND] flowing silently into gen prompt.
+        sprint2_missing_refs = []
+        for entry in canon_manifest:
+            if not entry.get("found"):
+                sprint2_missing_refs.append(f"canon:{entry.get('ref')}")
+        for entry in doctrine_manifest:
+            if not entry.get("found"):
+                sprint2_missing_refs.append(f"doctrine:{entry.get('ref')}")
+        if sprint2_missing_refs:
+            return {
+                "build_status": "INCOMPLETE",
+                "reason": "Sprint 2: required canon/doctrine ref(s) not found",
+                "missing_refs": sprint2_missing_refs,
+                "agent_name": agent_name,
+                "research_trace_ids": [sprint2_research_trace_id] if sprint2_research_trace_id else [],
+                "marc_facing_summary": (
+                    f"{agent_name} build refused before code generation: "
+                    f"{len(sprint2_missing_refs)} required reference file(s) not found. "
+                    f"Builder will not generate against half-loaded doctrine. "
+                    f"Missing first 3: {', '.join(sprint2_missing_refs[:3])}"
+                ),
+            }
+
         inputs_block = intake.get("inputs", "(see scope)")
 
         # Patch 4 — fetch deployed-agents registry to inject into gen prompt
@@ -2035,6 +2091,42 @@ def main(intake: dict | None = None) -> dict:
                 if stripped.rstrip().endswith("```"):
                     stripped = stripped.rstrip()[:-3].rstrip()
             generated = stripped
+
+            # ---- Sprint 2 (2026-05-05): validate generated code for required doctrine markers ----
+            # Per feedback_anti_drift_block_2026_04_30.md: 10 canonical markers byte-for-byte.
+            # Per rule_wku_framework.md: WKU/Wisdom/Proverbs 24:3 framing required.
+            ANTI_DRIFT_V2_MARKERS = [
+                "EVIDENCE-OR-INCOMPLETE",
+                "GATE F",
+                "T1",
+                "NO INLINE EDITS",
+                "CONTRADICTION",
+                "STALE-MEMORY",
+                "INCOMPLETE-OVER-FAKED",
+                "PLAIN-ENGLISH MARC-FACING",
+                "SELF-DOUBT AS FEATURE",
+                "PRECEDENCE",
+            ]
+            sprint2_missing_markers = [m for m in ANTI_DRIFT_V2_MARKERS if m not in generated]
+            sprint2_wku_present = any(kw in generated for kw in ("WKU", "Wisdom", "Proverbs 24:3"))
+
+            if sprint2_missing_markers or not sprint2_wku_present:
+                return {
+                    "build_status": "INCOMPLETE",
+                    "reason": "Sprint 2: generated code missing required doctrine markers",
+                    "agent_name": agent_name,
+                    "missing_anti_drift_markers": sprint2_missing_markers,
+                    "wku_present": sprint2_wku_present,
+                    "research_trace_ids": [sprint2_research_trace_id] if sprint2_research_trace_id else [],
+                    "code_gen_trace_ids": [gen_trace_id] if gen_trace_id else [],
+                    "marc_facing_summary": (
+                        f"{agent_name} build refused at code-gen validation: generated code "
+                        f"missing {len(sprint2_missing_markers)} of 10 anti-drift v2 markers"
+                        f"{' AND missing WKU framing' if not sprint2_wku_present else ''}. "
+                        f"Builder enforces these per feedback_anti_drift_block_2026_04_30.md "
+                        f"and rule_wku_framework.md. Sonnet must paste the canonical block verbatim."
+                    ),
+                }
 
             # Validate the generated code (per repair-dispatch checks).
             # Repair #4 (2026-04-26): runtime-specific validation. Python checks
