@@ -1491,6 +1491,220 @@ def compute_diff_preview(before: str, after: str, max_lines: int = 50) -> str:
 # ----------------------------------------------------------------------------
 # MARC-FACING SUMMARY (outcomes-first per feedback_communication_style.md)
 # ----------------------------------------------------------------------------
+def build_sprint4_scaffolding(
+    agent_name: str, silo: str, runtime_host: str,
+    scope: str, success_criteria: str,
+    generated_artifact: str,
+    canon_refs: list, doctrine_refs: list,
+    target_path: str | None,
+    krite_scores: dict,
+) -> dict:
+    """Sprint 4 (2026-05-05): build the 5-layer self-improvement scaffolding for an agent.
+
+    Returns a dict with:
+      - memstore: memory schema + retention policy + self-improvement loop config
+      - rubric: 5-axis evaluation rubric (voice/compliance/research/tone/wku)
+      - scorecard: performance ledger seeded with build-time KRITE scores
+      - failure_modes: escalation triggers + chain (stub)
+      - references: canonical doctrine/canon refs + curation policy (stub)
+      - dossier_validation: 5-layer scaffold check (only when applicable to this agent)
+
+    These are scaffolding files only — agents wire their own metric emitters and
+    fill these stores at runtime. Builder seeds the schemas and initial state.
+    """
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    memstore = {
+        "agent_name": agent_name,
+        "memory_namespace": f"agents/{agent_name}/memory",
+        "memory_schema": {
+            "trace_decisions": "JSONL — every meaningful decision (input → reasoning → output)",
+            "lessons_learned": "JSONL — corrections from KRITE/Karis/Marc that should change future behavior",
+            "open_questions": "JSON object — questions the agent has flagged as unresolved",
+            "confidence_calibration": "JSONL — agent's stated confidence on each output + actual outcome",
+        },
+        "retention_policy": {
+            "trace_decisions": "30d",
+            "lessons_learned": "permanent",
+            "open_questions": "until_resolved",
+            "confidence_calibration": "180d",
+        },
+        "self_improvement_loop": {
+            "review_cadence": "weekly",
+            "review_agent": "judge-agent-v1",
+            "trigger_thresholds": {
+                "rubric_avg_below": 0.80,
+                "lessons_unaddressed": 5,
+                "confidence_miscalibration_above": 0.30,
+            },
+        },
+        "created_at": now_iso,
+        "version": "1.0.0",
+    }
+
+    rubric = {
+        "agent_name": agent_name,
+        "axes": [
+            {
+                "name": "voice", "weight": 0.20,
+                "rubric": "Plain English; no sales-theater phrases; marc_facing_summary leads with outcome.",
+                "hard_fail_signals": ["sales_theater_phrase", "fake_completion_phrase"],
+            },
+            {
+                "name": "compliance", "weight": 0.20,
+                "rubric": "Doctrine cited correctly; anti-drift v2 markers present; WKU block in every system prompt; no silent env fallbacks.",
+                "hard_fail_signals": ["missing_anti_drift_marker", "missing_wku", "silent_env_fallback"],
+            },
+            {
+                "name": "research", "weight": 0.20,
+                "rubric": "T1/T2 citations on every load-bearing claim; specific named voices when canon-relevant; no invented sources.",
+                "hard_fail_signals": ["uncited_claim", "invented_voice"],
+            },
+            {
+                "name": "tone", "weight": 0.15,
+                "rubric": "Calibrated confidence; flags uncertainty; refuses on insufficient evidence.",
+                "hard_fail_signals": ["overconfident_assertion"],
+            },
+            {
+                "name": "wku", "weight": 0.25,
+                "rubric": "Wisdom-Knowledge-Understanding per Proverbs 24:3-4; serves Marc's actual goal not literal request.",
+                "hard_fail_signals": ["wisdom_failure"],
+            },
+        ],
+        "pass_threshold": 0.80,
+        "max_iterations": 3,
+        "scored_by": "krite-agent-v1",
+        "version": "1.0.0",
+    }
+
+    initial_run = None
+    if isinstance(krite_scores, dict):
+        score_values = {
+            axis: krite_scores.get(axis)
+            for axis in ("voice", "compliance", "research", "tone", "wku")
+        }
+        numeric = [v for v in score_values.values() if isinstance(v, (int, float))]
+        avg = (sum(numeric) / len(numeric)) if numeric else None
+        initial_run = {
+            "timestamp": now_iso,
+            "trigger": "agent_birth",
+            "scores": score_values,
+            "passed": bool(krite_scores.get("pass", False)),
+            "rubric_avg": avg,
+            "notes": "Build-time KRITE pre-score (Sprint 4 seed)",
+        }
+
+    scorecard_summary_avg = initial_run["rubric_avg"] if initial_run else None
+    scorecard = {
+        "agent_name": agent_name,
+        "history": [initial_run] if initial_run else [],
+        "summary": {
+            "runs_total": 1 if initial_run else 0,
+            "runs_passed": 1 if (initial_run and initial_run["passed"]) else 0,
+            "runs_failed": 1 if (initial_run and not initial_run["passed"]) else 0,
+            "rubric_avg": scorecard_summary_avg,
+            "trend_30d": None,
+        },
+        "last_review_at": now_iso if initial_run else None,
+        "next_review_due_at": None,
+        "version": "1.0.0",
+    }
+
+    failure_modes = {
+        "agent_name": agent_name,
+        "triggers": [
+            {"id": "rubric_avg_drop", "condition": "rubric_avg_30d < 0.75", "severity": "yellow", "action": "judge-agent-v1 review"},
+            {"id": "rubric_avg_critical", "condition": "rubric_avg_30d < 0.65", "severity": "red", "action": "halt agent + dispatch repair"},
+            {"id": "consecutive_failures", "condition": "consecutive_runs_failed >= 3", "severity": "yellow", "action": "judge-agent-v1 review"},
+            {"id": "consecutive_failures_critical", "condition": "consecutive_runs_failed >= 5", "severity": "red", "action": "halt agent + dispatch repair"},
+            {"id": "lessons_backlog", "condition": "lessons_unaddressed >= 10", "severity": "yellow", "action": "trigger weekly review early"},
+            {"id": "doctrine_marker_missing", "condition": "anti_drift_v2_markers < 10", "severity": "red", "action": "dispatch Builder fix mode"},
+        ],
+        "escalation_chain": ["judge-agent-v1", "krite-agent-v1", "marc"],
+        "stub": True,
+        "stub_note": "Triggers are declarative; agent runtime must wire metric emitters that update memstore so these conditions can evaluate.",
+        "version": "1.0.0",
+    }
+
+    references = {
+        "agent_name": agent_name,
+        "canonical_references": {
+            "doctrine": list(doctrine_refs or []),
+            "canon": list(canon_refs or []),
+            "external": [],
+        },
+        "curation_policy": {
+            "stale_threshold_days": 90,
+            "reviewer": "daniel-agent-v1",
+            "action_on_stale": "queue_for_review",
+        },
+        "stub": True,
+        "stub_note": "External T1/T2/T3 sources accumulate as the agent runs and cites; daniel-agent-v1 reviews quarterly.",
+        "version": "1.0.0",
+    }
+
+    DOSSIER_KEYWORDS = (
+        "dossier", "research", "intel", "report", "protocol",
+        "brief", "monograph", "weekly", "morning", "magazine",
+    )
+    scope_lower = (scope or "").lower()
+    name_lower = (agent_name or "").lower()
+    dossier_applicable = any(
+        kw in scope_lower or kw in name_lower for kw in DOSSIER_KEYWORDS
+    )
+
+    DOSSIER_LAYERS = [
+        ("header", ["title", "agent_name", "generated_at", "for_whom", "audience"]),
+        ("synthesis", ["executive_summary", "outcome", "key_findings", "summary"]),
+        ("evidence", ["citations", "claims", "T1", "T2", "evidence", "source"]),
+        ("recommendations", ["action", "next_step", "owner", "by_when", "recommendation"]),
+        ("appendix", ["references", "raw_data", "notes", "appendix"]),
+    ]
+
+    if dossier_applicable:
+        artifact_text = (generated_artifact or "").lower()
+        layers_found = []
+        layers_missing = []
+        for layer_name, signal_keywords in DOSSIER_LAYERS:
+            hits = sum(1 for kw in signal_keywords if kw.lower() in artifact_text)
+            entry = {"layer": layer_name, "signal_hits": hits, "signals_checked": signal_keywords}
+            if hits >= 1:
+                layers_found.append(entry)
+            else:
+                layers_missing.append(entry)
+        if len(layers_missing) == 0:
+            verdict = "complete"
+        elif len(layers_found) >= 3:
+            verdict = "partial"
+        else:
+            verdict = "incomplete"
+        dossier_validation = {
+            "applicable": True,
+            "layers_required": 5,
+            "layers_found": len(layers_found),
+            "layers_missing_count": len(layers_missing),
+            "layers_found_detail": layers_found,
+            "layers_missing_detail": layers_missing,
+            "verdict": verdict,
+            "method": "heuristic_keyword_match",
+            "notes": "Stub validator. Full structural check is Sprint 5+ work.",
+        }
+    else:
+        dossier_validation = {
+            "applicable": False,
+            "reason": "agent_name + scope did not match dossier keywords; structural 5-layer check skipped.",
+        }
+
+    return {
+        "memstore": memstore,
+        "rubric": rubric,
+        "scorecard": scorecard,
+        "failure_modes": failure_modes,
+        "references": references,
+        "dossier_validation": dossier_validation,
+    }
+
+
 def marc_summary(build_status: str, agent_name: str, runtime_path: str,
                  krite_scores: dict, iterations: int, trace_ids: list,
                  runtime_host: str = "windmill",
@@ -2669,6 +2883,26 @@ def main(intake: dict | None = None) -> dict:
     except NameError:
         doctrine_manifest_out = []
 
+    # Sprint 4 (2026-05-05): build self-improvement scaffolding (5 files + optional
+    # dossier validation). Apply script writes these to agents/<agent-name>/scaffold/
+    # in the host repo. Failure here is non-fatal — scaffolding is metadata, not
+    # gating, so we surface the error instead of failing the build.
+    try:
+        sprint4_scaffolding = build_sprint4_scaffolding(
+            agent_name=agent_name,
+            silo=silo,
+            runtime_host=runtime_host,
+            scope=scope,
+            success_criteria=success_criteria,
+            generated_artifact=(generated if 'generated' in dir() and isinstance(generated, str) else ""),
+            canon_refs=canon_refs,
+            doctrine_refs=doctrine_refs,
+            target_path=(sprint3_target_subpath if 'sprint3_target_subpath' in dir() else None),
+            krite_scores=krite_scores,
+        )
+    except Exception as e:
+        sprint4_scaffolding = {"_error": str(e)[:500]}
+
     return {
         "build_status": final_status,
         "agent_name": agent_name,
@@ -2716,6 +2950,11 @@ def main(intake: dict | None = None) -> dict:
             "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "memory_status": "not_yet_bootstrapped",
         } if final_status in ("BUILT", "INCOMPLETE") and 'sprint3_target_subpath' in dir() else None),
+        # Sprint 4 (2026-05-05): self-improvement scaffolding metadata.
+        # Apply script reads sprint4_scaffolding.{memstore,rubric,scorecard,
+        # failure_modes,references,dossier_validation} and writes each as a JSON
+        # file under agents/<agent_name>/scaffold/ in the host repo.
+        "sprint4_scaffolding": sprint4_scaffolding,
         "marc_facing_summary": marc_summary(
             final_status, agent_name, runtime_path,
             krite_scores, len(krite_iterations), trace_ids,
