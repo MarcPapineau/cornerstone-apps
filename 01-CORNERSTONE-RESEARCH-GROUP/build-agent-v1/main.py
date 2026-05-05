@@ -2429,12 +2429,17 @@ def main(intake: dict | None = None) -> dict:
     sprint3_failures = []
 
     if final_status == "BUILT":
-        # Patch D: write generated source to disk (so orchestrator can git commit)
-        sprint3_repo_roots = [
-            "/workspace/cornerstoneregroup-site",
+        # Patch D: write generated source to disk + REQUIRE host persistence verification.
+        # Sprint 3 repair (2026-05-05): container-only writes do NOT count as success.
+        # Host-verified roots are checked first; container fallback only for diagnostic.
+        SPRINT3_HOST_VERIFIED_ROOTS = [
             "/Users/marcpapineau/.openclaw/workspace/cornerstoneregroup-site",
             os.path.expanduser("~/.openclaw/workspace/cornerstoneregroup-site"),
         ]
+        SPRINT3_CONTAINER_ONLY_ROOTS = [
+            "/workspace/cornerstoneregroup-site",
+        ]
+        sprint3_repo_roots = SPRINT3_HOST_VERIFIED_ROOTS + SPRINT3_CONTAINER_ONLY_ROOTS
         if runtime_host == "netlify-fn":
             sprint3_target_subpath = f"netlify/functions/{agent_name}.js"
         elif runtime_host == "windmill":
@@ -2447,25 +2452,72 @@ def main(intake: dict | None = None) -> dict:
         except NameError:
             generated_str = None
 
+        sprint3_source_path_host_verified = False
+        sprint3_source_paths_tried = []
+        sprint3_source_write_note = None
         if sprint3_target_subpath and generated_str:
+            # Sprint 3 repair (2026-05-05 v2): from INSIDE Windmill container,
+            # host-persistence is FUNDAMENTALLY UNVERIFIABLE. Both /workspace/* and
+            # /Users/marcpapineau/* paths exist in container overlay but neither is
+            # bind-mounted to host (verified empirically — Builder writes succeed
+            # container-side but files never appear on host). Per Marc Sprint 3
+            # repair directive: container-only writes do NOT count. Therefore
+            # Patch D ALWAYS returns INCOMPLETE in this container config; the
+            # generated source content is exposed in code_gen_response for the
+            # orchestrator (post-Build) to write to host + git commit.
             for root in sprint3_repo_roots:
                 cand = os.path.join(root, sprint3_target_subpath)
+                root_class = "host_shaped" if root in SPRINT3_HOST_VERIFIED_ROOTS else "container_only"
                 try:
                     os.makedirs(os.path.dirname(cand), exist_ok=True)
                     with open(cand, "w") as fh:
                         fh.write(generated_str)
-                    sprint3_source_path = cand
-                    break
-                except (OSError, PermissionError):
+                    # Container-internal stat — meaningless for host persistence.
+                    container_stat = os.path.exists(cand) and os.path.getsize(cand) == len(generated_str.encode("utf-8"))
+                    sprint3_source_paths_tried.append({
+                        "root_class": root_class,
+                        "path": cand,
+                        "container_internal_write": "ok",
+                        "container_size_match": container_stat,
+                        "host_verified": False,
+                    })
+                    if not sprint3_source_path:
+                        sprint3_source_path = cand  # diagnostic only
+                except (OSError, PermissionError) as e:
+                    sprint3_source_paths_tried.append({
+                        "root_class": root_class,
+                        "path": cand,
+                        "error": str(e)[:100],
+                    })
                     continue
-            if not sprint3_source_path:
-                sprint3_failures.append("Patch D: could not write source — no writable shared FS")
-                final_status = "INCOMPLETE"
 
-        # Patch E: update agents-registry.json (only if source written)
-        if sprint3_source_path:
+            sprint3_source_path_host_verified = False
+            sprint3_source_write_note = (
+                "Builder ran inside Windmill container. From this context, host filesystem "
+                "persistence is UNVERIFIABLE — neither /workspace/* nor /Users/marcpapineau/* "
+                "paths are bind-mounted to the host repo (verified empirically 2026-05-05). "
+                "Generated source is held in code_gen_response for orchestrator to write+commit. "
+                "Patch D returns INCOMPLETE per Marc Sprint 3 repair directive: "
+                "container-only writes do NOT count."
+            )
+            sprint3_failures.append(
+                f"Patch D: host persistence UNVERIFIED from container. "
+                f"diagnostic_path={sprint3_source_path or 'none'}. "
+                f"paths_tried={sprint3_source_paths_tried}. "
+                f"note={sprint3_source_write_note}"
+            )
+            final_status = "INCOMPLETE"
+
+        # Patch E: update managed-agents-registry.json
+        # Sprint 3 repair v3 (2026-05-05): decoupled from Patch D host-verification —
+        # E always attempts (regardless of D outcome) so Marc gets "exercised OR
+        # explicitly INCOMPLETE with evidence" per spec, not silent skip.
+        # Filename: managed-agents-registry.json per Audit 1 (NOT agents-registry.json).
+        if sprint3_target_subpath:
+            sprint3_registry_paths_tried = []
             for root in sprint3_repo_roots:
-                rpath = os.path.join(root, "data", "agents-registry.json")
+                rpath = os.path.join(root, "data", "managed-agents-registry.json")
+                sprint3_registry_paths_tried.append(rpath)
                 if os.path.exists(rpath):
                     try:
                         with open(rpath) as fh:
@@ -2503,7 +2555,10 @@ def main(intake: dict | None = None) -> dict:
                         sprint3_failures.append(f"Patch E: registry update at {rpath} failed: {e}")
                         continue
             if not sprint3_registry_updated:
-                sprint3_failures.append("Patch E: agents-registry.json not found at any candidate path")
+                sprint3_failures.append(
+                    f"Patch E: managed-agents-registry.json not found at any candidate path; "
+                    f"tried={sprint3_registry_paths_tried}"
+                )
                 final_status = "INCOMPLETE"
 
         # Patch H: run Habakkuk pattern checks
@@ -2513,7 +2568,10 @@ def main(intake: dict | None = None) -> dict:
         habakkuk_found = next((p for p in habakkuk_paths if os.path.exists(p)), None)
         if not habakkuk_found:
             sprint3_habakkuk_status = "unavailable"
-            sprint3_failures.append("Patch H: habakkuk-pre-build.sh not accessible from runtime container")
+            sprint3_failures.append(
+                f"Patch H: habakkuk-pre-build.sh not accessible from runtime container; "
+                f"tried={habakkuk_paths}"
+            )
             final_status = "INCOMPLETE"
         else:
             try:

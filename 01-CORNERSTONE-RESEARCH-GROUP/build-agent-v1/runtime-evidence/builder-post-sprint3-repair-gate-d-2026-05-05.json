@@ -1,0 +1,12 @@
+{
+  "gate": "D",
+  "status": "INCOMPLETE",
+  "runtime_id": "windmill:u/admin/build-agent-v1",
+  "trace_id": "build-agent-v1-1777945923143",
+  "timestamp": "2026-05-05T01:48:00Z",
+  "evidence_paths": [
+    "windmill-job:019df5d4-1d73-dce1-9f12-12c27079fba6",
+    "file:/Users/marcpapineau/.openclaw/workspace/01-CORNERSTONE-RESEARCH-GROUP/build-agent-v1/main.py:2657"
+  ],
+  "notes": "Sprint 3 repair v3 final self-test. Builder hash 531758382afe47a6. ALL 4 PATCHES EXERCISED IN ONE RUN: G passed (no banned phrases), F passed (agentGuard injected), D explicitly INCOMPLETE with paths_tried + host_verified=False evidence (Windmill container fundamentally cannot verify host persistence from inside), E explicitly INCOMPLETE with 3 paths_tried evidence (managed-agents-registry.json not in container view), H explicitly INCOMPLETE with 3 paths_tried evidence (habakkuk script not in container view). Builder build_status=INCOMPLETE per correct doctrine enforcement."
+}
