@@ -2128,6 +2128,60 @@ def main(intake: dict | None = None) -> dict:
                     ),
                 }
 
+            # ---- Sprint 3 Patch G (2026-05-05): KRITE Voice hard-fails ----
+            # Block sales-theater language + fake completion language in generated code.
+            # Per EVALUATION-GRADING-FRAMEWORK-v1.md Voice axis hard-fails.
+            SPRINT3_SALES_THEATER_PHRASES = [
+                "game-changing", "revolutionary", "unprecedented",
+                "in today's fast-paced", "ever-changing landscape",
+                "best-in-class", "world-class", "next-generation",
+                "delve into", "dive into", "landscape of",
+                "leverage synergy", "synergize",
+            ]
+            SPRINT3_FAKE_COMPLETION_PHRASES = [
+                "successfully deployed", "successfully built",
+                "successfully shipped", "successfully completed",
+                "everything is working", "all systems operational",
+                "production-ready and tested",
+            ]
+            sprint3_lower = generated.lower()
+            sprint3_sales_theater = [p for p in SPRINT3_SALES_THEATER_PHRASES if p in sprint3_lower]
+            sprint3_fake_completion = [p for p in SPRINT3_FAKE_COMPLETION_PHRASES if p in sprint3_lower]
+            if sprint3_sales_theater or sprint3_fake_completion:
+                return {
+                    "build_status": "INCOMPLETE",
+                    "reason": "Sprint 3: KRITE Voice hard-fail — banned phrases found in generated code",
+                    "agent_name": agent_name,
+                    "sales_theater_found": sprint3_sales_theater,
+                    "fake_completion_found": sprint3_fake_completion,
+                    "research_trace_ids": [sprint2_research_trace_id] if sprint2_research_trace_id else [],
+                    "code_gen_trace_ids": [gen_trace_id] if gen_trace_id else [],
+                    "marc_facing_summary": (
+                        f"{agent_name} build refused at KRITE Voice gate: generated code contains "
+                        f"{len(sprint3_sales_theater)} sales-theater phrase(s) "
+                        f"and/or {len(sprint3_fake_completion)} fake-completion phrase(s). "
+                        f"Per EVALUATION-GRADING-FRAMEWORK-v1.md Voice axis hard-fails."
+                    ),
+                }
+
+            # ---- Sprint 3 Patch F (2026-05-05): agentGuard validation ----
+            # Per AGENT-OPERATING-MODEL.md, every CRG agent must call
+            # agentGuard(tier, name) at function entry, fail-closed.
+            if "agentGuard(" not in generated:
+                return {
+                    "build_status": "INCOMPLETE",
+                    "reason": "Sprint 3: generated code missing agentGuard(tier, name) call",
+                    "agent_name": agent_name,
+                    "research_trace_ids": [sprint2_research_trace_id] if sprint2_research_trace_id else [],
+                    "code_gen_trace_ids": [gen_trace_id] if gen_trace_id else [],
+                    "marc_facing_summary": (
+                        f"{agent_name} build refused: generated code does not call "
+                        f"agentGuard(tier, name) at function entry. Per "
+                        f"AGENT-OPERATING-MODEL.md, every CRG agent must be wrapped "
+                        f"in agentGuard for tier-aware fail-closed gating."
+                    ),
+                }
+
             # Validate the generated code (per repair-dispatch checks).
             # Repair #4 (2026-04-26): runtime-specific validation. Python checks
             # `def main(` + Anthropic refs; Node.js checks `exports.handler` +
@@ -2355,6 +2409,124 @@ def main(intake: dict | None = None) -> dict:
             "markers_found": [], "markers_missing": [],
         }
 
+    # ---- Sprint 3 Patches D + E + H (2026-05-05): source-write + registry + Habakkuk ----
+    # Per Marc directive: no Windmill-only / runtime-only output. If any Sprint 3
+    # gate fails, downgrade final_status to INCOMPLETE — no fake completion.
+    import subprocess
+    sprint3_source_path = None
+    sprint3_registry_updated = None
+    sprint3_habakkuk_status = "not_run"
+    sprint3_habakkuk_verdict = None
+    sprint3_failures = []
+
+    if final_status == "BUILT":
+        # Patch D: write generated source to disk (so orchestrator can git commit)
+        sprint3_repo_roots = [
+            "/workspace/cornerstoneregroup-site",
+            "/Users/marcpapineau/.openclaw/workspace/cornerstoneregroup-site",
+            os.path.expanduser("~/.openclaw/workspace/cornerstoneregroup-site"),
+        ]
+        if runtime_host == "netlify-fn":
+            sprint3_target_subpath = f"netlify/functions/{agent_name}.js"
+        elif runtime_host == "windmill":
+            sprint3_target_subpath = f"01-CORNERSTONE-RESEARCH-GROUP/agents/windmill/{agent_name}/main.py"
+        else:
+            sprint3_target_subpath = None
+
+        try:
+            generated_str = generated  # type: ignore[name-defined]
+        except NameError:
+            generated_str = None
+
+        if sprint3_target_subpath and generated_str:
+            for root in sprint3_repo_roots:
+                cand = os.path.join(root, sprint3_target_subpath)
+                try:
+                    os.makedirs(os.path.dirname(cand), exist_ok=True)
+                    with open(cand, "w") as fh:
+                        fh.write(generated_str)
+                    sprint3_source_path = cand
+                    break
+                except (OSError, PermissionError):
+                    continue
+            if not sprint3_source_path:
+                sprint3_failures.append("Patch D: could not write source — no writable shared FS")
+                final_status = "INCOMPLETE"
+
+        # Patch E: update agents-registry.json (only if source written)
+        if sprint3_source_path:
+            for root in sprint3_repo_roots:
+                rpath = os.path.join(root, "data", "agents-registry.json")
+                if os.path.exists(rpath):
+                    try:
+                        with open(rpath) as fh:
+                            registry = json.load(fh)
+                        agents_list = registry.get("agents", []) if isinstance(registry, dict) else (registry if isinstance(registry, list) else [])
+                        new_entry = {
+                            "name": agent_name,
+                            "silo": silo,
+                            "runtime_host": runtime_host,
+                            "runtime_id": f"{runtime_host}:{agent_name}",
+                            "source_path": sprint3_source_path,
+                            "trace_id": (final_trace_id if 'final_trace_id' in dir() else None),
+                            "build_status": "BUILT",
+                            "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "memory_status": "not_yet_bootstrapped",
+                        }
+                        existing_idx = None
+                        for i, a in enumerate(agents_list):
+                            if isinstance(a, dict) and a.get("name") == agent_name:
+                                existing_idx = i
+                                break
+                        if existing_idx is not None:
+                            agents_list[existing_idx] = new_entry
+                        else:
+                            agents_list.append(new_entry)
+                        if isinstance(registry, dict):
+                            registry["agents"] = agents_list
+                        else:
+                            registry = agents_list
+                        with open(rpath, "w") as fh:
+                            json.dump(registry, fh, indent=2)
+                        sprint3_registry_updated = rpath
+                        break
+                    except Exception as e:
+                        sprint3_failures.append(f"Patch E: registry update at {rpath} failed: {e}")
+                        continue
+            if not sprint3_registry_updated:
+                sprint3_failures.append("Patch E: agents-registry.json not found at any candidate path")
+                final_status = "INCOMPLETE"
+
+        # Patch H: run Habakkuk pattern checks
+        habakkuk_paths = [
+            os.path.join(r, "scripts", "qa", "habakkuk-pre-build.sh") for r in sprint3_repo_roots
+        ]
+        habakkuk_found = next((p for p in habakkuk_paths if os.path.exists(p)), None)
+        if not habakkuk_found:
+            sprint3_habakkuk_status = "unavailable"
+            sprint3_failures.append("Patch H: habakkuk-pre-build.sh not accessible from runtime container")
+            final_status = "INCOMPLETE"
+        else:
+            try:
+                proc = subprocess.run(
+                    ["bash", habakkuk_found, "--json"],
+                    capture_output=True, timeout=60, text=True,
+                )
+                sprint3_habakkuk_status = f"ran (exit={proc.returncode})"
+                sprint3_habakkuk_verdict = (proc.stdout or "")[:1500]
+                # Exit codes: 0=pass, 1=reject, 2=inconclusive (fail-closed), 3=environmental
+                if proc.returncode != 0:
+                    sprint3_failures.append(f"Patch H: Habakkuk exit={proc.returncode}")
+                    final_status = "INCOMPLETE"
+            except subprocess.TimeoutExpired:
+                sprint3_habakkuk_status = "timeout"
+                sprint3_failures.append("Patch H: Habakkuk timed out")
+                final_status = "INCOMPLETE"
+            except Exception as e:
+                sprint3_habakkuk_status = f"error: {e}"
+                sprint3_failures.append(f"Patch H: Habakkuk error: {e}")
+                final_status = "INCOMPLETE"
+
     # ---- Step 5: emit final trace + return Marc-facing summary --------
     final_trace_id = langfuse_trace(
         lf_pub, lf_sec, lf_host,
@@ -2403,6 +2575,12 @@ def main(intake: dict | None = None) -> dict:
         "code_gen_validation": code_gen_validation,
         "functional_test_design": functional_test_design,
         "functional_test_result": functional_test_result,
+        # Sprint 3 (2026-05-05): source-write + registry + Habakkuk fields
+        "sprint3_source_path": sprint3_source_path if 'sprint3_source_path' in dir() else None,
+        "sprint3_registry_updated": sprint3_registry_updated if 'sprint3_registry_updated' in dir() else None,
+        "sprint3_habakkuk_status": sprint3_habakkuk_status if 'sprint3_habakkuk_status' in dir() else "skipped",
+        "sprint3_habakkuk_verdict": sprint3_habakkuk_verdict if 'sprint3_habakkuk_verdict' in dir() else None,
+        "sprint3_failures": sprint3_failures if 'sprint3_failures' in dir() else [],
         "marc_facing_summary": marc_summary(
             final_status, agent_name, runtime_path,
             krite_scores, len(krite_iterations), trace_ids,
