@@ -817,6 +817,285 @@ def _http_get(url: str, headers: dict, timeout: int = 30) -> dict:
         return {"_error": True, "status": 0, "body": str(e)}
 
 
+def _http_patch(url: str, headers: dict, body: dict, timeout: int = 30) -> dict:
+    """PATCH helper for memory-store updates (memories.update endpoint)."""
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="PATCH")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8")
+            try:
+                return json.loads(text) if text else {"_ok": True, "_status": resp.status}
+            except json.JSONDecodeError:
+                return {"_ok": True, "_raw": text, "_status": resp.status}
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8")
+        except Exception:
+            err_body = str(e)
+        return {"_error": True, "status": e.code, "body": err_body}
+    except Exception as e:
+        return {"_error": True, "status": 0, "body": str(e)}
+
+
+# ----------------------------------------------------------------------------
+# Builder self-improvement memstore (Sprint 5 boundary 2026-05-05).
+#
+# Builder is the only fleet agent on Windmill (Python) rather than Anthropic
+# Managed Agents. So we cannot use the agent-bound memory tool pattern. Instead
+# the memstore is a plain Anthropic memory_store, accessed via the Anthropic
+# /v1/memory_stores HTTP API directly (urllib).
+#
+# Lifecycle:
+#   - bootstrap (scripts/managed-agents-bootstrap/build-agent-v1-bootstrap.js)
+#     creates the memstore + persists ID to registry.json + Netlify Blob +
+#     Windmill variable u/admin/build-agent-v1/self-improvement-memstore-id
+#   - this Builder runtime resolves the ID via wmill.get_variable + falls
+#     back to env BUILD_AGENT_V1_SELF_IMPROVEMENT_MEMSTORE_ID
+#   - at gen-prompt build time, load_builder_lessons() retrieves the last
+#     ~8KB of /build-outcomes.md and injects it into the gen prompt
+#   - at return time, write_build_outcome() appends the new run's outcome
+#     (build_status, KRITE failures, Habakkuk failures, env/runtime failures,
+#     successful patterns) to /build-outcomes.md via read-modify-write
+# ----------------------------------------------------------------------------
+ANTHROPIC_MEMSTORE_BASE = "https://api.anthropic.com/v1/memory_stores"
+BUILDER_LESSONS_PATH = "/build-outcomes.md"
+BUILDER_LESSONS_MAX_BYTES = 8000   # last 8KB of lessons injected into gen prompt
+ANTHROPIC_MEMSTORE_BETA = "managed-agents-2026-04-01"
+
+
+def _builder_memstore_id() -> str | None:
+    """Resolve memstore_id from env var or Windmill variable. Returns None if absent."""
+    v = os.environ.get("BUILD_AGENT_V1_SELF_IMPROVEMENT_MEMSTORE_ID")
+    if v:
+        return v
+    try:
+        import wmill  # type: ignore[import-not-found]
+        return wmill.get_variable("u/admin/build-agent-v1/self-improvement-memstore-id")
+    except Exception:
+        return None
+
+
+def _memstore_headers(anthropic_key: str) -> dict:
+    return {
+        "x-api-key": anthropic_key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": ANTHROPIC_MEMSTORE_BETA,
+        "Content-Type": "application/json",
+    }
+
+
+def _memstore_find_path(memstore_id: str, path: str, anthropic_key: str) -> dict | None:
+    """List memories in store; return the one whose path matches. None if not found.
+    Endpoint per @anthropic-ai/sdk 0.92.0 memories.list: GET /v1/memory_stores/{id}/memories?beta=true.
+    """
+    url = f"{ANTHROPIC_MEMSTORE_BASE}/{memstore_id}/memories?beta=true"
+    resp = _http_get(url, _memstore_headers(anthropic_key))
+    if resp.get("_error"):
+        return None
+    items = resp.get("data") or resp.get("memories") or []
+    for m in items:
+        if m.get("path") == path:
+            return m
+    return None
+
+
+def _memstore_retrieve_content(memstore_id: str, memory_id: str,
+                                anthropic_key: str) -> str | None:
+    """Retrieve full content of a memory by mem_... id.
+    Endpoint per SDK memories.retrieve: GET /v1/memory_stores/{id}/memories/{mem_id}?beta=true&view=full.
+    """
+    url = f"{ANTHROPIC_MEMSTORE_BASE}/{memstore_id}/memories/{memory_id}?beta=true&view=full"
+    resp = _http_get(url, _memstore_headers(anthropic_key))
+    if resp.get("_error"):
+        return None
+    return resp.get("content")
+
+
+def _memstore_create(memstore_id: str, path: str, content: str,
+                     anthropic_key: str) -> dict:
+    """Endpoint per SDK memories.create: POST /v1/memory_stores/{id}/memories?beta=true."""
+    url = f"{ANTHROPIC_MEMSTORE_BASE}/{memstore_id}/memories?beta=true"
+    return _http_post(url, _memstore_headers(anthropic_key),
+                      {"path": path, "content": content})
+
+
+def _memstore_update(memstore_id: str, memory_id: str, content: str,
+                     anthropic_key: str) -> dict:
+    """Endpoint per SDK memories.update: POST (NOT PATCH) /v1/memory_stores/{id}/memories/{mem_id}?beta=true.
+    Verified empirically 2026-05-05 — PATCH returns 405 Method Not Allowed."""
+    url = f"{ANTHROPIC_MEMSTORE_BASE}/{memstore_id}/memories/{memory_id}?beta=true"
+    return _http_post(url, _memstore_headers(anthropic_key), {"content": content})
+
+
+def load_builder_lessons(memstore_id: str | None,
+                         anthropic_key: str) -> tuple[str, dict]:
+    """Read /build-outcomes.md from Builder's memstore.
+
+    Returns (content_string, metadata_dict). content is "" if file is absent
+    or read fails. metadata is always populated for traceability:
+      {
+        memstore_id: str | None,
+        found: bool,
+        memory_id: str | None,
+        total_bytes: int,
+        returned_bytes: int,
+        truncated: bool,
+        error: str | None,
+      }
+    """
+    meta = {
+        "memstore_id": memstore_id,
+        "found": False,
+        "memory_id": None,
+        "total_bytes": 0,
+        "returned_bytes": 0,
+        "truncated": False,
+        "error": None,
+    }
+    if not memstore_id:
+        meta["error"] = "memstore_id absent (Windmill variable + env var both unset)"
+        return ("", meta)
+    if not anthropic_key:
+        meta["error"] = "anthropic_key absent"
+        return ("", meta)
+    try:
+        m = _memstore_find_path(memstore_id, BUILDER_LESSONS_PATH, anthropic_key)
+        if not m:
+            return ("", meta)
+        meta["found"] = True
+        meta["memory_id"] = m.get("id")
+        meta["total_bytes"] = m.get("content_size_bytes", 0)
+        content = _memstore_retrieve_content(memstore_id, m["id"], anthropic_key)
+        if content is None:
+            meta["error"] = "retrieve returned None"
+            return ("", meta)
+        if len(content) > BUILDER_LESSONS_MAX_BYTES:
+            meta["truncated"] = True
+            tail = content[-BUILDER_LESSONS_MAX_BYTES:]
+            # Snap to a line boundary so the tail starts cleanly
+            nl = tail.find("\n")
+            if 0 < nl < 200:
+                tail = tail[nl + 1:]
+            tail = "[…earlier entries truncated to fit prompt budget…]\n" + tail
+            content = tail
+        meta["returned_bytes"] = len(content)
+        return (content, meta)
+    except Exception as e:
+        meta["error"] = str(e)[:200]
+        return ("", meta)
+
+
+def build_outcome_entry(result: dict) -> str:
+    """Compose a markdown entry for /build-outcomes.md from the result dict.
+
+    Categorizes into: successful_pattern | krite_failure | habakkuk_failure
+    | sprint3_or_runtime_failure | incomplete_other.
+    """
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    agent_name = result.get("agent_name") or "(unknown)"
+    status = result.get("build_status") or "(unknown)"
+    silo = result.get("silo") or "(unknown)"
+    runtime_host = result.get("runtime_host") or "(unknown)"
+    krite = result.get("krite_scores") or {}
+    krite_axes = {k: krite.get(k) for k in ("voice", "compliance", "research", "tone", "wku", "pass")
+                  if krite.get(k) is not None}
+    krite_fail = result.get("krite_failures") or []
+    sales_theater = result.get("sales_theater_found") or []
+    fake_completion = result.get("fake_completion_found") or []
+    hab_status = result.get("sprint3_habakkuk_status") or "(none)"
+    hab_verdict = (result.get("sprint3_habakkuk_verdict") or "")[:300].replace("\n", " / ")
+    sprint3_failures = result.get("sprint3_failures") or []
+    test_traces = result.get("test_fire_trace_ids") or []
+
+    parts = [
+        f"## {now_iso} — {agent_name}",
+        f"build_status: {status}",
+        f"silo: {silo} | runtime_host: {runtime_host}",
+    ]
+    if krite_axes:
+        parts.append(f"krite_scores: {json.dumps(krite_axes)}")
+    if krite_fail:
+        parts.append(f"krite_failures: {' | '.join(str(f)[:80] for f in krite_fail[:5])}")
+    if sales_theater:
+        parts.append(f"sales_theater_found: {', '.join(sales_theater[:6])}")
+    if fake_completion:
+        parts.append(f"fake_completion_found: {', '.join(fake_completion[:6])}")
+    parts.append(f"habakkuk: status={hab_status}")
+    if hab_verdict:
+        parts.append(f"habakkuk_verdict_head: {hab_verdict}")
+    if sprint3_failures:
+        parts.append(f"sprint3_failures: {' | '.join(str(f)[:140] for f in sprint3_failures[:3])}")
+    if test_traces:
+        parts.append(f"trace_ids: {', '.join(test_traces[:3])}")
+
+    if status == "BUILT":
+        category = "successful_pattern"
+    elif krite_fail or sales_theater or fake_completion:
+        category = "krite_failure"
+    elif (hab_status not in ("(none)", "skipped", "unavailable")
+          and "exit=0" not in str(hab_status)):
+        category = "habakkuk_failure"
+    elif sprint3_failures:
+        category = "sprint3_or_runtime_failure"
+    else:
+        category = "incomplete_other"
+    parts.append(f"category: {category}")
+
+    return "\n".join(parts)
+
+
+def write_build_outcome(memstore_id: str | None, anthropic_key: str,
+                         outcome_entry: str) -> dict:
+    """Append outcome to /build-outcomes.md (read-modify-write).
+
+    Returns a metadata dict suitable for the result["builder_memory_write"]
+    field — never raises:
+      {
+        wrote: bool,
+        memory_id: str | None,
+        action: "created" | "updated" | None,
+        bytes_written: int,
+        error: str | None,
+      }
+    """
+    out = {"wrote": False, "memory_id": None, "action": None,
+           "bytes_written": 0, "error": None}
+    if not memstore_id:
+        out["error"] = "memstore_id absent"
+        return out
+    if not anthropic_key:
+        out["error"] = "anthropic_key absent"
+        return out
+    try:
+        m = _memstore_find_path(memstore_id, BUILDER_LESSONS_PATH, anthropic_key)
+        if m:
+            existing = _memstore_retrieve_content(memstore_id, m["id"], anthropic_key) or ""
+            new_content = existing.rstrip() + "\n\n" + outcome_entry.strip() + "\n"
+            r = _memstore_update(memstore_id, m["id"], new_content, anthropic_key)
+            if r.get("_error"):
+                out["error"] = f"update: {str(r.get('body',''))[:200]}"
+                return out
+            out["wrote"] = True
+            out["memory_id"] = m["id"]
+            out["action"] = "updated"
+            out["bytes_written"] = len(new_content)
+        else:
+            r = _memstore_create(memstore_id, BUILDER_LESSONS_PATH,
+                                 outcome_entry.strip() + "\n", anthropic_key)
+            if r.get("_error"):
+                out["error"] = f"create: {str(r.get('body',''))[:200]}"
+                return out
+            out["wrote"] = True
+            out["memory_id"] = r.get("id")
+            out["action"] = "created"
+            out["bytes_written"] = len(outcome_entry) + 1
+        return out
+    except Exception as e:
+        out["error"] = str(e)[:200]
+        return out
+
+
 def krite_review_via_deployed_agent(
     artifact_text: str, artifact_kind: str, anthropic_key: str,
     lf_pub: str, lf_sec: str, lf_host: str,
@@ -1805,6 +2084,22 @@ def marc_summary(build_status: str, agent_name: str, runtime_path: str,
 def main(intake: dict | None = None) -> dict:
     """Build Agent v1 entrypoint — invoked by Windmill with `intake` JSON arg."""
 
+    # Sprint 5 boundary (2026-05-05): pre-declare Builder memory loop variables
+    # at function scope so the return dict can read them regardless of which
+    # gen-prompt branch (windmill vs netlify-fn vs early-exit) was taken.
+    builder_memstore_id = None
+    prior_lessons_content = ""
+    prior_lessons_meta = {
+        "memstore_id": None, "found": False, "memory_id": None,
+        "total_bytes": 0, "returned_bytes": 0, "truncated": False,
+        "error": "not_loaded",
+    }
+    builder_memory_write = {
+        "wrote": False, "memory_id": None, "action": None,
+        "bytes_written": 0, "error": "not_executed",
+    }
+    builder_outcome_md = ""
+
     # ---- Step 1: secret hydration --------------------------------------
     try:
         anthropic_key = wmill.get_variable("u/admin/ANTHROPIC_API_KEY")
@@ -1907,6 +2202,17 @@ def main(intake: dict | None = None) -> dict:
         success_criteria = intake["success_criteria"]
         canon_refs = intake.get("canon_refs", [])
         doctrine_refs = intake.get("doctrine_refs", [])
+
+    # Sprint 5 boundary (2026-05-05): UNCONDITIONALLY load Builder's prior-build
+    # lessons EARLY (before spec-KRITE) so the read fires for every run — even
+    # ones that never reach code generation (spec-KRITE-fail → ESCALATED, or
+    # Sprint 2 research-fail → INCOMPLETE). The lessons are still injected into
+    # the gen prompt below when generation does happen; loading them up here
+    # just guarantees the memory-read field is always populated in the result.
+    builder_memstore_id = _builder_memstore_id()
+    prior_lessons_content, prior_lessons_meta = load_builder_lessons(
+        builder_memstore_id, anthropic_key
+    )
 
     # ---- Step 3: KRITE inline 3-iteration loop on the SPEC ------------
     # We score the build SPEC itself (not yet generated code) so we refuse
@@ -2296,8 +2602,34 @@ def main(intake: dict | None = None) -> dict:
                 f"Output ONLY the JavaScript code. First character of your response must start the .js file."
             )
 
+        # Sprint 5 boundary (2026-05-05): inject prior-build lessons into the
+        # gen prompt so Sonnet can avoid past failure modes + reuse successful
+        # patterns. The actual load happens earlier (top of main, unconditional
+        # so the read fires even on spec-KRITE-fail / research-fail paths).
+        # Here we just compose the prompt block from the already-loaded content.
+        if prior_lessons_content:
+            lessons_block = (
+                f"=== PRIOR BUILDER LESSONS (last {prior_lessons_meta.get('returned_bytes', 0)} bytes "
+                f"of /build-outcomes.md, total stored {prior_lessons_meta.get('total_bytes', 0)} bytes) ===\n"
+                f"You are Build Agent v1. Below are outcomes of your own prior runs — "
+                f"successful patterns you should reuse, KRITE failures you should avoid, "
+                f"Habakkuk pattern violations to not repeat, and runtime/env issues you have "
+                f"already learned about. Read these BEFORE generating. Do not repeat documented "
+                f"failure modes. Reuse phrasing patterns from successful_pattern entries.\n\n"
+                f"{prior_lessons_content}\n\n"
+            )
+        else:
+            err_note = ""
+            if prior_lessons_meta.get("error"):
+                err_note = f" (error: {prior_lessons_meta['error']})"
+            lessons_block = (
+                f"=== PRIOR BUILDER LESSONS ===\n"
+                f"(none — memstore empty or unavailable{err_note})\n\n"
+            )
+
         gen_user_prompt = (
             f"Build the runtime {output_language} script for the agent `{agent_name}`.\n\n"
+            f"{lessons_block}"
             f"=== SILO ===\n{silo}\n\n"
             f"=== SCOPE (the actual job to do) ===\n{scope}\n\n"
             f"=== INPUTS the agent receives ===\n{inputs_block}\n\n"
@@ -2903,6 +3235,33 @@ def main(intake: dict | None = None) -> dict:
     except Exception as e:
         sprint4_scaffolding = {"_error": str(e)[:500]}
 
+    # Sprint 5 boundary (2026-05-05): write this run's outcome to Builder's
+    # self-improvement memstore. Read-modify-write append to /build-outcomes.md.
+    # Failure is non-fatal — memstore is observability, not gating. The next
+    # Builder run reads the resulting file via load_builder_lessons() above.
+    builder_outcome_md = build_outcome_entry({
+        "agent_name": agent_name,
+        "build_status": final_status,
+        "silo": silo,
+        "runtime_host": runtime_host,
+        "krite_scores": krite_scores,
+        "krite_failures": krite_scores.get("failures", []) if isinstance(krite_scores, dict) else [],
+        "sales_theater_found": locals().get("sales_theater_found", []),
+        "fake_completion_found": locals().get("fake_completion_found", []),
+        "sprint3_habakkuk_status": (sprint3_habakkuk_status if 'sprint3_habakkuk_status' in dir() else None),
+        "sprint3_habakkuk_verdict": (sprint3_habakkuk_verdict if 'sprint3_habakkuk_verdict' in dir() else None),
+        "sprint3_failures": (sprint3_failures if 'sprint3_failures' in dir() else []),
+        "test_fire_trace_ids": trace_ids,
+    })
+    # builder_memstore_id was pre-initialized at function-scope and overwritten
+    # in the gen-prompt branch if reached. Fall back to a fresh resolve if it
+    # remained None (e.g. windmill-runtime branch took a different path).
+    if not builder_memstore_id:
+        builder_memstore_id = _builder_memstore_id()
+    builder_memory_write = write_build_outcome(
+        builder_memstore_id, anthropic_key, builder_outcome_md,
+    )
+
     return {
         "build_status": final_status,
         "agent_name": agent_name,
@@ -2955,6 +3314,19 @@ def main(intake: dict | None = None) -> dict:
         # failure_modes,references,dossier_validation} and writes each as a JSON
         # file under agents/<agent_name>/scaffold/ in the host repo.
         "sprint4_scaffolding": sprint4_scaffolding,
+        # Sprint 5 boundary (2026-05-05): Builder self-improvement memstore.
+        # builder_memory_read.found indicates whether prior lessons were loaded
+        # this run; builder_memory_read.returned_bytes shows how much was injected
+        # into the gen prompt. builder_memory_write reports the append outcome
+        # (created vs updated, bytes_written, error if any).
+        "builder_memstore_id": builder_memstore_id,
+        "builder_memory_read": prior_lessons_meta,
+        # Last 1200 chars of loaded lessons — most recent activity. Used by
+        # external validators (e.g. /tmp/builder-memory-validate.js) to confirm
+        # that a freshly-appended sentinel is visible to the next read.
+        "builder_memory_read_preview": (prior_lessons_content[-1200:] if prior_lessons_content else ""),
+        "builder_memory_write": builder_memory_write,
+        "builder_outcome_entry_md": builder_outcome_md,
         "marc_facing_summary": marc_summary(
             final_status, agent_name, runtime_path,
             krite_scores, len(krite_iterations), trace_ids,
