@@ -92,7 +92,7 @@ export const MODEL_CONFIG = {
   primary: 'claude-sonnet-4-6',
   criticEnabled: false, // Phase 2 — Opus safety-reviewer pass
   critic: 'claude-opus-4-7',
-  maxTokens: 3000,
+  maxTokens: 6000,
   temperature: 0.4, // conservative; dosing is not a creative task
 };
 

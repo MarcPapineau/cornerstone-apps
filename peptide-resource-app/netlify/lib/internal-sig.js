@@ -28,7 +28,7 @@
 
 const crypto = require('crypto');
 
-const REPLAY_WINDOW_MS = 30_000; // 30 seconds — generous for clock skew + cold start
+const REPLAY_WINDOW_MS = 120_000; // 120 seconds — covers Anthropic 25-60s cold-start latency
 const SIG_HEADER = 'x-internal-sig';
 
 /**

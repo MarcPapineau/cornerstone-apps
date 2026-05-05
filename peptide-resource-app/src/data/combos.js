@@ -109,46 +109,9 @@ This is the KLOW blend without KPV — ideal for clients who don't have active h
     ],
   },
 
-  {
-    id: 'glow-kpv',
-    name: 'Glow + KPV — Full Healing Blend',
-    shortName: 'Glow + KPV',
-    format: 'freeze-dried-vial',
-    formatLabel: 'Freeze-Dried Vial',
-    formatEmoji: '🧊',
-    emoji: '✨',
-    tagline: 'BPC-157 + TB-500 + GHK-Cu + KPV — the complete healing and rejuvenation stack',
-    category: 'healing',
-    inStock: true,
-    compounds: [
-      { id: 'bpc157', name: 'BPC-157', dose: '10mg', emoji: '🩹', role: 'Local tissue repair' },
-      { id: 'tb500',  name: 'TB-500',  dose: '10mg', emoji: '🩹', role: 'Systemic healing' },
-      { id: 'ghkcu',  name: 'GHK-Cu',  dose: '50mg', emoji: '✨', role: 'Anti-aging and collagen rebuilding' },
-      { id: 'kpv',    name: 'KPV',     dose: '10mg', emoji: '🌿', role: 'Inflammation control and histamine resolution' },
-    ],
-    whyTogether: `This is the Glow blend with KPV added — making it the equivalent of KLOW with the same anti-aging and skin focus. KPV completes the healing system by addressing the inflammatory environment that can blunt the effects of the other three compounds.
-
-Without KPV, histamine reactions can reduce tolerance to BPC-157 and GHK-Cu in sensitive clients. KPV resolves this by stabilizing mast cells and repairing gut integrity — the primary source of systemic histamine overactivation. Adding KPV makes this blend suitable for long-term continuous use and appropriate for clients with inflammatory conditions, gut issues, or previous peptide sensitivity.`,
-    whySuspension: `Same freeze-dried co-lyophilization benefits as KLOW — all four compounds stabilized together in a single vial for maximum convenience and bioavailability.`,
-    benefits: [
-      'Complete healing + anti-aging + inflammation control',
-      'Safe for sensitive clients and long-term use',
-      'Gut healing alongside systemic repair',
-      'Collagen and skin quality improvement',
-      'Histamine reaction prevention',
-    ],
-    idealFor: [
-      'Clients with gut issues alongside musculoskeletal concerns',
-      'Sensitive clients who react to individual compounds',
-      'Long-term maintenance protocols',
-      'Post-surgical recovery with skin improvement goals',
-    ],
-    dosing: 'Same as KLOW protocol',
-    duration: '8–16 weeks',
-    research: [
-      { title: 'KPV attenuates inflammation in colitis', journal: 'Gut, 2009', url: 'https://pubmed.ncbi.nlm.nih.gov/19091823/' },
-    ],
-  },
+  // glow-kpv removed 2026-05-04 per memory/feedback_glow_plus_kpv_is_klow.md
+  // GLOW + KPV is by definition KLOW. SKU `GLOW-KPV-BOX10` resolves to the existing
+  // KLOW canonical entry above. Listing as a separate combo created a duplicate card.
 
   // ── PRE-COMPOUNDED PENS ───────────────────────────────────
 

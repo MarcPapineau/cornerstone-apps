@@ -67,25 +67,28 @@ function isPreviewMode() {
   return false;
 }
 
+// Marc 2026-05-04: removed Netlify Identity auth wall — app is now fully public.
+// RequireAuth is kept as a no-op pass-through (cheaper than ripping it out of every route).
+// AuthContext + Login page kept intact in case auth is re-enabled later, but no route enforces it.
 function RequireAuth({ children }) {
-  const { user, isLoading } = useAuth();
-  if (isLoading) return <AuthLoading />;
-  if (!user && !isPreviewMode()) return <Navigate to="/login" replace />;
   return children;
 }
 
 function AppRoutes() {
-  const { user, isLoading } = useAuth();
-  if (isLoading) return <AuthLoading />;
-
   return (
     <div style={{ minHeight: '100vh', background: '#0a1628' }}>
-      {(user || isPreviewMode()) && <Nav />}
+      <Nav />
       <Routes>
-        {/* Public */}
-        <Route path="/login" element={
-          user ? <Navigate to="/start" replace /> : <Login />
-        } />
+        {/* /login deprecated — auth removed 2026-05-04. Redirect to home. */}
+        <Route path="/login" element={<Navigate to="/" replace />} />
+
+        {/* Stale-route 301 redirects (Marc 2026-05-04 — Judge-Playwright P2-001/003) */}
+        <Route path="/matrix" element={<Navigate to="/compounds" replace />} />
+        <Route path="/find" element={<Navigate to="/compounds" replace />} />
+        <Route path="/library" element={<Navigate to="/compounds" replace />} />
+        <Route path="/admin" element={<Navigate to="/" replace />} />
+        <Route path="/about" element={<Navigate to="/" replace />} />
+        <Route path="/protocol" element={<Navigate to="/goals" replace />} />
 
         {/* ── 5-Step Waterfall — Primary Nav ── */}
         <Route path="/" element={
@@ -134,25 +137,20 @@ function AppRoutes() {
           <RequireAuth><FAQ /></RequireAuth>
         } />
 
-        {/* Catch-all */}
+        {/* Catch-all 404 (auth-removed; no more login-redirect) */}
         <Route path="*" element={
-          user ? (
-            <div style={{ textAlign: 'center', padding: '80px 20px', color: '#64748b' }}>
-              <div style={{ fontSize: '3rem', marginBottom: '16px' }}>🔬</div>
-              <h2 style={{ color: '#fff', marginBottom: '12px' }}>Page Not Found</h2>
-              <a href="/" style={{ color: '#d4af37', textDecoration: 'none', fontWeight: 600 }}>← Back to Home</a>
-            </div>
-          ) : (
-            <Navigate to="/login" replace />
-          )
+          <div style={{ textAlign: 'center', padding: '80px 20px', color: '#64748b' }}>
+            <div style={{ fontSize: '3rem', marginBottom: '16px' }}>🔬</div>
+            <h2 style={{ color: '#fff', marginBottom: '12px' }}>Page Not Found</h2>
+            <a href="/" style={{ color: '#d4af37', textDecoration: 'none', fontWeight: 600 }}>← Back to Home</a>
+          </div>
         } />
       </Routes>
 
-      {/* Vitalis Chat — persistent bottom-right widget on all authed routes.
-          Also renders for preview mode (vitalis-preview=1 or localStorage flag). */}
-      {(user || isPreviewMode()) && <VitalisChat />}
+      {/* Vitalis Chat — persistent bottom-right widget on every page (auth removed 2026-05-04). */}
+      <VitalisChat />
 
-      {(user || isPreviewMode()) && (
+      {true && (
         <footer style={{ borderTop: '1px solid rgba(255,255,255,0.06)', padding: '32px 20px', textAlign: 'center' }}>
           <div style={{ maxWidth: '800px', margin: '0 auto' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '16px' }}>
@@ -163,7 +161,7 @@ function AppRoutes() {
               Educational resource for Marc Papineau's research clients. Not medical advice.
             </p>
             <p style={{ margin: 0, fontSize: '0.72rem', color: '#475569' }}>
-              © {new Date().getFullYear()} Cornerstone RE Health — Research Education Platform
+              © {new Date().getFullYear()} Vitalis Research — Research Education Platform
             </p>
           </div>
         </footer>

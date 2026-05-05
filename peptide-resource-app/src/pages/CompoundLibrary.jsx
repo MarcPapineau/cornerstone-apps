@@ -1,9 +1,37 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { COMPOUNDS } from '../data/compounds';
+import { COMBOS } from '../data/combos';
 import { compoundMatchesDomain, getSecondaryEffects } from '../data/effects-matrix';
 import CompoundCard from '../components/CompoundCard';
 import CompoundDetail from '../components/CompoundDetail';
+
+// Per Marc 2026-05-04 + memory/feedback_klow_paired_compound_doctrine.md + memory/feedback_glow_plus_kpv_is_klow.md:
+// Combo entities (KLOW, GLOW, CJC+Ipa, SS31+Cardiogen, etc.) appear as their own cards in
+// the compound library so search finds them. Normalize combo shape to match CompoundCard +
+// CompoundDetail's expected field names (whyTogether→mechanism, dosing→dose, etc.).
+// glow-kpv was removed from combos.js per the doctrine — no separate filter needed here.
+const NORMALIZED_COMBOS = COMBOS.map(combo => ({
+  ...combo,
+  confidence: combo.confidence || 'HIGH',
+  fullName: combo.fullName || (combo.compounds ? `Blend: ${combo.compounds.map(c => c.name).join(' + ')}` : combo.name),
+  benefits: combo.benefits || [],
+  description: combo.description || combo.tagline,
+  mechanism: combo.mechanism || combo.whyTogether || 'See "Why these together" for the mechanistic rationale.',
+  dose: combo.dose || combo.dosing || 'Per Vitalis SOP — dosing protocol provided on enrollment.',
+  frequency: combo.frequency || 'See dosing protocol below',
+  storage: combo.storage || 'Refrigerate after reconstitution. Use within 28 days. Protect from light.',
+  notable: combo.notable || combo.whySuspension || null,
+  sideEffects: combo.sideEffects || [],
+  faq: combo.faq || [],
+  research: combo.research || [],
+  reconstitution: combo.reconstitution || null,
+  burnWarning: combo.burnWarning || false,
+  flushWarning: combo.flushWarning || false,
+  isCombo: true,
+}));
+
+const ALL_ENTRIES = [...COMPOUNDS, ...NORMALIZED_COMBOS];
 
 const filters = [
   { id: 'all',         label: 'All Compounds' },
@@ -34,7 +62,7 @@ export default function CompoundLibrary() {
 
     const id = searchParams.get('id');
     if (id) {
-      const compound = COMPOUNDS.find(c => c.id === id);
+      const compound = ALL_ENTRIES.find(c => c.id === id);
       if (compound) {
         setSelected(compound);
         // Clean the id param from URL so back-navigation works cleanly
@@ -45,7 +73,7 @@ export default function CompoundLibrary() {
     }
   }, []); // Run once on mount only
 
-  const filtered = COMPOUNDS.filter(c => {
+  const filtered = ALL_ENTRIES.filter(c => {
     // Use effects matrix for domain matching — compounds can appear in multiple categories
     const matchesCategory = activeFilter === 'all' || compoundMatchesDomain(c.id, activeFilter) || c.category === activeFilter;
     const q = search.toLowerCase();

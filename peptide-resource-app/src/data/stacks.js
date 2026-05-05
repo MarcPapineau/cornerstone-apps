@@ -133,5 +133,21 @@ export const STACKS = [
       { compound: 'DSIP', citation: 'Scha tt et al. DSIP and sleep induction in clinical insomnia. Pharmacol Biochem Behav. 1984;21(1):127–30.', finding: 'DSIP improved sleep quality and reduced sleep onset latency in clinical insomnia patients.' },
       { compound: 'DSIP', citation: 'Steiger A et al. DSIP and GH secretion during sleep. Eur J Pharmacol. 1988;147(2):227–32.', finding: 'DSIP enhanced GH pulse during slow-wave sleep — linking better deep sleep to improved overnight growth hormone release and recovery.' }
     ]
+  },
+  {
+    id: 'male-sexual-health',
+    goals: ['sexual'],
+    goal: 'Male Sexual Health & Vitality',
+    emoji: '💪',
+    compounds: ['pt141','kisspeptin','cjc','ipamorelin'],
+    tagline: 'Restore the full HPG-axis cascade — libido, function, vitality, and energy together.',
+    duration: '8–16 weeks',
+    description: 'Male sexual health is rarely a single-mechanism issue — it sits at the intersection of central libido drive, peripheral erectile function, endogenous testosterone production, and overall vitality. This stack addresses all four layers simultaneously rather than masking one symptom at a time.\n\nPT-141 (bremelanotide) acts on melanocortin receptors in the brain to drive libido and erectile response — a CNS-mediated mechanism distinct from PDE-5 inhibitors (Viagra/Cialis), which only affect peripheral blood flow. PT-141 works on desire AND function from the central side. FDA-approved for women with HSDD; off-label male protocols are well-established in functional medicine.\n\nKisspeptin restores endogenous testosterone production by stimulating the HPG (hypothalamic-pituitary-gonadal) axis. Unlike exogenous TRT — which suppresses natural production — kisspeptin amplifies the body\'s own GnRH/LH cascade, supporting fertility AND testosterone simultaneously. Pulsatile dosing protocol required (mimics natural release pattern); never daily.\n\nCJC-1295 + Ipamorelin restore the GH-axis — declining GH is a major contributor to mid-life vitality drop, and the GH/IGF-1 cascade also indirectly supports testosterone production and sexual function. The CJC/Ipa combo provides clean pulsatile GH release matching the natural overnight rhythm.\n\nTogether: PT-141 handles desire + erectile response (CNS), Kisspeptin restores endogenous testosterone (HPG axis), CJC + Ipa restore GH-axis vitality. The result is a comprehensive sexual-health restoration that addresses the full cascade rather than chasing single symptoms.',
+    keyStudies: [
+      { compound: 'PT-141', citation: 'Kingsberg SA et al. Bremelanotide for the treatment of hypoactive sexual desire disorder: two randomized phase 3 trials. Obstet Gynecol. 2019;134(5):899–908. PMID 31022134', finding: 'Bremelanotide significantly improved sexual desire and reduced distress in randomized controlled trials — central melanocortin mechanism distinct from PDE-5 inhibitors.' },
+      { compound: 'Kisspeptin', citation: 'Skorupskaite K et al. Kisspeptin and neurokinin B in reproduction and metabolism. Trends Endocrinol Metab. 2020;31(5):394–406. PMID 32271881', finding: 'Kisspeptin signaling drives the entire HPG-axis cascade — therapeutic kisspeptin restores endogenous LH/testosterone production via natural pulsatile release.' },
+      { compound: 'CJC-1295', citation: 'Teichman SL et al. Prolonged stimulation of GH and IGF-I secretion by CJC-1295 in healthy adults. JCEM. 2006;91(3):799–805. PMID 16352683', finding: 'CJC-1295 produces sustained GH/IGF-1 elevation matching natural pulsatile rhythm — restored youthful GH-axis function.' },
+      { compound: 'Ipamorelin', citation: 'Raun K et al. Ipamorelin, the first selective growth hormone secretagogue. Eur J Endocrinol. 1998;139(5):552–61. PMID 9849822', finding: 'Selective GH secretagogue with no impact on cortisol or prolactin — clean pulsatile GH release without side effects of older GHS compounds.' }
+    ]
   }
 ];

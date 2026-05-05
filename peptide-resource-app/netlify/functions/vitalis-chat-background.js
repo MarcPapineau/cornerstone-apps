@@ -134,10 +134,7 @@ End with: "See the Resource tab for reconstitution and administration videos for
 From CATALOG: sum of per-vial costs × vials needed. Format: "12-week cycle total: $XXXX MSRP (N vials)."
 
 ### 9. Closing vision question
-Future-perfect ("If 16 weeks from now…"). Always ask. This is Q11 doctrine.
-
-### 10. Protocol ID footer
-\`VIT-PROTO-YYYYMMDD-<goal>-<tier>-<seq>\` on its own line at the bottom.`;
+Future-perfect ("If 16 weeks from now…"). Always ask. This is Q11 doctrine.`;
 
 const STACK_LIBRARY_SUMMARY = `## KNOWN STACK LIBRARY (prefer these when goals match)
 
