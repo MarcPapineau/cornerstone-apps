@@ -1,0 +1,8 @@
+{"type":"CompletedJob","workspace_id":"admin","id":"019df579-d270-d7de-20f1-f54eb5310f90","created_by":"admin","created_at":"2026-05-05T00:11:34.892743Z","started_at":"2026-05-05T00:11:34.937110Z","completed_at":"2026-05-05T00:11:35.367531Z","duration_ms":427,"success":true,"script_hash":"189fd587e4dab59f","script_path":"u/admin/build-agent-v1","args":{"intake":null},"result":{"reason": "Windmill variable hydration failed: http://localhost:8000/api/w/admin/variables/get_value/u/marc/ANTHROPIC_API_KEY: 404, Not found: Variable u/marc/ANTHROPIC_API_KEY not found", "build_status": "HONEST-FAILED", "marc_facing_summary": "Build Agent could not read its own credentials from Windmill. This is a setup issue, not a build issue. Check workspace variables u/marc/ANTHROPIC_API_KEY, PERPLEXITY_API_KEY, LANGFUSE_*."},"result_columns":null,"logs":"job=019df579-d270-d7de-20f1-f54eb5310f90 tag=python3 worker=wk-default-eddc85d70ea8-2xuJ3 hostname=eddc85d70ea8 isolation=none
+
+env deps from local cache: anyio==4.13.0, certifi==2026.4.22, h11==0.16.0, httpcore==1.0.9, httpx==0.28.1, idna==3.13, typing-extensions==4.15.0, wmill==1.695.0
+
+
+--- PYTHON (3.12) CODE EXECUTION ---
+
+http://localhost:8000/api/w/admin/variables/get_value/u/marc/ANTHROPIC_API_KEY: 404, Not found: Variable u/marc/ANTHROPIC_API_KEY not found","deleted":false,"canceled":false,"job_kind":"script","permissioned_as":"u/admin","is_flow_step":false,"language":"python3","is_skipped":false,"email":"admin@windmill.dev","visible_to_owner":true,"mem_peak":2248,"tag":"python3","worker":"wk-default-eddc85d70ea8-2xuJ3"}

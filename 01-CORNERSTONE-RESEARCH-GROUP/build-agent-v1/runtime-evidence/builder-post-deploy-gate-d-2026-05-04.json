@@ -1,0 +1,14 @@
+{
+  "gate": "D",
+  "status": "INCOMPLETE",
+  "runtime_id": "windmill:u/admin/build-agent-v1",
+  "trace_id": null,
+  "timestamp": "",
+  "evidence_paths": [
+    "windmill-job:019df579-d270-d7de-20f1-f54eb5310f90",
+    "file:/Users/marcpapineau/.openclaw/workspace/01-CORNERSTONE-RESEARCH-GROUP/build-agent-v1/main.py:2318",
+    "file:/Users/marcpapineau/.openclaw/workspace/01-CORNERSTONE-RESEARCH-GROUP/build-agent-v1/runtime-evidence/self-test-2026-05-04-job-019df579-d270-d7de-20f1-f54eb5310f90.json"
+  ],
+  "claim_status": "DEPLOYED-AND-CALLABLE-NOT-FULLY-VALIDATED",
+  "notes": "Builder deployed at hash 189fd587e4dab59f. Self-test invoked with intake=null. Job completed (success=). Result returned HONEST-FAILED at secret hydration step (u/marc/* Windmill variables not present in admin workspace). NO LLM calls made → NO Langfuse trace → trace_id null → enforcement returns INCOMPLETE per Rule R6. Builder is structurally deployed and executes cleanly; full E2E validation requires either creating u/marc/* Windmill variables or modifying main.py to use u/admin/* paths (separate dispatch)."
+}
