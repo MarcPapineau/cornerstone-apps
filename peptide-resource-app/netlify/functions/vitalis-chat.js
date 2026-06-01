@@ -266,18 +266,28 @@ exports.handler = async (event) => {
   }
   const sigHeader = signInternal(internalSecret, runId);
 
-  // Fire-and-forget: background function is non-blocking from the client
-  // perspective. We don't await it — we return 202 immediately.
-  fetch(bgUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      [SIG_HEADER]: sigHeader,
-    },
-    body: JSON.stringify(bgPayload),
-  }).catch(err => {
+  // IMPORTANT: We await the fetch to ensure the TCP handshake with the
+  // background function completes before this handler returns. If we fire-
+  // and-forget (no await), Netlify may terminate the sync function instance
+  // before the connection is established, silently dropping the invocation.
+  //
+  // We do NOT await the background function's result (it runs async for up
+  // to 15 min). We await only the initial HTTP 202 acknowledgement, which
+  // is fast (sub-50ms within Netlify's internal network).
+  try {
+    const bgRes = await fetch(bgUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [SIG_HEADER]: sigHeader,
+      },
+      body: JSON.stringify(bgPayload),
+    });
+    console.log('[vitalis-chat] bg invoked', { runId, bgStatus: bgRes.status });
+  } catch (err) {
     console.error('[vitalis-chat] background invoke error:', err.message);
-  });
+    // Don't fail the client request — bg fn may still run or we can report stale
+  }
 
   console.log('[vitalis-chat] queued', { runId, userMessage: userMessage.slice(0, 60) });
 
