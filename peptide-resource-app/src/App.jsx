@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import Nav from './components/Nav';
-import Login from './pages/Login';
 import CompoundLibrary from './pages/CompoundLibrary';
+import Combos from './pages/Combos';
 import StackFinder from './pages/StackFinder';
 import StackBuilder from './pages/StackBuilder';
 import DosingGuide from './pages/DosingGuide';
@@ -15,6 +15,7 @@ import Landing from './pages/Landing';
 import Protocol from './pages/Protocol';
 import Build from './pages/Build';
 import Book from './pages/Book';
+import CompoundMatrix from './pages/CompoundMatrix';
 import VitalisChat from './components/VitalisChat';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
@@ -28,7 +29,7 @@ function AuthLoading() {
   return (
     <div style={{
       minHeight: '100vh',
-      background: '#0a1628',
+      background: '#09090D',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
@@ -40,12 +41,12 @@ function AuthLoading() {
         alignItems: 'center',
         gap: '20px',
       }}>
-        <span style={{ fontSize: '2.5rem', filter: 'drop-shadow(0 0 12px rgba(212,175,55,0.4))' }}>🏥</span>
+        <span style={{ fontSize: '2.5rem', filter: 'drop-shadow(0 0 12px rgba(196,146,42,0.4))' }}>🏥</span>
         <div style={{
           width: '36px',
           height: '36px',
-          border: '3px solid rgba(212,175,55,0.2)',
-          borderTop: '3px solid #d4af37',
+          border: '3px solid rgba(196,146,42,0.2)',
+          borderTop: '3px solid #C4922A',
           borderRadius: '50%',
           animation: 'spin 0.8s linear infinite',
         }} />
@@ -56,15 +57,12 @@ function AuthLoading() {
   );
 }
 
-// FIX BUG-003: preview bypass persists via localStorage
+// PUBLIC ACCESS (2026-06-03): invite-only gate opened so developers/testers can use the
+// app without logging in. Because every RequireAuth and the Nav/chat/footer guards key off
+// isPreviewMode(), returning true opens the whole app. To restore invite-only, revert this
+// function to its prior preview-bypass body (available in git history).
 function isPreviewMode() {
-  if (typeof window === 'undefined') return false;
-  if (window.location.search.includes('vitalis-preview=1')) {
-    try { localStorage.setItem('vitalis_preview', 'true'); } catch {}
-    return true;
-  }
-  try { return localStorage.getItem('vitalis_preview') === 'true'; } catch {}
-  return false;
+  return true;
 }
 
 function RequireAuth({ children }) {
@@ -79,18 +77,17 @@ function AppRoutes() {
   if (isLoading) return <AuthLoading />;
 
   return (
-    <div style={{ minHeight: '100vh', background: '#0a1628' }}>
+    <div style={{ minHeight: '100vh', background: '#09090D' }}>
       {(user || isPreviewMode()) && <Nav />}
       <Routes>
         {/* Public */}
-        <Route path="/login" element={
-          user ? <Navigate to="/start" replace /> : <Login />
-        } />
+        <Route path="/login" element={<Navigate to="/stacks" replace />} />
 
-        {/* ── 5-Step Waterfall — Primary Nav ── */}
+        {/* Root → Stacks (Goals/Protocol/Personalize removed from nav; pages still accessible by URL) */}
         <Route path="/" element={
-          <RequireAuth><Landing /></RequireAuth>
+          <RequireAuth><Navigate to="/stacks" replace /></RequireAuth>
         } />
+        {/* Legacy waterfall routes — kept so bookmarks + protocol/:goal deep links still work */}
         <Route path="/goals" element={
           <RequireAuth><Landing /></RequireAuth>
         } />
@@ -111,6 +108,12 @@ function AppRoutes() {
         } />
         <Route path="/compounds" element={
           <RequireAuth><CompoundLibrary /></RequireAuth>
+        } />
+        <Route path="/matrix" element={
+          <RequireAuth><CompoundMatrix /></RequireAuth>
+        } />
+        <Route path="/combos" element={
+          <RequireAuth><Combos /></RequireAuth>
         } />
         <Route path="/stacks" element={
           <RequireAuth><StackFinder /></RequireAuth>
@@ -135,17 +138,7 @@ function AppRoutes() {
         } />
 
         {/* Catch-all */}
-        <Route path="*" element={
-          user ? (
-            <div style={{ textAlign: 'center', padding: '80px 20px', color: '#64748b' }}>
-              <div style={{ fontSize: '3rem', marginBottom: '16px' }}>🔬</div>
-              <h2 style={{ color: '#fff', marginBottom: '12px' }}>Page Not Found</h2>
-              <a href="/" style={{ color: '#d4af37', textDecoration: 'none', fontWeight: 600 }}>← Back to Home</a>
-            </div>
-          ) : (
-            <Navigate to="/login" replace />
-          )
-        } />
+        <Route path="*" element={<Navigate to="/stacks" replace />} />
       </Routes>
 
       {/* Vitalis Chat — persistent bottom-right widget on all authed routes.
@@ -157,7 +150,7 @@ function AppRoutes() {
           <div style={{ maxWidth: '800px', margin: '0 auto' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '16px' }}>
               <span style={{ fontSize: '1.2rem' }}>🏥</span>
-              <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff' }}>Vitalis <span style={{ color: '#d4af37' }}>Health</span></span>
+              <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#fff' }}>Vitalis <span style={{ color: '#C4922A' }}>Health</span></span>
             </div>
             <p style={{ margin: '0 0 8px', fontSize: '0.78rem', color: '#64748b', lineHeight: 1.5 }}>
               Educational resource for Marc Papineau's research clients. Not medical advice.
