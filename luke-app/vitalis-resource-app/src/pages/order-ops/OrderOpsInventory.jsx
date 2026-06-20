@@ -119,7 +119,12 @@ export default function OrderOpsInventory() {
                     <TD className="font-data">{money(i.valueAtMsrp)}</TD>
                     <TD className="font-data text-success">{money(i.projectedGrossProfit)}</TD>
                     <TD className="pr-5 text-right">
-                      {drafted[i.productId]
+                      {i.hasOpenOrder ? (
+                        <span className="inline-flex flex-col items-end gap-0.5">
+                          <Badge tone="neutral">Already ordered</Badge>
+                          {i.openOrder && <span className="text-2xs text-faint">{i.openOrder.supplier} · {i.openOrder.status}{i.openOrder.qty ? ` · ${fmtInt(i.openOrder.qty)}` : ''}</span>}
+                        </span>
+                      ) : drafted[i.productId]
                         ? <Badge tone="success">Drafted</Badge>
                         : <Button size="sm" variant="outline" onClick={() => createSupplierDraft(i)} disabled={busy}>Create supplier draft</Button>}
                     </TD>

@@ -3263,7 +3263,12 @@ async function runOpsGuardSuite() {
     await testAsync('OR2', 'reorder draft reuses /api/ops/supplier-orders: CLIENT 403; ADMIN draft uses canonical cost + ORDERED; inventory NOT mutated until received', async () => {
       store.resetDemo();
       const { catalog: cat } = require('@vitalis/protocol-core/data');
-      const low = store.list('opsInventory').find((iv) => (iv.onHand || 0) <= 3);
+      // Pick a low-stock product WITHOUT an already-open supplier order (the realistic reorder case;
+      // the de-dup guard covers the already-open case separately in the OD* tests).
+      const openPids = new Set(store.list('opsSupplierOrders')
+        .filter((so) => ['ORDERED', 'PARTIAL_RECEIVED'].includes(so.orderStatus))
+        .flatMap((so) => (so.items || []).map((it) => it.productId)));
+      const low = store.list('opsInventory').find((iv) => (iv.onHand || 0) <= 3 && !openPids.has(iv.productId));
       const prod = cat.products.find((p) => p.id === low.productId);
       const onHandBefore = low.onHand || 0;
 
@@ -3278,6 +3283,58 @@ async function runOpsGuardSuite() {
 
       const onHandAfter = (store.list('opsInventory').find((iv) => iv.productId === prod.id) || {}).onHand || 0;
       assert.strictEqual(onHandAfter, onHandBefore, 'creating the supplier order did NOT change on-hand (no auto-receive)');
+    });
+
+    // --- OD*: Reorder de-dup guard (Sprint 11) -------------------------------------------------
+    await testAsync('OD1', 'reorder-suggestions flag products that already have an OPEN supplier order (hasOpenOrder + openOrder details)', async () => {
+      store.resetDemo();
+      // The seed Biogenix order (ORDERED = open) covers a low-stock product → it must be flagged.
+      const openSO = store.list('opsSupplierOrders').find((so) => so.orderStatus === 'ORDERED');
+      const openPid = openSO.items[0].productId;
+      const r = await httpJson(server, 'GET', '/api/ops/reorder-suggestions', { headers: { 'x-vitalis-role': 'ADMIN' } });
+      assert.strictEqual(r.status, 200, 'ADMIN reads suggestions');
+      const flagged = (r.json.items || []).find((i) => i.productId === openPid);
+      assert.ok(flagged, 'the open-order product is in the low-stock list');
+      assert.strictEqual(flagged.hasOpenOrder, true, 'it is flagged hasOpenOrder');
+      assert.ok(flagged.openOrder && flagged.openOrder.id === openSO.id && flagged.openOrder.status === 'ORDERED', 'the open order id + status are surfaced');
+      // a low-stock product with NO open order is not flagged
+      const free = (r.json.items || []).find((i) => !i.hasOpenOrder);
+      assert.ok(free && free.openOrder === null, 'a product without an open order is not flagged');
+    });
+
+    await testAsync('OD2', 'duplicate supplier-order POST for an already-open product is rejected 409; inventory + order count unchanged; CLIENT/PRACTITIONER 403', async () => {
+      store.resetDemo();
+      const { catalog: cat } = require('@vitalis/protocol-core/data');
+      const openSO = store.list('opsSupplierOrders').find((so) => so.orderStatus === 'ORDERED');
+      const dupPid = openSO.items[0].productId;
+      const prod = cat.products.find((p) => p.id === dupPid);
+      const ordersBefore = store.list('opsSupplierOrders').length;
+      const onHandBefore = (store.list('opsInventory').find((iv) => iv.productId === dupPid) || {}).onHand || 0;
+
+      // role guard still applies on the create path
+      assert.strictEqual((await httpJson(server, 'POST', '/api/ops/supplier-orders', { headers: { 'x-vitalis-role': 'CLIENT' }, body: { supplier: 'Biogenix', items: [{ productId: dupPid, qty: 5 }] } })).status, 403, 'CLIENT 403');
+      assert.strictEqual((await httpJson(server, 'POST', '/api/ops/supplier-orders', { headers: { 'x-vitalis-role': 'PRACTITIONER' }, body: { supplier: 'Biogenix', items: [{ productId: dupPid, qty: 5 }] } })).status, 403, 'PRACTITIONER 403');
+
+      const dup = await httpJson(server, 'POST', '/api/ops/supplier-orders', { headers: { 'x-vitalis-role': 'ADMIN' }, body: { supplier: prod.supplier || 'Other', items: [{ productId: dupPid, qty: 5 }] } });
+      assert.strictEqual(dup.status, 409, 'a duplicate open reorder is rejected with 409');
+      assert.ok(/open supplier order/i.test(dup.json.error || ''), 'the 409 explains an open order already exists');
+      assert.strictEqual(store.list('opsSupplierOrders').length, ordersBefore, 'no new supplier order was created');
+      const onHandAfter = (store.list('opsInventory').find((iv) => iv.productId === dupPid) || {}).onHand || 0;
+      assert.strictEqual(onHandAfter, onHandBefore, 'inventory unchanged by the rejected duplicate');
+    });
+
+    await testAsync('OD3', 'a RECEIVED/closed supplier order does NOT block a new reorder for the same product', async () => {
+      store.resetDemo();
+      const { catalog: cat } = require('@vitalis/protocol-core/data');
+      // The seed JH Strong order is RECEIVED (closed) → its products are reorderable again.
+      const closedSO = store.list('opsSupplierOrders').find((so) => so.orderStatus === 'RECEIVED');
+      const rePid = closedSO.items[0].productId;
+      const prod = cat.products.find((p) => p.id === rePid);
+      const hasOpen = store.list('opsSupplierOrders').some((so) => ['ORDERED', 'PARTIAL_RECEIVED'].includes(so.orderStatus) && (so.items || []).some((it) => it.productId === rePid));
+      assert.strictEqual(hasOpen, false, 'precondition: no OPEN order for this product');
+      const r = await httpJson(server, 'POST', '/api/ops/supplier-orders', { headers: { 'x-vitalis-role': 'ADMIN' }, body: { supplier: prod.supplier || 'Other', items: [{ productId: rePid, qty: 6 }] } });
+      assert.strictEqual(r.status, 200, 'a new reorder succeeds once the prior order is RECEIVED/closed');
+      assert.strictEqual(r.json.supplierOrder.orderStatus, 'ORDERED', 'the new order opens as ORDERED');
     });
   } finally {
     await close(server);

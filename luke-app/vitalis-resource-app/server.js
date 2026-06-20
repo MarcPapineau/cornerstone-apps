@@ -1989,6 +1989,17 @@ app.get('/api/ops/inventory', (_req, res) => {
 // this suggests, it never creates a supplier order or mutates stock.
 const REORDER_POINT = 3;   // onHand <= this → suggest a reorder
 const REORDER_TARGET = 12; // restock back up to this level (suggested qty = target − onHand)
+
+// A duplicate reorder is blocked while an OPEN supplier order already covers the product. "Open" =
+// still in flight (ORDERED or PARTIAL_RECEIVED); RECEIVED / CANCELLED are closed and do NOT block.
+// Single source of truth: the existing opsSupplierOrders store (no second tracking store).
+const OPEN_SUPPLIER_STATUSES = ['ORDERED', 'PARTIAL_RECEIVED'];
+function openSupplierOrderForProduct(productId) {
+  return store.list('opsSupplierOrders').find((so) =>
+    OPEN_SUPPLIER_STATUSES.includes(so.orderStatus) && (so.items || []).some((it) => it.productId === productId),
+  ) || null;
+}
+
 app.get('/api/ops/reorder-suggestions', (_req, res) => {
   const catMap = {};
   for (const p of catalog.products) {
@@ -2005,10 +2016,15 @@ app.get('/api/ops/reorder-suggestions', (_req, res) => {
       const valueAtCost = +(suggestedReorderQty * cost).toFixed(2);
       const valueAtMsrp = +(suggestedReorderQty * msrp).toFixed(2);
       const projectedGrossProfit = +(valueAtMsrp - valueAtCost).toFixed(2);
+      // Already-ordered guard: surface any OPEN supplier order so the UI can show "Already ordered".
+      const openSO = openSupplierOrderForProduct(iv.productId);
+      const openLine = openSO ? (openSO.items || []).find((it) => it.productId === iv.productId) : null;
       return {
         productId: iv.productId, sku: iv.sku || c.sku || null, name: iv.name || c.name || null,
         supplier: c.supplier, onHand, reorderPoint: REORDER_POINT, suggestedReorderQty,
         cost, msrp, valueAtCost, valueAtMsrp, projectedGrossProfit,
+        hasOpenOrder: !!openSO,
+        openOrder: openSO ? { id: openSO.id, supplier: openSO.supplier, status: openSO.orderStatus, qty: (openLine && openLine.qty) || null } : null,
       };
     })
     .filter((it) => it.onHand <= it.reorderPoint)
@@ -2067,6 +2083,14 @@ app.post('/api/ops/supplier-orders', (req, res) => {
       qty, unitCost, lineTotal: +(qty * unitCost).toFixed(2),
     };
   });
+  // De-dup guard: reject if any item already has an OPEN supplier order (receive/cancel it first).
+  // Prevents duplicate reorders for the same product; a RECEIVED/CANCELLED order does NOT block.
+  for (const it of items) {
+    const openSO = openSupplierOrderForProduct(it.productId);
+    if (openSO) {
+      return fail(res, 409, `An open supplier order (${openSO.id}, ${openSO.orderStatus}) already exists for "${it.name || it.productId}". Receive or cancel it before creating another.`);
+    }
+  }
   const totalCost   = items.reduce((s, it) => s + it.lineTotal, 0);
   const amountPaid  = parseFloat(body.amountPaid) || 0;
   const balanceDue  = Math.max(0, totalCost - amountPaid);
