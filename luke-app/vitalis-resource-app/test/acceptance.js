@@ -3228,6 +3228,57 @@ async function runOpsGuardSuite() {
       const zero = items.filter((i) => (i.onHand || 0) === 0);
       assert.ok(zero.every((i) => i.valueAtCost === 0 && i.valueAtMsrp === 0), 'zero-stock products value to 0 at cost and MSRP');
     });
+
+    // --- OR*: Low-stock reorder (Sprint 9) -------------------------------------------------
+    await testAsync('OR1', 'reorder-suggestions = TRACKED stock at/below reorder point (incl sold-out tracked), excludes never-stocked catalog; canonical economics; CLIENT/PRACTITIONER 403; banner', async () => {
+      store.resetDemo();
+      const { catalog: cat } = require('@vitalis/protocol-core/data');
+      const invIds = new Set(store.list('opsInventory').map((iv) => iv.productId));
+      // (a) a SOLD-OUT but actively-tracked product (onHand 0) → must appear (it needs reordering)
+      const soldOut = cat.products.find((p) => !invIds.has(p.id) && (p.cost || 0) > 0 && ((p.msrp || p.boxPrice || 0) > 0));
+      store.upsert('opsInventory', { id: 'ops_inv_soldout_test', productId: soldOut.id, sku: soldOut.sku, name: soldOut.name || soldOut.displayName, onHand: 0, _demo: true });
+      // (b) a NEVER-STOCKED catalog product (no inventory record) → must NOT appear
+      const neverStocked = cat.products.find((p) => !invIds.has(p.id) && p.id !== soldOut.id);
+
+      assert.strictEqual((await httpJson(server, 'GET', '/api/ops/reorder-suggestions', { headers: { 'x-vitalis-role': 'CLIENT' } })).status, 403, 'CLIENT is forbidden');
+      assert.strictEqual((await httpJson(server, 'GET', '/api/ops/reorder-suggestions', { headers: { 'x-vitalis-role': 'PRACTITIONER' } })).status, 403, 'PRACTITIONER is forbidden');
+
+      const r = await httpJson(server, 'GET', '/api/ops/reorder-suggestions', { headers: { 'x-vitalis-role': 'ADMIN' } });
+      assert.strictEqual(r.status, 200, 'ADMIN can read reorder suggestions');
+      assert.strictEqual(r.json.banner, BANNER, 'the exact simulation banner is present');
+      const items = r.json.items || [];
+      const ids = new Set(items.map((i) => i.productId));
+      assert.ok(ids.has(soldOut.id), 'a sold-out (onHand 0) TRACKED product appears in the reorder list');
+      assert.ok(!ids.has(neverStocked.id), 'a never-stocked catalog product (no inventory record) is excluded');
+      assert.ok(items.every((i) => i.onHand <= i.reorderPoint), 'every suggestion is at or below the reorder point');
+      const catMap = {}; for (const p of cat.products) catMap[p.id] = { cost: p.cost || 0, msrp: p.msrp || p.boxPrice || 0 };
+      for (const i of items) {
+        assert.strictEqual(i.suggestedReorderQty, Math.max(0, r.json.reorderTarget - i.onHand), `${i.name}: suggestedReorderQty = target − onHand`);
+        assert.strictEqual(i.cost, catMap[i.productId].cost, `${i.name}: cost is canonical catalog cost`);
+        assert.strictEqual(i.valueAtCost, +(i.suggestedReorderQty * i.cost).toFixed(2), `${i.name}: reorder value @ cost = suggestedQty × cost`);
+        assert.strictEqual(i.projectedGrossProfit, +(i.valueAtMsrp - i.valueAtCost).toFixed(2), `${i.name}: projected profit = MSRP value − cost value`);
+      }
+    });
+
+    await testAsync('OR2', 'reorder draft reuses /api/ops/supplier-orders: CLIENT 403; ADMIN draft uses canonical cost + ORDERED; inventory NOT mutated until received', async () => {
+      store.resetDemo();
+      const { catalog: cat } = require('@vitalis/protocol-core/data');
+      const low = store.list('opsInventory').find((iv) => (iv.onHand || 0) <= 3);
+      const prod = cat.products.find((p) => p.id === low.productId);
+      const onHandBefore = low.onHand || 0;
+
+      const clientPost = await httpJson(server, 'POST', '/api/ops/supplier-orders', { headers: { 'x-vitalis-role': 'CLIENT' }, body: { supplier: prod.supplier || 'Other', items: [{ productId: prod.id, qty: 9 }] } });
+      assert.strictEqual(clientPost.status, 403, 'a CLIENT cannot create a supplier order');
+
+      // ADMIN draft with NO unitCost → server fills the canonical catalog cost (no second cost source).
+      const r = await httpJson(server, 'POST', '/api/ops/supplier-orders', { headers: { 'x-vitalis-role': 'ADMIN' }, body: { supplier: prod.supplier || 'Other', items: [{ productId: prod.id, qty: 9 }] } });
+      assert.strictEqual(r.status, 200, 'ADMIN creates the supplier draft');
+      assert.strictEqual(r.json.supplierOrder.items[0].unitCost, prod.cost || 0, 'the reorder draft uses the canonical catalog cost');
+      assert.strictEqual(r.json.supplierOrder.orderStatus, 'ORDERED', 'created ORDERED (a draft), not RECEIVED');
+
+      const onHandAfter = (store.list('opsInventory').find((iv) => iv.productId === prod.id) || {}).onHand || 0;
+      assert.strictEqual(onHandAfter, onHandBefore, 'creating the supplier order did NOT change on-hand (no auto-receive)');
+    });
   } finally {
     await close(server);
     // Restore the runtime store EXACTLY as we found it (the visual suite reuses data/store.json).

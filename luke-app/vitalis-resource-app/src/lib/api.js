@@ -203,6 +203,8 @@ export const api = {
 
   opsInventory: () => request('/ops/inventory', { headers: opsHeaders() }),
   opsInventoryAdjust: (payload) => request('/ops/inventory/adjust', { method: 'POST', body: payload, headers: opsHeaders() }),
+  // Low-stock reorder suggestions (read-only; tracked stock at/below reorder point, canonical economics).
+  opsReorderSuggestions: () => request('/ops/reorder-suggestions', { headers: opsHeaders() }),
 
   opsSupplierOrders: () => request('/ops/supplier-orders', { headers: opsHeaders() }),
   opsCreateSupplierOrder: (payload) => request('/ops/supplier-orders', { method: 'POST', body: payload, headers: opsHeaders() }),

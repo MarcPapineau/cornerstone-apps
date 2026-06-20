@@ -3,7 +3,7 @@
  * manual adjust control (add / set / subtract), and the movement log (sales + restocks).
  */
 import { useEffect, useMemo, useState } from 'react';
-import { PackageCheck } from 'lucide-react';
+import { PackageCheck, Truck } from 'lucide-react';
 import api from '../../lib/api.js';
 import { fmtInt } from '../../lib/utils.js';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/Card.jsx';
@@ -23,12 +23,13 @@ export default function OrderOpsInventory() {
   const [productId, setProductId] = useState('');
   const [mode, setMode] = useState('add');
   const [qty, setQty] = useState('');
+  const [drafted, setDrafted] = useState({}); // productId → created supplier-order id (UI feedback)
 
   async function load() {
     setError(null);
     try {
-      const res = await api.opsInventory();
-      setData(res);
+      const [res, reorder] = await Promise.all([api.opsInventory(), api.opsReorderSuggestions()]);
+      setData({ ...res, reorder: reorder.items || [], reorderPoint: reorder.reorderPoint });
       if (!productId && res.items && res.items[0]) setProductId(res.items[0].productId);
     } catch (e) { setError(e); }
   }
@@ -48,6 +49,7 @@ export default function OrderOpsInventory() {
   const valueAtMsrp = useMemo(() => stocked.reduce((s, i) => s + (i.valueAtMsrp != null ? i.valueAtMsrp : (i.onHand || 0) * (i.msrp || 0)), 0), [stocked]);
   const projectedProfit = valueAtMsrp - totalValue;
   const projectedMargin = valueAtMsrp > 0 ? (projectedProfit / valueAtMsrp) * 100 : 0;
+  const reorder = (data && data.reorder) || [];
 
   async function adjust() {
     if (!productId || !qty) return;
@@ -56,6 +58,22 @@ export default function OrderOpsInventory() {
       await api.opsInventoryAdjust({ productId, mode, qty: Number(qty), reason: `Manual ${mode} on ${today()}` });
       setQty(''); await load(); setMessage('Inventory updated.');
     } catch (e) { setMessage(e.message || 'Adjustment failed.'); } finally { setBusy(false); }
+  }
+
+  // Reuse the existing supplier-order system: a draft is created ORDERED (not received), so it never
+  // mutates stock — receiving stays manual on the Suppliers tab. unitCost is omitted so the server
+  // uses the canonical catalog cost (no second cost source).
+  async function createSupplierDraft(item) {
+    setBusy(true);
+    try {
+      const res = await api.opsCreateSupplierOrder({
+        supplier: item.supplier || 'Other',
+        items: [{ productId: item.productId, qty: item.suggestedReorderQty }],
+      });
+      setDrafted((d) => ({ ...d, [item.productId]: (res.supplierOrder && res.supplierOrder.id) || true }));
+      await load();
+      setMessage(`Supplier draft created for ${item.name} (${item.supplier || 'Other'}) — review on the Suppliers tab.`);
+    } catch (e) { setMessage(e.message || 'Could not create supplier draft.'); } finally { setBusy(false); }
   }
 
   if (data == null && !error) return <Loading label="Loading inventory…" />;
@@ -73,6 +91,46 @@ export default function OrderOpsInventory() {
         <StatCard label="Projected profit" value={money(projectedProfit)} sub="MSRP − cost" tone="success" />
         <StatCard label="Projected margin" value={pct(projectedMargin)} tone="success" />
       </div>
+
+      {/* Low-stock reorder — tracked products at/below the reorder point; one-click supplier draft. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-1.5"><Truck className="h-4 w-4 text-primary" /> Low-stock reorder</CardTitle>
+          <CardDescription>
+            Tracked products at or below the reorder point ({data && data.reorderPoint != null ? data.reorderPoint : 3}). “Create supplier draft” opens an ORDERED supplier order (not received) — stock only changes when you mark it received on the Suppliers tab. Reorder values use the suggested qty at canonical catalog cost/MSRP.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="px-0 pb-1">
+          <div className="overflow-x-auto">
+            <Table>
+              <THead><TR>
+                <TH className="pl-5">Product</TH><TH>Supplier</TH><TH>On hand</TH><TH>Reorder pt</TH><TH>Suggested qty</TH>
+                <TH>Reorder @ cost</TH><TH>Reorder @ MSRP</TH><TH>Proj. profit</TH><TH className="pr-5" />
+              </TR></THead>
+              <TBody>
+                {reorder.map((i) => (
+                  <TR key={i.productId} className={i.onHand === 0 ? 'bg-danger-soft/40' : undefined}>
+                    <TD className="pl-5 text-foreground">{i.name}<div className="text-2xs text-faint">{i.sku}</div></TD>
+                    <TD className="text-2xs text-soft">{i.supplier || '—'}</TD>
+                    <TD><Badge tone={i.onHand === 0 ? 'danger' : 'warning'}>{fmtInt(i.onHand)}</Badge></TD>
+                    <TD className="font-data text-soft">{fmtInt(i.reorderPoint)}</TD>
+                    <TD className="font-data text-foreground">{fmtInt(i.suggestedReorderQty)}</TD>
+                    <TD className="font-data">{money(i.valueAtCost)}</TD>
+                    <TD className="font-data">{money(i.valueAtMsrp)}</TD>
+                    <TD className="font-data text-success">{money(i.projectedGrossProfit)}</TD>
+                    <TD className="pr-5 text-right">
+                      {drafted[i.productId]
+                        ? <Badge tone="success">Drafted</Badge>
+                        : <Button size="sm" variant="outline" onClick={() => createSupplierDraft(i)} disabled={busy}>Create supplier draft</Button>}
+                    </TD>
+                  </TR>
+                ))}
+                {!reorder.length && <TR><TD colSpan={9}><EmptyState title="Nothing to reorder" hint="All tracked stock is above the reorder point." icon={PackageCheck} /></TD></TR>}
+              </TBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader><CardTitle className="flex items-center gap-1.5"><PackageCheck className="h-4 w-4 text-primary" /> Adjust stock</CardTitle><CardDescription>Manual intake/restock; orders auto-decrement on sale. Value {money(totalValue)} · {fmtInt(totalUnits)} units · {fmtInt(lowCount)} low.</CardDescription></CardHeader>

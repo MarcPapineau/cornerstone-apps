@@ -1981,6 +1981,41 @@ app.get('/api/ops/inventory', (_req, res) => {
   ok(res, { items, movements, banner: OPS_BANNER });
 });
 
+// --- GET /api/ops/reorder-suggestions -------------------------------------
+// Low-stock reorder list. Source is the ACTIVELY-TRACKED inventory records (store opsInventory) —
+// NOT the full catalog — so a sold-out tracked product (onHand 0) is included (it needs reordering)
+// while the 100+ never-stocked catalog products are excluded. reorderPoint / target are simulation
+// operational defaults (NOT economics); cost/MSRP come ONLY from the canonical catalog. Read-only:
+// this suggests, it never creates a supplier order or mutates stock.
+const REORDER_POINT = 3;   // onHand <= this → suggest a reorder
+const REORDER_TARGET = 12; // restock back up to this level (suggested qty = target − onHand)
+app.get('/api/ops/reorder-suggestions', (_req, res) => {
+  const catMap = {};
+  for (const p of catalog.products) {
+    catMap[p.id] = { cost: p.cost || 0, msrp: p.msrp || p.boxPrice || 0, sku: p.sku, name: p.name || p.displayName, supplier: p.supplier || p.provider || null };
+  }
+  const items = store.list('opsInventory')
+    .map((iv) => {
+      const c = catMap[iv.productId] || {};
+      const onHand = iv.onHand || 0;
+      const suggestedReorderQty = Math.max(0, REORDER_TARGET - onHand);
+      const cost = c.cost || 0;
+      const msrp = c.msrp || 0;
+      // Valuation is of the SUGGESTED REORDER QTY (what restocking would cost / be worth / yield).
+      const valueAtCost = +(suggestedReorderQty * cost).toFixed(2);
+      const valueAtMsrp = +(suggestedReorderQty * msrp).toFixed(2);
+      const projectedGrossProfit = +(valueAtMsrp - valueAtCost).toFixed(2);
+      return {
+        productId: iv.productId, sku: iv.sku || c.sku || null, name: iv.name || c.name || null,
+        supplier: c.supplier, onHand, reorderPoint: REORDER_POINT, suggestedReorderQty,
+        cost, msrp, valueAtCost, valueAtMsrp, projectedGrossProfit,
+      };
+    })
+    .filter((it) => it.onHand <= it.reorderPoint)
+    .sort((a, b) => a.onHand - b.onHand);
+  ok(res, { items, reorderPoint: REORDER_POINT, reorderTarget: REORDER_TARGET, banner: OPS_BANNER });
+});
+
 app.post('/api/ops/inventory/adjust', (req, res) => {
   const body = req.body || {};
   const productId = String(body.productId || '').trim();
