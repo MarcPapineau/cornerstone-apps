@@ -1,0 +1,87 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "builder-control/schemas/scout-diff.schema.json",
+  "title": "Builder Control — Weekly AI Scout JSON Sidecar + Diff",
+  "description": "JSON sidecar for the existing DANIEL Monday markdown scout (research/daniel-tool-scout-YYYY-MM-DD.md). The scout itself is NOT rebuilt; B3 emits this sidecar by parsing the latest markdown plus a diff vs the prior week so a downstream consumer sees only 'what changed how Marc builds' — verdict changes, substrate changes, watchlist promotions/expirations. Written next to the markdown as research/daniel-tool-scout-YYYY-MM-DD.json.",
+  "type": "object",
+  "required": ["scoutDate", "sourceMarkdown", "items", "diffVsPrior"],
+  "properties": {
+    "scoutDate": { "type": "string", "format": "date", "examples": ["2026-06-22"] },
+    "sourceMarkdown": { "type": "string", "examples": ["research/daniel-tool-scout-2026-06-22.md"] },
+    "priorMarkdown": { "type": ["string", "null"], "examples": ["research/daniel-tool-scout-2026-06-15.md"] },
+    "bluf": { "type": "string", "description": "Bottom-line-up-front, copied from the markdown BLUF section." },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "tier", "verdict", "buildRelevance"],
+        "properties": {
+          "name": { "type": "string", "examples": ["ElevenLabs ElevenAgents x TELUS Digital"] },
+          "tier": { "type": "string", "enum": ["T1", "T2", "T3", "T4"] },
+          "verdict": { "type": "string", "enum": ["Ignore", "Monitor", "Test", "Deploy"], "description": "The AI Ops Research Desk capability-harvest verdict." },
+          "category": { "type": "string", "examples": ["voice-ai", "foundation-model", "agent-orchestration", "crm-sales", "substrate", "market-context"] },
+          "buildRelevance": {
+            "type": "string",
+            "description": "ONE line: does this change how Marc builds? (substrate swap candidate, watch-only, market context, etc.)"
+          },
+          "differentiatorVsCurrent": { "type": "string", "description": "How it compares to what Marc currently uses." },
+          "sources": { "type": "array", "items": { "type": "string", "format": "uri" } }
+        }
+      }
+    },
+    "diffVsPrior": {
+      "type": "object",
+      "description": "The actionable delta — the whole point of the sidecar.",
+      "required": ["newItems", "verdictChanges", "watchlistPromoted", "watchlistExpired", "substrateChanges"],
+      "properties": {
+        "newItems": { "type": "array", "items": { "type": "string" }, "description": "Item names present this week, absent last week." },
+        "verdictChanges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "from", "to"],
+            "properties": {
+              "name": { "type": "string" },
+              "from": { "type": "string", "enum": ["Ignore", "Monitor", "Test", "Deploy", "absent"] },
+              "to": { "type": "string", "enum": ["Ignore", "Monitor", "Test", "Deploy"] }
+            }
+          }
+        },
+        "watchlistPromoted": { "type": "array", "items": { "type": "string" } },
+        "watchlistExpired": { "type": "array", "items": { "type": "string" } },
+        "substrateChanges": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Changes to the build substrate (model / orchestration / voice-path / metering) Marc should act on."
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "scoutDate": "2026-06-22",
+      "sourceMarkdown": "research/daniel-tool-scout-2026-06-22.md",
+      "priorMarkdown": "research/daniel-tool-scout-2026-06-15.md",
+      "bluf": "One in-window enterprise voice-AI partnership signal; no foundation-model changes; substrate watchlist unchanged.",
+      "items": [
+        {
+          "name": "ElevenLabs ElevenAgents x TELUS Digital",
+          "tier": "T1",
+          "verdict": "Monitor",
+          "category": "voice-ai",
+          "buildRelevance": "Market-maturity signal — governed enterprise voice tier now exists; not a swap candidate for a solo advisor.",
+          "differentiatorVsCurrent": "Marc's tracked voice path is Retell AI (solo-deployable, per-minute); ElevenAgents-via-TELUS is enterprise-CX, white-glove.",
+          "sources": ["https://www.telusdigital.com/about/newsroom/telus-digital-partners-with-elevenlabs-to-scale-voice-ai-in-enterprise-customer-experience"]
+        }
+      ],
+      "diffVsPrior": {
+        "newItems": ["ElevenLabs ElevenAgents x TELUS Digital", "ElevenLabs SMB/self-serve ElevenAgents tier (watch)"],
+        "verdictChanges": [],
+        "watchlistPromoted": [],
+        "watchlistExpired": [],
+        "substrateChanges": ["Claude Fable 5 / Mythos 5 on Bedrock — still highest-leverage substrate item; regression-test before any fleet swap (unchanged this week)."]
+      }
+    }
+  ]
+}

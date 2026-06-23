@@ -1,0 +1,21 @@
+{
+  "entryId": "LED-TEST-0001",
+  "ts": "2026-06-22T00:00:00Z",
+  "packetId": "B2-packet-ledger",
+  "agentId": "claude-code",
+  "gate": "control",
+  "status": "PASS",
+  "blockRule": null,
+  "operation": "test append — builder-control ledger-writer smoke test",
+  "changed": ["builder-control/ledger.json"],
+  "commandsRun": [
+    { "cmd": "node builder-control/ledger-writer.cjs --append builder-control/test/test-entry.json", "exit": 0, "outputTail": "Ledger length: N → N+1 (grew by 1)" }
+  ],
+  "testsRun": ["append grows array by 1; prior entries byte-identical"],
+  "screenshots": [],
+  "commitSha": null,
+  "bundleHash": null,
+  "evidencePaths": ["file:builder-control/ledger-writer.cjs"],
+  "driftChecks": [],
+  "notes": "Smoke-test entry for B2 append proof. Not a real gate decision."
+}

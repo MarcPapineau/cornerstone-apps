@@ -1,0 +1,22 @@
+{
+  "packetId": "B1-override-demo",
+  "agentId": "claude-code",
+  "objective": "Demonstrate the ONLY override mechanism: a packet authorization naming an exact overridable protected path lets that one write through, logged to the ledger.",
+  "constraints": [
+    "Override is per-exact-path; it does not broaden any other protected path.",
+    "Anti-theater: this is a gate-decision demo only; no canon file is actually edited."
+  ],
+  "sourceOfTruth": ["builder-control/CONTROL-CONTRACT.md"],
+  "filesAllowed": ["packages/protocol-core/data/catalog.json"],
+  "testsRequired": ["node builder-control/gate.cjs --check --packet builder-control/packets/B1-override-demo.json --op write --path packages/protocol-core/data/catalog.json"],
+  "stopConditions": [
+    "Marc revokes the authorization",
+    "Claude Code fails twice on the same gate-logic issue"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc (demo authorization for an overridable canon path)",
+    "allowsProtectedPaths": ["packages/protocol-core/data/catalog.json"],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

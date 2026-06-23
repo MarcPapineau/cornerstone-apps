@@ -1,0 +1,24 @@
+{
+  "packetId": "B1-pass-demo",
+  "agentId": "claude-code",
+  "objective": "Demonstrate a conforming in-scope control-system maintenance write that the gate PASSES (edit builder-control/gate.cjs).",
+  "constraints": [
+    "Reuse > rebuild; this packet only exercises the gate on an in-scope, non-protected path.",
+    "No edits to any protected-paths.json entry.",
+    "Anti-theater: claim done only with files+commands+tests in the same response."
+  ],
+  "sourceOfTruth": ["builder-control/CONTROL-CONTRACT.md"],
+  "filesAllowed": ["builder-control/gate.cjs", "builder-control/test/**"],
+  "testsRequired": ["node builder-control/gate.cjs --check --packet builder-control/packets/B1-pass-demo.json --op write --path builder-control/gate.cjs"],
+  "stopConditions": [
+    "the write would require touching a protected-paths.json canon entry",
+    "Claude Code fails twice on the same gate-logic issue",
+    "Marc issues STOP / delegate / canon language"
+  ],
+  "authorization": {
+    "authorizedBy": "none",
+    "allowsProtectedPaths": [],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

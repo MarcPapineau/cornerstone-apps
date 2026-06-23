@@ -1,0 +1,78 @@
+{
+  "policyVersion": "v1-2026-06-22",
+  "note": "Authoritative protected-paths policy. No agent may create/edit/delete/move/commit/push these unless its task packet's authorization names the exact path + an authorizer. The gate (gate.cjs) reads THIS file. APPEND to builder-control/ledger.json is allowed; rewriting/truncating it is protected. Globs use ** for recursive.",
+  "categories": {
+    "canonDoctrine": {
+      "reason": "source-of-truth, drift-sensitive; edit clobbers canonical authority",
+      "overridable": true,
+      "paths": [
+        "peptide-resource-app/netlify/functions/_chat-tier-context.cjs",
+        "packages/protocol-core/data/dosing.js",
+        "packages/protocol-core/data/evidence.json",
+        "packages/protocol-core/data/catalog.json",
+        "packages/protocol-core/data/research-sources.js",
+        "packages/protocol-core/data/protocol-document-standard.js",
+        "packages/protocol-core/research-doctrine.js",
+        "memory/doctrine_tier_matrix_canonical.md",
+        "memory/reference_vitalis_protocol_pricing_canon.md",
+        "GOLD-STANDARD-PROTOCOL-CONTENT-CONTRACT-2026-06-18.md",
+        "GLOBAL-EVIDENCE-INCLUSION-DOCTRINE.md",
+        "AGENTS.md",
+        "BUILD-PROTOCOL.md",
+        "CLAUDE.md"
+      ]
+    },
+    "researchBrain": {
+      "reason": "curated knowledge base; UPSERT through brain.js only, never freehand edit",
+      "overridable": true,
+      "paths": [
+        "peptide-resource-app/research-intel/brain/research-brain.json",
+        "peptide-resource-app/research-intel/brain.js",
+        "peptide-resource-app/research-intel/scoring.js"
+      ]
+    },
+    "commercialCatalog": {
+      "reason": "live customer-facing catalog/pricing data",
+      "overridable": true,
+      "paths": [
+        "luke-app/public/catalog-data.json",
+        "peptide-resource-app/public/catalog-data.json",
+        "**/catalog-data.json"
+      ]
+    },
+    "publicRepoPush": {
+      "reason": "push = external exposure; requires authorization.allowsPublicPush",
+      "overridable": true,
+      "appliesTo": "push",
+      "paths": [
+        "cornerstoneregroup-site/**",
+        "peptide-resource-app/**",
+        "packages/**"
+      ],
+      "remotes": [
+        "github.com/MarcPapineau/cornerstoneregroup-site",
+        "github.com/MarcPapineau/cornerstone-apps"
+      ]
+    },
+    "controlSystemSelf": {
+      "reason": "the control system protects itself from agent edits",
+      "overridable": true,
+      "paths": [
+        "builder-control/agent-registry.json",
+        "builder-control/protected-paths.json",
+        "builder-control/CONTROL-CONTRACT.md",
+        "builder-control/schemas/*.json"
+      ],
+      "appendAllowed": ["builder-control/ledger.json"]
+    },
+    "customerFacingProtocol": {
+      "reason": "KRITE-gated; build requires content-contract audit, release requires --require-krite-approved",
+      "overridable": false,
+      "gatedBy": "scripts/audit-protocol-content-contract.mjs",
+      "paths": [
+        "01-CORNERSTONE-RESEARCH-GROUP/**/*protocol*.html",
+        "01-CORNERSTONE-RESEARCH-GROUP/**/*protocol-guide*.html"
+      ]
+    }
+  }
+}

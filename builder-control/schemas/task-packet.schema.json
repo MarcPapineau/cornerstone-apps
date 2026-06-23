@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "builder-control/schemas/task-packet.schema.json",
+  "title": "Builder Control — Task Packet",
+  "description": "The unit of authorization. No agent may write a protected path, push to a public repo, or run a forbidden-by-default op without a conforming packet. The packet's authorization{} is the ONLY override mechanism in the whole system, and creating one leaves a ledger trail. There is no silent bypass.",
+  "type": "object",
+  "required": [
+    "packetId", "agentId", "objective", "constraints", "sourceOfTruth",
+    "filesAllowed", "testsRequired", "stopConditions", "authorization"
+  ],
+  "properties": {
+    "packetId": { "type": "string", "pattern": "^B?C?[0-9A-Za-z._-]{3,}$", "examples": ["B1-registry-gate", "PKT-2026-06-22-001"] },
+    "agentId": { "type": "string", "description": "MUST match a key in agent-registry.json.", "examples": ["claude-code", "codex", "daniel"] },
+    "objective": { "type": "string", "description": "One precise sentence: what done looks like." },
+    "constraints": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Hard rules this work must respect (reuse>rebuild, anti-theater, no parallel canon, etc.)."
+    },
+    "sourceOfTruth": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Authoritative files this work reads/implements against. Builder packets point at builder-control/CONTROL-CONTRACT.md.",
+      "minItems": 1
+    },
+    "filesAllowed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Exact paths/globs this packet may create or edit. A write outside this list is HARD-BLOCKED even for a registered agent.",
+      "minItems": 1
+    },
+    "testsRequired": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Commands that must run and pass (or be explicitly INCOMPLETE) before the packet's ledger entry can be PASS."
+    },
+    "stopConditions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Conditions under which the agent must STOP and hand off rather than continue (mirrors DIRECT-AGENT-BYPASS-CONTROL stop conditions)."
+    },
+    "authorization": {
+      "type": "object",
+      "description": "The override surface. Empty/false everywhere = packet authorizes only ordinary allowed ops. Each true/non-empty field is logged to the ledger.",
+      "required": ["authorizedBy", "allowsProtectedPaths", "allowsPublicPush", "allowsRelease"],
+      "properties": {
+        "authorizedBy": { "type": "string", "description": "Human/owner who authorized any exception. 'none' if no exception requested.", "examples": ["Marc", "none"] },
+        "allowsProtectedPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Exact protected paths this packet may touch. Each must also be a protected-paths.json entry; the gate logs the pairing."
+        },
+        "allowsPublicPush": { "type": "boolean", "default": false },
+        "allowsRelease": { "type": "boolean", "default": false, "description": "Permits a customer-facing release; release still requires the KRITE content-contract gate to pass — this flag does not bypass KRITE." }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "packetId": "PKT-2026-06-22-EXAMPLE",
+      "agentId": "claude-code",
+      "objective": "Fix the reorder-supplier duplicate-draft bug in luke-app order-ops without touching catalog or pricing canon.",
+      "constraints": [
+        "Reuse existing order-ops module; do not rebuild it",
+        "No edits to any protected-paths.json entry",
+        "Anti-theater: claim done only with files+commands+tests in the same response"
+      ],
+      "sourceOfTruth": ["builder-control/CONTROL-CONTRACT.md", "luke-app/server (order-ops module)"],
+      "filesAllowed": ["luke-app/server/**", "luke-app/test/**"],
+      "testsRequired": ["npm --prefix luke-app test -- order-ops", "curl -s http://localhost:3000/api/orders"],
+      "stopConditions": [
+        "the fix would require editing packages/protocol-core/data/catalog.json",
+        "Claude Code fails twice on the same delegated code issue",
+        "Marc issues STOP / delegate / canon language"
+      ],
+      "authorization": {
+        "authorizedBy": "none",
+        "allowsProtectedPaths": [],
+        "allowsPublicPush": false,
+        "allowsRelease": false
+      }
+    }
+  ]
+}

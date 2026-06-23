@@ -1,0 +1,51 @@
+{
+  "packetId": "B1-registry-gate",
+  "agentId": "claude-code",
+  "objective": "Implement Modules 1, 4, 5: write builder-control/agent-registry.json (governance only, infraRef pointers, no runtime fields), and build builder-control/gate.cjs — the HARD-BLOCK permission gate that loads the registry + a task packet + protected-paths.json, decides PASS/BLOCK per the RULE-ID set in CONTROL-CONTRACT.md s6, and shells the existing drift scripts (check-drift.cjs, audit-protocol-content-contract.mjs, protocol-drafter-guard.js, validateBrain) using their exit codes.",
+  "constraints": [
+    "REUSE > REBUILD: gate.cjs SHELLS the existing drift scripts; it must NOT reimplement tier-matrix/SKU/content-contract/brain logic.",
+    "agent-registry.json MUST validate against builder-control/schemas/agent-registry.schema.json and MUST NOT contain agentId/environmentId/memstoreId/cron/runtimeType (those resolve via infraRef to managed-agents-registry.json).",
+    "HARD-BLOCK from day one: unauthorized write/commit/push/release => process.exit(non-zero) and refuse. No write happens on block.",
+    "Block message MUST follow the fixed format in s6 (rule, agentId, operation, reason, packetId, override line). False positives must be debuggable.",
+    "The ONLY override is a task packet authorization{} block. No --force, no skip env-var, no silent bypass anywhere.",
+    "BC-FORBIDDEN-TASK / BC-INVENTED-AUTHORITY / BC-DOSING-OUT-OF-CANON / BC-GOV-AUTHORITY-LEAK are NOT packet-overridable.",
+    "Do not edit any protected-paths.json entry; gate.cjs and packets/** are in claude-code allowedPathGlobs so writing them is permitted.",
+    "Anti-theater: report done only with files changed + commands run + exit codes in the same response."
+  ],
+  "sourceOfTruth": [
+    "builder-control/CONTROL-CONTRACT.md",
+    "builder-control/schemas/agent-registry.schema.json",
+    "builder-control/schemas/task-packet.schema.json",
+    "builder-control/protected-paths.json",
+    "peptide-resource-app/scripts/check-drift.cjs",
+    "scripts/audit-protocol-content-contract.mjs",
+    "scripts/lib/protocol-drafter-guard.js",
+    "cornerstoneregroup-site/data/managed-agents-registry.json"
+  ],
+  "filesAllowed": [
+    "builder-control/agent-registry.json",
+    "builder-control/gate.cjs",
+    "builder-control/test/**",
+    "builder-control/packets/**"
+  ],
+  "testsRequired": [
+    "node -e \"require('./builder-control/gate.cjs')\"  (loads without throwing)",
+    "node builder-control/gate.cjs --check --packet builder-control/packets/B1.json  (self-check PASS for an in-scope write)",
+    "simulate BC-PUBLIC-PUSH: gate.cjs invoked for a push to cornerstoneregroup-site/** with no allowsPublicPush => exit non-zero + named-rule message",
+    "simulate BC-NO-PACKET: protected write with no packet => exit non-zero",
+    "node -e \"const a=require('./builder-control/agent-registry.json'); /* assert no agentId/cron/runtimeType keys present */\""
+  ],
+  "stopConditions": [
+    "agent-registry.schema.json and the contract disagree on a field — STOP and surface, do not guess",
+    "implementing a check would require editing a protected canon file",
+    "a drift script is missing or non-executable from the gate's cwd — record path, do not fabricate a pass",
+    "Claude Code fails twice on the same gate-logic issue",
+    "Marc issues STOP / delegate / canon / source-of-truth language"
+  ],
+  "authorization": {
+    "authorizedBy": "ARCHITECT (B1 bootstrap — control system writes its own registry once)",
+    "allowsProtectedPaths": ["builder-control/agent-registry.json"],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}
