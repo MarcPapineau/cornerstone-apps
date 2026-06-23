@@ -1,6 +1,6 @@
 {
-  "policyVersion": "v1-2026-06-22",
-  "note": "Authoritative protected-paths policy. No agent may create/edit/delete/move/commit/push these unless its task packet's authorization names the exact path + an authorizer. The gate (gate.cjs) reads THIS file. APPEND to builder-control/ledger.json is allowed; rewriting/truncating it is protected. Globs use ** for recursive.",
+  "policyVersion": "v1.1-2026-06-22",
+  "note": "Authoritative protected-paths policy. No agent may create/edit/delete/move/commit/push these unless its task packet's authorization names the exact path + an authorizer. The gate (gate.cjs) reads THIS file. APPEND to builder-control/ledger.json is allowed; rewriting/truncating it is protected. Globs use ** for recursive. v1.1 (Sprint 1) extends coverage to REAL existing non-Vitalis lanes: crg-command-center live functions/data, the agent-health truth files, and the infra runtime registry. New categories are appended after existing ones so no existing path's classification changes.",
   "categories": {
     "canonDoctrine": {
       "reason": "source-of-truth, drift-sensitive; edit clobbers canonical authority",
@@ -47,7 +47,8 @@
       "paths": [
         "cornerstoneregroup-site/**",
         "peptide-resource-app/**",
-        "packages/**"
+        "packages/**",
+        "crg-command-center/**"
       ],
       "remotes": [
         "github.com/MarcPapineau/cornerstoneregroup-site",
@@ -72,6 +73,31 @@
       "paths": [
         "01-CORNERSTONE-RESEARCH-GROUP/**/*protocol*.html",
         "01-CORNERSTONE-RESEARCH-GROUP/**/*protocol-guide*.html"
+      ]
+    },
+    "commandCenterLive": {
+      "reason": "Sprint 1: GARVIS command-center is a LIVE deployed ops surface (pushes to cornerstone-apps); function/data edits change what operators see",
+      "overridable": true,
+      "paths": [
+        "crg-command-center/netlify/functions/**",
+        "crg-command-center/data/**"
+      ]
+    },
+    "agentHealthTruth": {
+      "reason": "Sprint 1: canonical agent-health truth + live observability; hand-editing these = reporting drift / fake-GREEN (GARVIS operational-truth doctrine)",
+      "overridable": true,
+      "paths": [
+        "data/agent-health-current.json",
+        "crg-command-center/data/agent-health-current.json",
+        "cornerstoneregroup-site/data/agent-health-current.json",
+        "metrics/live-signal-loop.json"
+      ]
+    },
+    "infraRuntimeRegistry": {
+      "reason": "Sprint 1: the ONLY home of runtime facts (agentId/env/cron/runtimeType) per CONTROL-CONTRACT.md §3; agents are immutable/recreated, so hand-edits are dangerous — write via bootstrap, not freehand",
+      "overridable": true,
+      "paths": [
+        "cornerstoneregroup-site/data/managed-agents-registry.json"
       ]
     }
   }

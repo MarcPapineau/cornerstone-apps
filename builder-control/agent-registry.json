@@ -1,7 +1,8 @@
 {
-  "registryVersion": "v1-2026-06-22",
+  "registryVersion": "v1.1-2026-06-22",
   "infraRegistryPath": "cornerstoneregroup-site/data/managed-agents-registry.json",
   "protectedPathsRef": "builder-control/protected-paths.json",
+  "_sprint1Note": "v1.1 widens coverage to the full VERIFIABLE active fleet — the top-level keys of managed-agents-registry.json (the one infra source-of-truth per CONTROL-CONTRACT.md §3). karis is represented through the existing 'krite' governance role (infraRef:karis); no duplicate karis row. Agents whose governed write-scope is not yet grounded are registered at conservative read-only default-deny pending Marc scope confirmation (role string says so). Doctrine-roster biblical names with NO infra entry (solomon, ezra, joseph, luke, samuel, judge, levite, lazarus, benaiah) are intentionally NOT invented here — roster reconciliation is a Marc decision, flagged in the Sprint 1 report.",
   "agents": {
     "claude-code": {
       "role": "Builder — scoped milestone implementation (BUILD-PROTOCOL Builder identity)",
@@ -71,7 +72,7 @@
       "infraRef": "daniel"
     },
     "krite": {
-      "role": "Compliance / content QA gate for customer-facing artifacts",
+      "role": "Compliance / content QA gate for customer-facing artifacts (governance face of the karis managed-agent runtime; infraRef:karis)",
       "kind": "qa-gate",
       "allowedOps": ["read", "validate", "release"],
       "allowedPathGlobs": ["01-CORNERSTONE-RESEARCH-GROUP/**"],
@@ -105,6 +106,185 @@
       "forbiddenTasks": ["sign off rendering quality as content/writing quality (independent systems)"],
       "requiredEvidence": ["screenshot path", "visual-fidelity score"],
       "infraRef": null
+    },
+    "nehemiah": {
+      "role": "Orchestrator / conductor — scope, route, verify, report (BUILD-PROTOCOL orchestrator; infra cron */15)",
+      "kind": "managed-agent",
+      "allowedOps": ["read", "validate", "dispatch", "write"],
+      "allowedPathGlobs": ["memory/**", "metrics/**", "research/**"],
+      "allowedTasks": [
+        "scope every task before delegation; route builder -> diagnostic -> builder",
+        "compile EOD / status reports with REAL execution data",
+        "dispatch atomic tasks to bounded workers"
+      ],
+      "forbiddenTasks": [
+        "author customer-facing protocol / marketing content",
+        "git push to a public-repo path without authorization.allowsPublicPush",
+        "report 'all clear' with 0 runs on a workday (AGENT-QUALITY-DOCTRINE red line)",
+        "mark complete without evidence in the same response"
+      ],
+      "requiredEvidence": ["real execution counts", "files changed", "downstream consumer or release gate per output"],
+      "infraRef": "nehemiah"
+    },
+    "habakkuk": {
+      "role": "Structural pre-build critic — 8 deterministic patterns (Builder OS §J, pre-KRITE)",
+      "kind": "qa-gate",
+      "allowedOps": ["read", "validate"],
+      "allowedPathGlobs": [],
+      "allowedTasks": [
+        "run the 8-pattern structural check pre-build",
+        "emit PASS/FAIL per pattern"
+      ],
+      "forbiddenTasks": [
+        "author the content it reviews",
+        "approve a build without running all 8 pattern checks"
+      ],
+      "requiredEvidence": ["per-pattern PASS/FAIL report"],
+      "infraRef": "habakkuk"
+    },
+    "apollos": {
+      "role": "Content Engine — brief intake -> draft -> critique -> revise (Builder OS §C #7; infra cron 13,17 Mon-Fri)",
+      "kind": "managed-agent",
+      "allowedOps": ["read", "write", "validate"],
+      "allowedPathGlobs": ["apollos/**", "research/**"],
+      "allowedTasks": [
+        "draft content from a brief",
+        "run the draft -> critique -> revise loop"
+      ],
+      "forbiddenTasks": [
+        "release customer / prospect-facing copy without KRITE approval",
+        "git push to a public-repo path without authorization",
+        "fabricate statistics (UNKNOWN > fabricated)",
+        "expose internal agent names in client-facing copy"
+      ],
+      "requiredEvidence": ["KRITE verdict before any customer-facing release", "source for every claim"],
+      "infraRef": "apollos"
+    },
+    "asaph": {
+      "role": "SEO / SERP system — weekly ranking telemetry, keyword clusters, on-page schema (Builder OS §C #8; infra cron Mon 15)",
+      "kind": "managed-agent",
+      "allowedOps": ["read", "write", "validate"],
+      "allowedPathGlobs": ["research/**"],
+      "allowedTasks": [
+        "weekly SERP / keyword / ranking telemetry",
+        "on-page schema + content-gap analysis"
+      ],
+      "forbiddenTasks": [
+        "release customer-facing copy without KRITE",
+        "fabricate ranking / traffic numbers"
+      ],
+      "requiredEvidence": ["sourced ranking data", "tiered findings"],
+      "infraRef": "asaph"
+    },
+    "eod-report": {
+      "role": "EOD report generator — real execution counts + per-agent status (AGENT-QUALITY-DOCTRINE; infra cron 23 Mon-Fri)",
+      "kind": "managed-agent",
+      "allowedOps": ["read", "write", "validate"],
+      "allowedPathGlobs": ["memory/**", "metrics/**"],
+      "allowedTasks": ["compile the EOD report with real execution counts and per-agent status"],
+      "forbiddenTasks": [
+        "report 'all clear' with 0 runs on a workday (red line)",
+        "fabricate execution counts",
+        "suppress or hide errors"
+      ],
+      "requiredEvidence": ["actual execution counts", "per-workflow status"],
+      "infraRef": "eod-report"
+    },
+    "morning-brief": {
+      "role": "Morning briefing assembler — source-backed daily intel brief (infra raw-sdk, daily)",
+      "kind": "raw-sdk",
+      "allowedOps": ["read", "write", "validate"],
+      "allowedPathGlobs": ["research/**", "metrics/**"],
+      "allowedTasks": ["assemble the daily morning brief from sourced inputs"],
+      "forbiddenTasks": [
+        "unsourced claims",
+        "fabricate sources",
+        "customer-facing release without KRITE"
+      ],
+      "requiredEvidence": ["source-backed items", "plain-English bottom line"],
+      "infraRef": "morning-brief"
+    },
+    "build-agent-v1": {
+      "role": "Windmill builder — builds scoped runtime artifacts, emits Gate-D runtime evidence (infra runtimeType windmill-python)",
+      "kind": "windmill",
+      "allowedOps": ["read", "write", "validate"],
+      "allowedPathGlobs": [
+        "peptide-resource-app/**",
+        "luke-app/**",
+        "scripts/**",
+        "01-CORNERSTONE-RESEARCH-GROUP/build-agent-v1/**"
+      ],
+      "allowedTasks": [
+        "build scoped runtime artifacts from a build packet",
+        "emit Gate-D runtime evidence (gate/status/trace_id/evidence_paths)"
+      ],
+      "forbiddenTasks": [
+        "git push to a public-repo path without authorization",
+        "edit protected canon without packet authorization",
+        "claim built / deployed without runtime evidence (URL / log / trace)"
+      ],
+      "requiredEvidence": ["runtime path (URL / log)", "Gate-D evidence JSON", "tests run"],
+      "infraRef": "build-agent-v1"
+    },
+    "ceo": {
+      "role": "Executive / governance managed agent (infra agents/ceo.md, doctrineVersion v4-2026-05-30). SCOPE CONSERVATIVE: read-only default-deny pending Marc confirmation of governed write scope.",
+      "kind": "managed-agent",
+      "allowedOps": ["read"],
+      "allowedPathGlobs": [],
+      "allowedTasks": ["(scope pending Marc confirmation — registered for coverage at read-only)"],
+      "forbiddenTasks": ["any state-changing op until registry scope is confirmed by packet / Marc (default-deny)"],
+      "requiredEvidence": ["n/a — read-only until scope confirmed"],
+      "infraRef": "ceo"
+    },
+    "lydia": {
+      "role": "Weekly background managed agent (infra agents/lydia.md, cron 0 14 * * 1). SCOPE CONSERVATIVE: read-only default-deny pending Marc confirmation.",
+      "kind": "managed-agent",
+      "allowedOps": ["read"],
+      "allowedPathGlobs": [],
+      "allowedTasks": ["(scope pending Marc confirmation — registered for coverage at read-only)"],
+      "forbiddenTasks": ["any state-changing op until registry scope is confirmed by packet / Marc (default-deny)"],
+      "requiredEvidence": ["n/a — read-only until scope confirmed"],
+      "infraRef": "lydia"
+    },
+    "boaz-daily": {
+      "role": "Daily background managed agent (infra agents/boaz-daily.md, cron 0 11 * * 1-5). SCOPE CONSERVATIVE: read-only default-deny pending Marc confirmation.",
+      "kind": "managed-agent",
+      "allowedOps": ["read"],
+      "allowedPathGlobs": [],
+      "allowedTasks": ["(scope pending Marc confirmation — registered for coverage at read-only)"],
+      "forbiddenTasks": ["any state-changing op until registry scope is confirmed by packet / Marc (default-deny)"],
+      "requiredEvidence": ["n/a — read-only until scope confirmed"],
+      "infraRef": "boaz-daily"
+    },
+    "martha-daily": {
+      "role": "Daily raw-sdk background job (infra agents/martha-daily.md, cron 0 12 * * *). SCOPE CONSERVATIVE: read-only default-deny pending Marc confirmation.",
+      "kind": "raw-sdk",
+      "allowedOps": ["read"],
+      "allowedPathGlobs": [],
+      "allowedTasks": ["(scope pending Marc confirmation — registered for coverage at read-only)"],
+      "forbiddenTasks": ["any state-changing op until registry scope is confirmed by packet / Marc (default-deny)"],
+      "requiredEvidence": ["n/a — read-only until scope confirmed"],
+      "infraRef": "martha-daily"
+    },
+    "martha-vm": {
+      "role": "Weekly raw-sdk background job (infra agents/martha-vm.md, cron 0 9 * * 0). SCOPE CONSERVATIVE: read-only default-deny pending Marc confirmation.",
+      "kind": "raw-sdk",
+      "allowedOps": ["read"],
+      "allowedPathGlobs": [],
+      "allowedTasks": ["(scope pending Marc confirmation — registered for coverage at read-only)"],
+      "forbiddenTasks": ["any state-changing op until registry scope is confirmed by packet / Marc (default-deny)"],
+      "requiredEvidence": ["n/a — read-only until scope confirmed"],
+      "infraRef": "martha-vm"
+    },
+    "martha-weekly": {
+      "role": "Weekly raw-sdk background job (infra agents/martha-weekly.md, cron 0 13 * * 1). SCOPE CONSERVATIVE: read-only default-deny pending Marc confirmation.",
+      "kind": "raw-sdk",
+      "allowedOps": ["read"],
+      "allowedPathGlobs": [],
+      "allowedTasks": ["(scope pending Marc confirmation — registered for coverage at read-only)"],
+      "forbiddenTasks": ["any state-changing op until registry scope is confirmed by packet / Marc (default-deny)"],
+      "requiredEvidence": ["n/a — read-only until scope confirmed"],
+      "infraRef": "martha-weekly"
     }
   }
 }
