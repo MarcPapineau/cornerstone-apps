@@ -61,6 +61,11 @@ const EXIT_PASS = 0;
 const EXIT_BLOCK = 3;
 const EXIT_ERROR = 2;
 
+// Sprint 1: OPTIONAL Langfuse trace id, threaded into the ledger entry only when
+// supplied (--langfuse-trace-id <id> or BC_LANGFUSE_TRACE_ID). Null by default →
+// entries are byte-identical to pre-Sprint-1 behavior (no field added).
+let LANGFUSE_TRACE_ID = null;
+
 // ─── Small helpers ───────────────────────────────────────────────────────────
 function loadJSON(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -241,6 +246,7 @@ function ledgerAndExit({ status, blockRule, agentId, packetId, operation, change
     driftChecks: driftChecks || [],
     notes: notes || '',
   };
+  if (LANGFUSE_TRACE_ID) entry.langfuseTraceId = LANGFUSE_TRACE_ID;
   const led = appendLedger(entry);
   if (led.exit !== 0) {
     process.stderr.write(`\n[gate] WARNING: ledger append did not succeed (exit ${led.exit}):\n${led.out}\n`);
@@ -253,6 +259,12 @@ function ledgerAndExit({ status, blockRule, agentId, packetId, operation, change
 // ─── Main decision ───────────────────────────────────────────────────────────
 function main() {
   const args = parseArgs(process.argv.slice(2));
+
+  // Sprint 1: capture optional Langfuse trace id (string only; a bare flag is ignored).
+  LANGFUSE_TRACE_ID =
+    (typeof args['langfuse-trace-id'] === 'string' ? args['langfuse-trace-id'] : null) ||
+    process.env.BC_LANGFUSE_TRACE_ID ||
+    null;
 
   // Hard rule: there is no bypass. Refuse any flag that smells like one.
   for (const bad of ['force', 'skip', 'no-verify', 'bypass']) {

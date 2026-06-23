@@ -53,7 +53,11 @@
         }
       }
     },
-    "notes": { "type": "string" }
+    "notes": { "type": "string" },
+    "langfuseTraceId": {
+      "type": ["string", "null"],
+      "description": "OPTIONAL (Sprint 1, Anti-Drift Rule 4 observability). Langfuse trace id linking this ledger decision to a run trace. Absent on existing entries (backward-compatible) and on gate runs where no trace id is supplied (--langfuse-trace-id / BC_LANGFUSE_TRACE_ID). Never required."
+    }
   },
   "additionalProperties": false,
   "examples": [
