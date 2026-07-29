@@ -5,8 +5,8 @@
  * data/store.json so state survives restarts. Server-authoritative: the SPA never holds
  * the source of truth, it asks the API.
  */
-const { readFileSync, writeFileSync, existsSync } = require('node:fs');
-const { resolve } = require('node:path');
+const { readFileSync, writeFileSync, existsSync, mkdirSync } = require('node:fs');
+const { resolve, dirname } = require('node:path');
 
 const STORE_PATH = resolve(__dirname, '..', 'data', 'store.json');
 const demo = require('@vitalis/protocol-core/data/demo-clients');
@@ -62,6 +62,12 @@ function load() {
 
 function save() {
   if (!state) return;
+  // data/ holds only gitignored runtime state, so it does not exist in a fresh
+  // clone — and the first save then died with ENOENT on the DIRECTORY, not the
+  // file. That made the app unbootable from a clean checkout while working
+  // perfectly on any machine that had run it before. CI found this on its first
+  // green-on-my-Mac / red-on-the-runner split.
+  mkdirSync(dirname(STORE_PATH), { recursive: true });
   writeFileSync(STORE_PATH, JSON.stringify(state, null, 2));
 }
 

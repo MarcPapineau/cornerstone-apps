@@ -121,8 +121,24 @@ const rules = [
     owner: 'builder-control/hooks/post-commit.sh',
     why: 'Layer 4 depends on exactly one hook writing bypass.log. Two writers would interleave and the log could no longer be read as a sequence of commits.',
     check: () => {
+      // Two different questions, and conflating them broke CI on the first run.
+      // Repo-side: does one observer script exist and does the installer wire
+      // it? That is portable and belongs in CI. Machine-side: is it symlinked
+      // into .git/hooks? That is per-clone state a fresh CI checkout can never
+      // have, so asserting it there fails every honest build.
+      const script = 'builder-control/hooks/post-commit.sh';
+      if (!exists(script)) return { ok: false, detail: `${script} is missing — Layer 4 has no observer` };
+      const installer = fs.readFileSync(path.join(ROOT, 'builder-control/hooks/install.sh'), 'utf8');
+      if (!/post-commit\.sh/.test(installer))
+        return { ok: false, detail: 'install.sh no longer installs the observer — new clones would be blind' };
+
       const hook = path.join(ROOT, '.git/hooks/post-commit');
-      if (!fs.existsSync(hook)) return { ok: false, detail: '.git/hooks/post-commit not installed — Layer 4 is blind' };
+      if (!fs.existsSync(hook)) {
+        // On a working machine this is a real finding; in CI it is expected.
+        return process.env.CI
+          ? { ok: true, detail: `${script} present and wired by install.sh (CI: no local hook expected)` }
+          : { ok: false, detail: '.git/hooks/post-commit not installed — Layer 4 is blind on THIS machine. Run: bash builder-control/hooks/install.sh --yes' };
+      }
       const target = fs.lstatSync(hook).isSymbolicLink() ? fs.readlinkSync(hook) : hook;
       return /builder-control\/hooks\/post-commit\.sh$/.test(target)
         ? { ok: true, detail: `.git/hooks/post-commit -> ${rel(target)}` }
