@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/check-drift.cjs",
     "build": "vite build",
+    "check:drift": "node scripts/check-drift.cjs",
     "lint": "eslint .",
     "preview": "vite preview"
   },

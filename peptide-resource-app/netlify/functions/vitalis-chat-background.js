@@ -46,6 +46,10 @@
 const { getStore } = require('@netlify/blobs');
 const { moderateMessage } = require('../lib/moderation');
 const { verify: verifyInternal, SIG_HEADER } = require('../lib/internal-sig');
+// SINGLE SOURCE OF TRUTH for tier matrix that chat must reference.
+// Mirrors src/data/stacks.js. If stacks.js changes, _chat-tier-context.cjs
+// must change too — see file header for sync discipline.
+const { TIER_MATRIX_SUMMARY } = require('./_chat-tier-context.cjs');
 
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
@@ -139,37 +143,12 @@ Future-perfect ("If 16 weeks from now…"). Always ask. This is Q11 doctrine.
 ### 10. Protocol ID footer
 \`VIT-PROTO-YYYYMMDD-<goal>-<tier>-<seq>\` on its own line at the bottom.`;
 
-const STACK_LIBRARY_SUMMARY = `## KNOWN STACK LIBRARY (prefer these when goals match)
-
-### Weight Loss
-- **GLP-GH Synergy**: Semaglutide/Tirz + CJC + Ipa. 16 wks. T1: PMID 34010691, 37285999. Block: pregnancy, MTC/MEN2, pancreatitis.
-- **Visceral Recomp**: Tesamorelin + CJC + AOD-9604. 16 wks. T1: Falutz 2007 (PMID 17616778).
-- **GLP-FatMobilize-GH**: Sema/Tirz + AOD + CJC + Ipa. Experimental.
-
-### Performance
-- **Muscle Growth & Recovery**: CJC-DAC + Ipa + IGF-1 LR3. 10 wks. WADA S2 BANNED.
-- **Wolverine Stack**: BPC-157 + TB-500 + CJC + Ipa. 8 wks. BPC-157 Cat 2.
-- **Hypertrophy & Genetic Ceiling**: IGF-1 LR3 + Follistatin-344 + CJC + Ipa. Organ-overgrowth risk.
-
-### Recovery
-- **Core Injury Stack**: BPC-157 + TB-500 + CJC + Ipa. 8 wks. Default injury template. T1: Sikiric PMID 32977665.
-- **Regen Repair Stack**: BPC + TB-500 + GHK-Cu + CJC/Ipa. 6 wks. T1: Pickart 2015.
-- **KLOW Systemic Stack** (template, not hero): KPV + BPC-157 + GHK-Cu + TB-500. Canonical four-peptide cascade. SKU: KLOW-FD or GLOW-KPV-BOX10. T1: Brown KPV PMID 23433402. Block: malignancy, copper overload, pregnancy.
-
-### General Health
-- **Classic GH Baseline**: CJC + Ipa + Tesamorelin. 10 wks.
-- **Repair & Regeneration**: BPC + TB + GHK-Cu + CJC/Ipa. 10 wks.
-- **Recovery & Longevity**: Sermorelin + Ipa + BPC + GHK-Cu. Gentler GHRH.
-
-### Anti-Aging
-- **GH Axis Stack**: CJC + Ipa + Sermorelin + GHK-Cu. 10 wks. Cancer history = critical block.
-- **Skin Regeneration**: GHK-Cu + BPC + TB + Epitalon. 6 wks.
-- **Mitochondrial Longevity**: SS-31 + MOTS-c + Humanin + NAD+. 14 wks. DO NOT co-prescribe with GH-axis (mTOR conflict).
-
-### Reproductive
-- **HPG Preserve (Male TRT)**: hCG + Gonadorelin + Enclomiphene + Kisspeptin-10. 16 wks.
-- **Restore Desire (Female HSDD)**: PT-141 + Oxytocin + Thymosin α-1 + Epitalon. T1: Kingsberg 2019 — FDA Vyleesi. PT-141 BP warning.
-- **Couple Protocol**: PT-141 + Oxytocin + MT-II + Kisspeptin-10. Block: melanoma/atypical moles.`;
+// STACK_LIBRARY_SUMMARY has been replaced by the canonical tier matrix
+// imported from _chat-tier-context.cjs. The prior inline string had drifted
+// from the app — referenced retired SKUs (the glow-kpv duplicate), redundant
+// pharmacology (GHRH-receptor-redundant pairings), and stacks that no longer exist in the matrix.
+// See _chat-tier-context.cjs for the new single source of truth.
+const STACK_LIBRARY_SUMMARY = TIER_MATRIX_SUMMARY;
 
 function buildCatalogSnapshot(catalogData) {
   if (!catalogData?.vials?.length) return '## CATALOG\n(No catalog provided — flag to Marc)';

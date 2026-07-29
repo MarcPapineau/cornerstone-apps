@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "builder-control/schemas/ledger-entry.schema.json",
+  "title": "Builder Control — Evidence Ledger Entry (append-only)",
+  "description": "ONE entry schema, consolidating the policy/ledger.json stub shape and the Gate-D runtime-evidence JSON shape (gate/status/trace_id/evidence_paths/notes). Every gate decision — PASS and BLOCK — appends one entry. A change with no ledger entry never happened. The ledger file is an array of these objects; entries are never mutated, only appended.",
+  "type": "object",
+  "required": ["entryId", "ts", "agentId", "gate", "status"],
+  "properties": {
+    "entryId": { "type": "string", "examples": ["LED-2026-06-22-0001"] },
+    "ts": { "type": "string", "format": "date-time" },
+    "packetId": { "type": ["string", "null"], "description": "The authorizing packet, or null for blocks where no packet was present." },
+    "agentId": { "type": "string", "examples": ["claude-code", "UNREGISTERED"] },
+    "gate": {
+      "type": "string",
+      "description": "Which gate produced this entry. 'control' = builder-control gate; 'D' = legacy Gate-D import; 'legacy-import' = migrated policy/ledger.json record.",
+      "examples": ["control", "D", "legacy-import", "release"]
+    },
+    "status": { "type": "string", "enum": ["PASS", "BLOCKED", "INCOMPLETE", "IMPORTED"] },
+    "blockRule": { "type": ["string", "null"], "description": "The RULE-ID when status=BLOCKED (e.g. BC-PUBLIC-PUSH), else null." },
+    "operation": { "type": ["string", "null"], "description": "e.g. 'push cornerstoneregroup-site -> origin/main' or 'write packages/protocol-core/data/dosing.js'." },
+    "changed": { "type": "array", "items": { "type": "string" }, "description": "Paths created/edited/deleted/moved by this op." },
+    "commandsRun": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["cmd", "exit"],
+        "properties": {
+          "cmd": { "type": "string" },
+          "exit": { "type": "integer" },
+          "outputTail": { "type": "string", "description": "Last lines of stdout/stderr — proof, not full dump." }
+        }
+      }
+    },
+    "testsRun": { "type": "array", "items": { "type": "string" } },
+    "screenshots": { "type": "array", "items": { "type": "string" } },
+    "commitSha": { "type": ["string", "null"] },
+    "bundleHash": { "type": ["string", "null"], "description": "Deploy/bundle hash where applicable (mirrors Gate-D 'Builder hash')." },
+    "evidencePaths": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "windmill-job: / file: / brain-compound: references. For protocol packets MUST include a brain-compound discoveryLineage reference (Module 6)."
+    },
+    "driftChecks": {
+      "type": "array",
+      "description": "Results of every drift script the gate invoked for this op.",
+      "items": {
+        "type": "object",
+        "required": ["check", "exit"],
+        "properties": {
+          "check": { "type": "string", "examples": ["check-drift.cjs", "audit-protocol-content-contract.mjs --strict", "validateBrain()"] },
+          "exit": { "type": "integer" },
+          "summary": { "type": "string" }
+        }
+      }
+    },
+    "notes": { "type": "string" },
+    "langfuseTraceId": {
+      "type": ["string", "null"],
+      "description": "OPTIONAL (Sprint 1, Anti-Drift Rule 4 observability). Langfuse trace id linking this ledger decision to a run trace. Absent on existing entries (backward-compatible) and on gate runs where no trace id is supplied (--langfuse-trace-id / BC_LANGFUSE_TRACE_ID). Never required."
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "entryId": "LED-2026-06-22-0001",
+      "ts": "2026-06-22T18:10:00Z",
+      "packetId": "PKT-2026-06-22-EXAMPLE",
+      "agentId": "claude-code",
+      "gate": "control",
+      "status": "PASS",
+      "blockRule": null,
+      "operation": "write luke-app/server/order-ops.js",
+      "changed": ["luke-app/server/order-ops.js", "luke-app/test/order-ops.test.js"],
+      "commandsRun": [
+        { "cmd": "npm --prefix luke-app test -- order-ops", "exit": 0, "outputTail": "12 passing" }
+      ],
+      "testsRun": ["order-ops duplicate-draft regression"],
+      "screenshots": [],
+      "commitSha": null,
+      "bundleHash": null,
+      "evidencePaths": ["file:luke-app/server/order-ops.js"],
+      "driftChecks": [
+        { "check": "check-drift.cjs", "exit": 0, "summary": "tier matrix authority intact, no forbidden patterns" }
+      ],
+      "notes": "Reorder duplicate-draft fix. No protected path touched; packet authorization empty."
+    },
+    {
+      "entryId": "LED-2026-06-22-0002",
+      "ts": "2026-06-22T18:22:00Z",
+      "packetId": null,
+      "agentId": "UNREGISTERED",
+      "gate": "control",
+      "status": "BLOCKED",
+      "blockRule": "BC-PUBLIC-PUSH",
+      "operation": "push cornerstoneregroup-site -> origin/main",
+      "changed": [],
+      "commandsRun": [],
+      "testsRun": [],
+      "screenshots": [],
+      "commitSha": null,
+      "bundleHash": null,
+      "evidencePaths": [],
+      "driftChecks": [],
+      "notes": "HARD-BLOCK: push to public repo path with no packet and no allowsPublicPush. Refused, exit 1."
+    }
+  ]
+}

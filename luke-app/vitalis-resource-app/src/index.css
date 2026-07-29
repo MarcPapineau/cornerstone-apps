@@ -1,0 +1,157 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Cormorant+Garamond:wght@500;600;700&family=Montserrat:wght@500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===========================================================================
+   Premium clinical palette — token-driven (white-label ready).
+   Cool near-white surfaces, deep teal-slate accent, low-saturation semantics.
+   =========================================================================== */
+@layer base {
+  :root {
+    /* ── Vitalis Health Co. brand — bright platinum field, cobalt accent, graphite ink. ──
+       Guardrail ratio ≈ 50% platinum/silver · 30% white · 15% cobalt · 5% graphite.
+       Cobalt is the RESTRAINED interactive/brand accent — never a background.
+       Anchors: Cobalt #033594 hsl(219 96% 30%) · Silver Steel #AEB5BF hsl(215 12% 72%)
+       · Pure White #FFFFFF · Deep Graphite #1E2430 hsl(220 23% 15%).
+       NOTE: the protocol dossier is a SEPARATE warm "document world" scoped under .vdoc via
+       --vd-* vars in vdoc.css and references ZERO of these app tokens — it is unaffected. */
+    --background: 214 24% 96%;        /* bright cool platinum field — cards lift off it (the ~50%) */
+    --foreground: 220 23% 15%;        /* Deep Graphite ink (the ~5%) */
+    --card: 210 30% 99.5%;            /* near-pure white panel (the ~30%) */
+    --card-foreground: 220 23% 15%;
+    --panel: 214 26% 94%;             /* light platinum tinted section */
+
+    --muted: 214 22% 92%;             /* table/header wash (cool platinum) */
+    --muted-foreground: 218 12% 42%;
+    --soft: 219 18% 30%;             /* secondary text (cool graphite) */
+    --faint: 218 11% 48%;            /* tertiary text — AA on platinum */
+
+    --border: 214 15% 78%;           /* silver-steel line — cards read clearly */
+    --border-soft: 214 19% 87%;      /* hairline (cool, visible) */
+    --input: 214 15% 80%;
+    --ring: 219 96% 30%;             /* COBALT focus ring */
+
+    --primary: 219 96% 30%;          /* VITALIS COBALT #033594 — interactive (buttons/links/active) */
+    --primary-foreground: 210 33% 99%;
+    --accent: 219 96% 30%;           /* COBALT — brand accent (the ~15%) */
+    --accent-foreground: 210 33% 99%;
+    --accent-soft: 217 60% 93%;      /* pale cobalt wash for active nav / soft chips */
+    --gold: 219 96% 30%;             /* repointed to COBALT — drives the dashboard "brand accent" utilities */
+    --gold-soft: 217 60% 93%;        /* pale cobalt wash (matches accent-soft) */
+    --ink: 220 28% 12%;              /* deeper graphite anchor */
+
+    --success: 158 42% 32%;          /* cooled clinical green — harmonises on platinum */
+    --success-foreground: 210 33% 99%;
+    --success-soft: 156 38% 91%;
+    --warning: 32 60% 42%;           /* cooled amber */
+    --warning-foreground: 210 33% 99%;
+    --warning-soft: 36 64% 90%;
+    --danger: 4 62% 47%;             /* cooled red */
+    --danger-foreground: 210 33% 99%;
+    --danger-soft: 6 60% 93%;
+    --neutral: 218 12% 44%;          /* cool graphite-steel */
+    --neutral-foreground: 210 33% 99%;
+    --neutral-soft: 214 20% 91%;
+
+    /* ── Chart / data-viz palette (cobalt + cool steel/graphite + cooled green for "good").
+       Promoted to vars so dashboards follow the app theme; kept DISTINCT from dossier --vd-*. ── */
+    --chart-1: 219 96% 34%;          /* cobalt — primary series */
+    --chart-2: 215 28% 46%;          /* cool steel-slate — secondary series */
+    --chart-3: 158 38% 38%;          /* cooled green — "good"/positive series */
+    --chart-grid: 214 22% 88%;       /* faint platinum grid line */
+    --chart-axis: 218 11% 52%;       /* axis tick label */
+    --ring-track: 214 20% 89%;       /* progress-ring empty track (platinum) */
+
+    /* ── Command-center RAIL palette (Option C hybrid) — ADDITIVE, scoped to the
+       PRACTITIONER + ADMIN operational sidebar ONLY (Sidebar.jsx applies them behind a
+       role guard). The CLIENT rail + the light platinum content canvas are UNTOUCHED:
+       these vars deliberately do NOT redefine --background/--card/--primary/--accent.
+       Deep navy field, cobalt-active, steel labels — dark rail + light content = the
+       reference command center. ── */
+    --rail-bg: 213 79% 9%;           /* deep navy field (base) */
+    --rail-bg-top: 213 62% 11%;      /* slightly lifted navy — gradient top */
+    --rail-fg: 215 12% 72%;          /* silver-steel inactive nav label */
+    --rail-fg-dim: 217 9% 47%;       /* dim steel — section eyebrow / subtitle */
+    --rail-active-bg: 219 96% 30%;   /* VITALIS COBALT — active nav background */
+    --rail-active-fg: 0 0% 100%;     /* white — active nav label */
+    --rail-hover-bg: 213 39% 16%;    /* navy hairline hover wash */
+    --rail-border: 214 35% 19%;      /* navy rail hairline / divider */
+
+    --radius: 0.5rem;
+  }
+
+  * {
+    border-color: hsl(var(--border-soft));
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    font-feature-settings: 'cv11', 'ss01';
+    font-variant-numeric: tabular-nums;
+  }
+
+  body {
+    margin: 0;
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: theme('fontFamily.sans');
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Numerals / data points read in mono for a clinical, instrument feel. */
+  .font-data {
+    font-family: theme('fontFamily.mono');
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum', 'zero';
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 9999px;
+  }
+}
+
+/*
+ * Print — the naturopath request slip is meant to be brought to Dr. Vincent Lun, so it must
+ * print clean. Hide the app chrome (sidebar/topbar/disclaimer are the only aside/header/footer
+ * in the app) and any control explicitly marked .no-print; let the main column flow.
+ */
+@media print {
+  aside,
+  header,
+  footer,
+  .no-print {
+    display: none !important;
+  }
+  html,
+  body,
+  #root,
+  main {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+  main > div {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+  details[open] > summary {
+    display: none;
+  }
+  details {
+    display: block !important;
+  }
+}

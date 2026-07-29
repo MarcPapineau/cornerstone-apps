@@ -1,0 +1,245 @@
+/*
+ * vdoc.css — the "Vitalis Research" document identity.
+ *
+ * Extracted 1:1 from the canonical PDF (Eric — 02 Fat-Loss Optimization Protocol):
+ * charcoal + antique-gold + cream/parchment, high-contrast Cormorant-style serif display
+ * with gold italic emphasis, humanist-sans body, dense clinical tables, gold-bordered
+ * callouts. Everything is scoped under `.vdoc` so it is fully insulated from the app's
+ * Tailwind tokens — the document is its own world, print/PDF-ready.
+ */
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500;1,600&display=swap');
+
+.vdoc {
+  --vd-ink: #1f1b18;
+  --vd-body: #403a34;
+  --vd-muted: #8d847b;
+  --vd-faint: #b3aaa0;
+  --vd-gold: #b0894e;
+  --vd-gold-deep: #8a6a38;
+  --vd-gold-soft: #d8c39a;
+  --vd-cream: #f4eee0;
+  --vd-cream-deep: #efe6d3;
+  --vd-cream-line: #e7ddc8;
+  --vd-coral: #bc5147;
+  --vd-coral-soft: #f3e0dd;
+  --vd-slate: #5b6b70;
+  --vd-slate-soft: #e3e9ea;
+  --vd-line: #e8e3d8;
+  --vd-line-strong: #d8d1c4;
+  --vd-paper: #ffffff;
+  --vd-serif: 'Cormorant Garamond', 'Hoefler Text', Georgia, 'Times New Roman', serif;
+  --vd-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  background: var(--vd-paper);
+  color: var(--vd-body);
+  font-family: var(--vd-sans);
+  font-size: 13.5px;
+  line-height: 1.62;
+  letter-spacing: 0.002em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* The document presented as a premium sheet inside the app. */
+.vdoc--sheet {
+  max-width: 860px;
+  margin: 0 auto;
+  border: 1px solid var(--vd-line-strong);
+  border-radius: 4px;
+  box-shadow: 0 1px 2px rgba(31, 27, 24, 0.04), 0 12px 32px -16px rgba(31, 27, 24, 0.18);
+  overflow: hidden;
+}
+.vdoc__pad { padding: 56px 64px; }
+@media (max-width: 640px) { .vdoc__pad { padding: 32px 24px; } }
+
+/* ---- Wordmark + kickers ------------------------------------------------ */
+.vd-wordmark { font-family: var(--vd-serif); font-weight: 600; font-size: 30px; line-height: 1; color: var(--vd-ink); letter-spacing: 0.01em; }
+.vd-wordmark em { color: var(--vd-gold); font-style: italic; font-weight: 600; }
+.vd-wordmark--sm { font-size: 17px; }
+.vd-kicker { font-family: var(--vd-sans); font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.18em; color: var(--vd-muted); }
+.vd-eyebrow { font-family: var(--vd-sans); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.16em; color: var(--vd-gold-deep); }
+
+/* ---- Titles ------------------------------------------------------------ */
+.vd-title { font-family: var(--vd-serif); font-weight: 600; font-size: 46px; line-height: 1.04; color: var(--vd-ink); letter-spacing: 0.005em; margin: 12px 0 0; }
+.vd-title em { color: var(--vd-gold); font-style: italic; font-weight: 600; }
+.vd-section-title { font-family: var(--vd-serif); font-weight: 600; font-size: 30px; line-height: 1.08; color: var(--vd-ink); margin: 6px 0 0; }
+.vd-section-title em { color: var(--vd-gold); font-style: italic; font-weight: 600; }
+.vd-subhead { font-family: var(--vd-serif); font-weight: 600; font-size: 19px; color: var(--vd-ink); margin: 0; }
+
+.vd-thesis { font-size: 14.5px; line-height: 1.6; color: var(--vd-body); margin: 16px 0 0; }
+.vd-p { margin: 12px 0 0; }
+.vd-p--lead { font-size: 14px; }
+.vd-strong { font-weight: 700; color: var(--vd-ink); }
+.vd-em { font-style: italic; }
+
+/* ---- Rules + running header ------------------------------------------- */
+.vd-rule { height: 0; border: 0; border-top: 1.5px solid var(--vd-gold); opacity: 0.55; margin: 10px 0 0; }
+.vd-hairline { height: 0; border: 0; border-top: 1px solid var(--vd-line); margin: 28px 0 0; }
+.vd-runhead { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.vd-runhead__ref { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.16em; color: var(--vd-muted); text-align: right; }
+
+/* ---- Cover metadata list ---------------------------------------------- */
+.vd-meta { display: grid; grid-template-columns: 168px 1fr; gap: 9px 20px; margin: 28px 0 0; }
+.vd-meta__label { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.14em; color: var(--vd-gold-deep); align-self: center; }
+.vd-meta__value { font-size: 13.5px; color: var(--vd-ink); font-weight: 500; }
+@media (max-width: 520px) { .vd-meta { grid-template-columns: 1fr; gap: 2px 0; } .vd-meta__value { margin-bottom: 8px; } }
+
+/* ---- Callouts (cream, gold left border) ------------------------------- */
+.vd-callout { background: var(--vd-cream); border-left: 3px solid var(--vd-gold); border-radius: 0 3px 3px 0; padding: 14px 18px; margin: 18px 0 0; font-size: 12.5px; line-height: 1.55; color: var(--vd-body); }
+.vd-callout--coral { border-left-color: var(--vd-coral); background: var(--vd-coral-soft); }
+.vd-callout--slate { border-left-color: var(--vd-slate); background: var(--vd-slate-soft); }
+.vd-callout--plain { background: #faf8f3; }
+.vd-callout__title { font-weight: 700; color: var(--vd-ink); }
+.vd-callout-stack { margin-top: 18px; }
+.vd-callout-stack .vd-callout { margin-top: 12px; }
+
+/* ---- Stat band -------------------------------------------------------- */
+.vd-statband { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin: 22px 0 0; border-top: 1px solid var(--vd-line); }
+.vd-stat { padding: 16px 18px 14px; border-right: 1px solid var(--vd-line); }
+.vd-stat:last-child { border-right: 0; }
+.vd-stat__value { font-family: var(--vd-serif); font-weight: 600; font-size: 30px; line-height: 1; color: var(--vd-ink); font-variant-numeric: oldstyle-nums; }
+.vd-stat__accent { width: 26px; height: 2px; background: var(--vd-gold); margin: 9px 0 8px; border-radius: 2px; }
+.vd-stat__accent--coral { background: var(--vd-coral); }
+.vd-stat__accent--slate { background: var(--vd-slate); }
+.vd-stat__label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.13em; color: var(--vd-muted); }
+@media (max-width: 640px) { .vd-statband { grid-template-columns: repeat(2, 1fr); } .vd-stat:nth-child(2) { border-right: 0; } }
+
+/* ---- Compound cards --------------------------------------------------- */
+.vd-cardgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0 0; }
+@media (max-width: 640px) { .vd-cardgrid { grid-template-columns: 1fr; } }
+.vd-card { border: 1px solid var(--vd-line); border-top: 3px solid var(--vd-gold); border-radius: 2px; padding: 15px 17px; background: var(--vd-paper); }
+.vd-card--anchor { border-top-color: var(--vd-coral); }
+.vd-card--support { border-top-color: var(--vd-gold); }
+.vd-card--foundation { border-top-color: var(--vd-slate); }
+.vd-card__name { font-family: var(--vd-serif); font-weight: 600; font-size: 20px; color: var(--vd-ink); line-height: 1.1; }
+.vd-card__desc { font-style: italic; color: var(--vd-muted); font-size: 12px; }
+.vd-card__role { margin: 6px 0 8px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.13em; color: var(--vd-gold-deep); }
+.vd-card__role--anchor { color: var(--vd-coral); }
+.vd-card__role--foundation { color: var(--vd-slate); }
+.vd-card__body { font-size: 12.5px; line-height: 1.5; color: var(--vd-body); }
+.vd-card__dose { font-style: italic; color: var(--vd-muted); }
+
+/* ---- Clinical table --------------------------------------------------- */
+.vd-table-wrap { margin: 20px 0 0; overflow-x: auto; }
+.vd-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.vd-table thead th { background: var(--vd-ink); color: #fff; text-align: left; padding: 10px 12px; font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; vertical-align: bottom; }
+.vd-table thead th .vd-th-sub { display: block; font-weight: 400; opacity: 0.7; letter-spacing: 0.03em; text-transform: none; font-size: 9.5px; }
+.vd-table tbody td { padding: 11px 12px; border-bottom: 1px solid var(--vd-line); vertical-align: top; color: var(--vd-body); }
+.vd-table tbody tr:nth-child(even) { background: #faf7f1; }
+.vd-table tbody tr:last-child td { border-bottom: 0; }
+.vd-table__block { font-family: var(--vd-serif); font-weight: 600; font-size: 14px; color: var(--vd-gold-deep); }
+.vd-table__block-sub { display: block; font-family: var(--vd-sans); font-weight: 700; font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--vd-muted); margin-top: 2px; }
+.vd-table__muted { color: var(--vd-faint); font-style: italic; }
+
+/* ---- Reference panel + definition list -------------------------------- */
+.vd-panel { border: 1px solid var(--vd-line); border-left: 3px solid var(--vd-gold); border-radius: 0 3px 3px 0; padding: 16px 20px; margin: 16px 0 0; }
+.vd-panel__head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--vd-line); }
+.vd-panel__name { font-family: var(--vd-serif); font-weight: 600; font-size: 21px; color: var(--vd-ink); line-height: 1.05; }
+.vd-panel__name em { font-style: italic; color: var(--vd-muted); font-size: 13px; font-weight: 500; }
+.vd-panel__cadence { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.13em; color: var(--vd-gold-deep); white-space: nowrap; }
+.vd-deflist { margin: 0; }
+.vd-def { display: grid; grid-template-columns: 132px 1fr; gap: 16px; padding: 10px 0; border-bottom: 1px dotted var(--vd-line-strong); }
+.vd-def:last-child { border-bottom: 0; }
+.vd-def__dt { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: var(--vd-gold-deep); padding-top: 2px; }
+.vd-def__dd { font-size: 12.5px; line-height: 1.5; color: var(--vd-body); }
+@media (max-width: 520px) { .vd-def { grid-template-columns: 1fr; gap: 3px; } }
+
+/* ---- Evidence tier badges (T1–T4) ------------------------------------- */
+.vd-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 16px; padding: 0 5px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: 0.04em; background: var(--vd-cream-deep); color: var(--vd-gold-deep); border: 1px solid var(--vd-cream-line); vertical-align: middle; }
+.vd-badge--t1 { background: #e9efe6; color: #46683f; border-color: #d4e2cd; }
+.vd-badge--t2 { background: #eef0f1; color: #4a5b62; border-color: #dde2e4; }
+.vd-badge--t3 { background: var(--vd-cream-deep); color: var(--vd-gold-deep); border-color: var(--vd-cream-line); }
+.vd-badge--t4 { background: #f3ece9; color: #9a6b5e; border-color: #e8dcd7; }
+
+/* ---- Numbered list (lifestyle) ---------------------------------------- */
+.vd-ol { margin: 16px 0 0; padding: 0; list-style: none; counter-reset: vd; }
+.vd-ol > li { counter-increment: vd; position: relative; padding: 0 0 0 34px; margin: 12px 0 0; font-size: 12.5px; line-height: 1.55; }
+.vd-ol > li::before { content: counter(vd); position: absolute; left: 0; top: 0; font-family: var(--vd-serif); font-weight: 600; font-size: 16px; color: var(--vd-gold); }
+
+/* ---- Supply summary + checkpoint list -------------------------------- */
+.vd-supply { margin: 24px 0 0; }
+.vd-supply__rows { border: 1px solid var(--vd-line); margin-top: 12px; }
+.vd-supply__row { display: grid; grid-template-columns: 220px 1fr; gap: 20px; padding: 12px 14px; border-bottom: 1px solid var(--vd-line); font-size: 12.5px; line-height: 1.45; }
+.vd-supply__row:last-child { border-bottom: 0; }
+.vd-supply__row:nth-child(even) { background: #faf7f1; }
+.vd-checkpoints { margin: 12px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.55; }
+.vd-checkpoints li { margin-top: 6px; }
+@media (max-width: 640px) {
+  .vd-supply__row { grid-template-columns: 1fr; gap: 6px; }
+}
+
+/* ---- Signal grid (monitoring tiers) ----------------------------------- */
+.vd-signalgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 16px 0 0; }
+@media (max-width: 640px) { .vd-signalgrid { grid-template-columns: 1fr; } }
+.vd-signal { border: 1px solid var(--vd-line); border-top: 2px solid var(--vd-slate); border-radius: 2px; padding: 13px 15px; }
+.vd-signal--observe { border-top-color: var(--vd-slate); }
+.vd-signal--drift { border-top-color: var(--vd-gold); }
+.vd-signal--stop { border-top-color: var(--vd-coral); }
+.vd-signal__tier { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: var(--vd-slate); }
+.vd-signal--drift .vd-signal__tier { color: var(--vd-gold-deep); }
+.vd-signal--stop .vd-signal__tier { color: var(--vd-coral); }
+.vd-signal__title { font-family: var(--vd-serif); font-weight: 600; font-size: 16px; color: var(--vd-ink); margin: 3px 0 5px; }
+.vd-signal__body { font-size: 12px; line-height: 1.5; color: var(--vd-body); }
+
+/* ---- Status banner + disclaimer --------------------------------------- */
+.vd-banner { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 3px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin: 20px 0 0; }
+.vd-banner--approved { background: #e9efe6; color: #41633a; border: 1px solid #d4e2cd; }
+.vd-banner--draft { background: var(--vd-cream); color: var(--vd-gold-deep); border: 1px solid var(--vd-cream-line); }
+.vd-disclaimer { background: var(--vd-cream); border-top: 2px solid var(--vd-gold); border-radius: 0 0 3px 3px; padding: 16px 20px; margin: 26px 0 0; font-size: 11px; line-height: 1.55; color: var(--vd-body); }
+.vd-disclaimer__title { font-weight: 700; color: var(--vd-ink); }
+.vd-footnote { font-size: 10.5px; color: var(--vd-muted); margin: 14px 0 0; line-height: 1.5; }
+
+/* ---- Section spacing -------------------------------------------------- */
+.vd-section { margin-top: 40px; }
+.vd-section:first-of-type { margin-top: 28px; }
+
+/* ---- Print / PDF ------------------------------------------------------ */
+@media print {
+  .vdoc--sheet { box-shadow: none; border: none; max-width: none; }
+  .vdoc__pad { padding: 0; }
+  .vd-section { break-inside: avoid; }
+  .vd-card, .vd-panel, .vd-signal, .vd-callout { break-inside: avoid; }
+  .vd-table { break-inside: auto; }
+  .vd-no-print { display: none !important; }
+}
+
+/* ── Section 02 — TIME-PHASED protocol schedule (old Vitalis standard) ──────
+ * BLOCK (week-range + phase) | <compound> | … | PHASE MILESTONE. Dark ink header,
+ * cream-striped rows, gold week-block + phase labels, centered dose cells, italic-muted
+ * off-state. Mirrors Eric's `.weekly` table 1:1. */
+.vdoc .vd-sched-wrap { overflow-x: auto; margin: 6px 0; }
+.vdoc .vd-sched { width: 100%; border-collapse: collapse; font-family: var(--vd-sans); }
+.vdoc .vd-sched thead th { background: var(--vd-ink); color: var(--vd-cream); text-align: left; padding: 9px 11px; vertical-align: top; border: 1px solid var(--vd-ink); }
+.vdoc .vd-sched__phasehead { width: 15%; font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; color: var(--vd-gold-soft); }
+.vdoc .vd-sched__milestonehead { width: 22%; font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; color: var(--vd-gold-soft); }
+.vdoc .vd-sched__chead { text-align: center; }
+.vdoc .vd-sched__cname { font-family: var(--vd-serif); font-size: 16px; font-weight: 700; line-height: 1.1; }
+.vdoc .vd-sched__blendtag { font-size: 10px; font-weight: 400; opacity: 0.85; }
+.vdoc .vd-sched__dose { font-weight: 700; font-size: 13px; margin-top: 4px; color: #fff; }
+.vdoc .vd-sched__dose--gap { color: var(--vd-gold-soft); font-weight: 600; font-size: 11px; }
+.vdoc .vd-sched__freq { font-size: 10.5px; opacity: 0.9; margin-top: 2px; font-weight: 500; }
+.vdoc .vd-sched__rf { font-size: 9.5px; opacity: 0.7; margin-top: 1px; }
+.vdoc .vd-sched__components { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 3px; justify-content: center; }
+.vdoc .vd-sched__comp { font-size: 9.5px; background: rgba(255,255,255,0.13); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+.vdoc .vd-sched__translation { margin: 7px auto 0; max-width: 260px; font-size: 9.8px; line-height: 1.35; color: var(--vd-cream); opacity: 0.92; }
+.vdoc .vd-sched__weekly { margin: 5px auto 0; max-width: 280px; display: grid; gap: 2px; font-size: 8.8px; line-height: 1.3; color: var(--vd-gold-soft); opacity: 0.92; }
+.vdoc .vd-sched__chip { margin-top: 7px; }
+.vdoc .vd-sched tbody td { padding: 8px 11px; border: 1px solid var(--vd-line); vertical-align: top; line-height: 1.42; color: var(--vd-ink); }
+.vdoc .vd-sched tbody tr:nth-child(even) td { background: var(--vd-cream); }
+.vdoc .vd-sched__phase { width: 15%; }
+.vdoc .vd-sched__phaselabel { display: block; font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; color: var(--vd-gold-deep); }
+.vdoc .vd-sched__cell { font-size: 11.5px; }
+.vdoc .vd-sched__cell--gap { color: var(--vd-muted); font-style: italic; }
+
+/* Time-phased grid specifics: centered dose columns, gold week-block, off-state, milestone column. */
+.vdoc .vd-sched--weekly tbody td:not(.vd-sched__phase):not(.vd-sched__milestone) { text-align: center; }
+.vdoc .vd-sched--weekly thead th:not(.vd-sched__phasehead):not(.vd-sched__milestonehead) { text-align: center; }
+.vdoc .vd-sched__wkblock { display: block; font-family: var(--vd-serif); font-size: 14px; font-weight: 700; line-height: 1.15; color: var(--vd-gold-deep); }
+.vdoc .vd-sched__cell--on .vd-sched__dosecell { display: block; font-weight: 700; font-size: 12px; color: var(--vd-ink); }
+.vdoc .vd-sched__cell--on .vd-sched__delivery { display: block; font-size: 9px; color: var(--vd-muted); margin-top: 1px; }
+.vdoc .vd-sched__cell--off { color: var(--vd-muted); font-style: italic; font-size: 10.5px; }
+.vdoc .vd-sched__milestone { width: 22%; font-size: 10.5px; color: var(--vd-body); }
+.vdoc .vd-sched__namedcaption { margin: 0 0 6px; font-style: italic; }
+
+.vdoc .vd-sched__sources { margin-top: 9px; }
+.vdoc .vd-sched__sourceline { margin: 2px 0; font-size: 10.5px; }

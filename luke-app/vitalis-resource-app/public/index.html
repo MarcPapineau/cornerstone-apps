@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>My Vitalis Health</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">V</div>
+        <div class="brand-text">
+          <div class="brand-name">Vitalis</div>
+          <div class="brand-sub">Health Resource App</div>
+        </div>
+      </div>
+      <nav id="nav" class="nav"></nav>
+      <div class="sidebar-foot">
+        <div class="demo-pill" id="demoPill">DEMO DATA</div>
+        <button class="btn-reset" id="resetDemo" title="Reset demo data">Reset demo</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-title" id="screenTitle">Dashboard</div>
+        <div class="disclaimer-chip" title="Resource app — not medical advice">
+          <span class="dot"></span> Research / resource tool — <strong>not medical advice</strong>
+        </div>
+      </header>
+      <div class="disclaimer-bar" id="disclaimerBar"></div>
+      <section id="view" class="view"><div class="loading">Loading…</div></section>
+    </main>
+  </div>
+  <script src="/js/app.js"></script>
+</body>
+</html>

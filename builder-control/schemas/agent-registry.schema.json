@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "builder-control/agent-registry.schema.json",
+  "title": "Builder Control — Agent Governance Registry",
+  "description": "ONE workspace-level governance registry. Holds ZERO runtime/infra fields (no agentId, environmentId, memstoreId, cron, runtimeType). Those live ONLY in cornerstoneregroup-site/data/managed-agents-registry.json and are resolved via infraRef. Default-deny: an op not matched by allowedOps + allowedPathGlobs is blocked unless a task packet authorizes an exception.",
+  "type": "object",
+  "required": ["registryVersion", "agents"],
+  "properties": {
+    "registryVersion": { "type": "string", "examples": ["v1-2026-06-22"] },
+    "infraRegistryPath": {
+      "type": "string",
+      "const": "cornerstoneregroup-site/data/managed-agents-registry.json",
+      "description": "The ONLY home of runtime facts. Governance registry references it, never duplicates its fields."
+    },
+    "protectedPathsRef": { "type": "string", "const": "builder-control/protected-paths.json" },
+    "agents": {
+      "type": "object",
+      "description": "Keyed by canonical agent name (must match infra registry key when infraRef is set).",
+      "additionalProperties": { "$ref": "#/$defs/agentRecord" }
+    }
+  },
+  "$defs": {
+    "agentRecord": {
+      "type": "object",
+      "required": ["role", "allowedOps", "allowedPathGlobs", "allowedTasks", "forbiddenTasks", "requiredEvidence", "infraRef"],
+      "properties": {
+        "role": { "type": "string" },
+        "kind": { "type": "string", "enum": ["cli-agent", "managed-agent", "raw-sdk", "windmill", "data-package", "qa-gate"] },
+        "allowedOps": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["read", "write", "commit", "push", "release", "dispatch", "validate"] }
+        },
+        "allowedPathGlobs": { "type": "array", "items": { "type": "string" } },
+        "allowedTasks": { "type": "array", "items": { "type": "string" } },
+        "forbiddenTasks": { "type": "array", "items": { "type": "string" } },
+        "requiredEvidence": { "type": "array", "items": { "type": "string" } },
+        "protectedPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Agent-scoped EXTRA protected paths, merged on top of the global protected-paths.json."
+        },
+        "infraRef": {
+          "type": ["string", "null"],
+          "description": "Canonical key in managed-agents-registry.json, or null for non-infra agents (Claude Code / Codex local CLIs)."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "examples": [
+    {
+      "registryVersion": "v1-2026-06-22",
+      "infraRegistryPath": "cornerstoneregroup-site/data/managed-agents-registry.json",
+      "protectedPathsRef": "builder-control/protected-paths.json",
+      "agents": {
+        "claude-code": {
+          "role": "Builder — scoped milestone implementation (BUILD-PROTOCOL Builder identity)",
+          "kind": "cli-agent",
+          "allowedOps": ["read", "write", "commit", "validate"],
+          "allowedPathGlobs": ["luke-app/**", "peptide-resource-app/**", "scripts/**", "builder-control/gate.cjs", "builder-control/packets/**"],
+          "allowedTasks": ["implement scoped milestone from a task packet", "run validators", "write runtime evidence"],
+          "forbiddenTasks": [
+            "edit any path in protected-paths.json without packet authorization",
+            "git push to a public-repo path without authorization.allowsPublicPush",
+            "author customer-facing protocol content (Gold Standard build authors zero content in the orchestrator/builder)",
+            "invent dosing / schedules / evidence tiers from memory",
+            "claim completion without evidence in the same response"
+          ],
+          "requiredEvidence": ["filesChanged[]", "commandsRun[] with exit + output tail", "testsRun[]"],
+          "infraRef": null
+        },
+        "codex": {
+          "role": "Direct control-plane orchestrator for the Vitalis / Research Brain lane (DIRECT-AGENT-BYPASS-CONTROL-2026-06-18)",
+          "kind": "cli-agent",
+          "allowedOps": ["read", "write", "commit", "dispatch", "validate"],
+          "allowedPathGlobs": ["peptide-resource-app/**", "01-CORNERSTONE-RESEARCH-GROUP/**", "builder-control/**"],
+          "allowedTasks": ["decompose / dispatch / verify / deliver", "route atomic tasks to bounded workers"],
+          "forbiddenTasks": [
+            "author final customer-facing protocol content",
+            "create a parallel Research Brain / scoring / dose / schedule engine when a canonical owner exists",
+            "external release without KRITE / Marc approval",
+            "use a North American government agency as customer-facing peptide-value authority"
+          ],
+          "requiredEvidence": ["paths", "commands", "findings", "gaps", "next action"],
+          "infraRef": null
+        },
+        "daniel": {
+          "role": "Research Intelligence Agent — weekly tool scout + research dossiers",
+          "kind": "managed-agent",
+          "allowedOps": ["read", "write", "validate"],
+          "allowedPathGlobs": ["research/**", "peptide-resource-app/research-intel/**"],
+          "allowedTasks": ["produce research dossier with T1-T4 tiering", "emit weekly tool-scout markdown + JSON sidecar"],
+          "forbiddenTasks": [
+            "write customer-facing protocol artifacts",
+            "edit research-brain.json by hand instead of UPSERT through brain.js",
+            "fabricate stats (UNKNOWN > fabricated)"
+          ],
+          "requiredEvidence": ["sources with tier", "scout JSON sidecar conforming to scout-diff.schema.json"],
+          "infraRef": "daniel"
+        },
+        "krite": {
+          "role": "Compliance / content QA gate for customer-facing artifacts",
+          "kind": "qa-gate",
+          "allowedOps": ["read", "validate", "release"],
+          "allowedPathGlobs": ["01-CORNERSTONE-RESEARCH-GROUP/**"],
+          "allowedTasks": ["approve/reject customer-facing protocol packages", "stamp KRITE STATUS markers"],
+          "forbiddenTasks": ["author protocol content it is reviewing", "approve without running the content-contract audit"],
+          "requiredEvidence": ["KRITE verdict", "audit-protocol-content-contract.mjs --require-krite-approved output"],
+          "infraRef": "karis"
+        },
+        "protocol-core": {
+          "role": "Curated canonical domain data (dosing / evidence / catalog / sources)",
+          "kind": "data-package",
+          "allowedOps": ["read"],
+          "allowedPathGlobs": ["packages/protocol-core/**"],
+          "allowedTasks": ["serve canonical dosing/evidence/catalog/source data to consumers"],
+          "forbiddenTasks": ["be edited by any agent without packet authorization (it is curated, not inferred)"],
+          "requiredEvidence": ["n/a — read-only canonical source"],
+          "infraRef": null
+        },
+        "visual-qa": {
+          "role": "Visual / rendering QA (screenshots, visual-regression, layout)",
+          "kind": "qa-gate",
+          "allowedOps": ["read", "validate"],
+          "allowedPathGlobs": ["luke-app/**", "01-CORNERSTONE-RESEARCH-GROUP/**"],
+          "allowedTasks": ["capture screenshots", "score visual fidelity vs reference"],
+          "forbiddenTasks": ["sign off rendering quality as content/writing quality (independent systems)"],
+          "requiredEvidence": ["screenshot path", "visual-fidelity score"],
+          "infraRef": null
+        }
+      }
+    }
+  ]
+}

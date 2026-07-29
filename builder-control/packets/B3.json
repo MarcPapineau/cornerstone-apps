@@ -1,0 +1,48 @@
+{
+  "packetId": "B3-drift-general-scout",
+  "agentId": "claude-code",
+  "objective": "Implement the Module 4 generalization and Module 7: (a) a reusable boundary-checks module (builder-control/boundary-checks.cjs) that gate.cjs imports, adding the general agent-boundary checks not covered by the existing scripts — gov-authority leak (FDA/Health Canada/ClinicalTrials.gov/NCT/503A/503B/'U.S. regulator'/approvalStatus), invented-authority, dosing-out-of-canon, public-repo-push detection, customer-copy-without-KRITE; and (b) builder-control/scout-sidecar.cjs that reads the latest two DANIEL markdown scouts and emits research/daniel-tool-scout-YYYY-MM-DD.json conforming to scout-diff.schema.json plus the diff vs prior week.",
+  "constraints": [
+    "Do NOT rebuild the DANIEL scout. scout-sidecar.cjs only PARSES the existing markdown (research/daniel-tool-scout-*.md) and emits the JSON sidecar + diff next to it.",
+    "Do NOT rebuild check-drift.cjs / content-contract / protocol-drafter-guard / validateBrain. boundary-checks.cjs ADDS only the checks those do not already perform; gate.cjs still shells the originals (per B1).",
+    "boundary-checks.cjs exports pure functions (input text/op -> {violated, rule, reason}); gate.cjs decides the exit. Keep the gov-leak suppression list aligned with DIRECT-AGENT-BYPASS-CONTROL-2026-06-18 (it lists the exact extra terms prior gates missed).",
+    "The scout sidecar diffVsPrior MUST surface verdict changes (Ignore/Monitor/Test/Deploy), new items, watchlist promoted/expired, and substrate changes — 'what changed how Marc builds', not prose.",
+    "Both modules are in claude-code allowedPathGlobs (research/** and builder-control/**); no protected-path authorization needed.",
+    "Anti-theater: show files changed + a real sidecar emitted from the 2026-06-22 + 2026-06-15 markdown + the boundary-check unit output."
+  ],
+  "sourceOfTruth": [
+    "builder-control/CONTROL-CONTRACT.md",
+    "builder-control/schemas/scout-diff.schema.json",
+    "DIRECT-AGENT-BYPASS-CONTROL-2026-06-18.md",
+    "research/daniel-tool-scout-2026-06-22.md",
+    "research/daniel-tool-scout-2026-06-15.md",
+    "scripts/lib/protocol-drafter-guard.js",
+    "peptide-resource-app/research-intel/brain.js"
+  ],
+  "filesAllowed": [
+    "builder-control/boundary-checks.cjs",
+    "builder-control/scout-sidecar.cjs",
+    "builder-control/test/**",
+    "research/daniel-tool-scout-2026-06-22.json"
+  ],
+  "testsRequired": [
+    "node builder-control/scout-sidecar.cjs --date 2026-06-22  then validate output against schemas/scout-diff.schema.json (exit 0)",
+    "assert research/daniel-tool-scout-2026-06-22.json diffVsPrior.newItems is non-empty and substrateChanges includes the Fable 5 / Bedrock watch item",
+    "node -e \"const b=require('./builder-control/boundary-checks.cjs'); /* assert govLeak('per ClinicalTrials.gov NCT01234567').violated === true */\"",
+    "node -e \"const b=require('./builder-control/boundary-checks.cjs'); /* assert govLeak('mechanism studied in animals').violated === false */\"",
+    "node -e \"const b=require('./builder-control/boundary-checks.cjs'); /* assert publicPush('cornerstoneregroup-site/index.html').violated === true */\""
+  ],
+  "stopConditions": [
+    "the DANIEL markdown structure changed and can no longer be parsed reliably — record the parse gap, do not fabricate items",
+    "a boundary check would duplicate logic already in an existing script — STOP and wire to the existing script instead",
+    "scout-diff.schema.json and the contract disagree — surface, do not guess",
+    "Claude Code fails twice on the same parser/boundary issue",
+    "Marc issues STOP / delegate / canon language"
+  ],
+  "authorization": {
+    "authorizedBy": "none",
+    "allowsProtectedPaths": [],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

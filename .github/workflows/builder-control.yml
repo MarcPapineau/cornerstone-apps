@@ -1,0 +1,90 @@
+name: Builder Control — enforcement self-test
+
+# This workflow tests THE ENFORCEMENT, not the app.
+#
+# Layers 1 and 4 are checks that exist to catch other people's mistakes, which
+# makes them the easiest things in the repo to break without noticing: nothing
+# fails when a validator silently stops validating. So CI runs their own test
+# suites — the fixtures that prove each rule still fires, and the throwaway-repo
+# experiments that prove a --no-verify commit is still visible.
+#
+# It also runs server-side, which is the point. A local hook can be skipped with
+# one flag; this cannot. On 2026-07-28 a --no-verify commit followed by a hard
+# reset destroyed 178 staged files while every local check reported green.
+
+on:
+  push:
+    paths:
+      - 'builder-control/**'
+      - 'scripts/audit-protocol-content-contract.mjs'
+      - 'scripts/test/**'
+      - '.github/workflows/builder-control.yml'
+  pull_request:
+    paths:
+      - 'builder-control/**'
+      - 'scripts/audit-protocol-content-contract.mjs'
+      - 'scripts/test/**'
+      - '.github/workflows/builder-control.yml'
+  workflow_dispatch:
+
+jobs:
+  enforcement:
+    name: doctrine validators + bypass telemetry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The doctrine step diffs against the push/PR base. checkout is shallow
+          # by default, so that base object is not in the clone and `git diff`
+          # exits 128 with "bad object" — which reads as a doctrine failure when
+          # it is really a missing commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Layer 4 — is post-commit still a valid bypass observer?
+        # Re-measured against CI's git version rather than trusted from the Mac
+        # it was first measured on. If a future git ever skips post-commit under
+        # --no-verify, Layer 4's placement becomes invalid and this must fail.
+        run: bash builder-control/test/bypass-experiment.sh
+
+      - name: Layer 4 — bypass telemetry fails closed
+        run: bash builder-control/test/layer4-telemetry.sh
+
+      - name: Layer 1 — doctrine validators fire on their fixtures
+        run: bash scripts/test/doctrine-validators.sh
+
+      - name: Layer 1 — doctrine rules apply to what THIS change touches
+        # Changed files, not the whole corpus. There are ~105 pre-existing
+        # violations in client documents written before these rules were
+        # executable; running --all here would make CI red on arrival, and a
+        # permanently-red gate is one nobody reads. This blocks NEW drift and
+        # leaves the backlog to a deliberate cleanup.
+        #
+        # It still fails closed: a missing or unparseable registry exits 2, so a
+        # deleted rulebook cannot read as "no violations".
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          # Fall back to HEAD's own files whenever the base is absent, empty, or
+          # not present in this clone (force-push, first push of a branch, or a
+          # shallow fetch). Checking THIS commit's files is the honest degraded
+          # mode; skipping the check would not be.
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "Base '$BASE' unavailable — checking HEAD's own files instead."
+            FILES=$(git diff-tree --no-commit-id --name-only -r HEAD)
+          else
+            FILES=$(git diff --name-only "$BASE" HEAD)
+          fi
+          if [ -z "$FILES" ]; then
+            echo "No changed files."; exit 0
+          fi
+          echo "$FILES"
+          # shellcheck disable=SC2086
+          node builder-control/doctrine-check.cjs $FILES
+
+      - name: Layer 2 — one owner per job
+        run: node builder-control/single-authority-check.cjs

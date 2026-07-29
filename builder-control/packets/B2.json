@@ -1,0 +1,49 @@
+{
+  "packetId": "B2-packet-ledger",
+  "agentId": "claude-code",
+  "objective": "Implement Modules 2, 3: a task-packet generator/validator (creates packets conforming to task-packet.schema.json and validates an arbitrary packet against the schema + against the agent's registry record) and an append-only ledger writer that writes entries conforming to ledger-entry.schema.json to builder-control/ledger.json; migrate the single existing policy/ledger.json record into the new ledger as a back-dated IMPORTED entry.",
+  "constraints": [
+    "Ledger is APPEND-ONLY: the writer must never mutate or truncate existing entries; it appends to the JSON array.",
+    "Every ledger entry MUST validate against builder-control/schemas/ledger-entry.schema.json.",
+    "The packet validator MUST reject a packet whose agentId is not a registry key, or whose filesAllowed escape the agent's allowedPathGlobs without an authorization entry.",
+    "Migrate policy/ledger.json's one record (agent:main:main research_report 2026-04-16) as gate:'legacy-import', status:'IMPORTED', preserving original via/targetAgent in notes. After migration, leave policy/ledger.json as a stub pointing to builder-control/ledger.json. Do not delete data.",
+    "Fold the Gate-D evidence shape (gate/status/trace_id->evidencePaths/notes) into entries when importing any future Gate-D JSON; the schema already accommodates it.",
+    "Do NOT build a second ledger. There is exactly one going forward: builder-control/ledger.json.",
+    "Anti-theater: show files changed + validation command output + the migrated entry."
+  ],
+  "sourceOfTruth": [
+    "builder-control/CONTROL-CONTRACT.md",
+    "builder-control/schemas/task-packet.schema.json",
+    "builder-control/schemas/ledger-entry.schema.json",
+    "builder-control/agent-registry.json",
+    "policy/ledger.json",
+    "01-CORNERSTONE-RESEARCH-GROUP/build-agent-v1/runtime-evidence/builder-post-sprint3-clean-gate-d-2026-05-05.json"
+  ],
+  "filesAllowed": [
+    "builder-control/packet-tools.cjs",
+    "builder-control/ledger-writer.cjs",
+    "builder-control/ledger.json",
+    "builder-control/test/**",
+    "policy/ledger.json"
+  ],
+  "testsRequired": [
+    "node builder-control/packet-tools.cjs --validate builder-control/packets/B1.json  (exit 0)",
+    "node builder-control/packet-tools.cjs --validate builder-control/packets/B2.json  (exit 0)",
+    "node builder-control/ledger-writer.cjs --append <test-entry>  then assert array length grew by 1 and prior entries unchanged",
+    "node builder-control/ledger-writer.cjs --migrate-policy-ledger  then assert one IMPORTED entry exists and policy/ledger.json is a stub",
+    "node -e \"JSON.parse(require('fs').readFileSync('builder-control/ledger.json'))\"  (valid JSON array)"
+  ],
+  "stopConditions": [
+    "the migrated record would lose any field — STOP and preserve it in notes",
+    "a ledger entry cannot be made schema-valid without inventing data — record INCOMPLETE, do not fabricate",
+    "policy/ledger.json is being concurrently written by another process",
+    "Claude Code fails twice on the same ledger/packet issue",
+    "Marc issues STOP / delegate / canon language"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc",
+    "allowsProtectedPaths": [],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

@@ -14,7 +14,13 @@
 //   - catalog (array)       — compact compound reference: [{ id, name, tagline, benefits }]
 //
 // The prompt template is FIXED here. The client CANNOT inject prompt text.
+//
+// 2026-05-20 update: tier matrix injected so compound recommendations align
+// with the app's Protocol page tiers (Light / Moderate / Advanced). See
+// _chat-tier-context.cjs for sync discipline.
 // ---------------------------------------------------------------------------
+
+const { TIER_MATRIX_SUMMARY } = require('./_chat-tier-context.cjs');
 
 /**
  * Validate and sanitize a single catalog entry.
@@ -49,14 +55,18 @@ function buildFindProtocolSystemPrompt(catalog) {
 
   return `You are a research assistant for a peptide education platform. Match someone's health goals or symptoms to the most relevant research peptides from this specific catalogue. You are NOT a doctor. All responses are framed as research information only — never as medical advice.
 
-Available compounds:
+${TIER_MATRIX_SUMMARY}
+
+Available compounds (catalog snapshot):
 ${compoundContext}
 
 RULES:
+- When the user's goal maps to one of the canonical indications above, recommend compounds from that indication's MODERATE tier by default (note Light/Advanced alternatives in stackNote if relevant).
 - Recommend 3-5 compounds maximum. Most relevant first.
 - Each rationale: 2-3 sentences referencing the mechanism or published research, specific to this person's situation.
-- Include a stackNote if 2+ compounds work well together.
-- Be specific and concrete — name the mechanism, reference a study if relevant.
+- Include a stackNote if 2+ compounds work well together — and reference the matching app indication + tier if applicable ("This matches the Moderate tier of the Fat Loss protocol — see /protocol/fat-loss").
+- Apply PAIRING RULES: if your recommendation contains both compounds of a pair (e.g., CJC + Ipa, or SS-31 + Cardiogen), note the pre-compounded combo SKU in the stackNote.
+- Apply DRIFT-PREVENTION RULES above — never recommend retired SKUs or pharmacology-redundant pairs.
 - priority values: "Primary" | "Supporting" | "Optional"
 - Respond ONLY with valid JSON in this exact format:
 {
@@ -64,7 +74,7 @@ RULES:
   "compounds": [
     { "id": "compound_id", "name": "Compound Name", "priority": "Primary", "why": "2-3 sentence rationale", "tags": ["tag1","tag2"] }
   ],
-  "stackNote": "how these work together, or empty string",
+  "stackNote": "how these work together + app indication/tier match, or empty string",
   "disclaimer": "For research purposes only. Not medical advice. Consult a qualified healthcare professional."
 }`;
 }

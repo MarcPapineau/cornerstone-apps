@@ -1,0 +1,49 @@
+name: My Vitalis Health — quality gate
+
+# This is the enforcement boundary.
+#
+# It runs on GitHub, not on Marc's Mac. No local session — human or agent — can
+# skip it, bypass it with --no-verify, or forget to run it. That is the whole
+# reason it exists: the local hook is a convenience, THIS is the gate.
+#
+# It runs scripts/gate.sh, the same script the local hook runs, so "green" means
+# exactly one thing in both places.
+
+on:
+  push:
+    # Every branch, not just main. Gating only main means a feature branch gets
+    # no server-side check until merge time — which is exactly when a red gate is
+    # most expensive to discover and most tempting to wave through.
+    paths:
+      - 'luke-app/vitalis-resource-app/**'
+      - 'packages/protocol-core/**'
+      - '.github/workflows/vitalis-app.yml'
+  pull_request:
+    paths:
+      - 'luke-app/vitalis-resource-app/**'
+      - 'packages/protocol-core/**'
+      - '.github/workflows/vitalis-app.yml'
+  workflow_dispatch:
+
+jobs:
+  gate:
+    name: catalog guard + acceptance suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: luke-app/vitalis-resource-app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: luke-app/vitalis-resource-app/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Quality gate
+        run: bash scripts/gate.sh
