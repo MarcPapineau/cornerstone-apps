@@ -1,0 +1,87 @@
+{
+  "registryVersion": "v1.0-2026-07-28",
+  "note": "The one place a written rule becomes an executable rule, for ANY domain built in this workspace — not just Vitalis. To govern a new lane (real estate, apparel, 75 Hard, Primerica), add an entry here. Do not write a second checker; builder-control/doctrine-check.cjs reads this file, the pre-commit hook runs it on every staged file, and CI reruns it server-side.",
+  "howToAddARule": [
+    "id      — stable, greppable. It appears in the failure message.",
+    "scope   — glob(s) the rule applies to. A rule only fires on files it names, so a peptide rule never fires on a listing package.",
+    "forbid  — regex (JS source, no delimiters) for content that must NOT appear.",
+    "excludeScope — optional glob(s) that win over scope. Use it to keep a 'customer-facing' rule off build evidence, runtime logs and internal audits, which are not customer-facing.",
+    "exempt  — optional regex; when it matches the surrounding text the hit is ignored. Use it for the CORRECT neighbour of the rule, so the check does not fail correct writing.",
+    "canon   — the document that makes this a rule. Required. A failure that cannot cite its authority is not enforceable and will be argued with.",
+    "rule    — one plain sentence a person can act on without asking anybody.",
+    "severity— 'block' fails the gate; 'review' reports and does not fail. Use 'review' when the distinction genuinely needs human judgment."
+  ],
+  "rules": [
+    {
+      "id": "no-fake-green",
+      "scope": [
+        "**/*.md",
+        "**/*.html",
+        "**/*.txt"
+      ],
+      "forbid": "\\b(gate|gates|checks?|tests?|suite)\\s+(passed|green|all green)\\b(?![^.]{0,80}(exit|verdict|output|log|run|command|`))",
+      "canon": "memory/feedback_gate_pass_language_banned.md — gate-pass language BANNED without a verdict file",
+      "rule": "Do not write that a gate passed without the evidence next to it — the command, its exit status, or the verdict path. An unevidenced 'tests passed' is the sentence every theater incident is built on.",
+      "severity": "review",
+      "excludeScope": [
+        "**/_backups/**",
+        "**/archive/**",
+        "**/runtime-evidence/**"
+      ]
+    },
+    {
+      "id": "naming-canon-naturopath",
+      "scope": [
+        "01-CORNERSTONE-RESEARCH-GROUP/**/*.html",
+        "**/*requisition*.html",
+        "**/*naturopath*.html"
+      ],
+      "forbid": "\\bvinny\\b",
+      "canon": "memory/rule_naturopath_dr_vincent_lun.md — HARD RULE, locked 2026-05-26",
+      "rule": "The partnering naturopath is \"Dr. Vincent Lun\". The casual form \"Vinny\" is verbal shorthand and must never appear on a document that leaves the building.",
+      "severity": "block",
+      "excludeScope": [
+        "**/build-agent-v1/**",
+        "**/runtime-evidence/**",
+        "**/RELEASE-CONTROL*",
+        "**/_backups/**",
+        "**/archive/**"
+      ]
+    },
+    {
+      "id": "internal-jargon-in-client-text",
+      "scope": [
+        "01-CORNERSTONE-RESEARCH-GROUP/**/*.html"
+      ],
+      "forbid": "\\b(canonical|canon|provenance|evidence[-\\s]tiers?|reverse[-\\s]engineer(ing|ed)?|agent workflows?|source[-\\s]of[-\\s]truth|usableClaim|doesNotShow)\\b",
+      "canon": "CLAUDE.md — \"Do not use internal jargon in customer-facing text\"",
+      "rule": "These are build-system words. A client reading them learns how the document was manufactured instead of what to do.",
+      "severity": "block",
+      "excludeScope": [
+        "**/build-agent-v1/**",
+        "**/runtime-evidence/**",
+        "**/RELEASE-CONTROL*",
+        "**/_backups/**",
+        "**/archive/**"
+      ]
+    },
+    {
+      "id": "regulator-as-value-authority",
+      "scope": [
+        "01-CORNERSTONE-RESEARCH-GROUP/**/*.html"
+      ],
+      "forbid": "\\b(FDA|Health Canada|USDA|NIH|CDC|Food and Drug Administration)\\b[^.]{0,60}?\\b(approved|endorsed|backed|certified|recommends?|recommended|sanctioned)\\b|\\b(approved|endorsed|backed|certified|sanctioned)\\b[^.]{0,60}?\\b(FDA|Health Canada|USDA|NIH|CDC|Food and Drug Administration)\\b",
+      "exempt": "\\b(not|never|no|isn't|is not|aren't|are not|lacks?|without|hasn't|has not|none of)\\b[^.]{0,40}?\\b(FDA|Health Canada|USDA|NIH|CDC|approved|endorsed|backed|certified|sanctioned)\\b",
+      "canon": "CLAUDE.md — \"Keep North American government/regulatory agencies out of customer-facing peptide-value authority framing\"",
+      "rule": "Naming a regulator as the reason a compound is worth taking borrows an authority it does not have. Stating a boundary (\"not approved by...\") is required and stays allowed.",
+      "severity": "block",
+      "excludeScope": [
+        "**/build-agent-v1/**",
+        "**/runtime-evidence/**",
+        "**/RELEASE-CONTROL*",
+        "**/_backups/**",
+        "**/archive/**"
+      ]
+    }
+  ]
+}

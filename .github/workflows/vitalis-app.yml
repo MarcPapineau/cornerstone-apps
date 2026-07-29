@@ -11,7 +11,9 @@ name: My Vitalis Health — quality gate
 
 on:
   push:
-    branches: [main]
+    # Every branch, not just main. Gating only main means a feature branch gets
+    # no server-side check until merge time — which is exactly when a red gate is
+    # most expensive to discover and most tempting to wave through.
     paths:
       - 'luke-app/vitalis-resource-app/**'
       - 'packages/protocol-core/**'

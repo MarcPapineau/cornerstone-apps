@@ -44,3 +44,11 @@ node_modules/
 .idea/
 *.swp
 *.swo
+
+# === builder-control local telemetry (Layer 3/4) ===
+# Machine-local evidence, not shared history. The watchdog reads these on the
+# machine that produced them; committing them would let one Mac's bypass record
+# masquerade as another's.
+builder-control/.receipts/
+builder-control/bypass.log
+builder-control/watchdog.log

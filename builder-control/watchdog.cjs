@@ -30,6 +30,13 @@ const findings = [];
 const green = [];
 const add = (sev, title, detail, fix) => findings.push({ sev, title, detail, fix });
 
+// readLayer4 is a hoisted declaration below, so it can be exported here.
+// Requiring this file gives you the reader WITHOUT running the checks — the
+// tests need to drive Layer 4 against fixture repos, and running the real gate
+// as a side effect of `require` would make that impossible (and slow).
+module.exports = { readLayer4 };
+if (require.main !== module) return;
+
 // ── A. Does the app's quality gate pass right now? ──────────────────
 (() => {
   const gate = path.join(ROOT, 'luke-app/vitalis-resource-app/scripts/gate.sh');
@@ -48,6 +55,61 @@ const add = (sev, title, detail, fix) => findings.push({ sev, title, detail, fix
   }
 })();
 
+// ── A2. Do the enforcement's OWN tests still pass? ──────────────────
+// Layers 1 and 4 catch other people's mistakes, so nothing fails when they
+// quietly stop working. These suites are the only thing that notices.
+(() => {
+  const suites = [
+    ['builder-control/test/bypass-experiment.sh', 'Layer 4 observer placement (post-commit survives --no-verify)'],
+    ['builder-control/test/layer4-telemetry.sh', 'Layer 4 bypass telemetry fails closed'],
+    ['scripts/test/doctrine-validators.sh', 'Layer 1 doctrine validators fire on their fixtures'],
+  ];
+  // Cross-lane checks: these are node, not shell suites.
+  for (const [cmd, label] of [
+    ['node builder-control/single-authority-check.cjs', 'Layer 2 one owner per job (no duplicate authorities)'],
+  ]) {
+    const r = sh(cmd);
+    if (r.ok) green.push(label);
+    else add('RED', `Check FAILING: ${cmd}`,
+      r.out.split('\n').filter(l => /BLOCK|FAIL|duplicate/.test(l)).slice(0, 4).join('\n   ') || 'exited non-zero',
+      `Run: ${cmd}`);
+  }
+  for (const [rel, label] of suites) {
+    if (!fs.existsSync(path.join(ROOT, rel))) {
+      add('RED', 'Enforcement self-test is missing', `${rel} does not exist — ${label} is unverified.`,
+        'Restore it from git history.');
+      continue;
+    }
+    const r = sh(`bash ${JSON.stringify(path.join(ROOT, rel))}`);
+    if (r.ok) green.push(label);
+    else add('RED', `Enforcement self-test FAILING: ${rel}`,
+      r.out.split('\n').filter(l => /FAIL/.test(l)).slice(0, 4).join('\n   ') || 'suite exited non-zero',
+      `Run: bash ${rel}`);
+  }
+})();
+
+// ── A3. Standing doctrine debt across client documents ──────────────
+// Reported, never silently cleared. These are violations in documents written
+// before the rules became executable; CI blocks NEW drift rather than this
+// backlog, so without a standing count the backlog would simply go unmentioned.
+(() => {
+  const r = sh('node builder-control/doctrine-check.cjs --all --summary');
+  let j;
+  try { j = JSON.parse(r.out); } catch {
+    return add('RED', 'Doctrine rules could not be evaluated',
+      (r.out || '').split('\n').slice(0, 3).join('\n   '),
+      'Run: node builder-control/doctrine-check.cjs --all');
+  }
+  if (j.blocking > 0) {
+    add('AMBER', `${j.blocking} standing doctrine violation(s) in ${j.filesWithBlocking} client document(s)`,
+      'Pre-existing content written before these rules were executable.\n'
+      + 'CI blocks new drift; this backlog is not blocked and will not clear itself.',
+      'node builder-control/doctrine-check.cjs --all');
+  } else {
+    green.push(`No standing doctrine violations (${j.scanned} in-scope files)`);
+  }
+})();
+
 // ── B. Is the enforcement itself committed? ─────────────────────────
 // This is the failure that actually happened: gates built, verified, and left
 // sitting untracked on one laptop. Enforcement that isn't committed is a
@@ -55,9 +117,13 @@ const add = (sev, title, detail, fix) => findings.push({ sev, title, detail, fix
 (() => {
   const critical = [
     '.github/workflows/vitalis-app.yml',
+    '.github/workflows/builder-control.yml',
     'luke-app/vitalis-resource-app/scripts/gate.sh',
     'luke-app/.claude/hooks/post-edit-gate.sh',
     'luke-app/.claude/settings.json',
+    'builder-control/hooks/post-commit.sh',
+    'builder-control/test/layer4-telemetry.sh',
+    'scripts/test/doctrine-validators.sh',
   ];
   const untracked = [], dirty = [];
   for (const f of critical) {
@@ -112,18 +178,103 @@ const add = (sev, title, detail, fix) => findings.push({ sev, title, detail, fix
 
 // ── E. Bypass telemetry ─────────────────────────────────────────────
 // Not blocked — blocked bypasses just get routed around. Logged ones get seen.
-(() => {
-  const log = path.join(ROOT, 'builder-control/bypass.log');
-  if (!fs.existsSync(log)) return green.push('No gate bypasses recorded');
+//
+// The previous version of this check said "No gate bypasses recorded" whenever
+// builder-control/bypass.log was absent. Nothing wrote that file, so it was
+// always absent, so this always reported green. It was not measuring bypasses;
+// it was measuring its own ignorance and calling it safety.
+//
+// readLayer4 now distinguishes the four states that used to collapse into one:
+//   OK      observer installed, log readable, no bypasses in window
+//   BYPASS  a commit went in with no gate receipt
+//   BLIND   observer not installed, or the log cannot be read/written
+//   UNKNOWN log missing or malformed — we genuinely cannot tell
+// Only OK is green. Exported so builder-control/test/layer4-telemetry.sh can
+// drive it against fixture repos instead of trusting it by inspection.
+function readLayer4(root) {
+  const log = path.join(root, 'builder-control/bypass.log');
+  const hook = path.join(root, '.git/hooks/post-commit');
+
+  let observerInstalled = false;
+  try { fs.accessSync(hook, fs.constants.X_OK); observerInstalled = true; } catch { /* not installed */ }
+
+  if (!observerInstalled) {
+    return { state: 'BLIND', sev: 'RED',
+      title: 'Bypass telemetry is not installed',
+      detail: '.git/hooks/post-commit is missing. Nothing is watching for --no-verify commits,\n'
+            + 'so this section can report nothing trustworthy about them either way.',
+      fix: 'bash builder-control/hooks/install.sh --yes' };
+  }
+
+  if (!fs.existsSync(log)) {
+    return { state: 'UNKNOWN', sev: 'AMBER',
+      title: 'Bypass telemetry has never written a line',
+      detail: 'The observer is installed but builder-control/bypass.log does not exist.\n'
+            + 'Expected after a fresh install; suspicious if commits have happened since.',
+      fix: 'Make any commit, then re-run the watchdog — a PASS line should appear.' };
+  }
+
+  // A log we cannot write is a log that will stop recording without telling us.
+  try { fs.accessSync(log, fs.constants.W_OK); } catch {
+    return { state: 'BLIND', sev: 'RED',
+      title: 'Bypass log is not writable',
+      detail: `${log}\nFuture bypasses will not be recorded, and the file will still look clean.`,
+      fix: `chmod u+w ${log}` };
+  }
+
+  let raw;
+  try { raw = fs.readFileSync(log, 'utf8'); } catch (e) {
+    return { state: 'BLIND', sev: 'RED',
+      title: 'Bypass log is unreadable', detail: String(e.message),
+      fix: 'Inspect permissions on builder-control/bypass.log' };
+  }
+
+  const lines = raw.split('\n').filter(l => l.trim());
+  const entries = [], malformed = [];
+  for (const l of lines) {
+    try {
+      const e = JSON.parse(l);
+      if (!e.ts || !e.verdict || isNaN(Date.parse(e.ts))) malformed.push(l);
+      else entries.push(e);
+    } catch { malformed.push(l); }
+  }
+
+  // Malformed lines are not skipped. Each one is a commit whose status we can no
+  // longer establish, which is exactly the condition this layer exists to surface.
+  if (malformed.length) {
+    return { state: 'UNKNOWN', sev: 'RED',
+      title: `${malformed.length} unparseable line(s) in the bypass log`,
+      detail: 'Telemetry is corrupt, so bypass history cannot be trusted:\n'
+            + malformed.slice(0, 3).map(l => l.slice(0, 90)).join('\n'),
+      fix: 'Investigate what wrote these before trusting any green here.' };
+  }
+
   const since = Date.now() - 7 * 864e5;
-  const recent = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).filter(l => {
-    const t = Date.parse(l.slice(0, 24)); return !isNaN(t) && t > since;
-  });
-  if (recent.length)
-    add('AMBER', `${recent.length} gate bypass(es) in the last 7 days`,
-      recent.slice(-4).join('\n   '),
-      'Each one is a commit no gate checked.');
-  else green.push('No gate bypasses in the last 7 days');
+  const recent = entries.filter(e => Date.parse(e.ts) > since);
+  const bypasses = recent.filter(e => e.verdict === 'BYPASS');
+  const unknowns = recent.filter(e => e.verdict === 'UNKNOWN');
+
+  if (bypasses.length) {
+    return { state: 'BYPASS', sev: 'RED',
+      title: `${bypasses.length} ungated commit(s) in the last 7 days`,
+      detail: bypasses.slice(-4).map(e => `${e.ts} ${String(e.commit).slice(0, 9)} on ${e.branch} by ${e.author}`).join('\n')
+            + '\nEach one is a commit no gate checked.',
+      fix: 'git show <commit> — and run the gate against it before trusting that work.' };
+  }
+  if (unknowns.length) {
+    return { state: 'UNKNOWN', sev: 'AMBER',
+      title: `${unknowns.length} commit(s) with indeterminate gate status`,
+      detail: unknowns.slice(-4).map(e => `${e.ts} ${e.detail || ''}`).join('\n'),
+      fix: 'The observer ran but could not establish what happened. Investigate.' };
+  }
+  return { state: 'OK', sev: null,
+    green: `No ungated commits in the last 7 days (${entries.length} commit(s) observed)` };
+}
+
+(() => {
+  const r = readLayer4(ROOT);
+  if (r.state === 'OK') green.push(r.green);
+  else add(r.sev, r.title, r.detail, r.fix);
 })();
 
 // ── Report ──────────────────────────────────────────────────────────
