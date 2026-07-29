@@ -33,6 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The doctrine step diffs against the push/PR base. checkout is shallow
+          # by default, so that base object is not in the clone and `git diff`
+          # exits 128 with "bad object" — which reads as a doctrine failure when
+          # it is really a missing commit.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -62,8 +68,13 @@ jobs:
         run: |
           set -euo pipefail
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
-          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
-            echo "No usable base ref — checking HEAD's own files."
+          # Fall back to HEAD's own files whenever the base is absent, empty, or
+          # not present in this clone (force-push, first push of a branch, or a
+          # shallow fetch). Checking THIS commit's files is the honest degraded
+          # mode; skipping the check would not be.
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "Base '$BASE' unavailable — checking HEAD's own files instead."
             FILES=$(git diff-tree --no-commit-id --name-only -r HEAD)
           else
             FILES=$(git diff --name-only "$BASE" HEAD)
