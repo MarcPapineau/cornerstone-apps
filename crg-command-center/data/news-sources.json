@@ -1,0 +1,123 @@
+{
+  "schema": "obadiah-news-sources@1.0",
+  "updated_at": "2026-05-04T00:00:00Z",
+  "notes": "URL verification run 2026-05-04. HTTP status codes recorded. RSS feeds confirmed live where 200.",
+  "tier_1": [
+    {
+      "name": "CoinDesk",
+      "url": "https://www.coindesk.com",
+      "rss": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+      "weight": 1.0,
+      "url_status": 200,
+      "rss_status": 200,
+      "notes": "Marc-preferred source per spec. Primary crypto news feed. RSS confirmed live 2026-05-04. Also available via CoinDesk MCP (fetch_news tool) at runtime — prefer MCP over RSS for OBADIAH agent.",
+      "categories": ["news", "markets", "policy", "tech"]
+    },
+    {
+      "name": "Coinbase Blog",
+      "url": "https://www.coinbase.com/blog",
+      "rss": "https://www.coinbase.com/blog/rss.xml",
+      "weight": 0.9,
+      "url_status": 403,
+      "rss_status": 403,
+      "notes": "Marc-preferred per spec. Blog returns 403 to curl (likely Cloudflare bot protection — human browser works). RSS also 403. Monitor for updates; use direct URL in Telegram brief links.",
+      "categories": ["institutional", "product", "regulatory"]
+    },
+    {
+      "name": "crypto.com Research",
+      "url": "https://crypto.com/research",
+      "rss": null,
+      "weight": 0.8,
+      "url_status": 200,
+      "rss_status": null,
+      "notes": "Marc-preferred per spec. No RSS feed available — research hub only. OBADIAH agent should use WebFetch against this URL on each run for latest research reports. Manual monitoring recommended for deep reports.",
+      "categories": ["research", "market-analysis", "institutional"]
+    }
+  ],
+  "tier_2": [
+    {
+      "name": "The Block",
+      "url": "https://www.theblock.co",
+      "rss": "https://www.theblock.co/rss.xml",
+      "weight": 0.75,
+      "url_status": 403,
+      "rss_status": null,
+      "notes": "403 to curl — Cloudflare-protected. Authoritative for institutional/data coverage. Subscribe via direct browser. RSS not verified due to main page 403.",
+      "categories": ["institutional", "data", "regulatory", "markets"]
+    },
+    {
+      "name": "Messari News",
+      "url": "https://messari.io/news",
+      "rss": "https://messari.io/rss/news.xml",
+      "weight": 0.7,
+      "url_status": 429,
+      "rss_status": null,
+      "notes": "Rate-limited (429) to automated curl. Messari Pro required for full API access. Use for unlock calendar and token intelligence. RSS not verified due to rate limiting.",
+      "categories": ["research", "unlocks", "token-intelligence", "regulatory"]
+    },
+    {
+      "name": "Bloomberg Crypto",
+      "url": "https://www.bloomberg.com/crypto",
+      "rss": null,
+      "weight": 0.65,
+      "url_status": 403,
+      "rss_status": null,
+      "notes": "Bloomberg paywall — 403 to automated requests. Headlines visible without subscription; full articles require Bloomberg Terminal or subscription. No RSS. Use for high-impact macro/institutional headlines via manual monitoring.",
+      "categories": ["macro", "institutional", "regulatory"]
+    }
+  ],
+  "tier_3": [
+    {
+      "name": "CoinTelegraph",
+      "url": "https://cointelegraph.com",
+      "rss": "https://cointelegraph.com/rss",
+      "weight": 0.5,
+      "url_status": 200,
+      "rss_status": 200,
+      "notes": "RSS confirmed live 2026-05-04. High volume output — filter by impact tags. Good for breaking news speed but lower signal-to-noise ratio vs Tier 1. Confirmed recent articles on DeFi, Bitcoin, regulatory.",
+      "categories": ["news", "altcoins", "defi", "regulatory"]
+    },
+    {
+      "name": "Decrypt",
+      "url": "https://decrypt.co",
+      "rss": "https://decrypt.co/feed",
+      "weight": 0.45,
+      "url_status": 200,
+      "rss_status": 200,
+      "notes": "RSS confirmed live 2026-05-04. Good consumer-tone crypto coverage. Confirmed recent articles on DeFi hacks, Bitcoin, Anthropic/AI-crypto crossover. Use for sentiment color and retail narrative.",
+      "categories": ["news", "nft", "defi", "consumer"]
+    },
+    {
+      "name": "CryptoSlate",
+      "url": "https://cryptoslate.com",
+      "rss": "https://cryptoslate.com/feed/",
+      "weight": 0.4,
+      "url_status": 200,
+      "rss_status": null,
+      "notes": "Site returns 200. RSS URL not verified separately — likely valid at /feed/. Lower tier for breaking news; useful for altcoin coverage not picked up by Tier 1/2.",
+      "categories": ["news", "altcoins", "defi", "markets"]
+    }
+  ],
+  "exclude": [
+    {
+      "domain": "ambcrypto.com",
+      "reason": "Low editorial standards, high click-bait ratio"
+    },
+    {
+      "domain": "zycrypto.com",
+      "reason": "Sponsored content heavy, low signal"
+    },
+    {
+      "domain": "u.today",
+      "reason": "Altcoin pump coverage, minimal institutional value"
+    },
+    {
+      "domain": "coinpedia.org",
+      "reason": "Price prediction theater, low editorial bar"
+    },
+    {
+      "domain": "cryptopotato.com",
+      "reason": "Aggregation-heavy, low original reporting"
+    }
+  ]
+}

@@ -1,0 +1,207 @@
+{
+  "schema": "obadiah-events@1.0",
+  "updated_at": "2026-05-04T00:00:00Z",
+  "events": [
+    {
+      "name": "FOMC Meeting (May)",
+      "date": "2026-05-06",
+      "category": "macro",
+      "impact": "high",
+      "description": "Federal Open Market Committee two-day meeting concludes May 7 with rate decision and press conference. First FOMC after April jobs data — market pricing ~80% hold at 4.25-4.50%. Fed commentary on disinflation pace is primary crypto catalyst.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "US CPI Print (April data)",
+      "date": "2026-05-13",
+      "category": "macro",
+      "impact": "high",
+      "description": "Bureau of Labor Statistics releases April 2026 Consumer Price Index. Expected ~2.7% YoY. A print below 2.5% would be risk-asset bullish; above 3.0% would pressure crypto alongside equities.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "13F ETF Holdings Report (Q1 2026)",
+      "date": "2026-05-15",
+      "category": "etf",
+      "impact": "high",
+      "description": "SEC 13F filing deadline for institutional managers holding spot Bitcoin and Ethereum ETFs as of March 31, 2026. Reveals which new institutional names entered or exited. Historically moves BTC 2-5% on reveal of large allocations.",
+      "affected_assets": ["BTC", "ETH"]
+    },
+    {
+      "name": "Babylon (BABY) Token Unlock — Linear Start",
+      "date": "2026-05-10",
+      "category": "unlock",
+      "impact": "medium",
+      "description": "Babylon Genesis first monthly linear unlock begins: 1/36th of locked supply released monthly over 36 months. Mercurial stakeholder tranche. Estimated ~$80-120M USD at current prices depending on BABY price. Ongoing monthly thereafter.",
+      "affected_assets": ["BABY"],
+      "_uncertainty": "verify before alert — USD value depends on BABY price at unlock date"
+    },
+    {
+      "name": "Hyperliquid (HYPE) Cliff Unlock",
+      "date": "2026-05-11",
+      "category": "unlock",
+      "impact": "high",
+      "description": "Major HYPE cliff unlock estimated ~$411M USD. Team/foundation allocation vesting cliff. One of the largest single-asset unlocks in May 2026 window. High sell pressure risk.",
+      "affected_assets": ["HYPE"],
+      "_uncertainty": "verify before alert — date approximate from tokenomist.ai 7-day forward window as of 2026-05-04"
+    },
+    {
+      "name": "US Jobs Report (May — April data)",
+      "date": "2026-05-01",
+      "category": "macro",
+      "impact": "high",
+      "description": "Bureau of Labor Statistics non-farm payrolls for April 2026. Already released. Listed for historical reference in rolling window. NFP feeds Fed reaction function and BTC risk sentiment directly.",
+      "affected_assets": ["BTC", "ETH"]
+    },
+    {
+      "name": "Arbitrum (ARB) Monthly Cliff Unlock",
+      "date": "2026-05-15",
+      "category": "unlock",
+      "impact": "medium",
+      "description": "Arbitrum monthly investor/team vesting cliff. Historically ~$70-120M per month in ARB. L2 token unlocks have shown moderate sell pressure patterns given liquid secondary market.",
+      "affected_assets": ["ARB"],
+      "_uncertainty": "verify before alert — exact USD value depends on ARB price and current tranche schedule"
+    },
+    {
+      "name": "EU MiCA Phase 2 — Full CASP Licensing Enforcement",
+      "date": "2026-06-01",
+      "category": "regulatory",
+      "impact": "high",
+      "description": "EU MiCA (Markets in Crypto-Assets Regulation) full enforcement of Crypto-Asset Service Provider licensing requirements begins. Exchanges and custodians serving EU customers must hold CASP licenses or cease operations. Major compliance inflection for Coinbase, Kraken, Binance EU entities.",
+      "affected_assets": ["BTC", "ETH", "SOL", "BNB"]
+    },
+    {
+      "name": "FOMC Meeting (June)",
+      "date": "2026-06-16",
+      "category": "macro",
+      "impact": "high",
+      "description": "FOMC June meeting with economic projections (dot plot update). June is a quarterly SEP meeting — dot plot revisions move markets significantly. Any guidance toward H2 2026 rate cuts is historically crypto-bullish.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "US CPI Print (May data)",
+      "date": "2026-06-10",
+      "category": "macro",
+      "impact": "high",
+      "description": "BLS May 2026 CPI release. Key input into June FOMC dot plot expectations. Market will interpret this as the final data point before the June 16 rate decision.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "US Jobs Report (June — May data)",
+      "date": "2026-06-05",
+      "category": "macro",
+      "impact": "medium",
+      "description": "BLS non-farm payrolls for May 2026. Labor market resilience vs. softening — key Fed input. Strong jobs data may push back rate-cut expectations, pressuring risk assets.",
+      "affected_assets": ["BTC", "ETH"]
+    },
+    {
+      "name": "CLARITY Act — Senate Banking Committee Vote (Expected)",
+      "date": "2026-06-15",
+      "category": "regulatory",
+      "impact": "high",
+      "description": "US Digital Asset Market Structure (CLARITY Act) expected Senate Banking Committee markup and vote. Bill passed House in 2025; Senate committee vote is next gate. Full Senate floor vote anticipated Q3 2026 if committee clears. Defines CFTC vs SEC jurisdiction over crypto assets.",
+      "affected_assets": ["BTC", "ETH", "SOL", "XRP"],
+      "_uncertainty": "verify before alert — Senate committee scheduling not yet formally published as of 2026-05-04; date is analyst consensus estimate"
+    },
+    {
+      "name": "Optimism (OP) Quarterly Cliff Unlock",
+      "date": "2026-06-20",
+      "category": "unlock",
+      "impact": "medium",
+      "description": "Optimism Foundation / investor quarterly cliff vesting. Previous cliffs: ~$100-180M range. OP unlocks historically coincide with short-term price weakness. Exact amount varies by tranches.",
+      "affected_assets": ["OP"],
+      "_uncertainty": "verify before alert — exact date and USD value from vesting schedule"
+    },
+    {
+      "name": "Aptos (APT) Monthly Vesting Unlock",
+      "date": "2026-06-12",
+      "category": "unlock",
+      "impact": "medium",
+      "description": "Aptos monthly team and investor linear vesting unlock. Consistent monthly releases from the 4-year vesting schedule. Estimated $60-90M at current APT prices.",
+      "affected_assets": ["APT"],
+      "_uncertainty": "verify before alert — exact USD value depends on APT price"
+    },
+    {
+      "name": "Ethereum Pectra — EOF / Verkle Prep Phase",
+      "date": "2026-06-30",
+      "category": "protocol",
+      "impact": "medium",
+      "description": "Ethereum Fusaka upgrade (post-Pectra) planning milestone. EOF (EVM Object Format) finalization and Verkle tree test-net activation expected Q2/Q3 2026. Not a mainnet hard fork — devnet milestone that precedes the Fusaka hard fork targeting late 2026.",
+      "affected_assets": ["ETH"],
+      "_uncertainty": "verify before alert — Ethereum core dev timeline subject to change; track AllCoreDevs calls"
+    },
+    {
+      "name": "FOMC Meeting (July)",
+      "date": "2026-07-28",
+      "category": "macro",
+      "impact": "high",
+      "description": "FOMC July meeting. No SEP update (non-dot-plot meeting). Market will be watching for any language shift toward September rate cut. Summer FOMC typically lower volatility unless labor/inflation surprises.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "US CPI Print (June data)",
+      "date": "2026-07-14",
+      "category": "macro",
+      "impact": "high",
+      "description": "BLS June 2026 CPI release. Mid-summer inflation read; primary driver of July FOMC positioning and September rate cut probability.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "US Jobs Report (July — June data)",
+      "date": "2026-07-02",
+      "category": "macro",
+      "impact": "medium",
+      "description": "BLS non-farm payrolls for June 2026. Early July release (first Friday). Note: if July 4 falls on Friday, release typically moved to Thursday.",
+      "affected_assets": ["BTC", "ETH"]
+    },
+    {
+      "name": "SEC Spot SOL ETF Decision Deadline",
+      "date": "2026-07-21",
+      "category": "regulatory",
+      "impact": "high",
+      "description": "SEC final deadline on spot Solana ETF applications (VanEck, 21Shares filings). Under current administration, approval probability analyst-estimated at 60-70%. Approval would open SOL to institutional ETF capital flows similar to BTC/ETH.",
+      "affected_assets": ["SOL"],
+      "_uncertainty": "verify before alert — exact SEC deadline date based on 240-day filing clock; confirm from SEC EDGAR"
+    },
+    {
+      "name": "Sui (SUI) Major Cliff Unlock",
+      "date": "2026-07-01",
+      "category": "unlock",
+      "impact": "medium",
+      "description": "Sui Network team and early investor cliff vesting event. SUI has large locked supplies from early rounds. Estimated $80-150M depending on SUI price. Mysten Labs allocation partially included.",
+      "affected_assets": ["SUI"],
+      "_uncertainty": "verify before alert — exact USD value and cliff amount from Sui foundation vesting disclosure"
+    },
+    {
+      "name": "US Treasury Quarterly Refunding Announcement (Q3)",
+      "date": "2026-08-05",
+      "category": "macro",
+      "impact": "medium",
+      "description": "US Treasury Q3 2026 quarterly refunding announcement. Reveals Treasury borrowing needs and auction sizes for the quarter. Large refunding increases can pressure risk assets via liquidity drain; smaller-than-expected issuance is crypto-bullish.",
+      "affected_assets": ["BTC", "ETH"]
+    },
+    {
+      "name": "FOMC Meeting (September)",
+      "date": "2026-09-15",
+      "category": "macro",
+      "impact": "high",
+      "description": "FOMC September meeting with SEP (dot plot update). Most-watched 2026 FOMC — market pricing September as the primary rate-cut window. A 25bps cut would be materially crypto-bullish given dollar softening and risk-on shift.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "US CPI Print (July data)",
+      "date": "2026-08-12",
+      "category": "macro",
+      "impact": "high",
+      "description": "BLS July 2026 CPI release. Critical pre-September-FOMC print. This data point will largely determine whether September 15 delivers a rate cut or hold. Market will trade this aggressively.",
+      "affected_assets": ["BTC", "ETH", "SOL"]
+    },
+    {
+      "name": "13F ETF Holdings Report (Q2 2026)",
+      "date": "2026-08-14",
+      "category": "etf",
+      "impact": "medium",
+      "description": "SEC 13F filing deadline for Q2 2026 (holdings as of June 30). Reveals 6-month evolution of institutional ETF positioning in BTC and ETH. Trend confirmation or reversal signal for ETF demand thesis.",
+      "affected_assets": ["BTC", "ETH"]
+    }
+  ]
+}
