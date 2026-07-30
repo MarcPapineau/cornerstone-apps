@@ -52,6 +52,7 @@ check_violation() { # fixture, rule-key, canon-substring
 check_violation violation-naming-canon       namingCanon                 rule_naturopath_dr_vincent_lun.md
 check_violation violation-internal-jargon    internalJargon              CLAUDE.md
 check_violation violation-regulatory-framing regulatoryAuthorityFraming  CLAUDE.md
+check_violation violation-evidence-authority evidenceAuthorityDisplacement feedback_pubmed_is_locator_not_authority.md
 
 # ── boundaries: the correct neighbours of each rule ──────────────────
 if [ "$(code boundary-regulatory-negated)" = "0" ]; then
@@ -61,12 +62,59 @@ else
 $(run boundary-regulatory-negated | sed 's/^/       /')"
 fi
 
+if [ "$(code boundary-evidence-authority-locator)" = "0" ]; then
+  ok "boundary: locating a study THROUGH an index is NOT flagged (a PMID and 'located through PubMed' are correct)"
+else
+  bad "boundary: the evidence-authority check fires on correct locator language
+$(run boundary-evidence-authority-locator | sed 's/^/       /')"
+fi
+
 out="$(run boundary-missing-bucket)"
 if [ "$(code boundary-missing-bucket)" != "0" ] && [ "${out#*VIOLATION}" = "$out" ]; then
   ok "boundary: a missing section fails as a structural gap, not as a doctrine violation"
 else
   bad "boundary: missing section mis-classified
 $(echo "$out" | sed 's/^/       /')"
+fi
+
+# ── --text: drift caught in the METHOD, before a file exists ─────────
+#
+# Every check above reads a finished document. The drift that has cost the most
+# happened in a chat turn, in a stated research plan, before any document
+# existed — so no document check could ever have seen it. These pin that path.
+#
+# The negative case is the verbatim sentence from the 2026-07-29 incident.
+txt() { node "$AUDIT" --text "$1" >/dev/null 2>&1; echo $?; }
+
+if [ "$(txt "Running — verified deep-research pass, every citation confirmed against PubMed before it makes the report.")" != "0" ]; then
+  ok "method: the verbatim 2026-07-29 incident sentence is caught before any file exists"
+else
+  bad "method: the incident sentence passed — the regression that caused this check is back"
+fi
+
+# The last two are verbatim from real client guides. Both were flagged by the
+# first draft of this rule and both were correct writing. They are pinned here
+# because the cost of a false alarm is the whole check getting switched off.
+for good in \
+  "I located the study through PubMed, then read the paper in full and graded it." \
+  "PubMed is a locator, not the authority. We go to the studies themselves." \
+  "This peptide is not approved by the FDA, and that is not the standard we use." \
+  "a vetted, organized place instead of a blank PubMed search" \
+  "Identifiers cross-checked via NCBI / PubMed; Dr. Lun should verify before clinical use."
+do
+  if [ "$(txt "$good")" = "0" ]; then
+    ok "method: correct writing passes — \"$(echo "$good" | cut -c1-46)...\""
+  else
+    bad "method: FALSE ALARM on correct writing — \"$good\"
+$(node "$AUDIT" --text "$good" 2>&1 | sed 's/^/       /')"
+  fi
+done
+
+# An empty --text is a check that did not run. It must never read as clean.
+if [ "$(txt "")" = "2" ]; then
+  ok "fail-closed: an empty --text exits 2, never a silent PASS"
+else
+  bad "fail-closed: empty --text did not exit 2 (got $(txt ""))"
 fi
 
 # ── fail-closed: nothing scanned must never read as clean ────────────

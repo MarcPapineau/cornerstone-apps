@@ -18,11 +18,16 @@ on:
       - 'luke-app/vitalis-resource-app/**'
       - 'packages/protocol-core/**'
       - '.github/workflows/vitalis-app.yml'
+  # No path filter on pull_request, deliberately.
+  #
+  # `main` requires this check before a merge. A path-filtered workflow simply
+  # does not report on a PR that misses its paths, and a required check that
+  # never reports blocks the PR forever — so the filter turns a safeguard into a
+  # deadlock. It also meant a PR touching only scripts/ was merged fully green
+  # having never run the app suite at all: "green" quietly meant two things.
+  #
+  # Running every PR costs a few CI minutes and makes green mean one thing.
   pull_request:
-    paths:
-      - 'luke-app/vitalis-resource-app/**'
-      - 'packages/protocol-core/**'
-      - '.github/workflows/vitalis-app.yml'
   workflow_dispatch:
 
 jobs:

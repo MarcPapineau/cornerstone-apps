@@ -9,6 +9,7 @@ const help = args.includes('--help') || args.includes('-h');
 const daysArgIndex = args.indexOf('--days');
 const days = daysArgIndex >= 0 ? Number(args[daysArgIndex + 1]) : 21;
 const targetFiles = [];
+let rawText = null;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--file') {
@@ -16,8 +17,18 @@ for (let i = 0; i < args.length; i++) {
     i += 1;
   } else if (args[i].startsWith('--file=')) {
     targetFiles.push(args[i].slice('--file='.length));
+  } else if (args[i] === '--text') {
+    rawText = args[i + 1] ?? '';
+    i += 1;
+  } else if (args[i].startsWith('--text=')) {
+    rawText = args[i].slice('--text='.length);
   }
 }
+
+// A draft or a plan has no obligation to carry all 14 sections yet — but it is
+// never allowed to carry forbidden content. Splitting these lets the rules run
+// on work in progress instead of only on the finished guide.
+const violationsOnly = args.includes('--violations-only') || rawText !== null;
 
 function usage() {
   return [
@@ -26,7 +37,12 @@ function usage() {
     '  node scripts/audit-protocol-content-contract.mjs --file path/to/guide.html [--file another.html] [--strict]',
     '  node scripts/audit-protocol-content-contract.mjs --file path/to/guide.html --strict --require-krite-approved',
     '',
+    '  node scripts/audit-protocol-content-contract.mjs --text "a research plan or draft paragraph"',
+    '  node scripts/audit-protocol-content-contract.mjs --file draft.md --violations-only',
+    '',
     'Default mode scans recent protocol guides and exits 0.',
+    '--text checks prose that is not a file yet (a stated research plan, a chat turn) and exits 1 on any violation.',
+    '--violations-only applies the forbidden-content rules without requiring the 14 sections — for drafts.',
     '--strict exits 1 when any scanned guide is missing required buckets.',
     '--file ignores the --days window and audits only the provided guide file(s).',
     '--require-krite-approved (alias --release) also fails unless KRITE and user approval markers are present.',
@@ -278,6 +294,24 @@ const violations = [
     // Boundary statements are the correct use and must not be flagged.
     exempt: /\b(not|never|no|isn't|is not|aren't|are not|lacks?|without|hasn't|has not|none of)\b[^.]{0,40}?\b(FDA|Health Canada|USDA|NIH|CDC|approved|endorsed|backed|certified|sanctioned)\b/i,
   },
+  {
+    key: 'evidenceAuthorityDisplacement',
+    label: 'index or institution used as the evidence authority',
+    source: 'memory/feedback_pubmed_is_locator_not_authority.md (recurring correction) + GLOBAL-EVIDENCE-INCLUSION-DOCTRINE.md',
+    rule: 'Authority is the study. An index locates and lists research; it does not decide whether a finding is real. Ratifying against a catalogue quietly discards everything that catalogue does not index — which is most non-Western research, and is exactly the origin bias the global-evidence doctrine exists to prevent. Locating a study through an index is correct and stays allowed; treating the index as the thing that makes the study true is not.',
+    // Same discipline as the regulator rule above: a ratification verb within
+    // ~40 chars of the index, in either order. "found via PubMed" carries no
+    // ratification verb and never fires. "confirmed against PubMed" does.
+    pattern: /\b(?:verif(?:y|ies|ied|ying|ication)|confirm(?:s|ed|ation)?|validat(?:e|es|ed|ion)|cross[-\s]?check(?:ed|ing)?|ratif(?:y|ied)|substantiat(?:e|ed))\b[^.]{0,40}?\b(?:PubMed|Google Scholar|Embase|Scopus|Web of Science|Cochrane)\b|\b(?:PubMed|Google Scholar|Embase|Scopus|Web of Science|Cochrane)\b[^.]{0,40}?\b(?:verif(?:y|ies|ied|ying|ication)|confirm(?:s|ed|ation)?|validat(?:e|es|ed|ion)|cross[-\s]?check(?:ed|ing)?|ratif(?:y|ied)|substantiat(?:e|ed)|authoritative|the authority|source of truth)\b/gi,
+    // Three shapes are correct usage and must never fire, all three found on
+    // real client guides while building this rule:
+    //   1. the doctrine naming PubMed in order to demote it
+    //   2. a citation carrying a PMID, or IDENTIFIERS checked against the index
+    //      — resolving an ID is the one thing an index is genuinely for
+    //   3. contrastive framing ("instead of a blank PubMed search"), where the
+    //      index is what the work is being distinguished FROM, not ratified by
+    exempt: /\b(?:PMID|identifiers?|citation ids?|is a locator|as a locator|not the authority|never the authority|locator,? not|instead of|rather than)\b/i,
+  },
 ];
 
 function findViolations(text) {
@@ -292,6 +326,43 @@ function findViolations(text) {
     }
   }
   return found;
+}
+
+// ── --text : check prose that is not a file yet ─────────────────────────────
+//
+// The drift that costs the most happens BEFORE a document exists — in a stated
+// research plan or a chat turn ("every citation confirmed against PubMed before
+// it makes the report"). A checker that only reads finished files is blind to
+// it by construction: there is no file to read.
+//
+// This reads a string, applies the same rules, and cites the same canon. It is
+// the difference between catching drift in the deliverable and catching it in
+// the method.
+if (rawText !== null) {
+  if (!rawText.trim()) {
+    console.error('--text was empty. Nothing was checked, so nothing can be reported as passing.');
+    process.exit(2);
+  }
+  const found = findViolations(rawText);
+  console.log(`Doctrine text check — ${rawText.length} chars, ${violations.length} rules applied`);
+  if (found.length === 0) {
+    console.log('PASS — no doctrine violation found in the supplied text.');
+    process.exit(0);
+  }
+  const grouped = new Map();
+  for (const v of found) {
+    if (!grouped.has(v.key)) grouped.set(v.key, { ...v, matches: [] });
+    grouped.get(v.key).matches.push(v);
+  }
+  for (const g of grouped.values()) {
+    console.log(`FAIL [${g.key}] ${g.label} — ${g.matches.length} occurrence(s)`);
+    console.log(`  rule  : ${g.rule}`);
+    console.log(`  canon : ${g.source}`);
+    for (const m of g.matches.slice(0, 3)) {
+      console.log(`  found : "${m.match}"  in  ...${m.excerpt.replace(/\s+/g, ' ')}...`);
+    }
+  }
+  process.exit(1);
 }
 
 function walk(dir) {
@@ -398,8 +469,8 @@ const rows = files.map((file) => {
         : matchesBucket(text, headings, bucket),
     ]),
   );
-  const missing = buckets.filter((bucket) => !present[bucket.key]);
-  if (internalBlockSignature.test(text)) {
+  const missing = violationsOnly ? [] : buckets.filter((bucket) => !present[bucket.key]);
+  if (!violationsOnly && internalBlockSignature.test(text)) {
     missing.push({
       key: 'internalLeak',
       label: 'Internal release-control block leaked into client guide body (move it to a RELEASE-CONTROL sidecar)',
