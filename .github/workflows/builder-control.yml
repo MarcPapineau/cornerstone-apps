@@ -19,12 +19,10 @@ on:
       - 'scripts/audit-protocol-content-contract.mjs'
       - 'scripts/test/**'
       - '.github/workflows/builder-control.yml'
+  # No path filter on pull_request — see vitalis-app.yml for the reasoning.
+  # `main` requires this check, and a required check that never reports is a
+  # deadlock, not a safeguard.
   pull_request:
-    paths:
-      - 'builder-control/**'
-      - 'scripts/audit-protocol-content-contract.mjs'
-      - 'scripts/test/**'
-      - '.github/workflows/builder-control.yml'
   workflow_dispatch:
 
 jobs:
