@@ -21,9 +21,35 @@
 
 const fs   = require('fs');
 const path = require('path');
+const os   = require('os');
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
-const LEDGER_FILE   = path.join(__dirname, 'ledger.json');
+// The canonical ledger. Tests need an ISOLATED ledger — asserting absolute
+// counts against the shared production file is what made ledger-atomicity fail
+// under a parallel runner, and its restore-on-exit was destroying other suites'
+// legitimately written entries.
+//
+// The override is deliberately CONSTRAINED to the OS temp directory. Allowing an
+// arbitrary path would turn this into an evidence-hiding switch: point the
+// ledger somewhere else and gate decisions stop being recorded where anyone
+// looks. Confining it to a temp dir makes it useful for isolation and useless
+// for redirecting production evidence into another repository path.
+function resolveLedgerFile() {
+  const override = process.env.AEGIS_LEDGER_FILE;
+  if (!override) return path.join(__dirname, 'ledger.json');
+  const abs = path.resolve(override);
+  const tmpRoot = fs.realpathSync(os.tmpdir());
+  let real;
+  try { real = fs.realpathSync(path.dirname(abs)); } catch { real = path.dirname(abs); }
+  if (real !== tmpRoot && !real.startsWith(tmpRoot + path.sep)) {
+    throw new Error(
+      `AEGIS_LEDGER_FILE must point inside ${tmpRoot} (got ${abs}). ` +
+      'Redirecting the canonical ledger outside a temp directory would hide gate decisions.'
+    );
+  }
+  return abs;
+}
+const LEDGER_FILE   = resolveLedgerFile();
 const SCHEMA_FILE   = path.join(__dirname, 'schemas', 'ledger-entry.schema.json');
 const POLICY_LEDGER = path.join(__dirname, '..', 'policy', 'ledger.json');
 
@@ -126,26 +152,92 @@ function readLedger() {
   return parsed;
 }
 
-// ─── Write the ledger, asserting old entries are byte-identical ───────────────
-function writeLedger(oldEntries, newEntry) {
-  const newArray  = [...oldEntries, newEntry];
+// ─── Atomic, idempotent ledger append ────────────────────────────────────────
+// CONFIRMED FINDING #7 (CRITICAL): the previous writeLedger() built
+// [...oldEntries, newEntry] from an in-memory snapshot, then checked only that
+// the on-disk array was not SHORTER than that snapshot. A concurrent append
+// made the file longer, the check passed, and the stale array was written over
+// the top — silently destroying the other process's entry. In an append-only
+// evidence ledger, a lost entry is a lost gate decision.
+//
+// The repair has three parts, each closing a distinct hole:
+//   1. an exclusive lock, so two appends cannot interleave at all;
+//   2. re-reading the CURRENT file under that lock, so the base is never stale;
+//   3. write-temp-then-rename, so a crash mid-write cannot leave a half-file.
+//
+// Idempotency is separate: a repeated operationId is a NO-OP rather than a
+// second entry, which is what makes an external retry safe instead of
+// duplicating the effect it is retrying.
 
-  // Safety: re-read and verify old entries are unchanged
-  if (fs.existsSync(LEDGER_FILE)) {
-    const onDisk = readLedger();
-    if (onDisk.length < oldEntries.length) {
-      throw new Error('LEDGER INTEGRITY VIOLATION: on-disk array is shorter than expected — refusing write');
-    }
-    // Byte-compare each old entry
-    for (let i = 0; i < oldEntries.length; i++) {
-      if (JSON.stringify(onDisk[i]) !== JSON.stringify(oldEntries[i])) {
-        throw new Error(`LEDGER INTEGRITY VIOLATION: entry at index ${i} differs on disk vs in memory — another process may have written concurrently`);
+const LOCK_FILE = LEDGER_FILE + '.lock';
+const LOCK_TIMEOUT_MS = 10000;
+const LOCK_STALE_MS = 60000;
+
+function acquireLock() {
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const fd = fs.openSync(LOCK_FILE, 'wx');
+      fs.writeFileSync(fd, String(process.pid));
+      return fd;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      // A lock left behind by a killed process must not wedge the system
+      // forever, but "stale" has to be generous enough that a slow-but-alive
+      // writer is never stolen from.
+      try {
+        const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+        if (age > LOCK_STALE_MS) { fs.unlinkSync(LOCK_FILE); continue; }
+      } catch { /* raced with the holder releasing it */ }
+      if (Date.now() > deadline) {
+        throw new Error(`could not acquire the ledger lock within ${LOCK_TIMEOUT_MS}ms (held by another process). Refusing to write rather than risk clobbering it.`);
       }
+      // Busy-wait briefly. Deliberately synchronous: this whole module is a
+      // synchronous CLI, and an async lock here would change its contract.
+      const until = Date.now() + 25;
+      while (Date.now() < until) { /* spin */ }
     }
   }
+}
 
-  fs.writeFileSync(LEDGER_FILE, JSON.stringify(newArray, null, 2) + '\n', 'utf8');
-  return newArray.length;
+function releaseLock(fd) {
+  try { fs.closeSync(fd); } catch { /* already closed */ }
+  try { fs.unlinkSync(LOCK_FILE); } catch { /* already gone */ }
+}
+
+// Append under an exclusive lock. Returns {appended, length, duplicate}.
+function appendAtomic(newEntry) {
+  const fd = acquireLock();
+  try {
+    // Re-read INSIDE the lock. This is the fix: the base is whatever is on
+    // disk right now, never a snapshot taken before the lock was held.
+    const current = fs.existsSync(LEDGER_FILE) ? readLedger() : [];
+
+    if (newEntry.operationId) {
+      const existing = current.find((e) => e && e.operationId === newEntry.operationId);
+      if (existing) {
+        return { appended: false, duplicate: true, length: current.length, existingEntryId: existing.entryId };
+      }
+    }
+    if (newEntry.entryId && current.some((e) => e && e.entryId === newEntry.entryId)) {
+      throw new Error(`entryId "${newEntry.entryId}" already exists in the ledger. Entry ids must be unique.`);
+    }
+
+    const next = [...current, newEntry];
+    const tmp = LEDGER_FILE + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmp, LEDGER_FILE); // atomic within a filesystem
+    return { appended: true, duplicate: false, length: next.length };
+  } finally {
+    releaseLock(fd);
+  }
+}
+
+// Retained for callers that still expect the old name. It now delegates to the
+// atomic path and ignores the caller's stale snapshot entirely, because using
+// that snapshot as the write base was the defect.
+function writeLedger(_oldEntriesIgnored, newEntry) {
+  return appendAtomic(newEntry).length;
 }
 
 // ─── Validate an entry object against the ledger-entry schema ─────────────────
@@ -174,12 +266,22 @@ function appendEntry(entryPath) {
     process.exit(1);
   }
 
-  // Append
-  const before = readLedger();
-  const newLen = writeLedger(before, entry);
-
+  // Append atomically. A repeated operationId is reported as a no-op rather
+  // than written twice — the caller needs to know its retry was absorbed.
+  let res;
+  try {
+    res = appendAtomic(entry);
+  } catch (e) {
+    console.error(`[ledger-writer] REFUSED: ${e.message}`);
+    process.exit(1);
+  }
+  if (res.duplicate) {
+    console.log(`[ledger-writer] NO-OP: operationId "${entry.operationId}" is already recorded as "${res.existingEntryId}".`);
+    console.log('[ledger-writer] The retry was absorbed; no duplicate effect was written.');
+    process.exit(0);
+  }
   console.log(`[ledger-writer] Appended entry "${entry.entryId}" to ${LEDGER_FILE}`);
-  console.log(`[ledger-writer] Ledger length: ${before.length} → ${newLen}  (grew by 1)`);
+  console.log(`[ledger-writer] Ledger length: ${res.length - 1} → ${res.length}  (grew by 1)`);
   process.exit(0);
 }
 
@@ -301,10 +403,15 @@ function migratePolicyLedger() {
 }
 
 // ─── CLI dispatch ─────────────────────────────────────────────────────────────
+// Guarded so this file can be require()d as a module. It previously ran the CLI
+// (and process.exit'd) on import, which meant any code trying to reuse
+// appendAtomic() killed itself printing a usage message.
 const args = process.argv.slice(2);
 const cmd  = args[0];
 
-if (cmd === '--append') {
+if (require.main !== module) {
+  // imported as a library — export only, run nothing
+} else if (cmd === '--append') {
   const entryPath = args[1];
   if (!entryPath) {
     console.error('Usage: node ledger-writer.cjs --append <entry.json>');
@@ -321,3 +428,5 @@ if (cmd === '--append') {
   console.error('  node ledger-writer.cjs --migrate-policy-ledger');
   process.exit(2);
 }
+
+module.exports = { appendAtomic, acquireLock, releaseLock, readLedger, validateEntry };

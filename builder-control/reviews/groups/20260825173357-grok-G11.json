@@ -1,0 +1,30 @@
+{
+  "reviewId": "REV-20260825173357-grok",
+  "ts": "2026-08-25T17:33:57.427Z",
+  "reviewer": "grok",
+  "reviewerModel": "grok-cli (grok-macos-aarch64)",
+  "packetId": "PKT-20260825-SWITCHBOARD-FOUNDATION",
+  "reviewOf": {
+    "diffSha256": "8e0640770f07f8723dbed4414684581af56c634c82117acc44f50e70b74d2f0d",
+    "changedPaths": [
+      "builder-control/review-adapters.cjs"
+    ]
+  },
+  "disposition": "UNAVAILABLE",
+  "unavailableReason": "Grok CLI exceeded the 180s timeout",
+  "findings": [],
+  "group": {
+    "groupId": "G11",
+    "groupDigest": "538ffd8de9d1394d0ac4723d6fa2d0b083a7f283bb2143c55510a7f0e21d5a10"
+  },
+  "attestation": {
+    "v": "aegis-attest-v1",
+    "alg": "HMAC-SHA256",
+    "packetDigest": "deb22ccca544029cb615075caaf607c7c2e93e6396f643eca46672a52bf57ec9",
+    "payloadDigest": "789a0fb7a07cc5389c4f9497f904e2562bfd5bb5ae487ca3b227927a1c36923c",
+    "mac": "d762938b6d092992826573880fb7b82e2a0ab1ead3dfc4de6150f0dd3252d06e",
+    "signedAt": "2026-08-25T17:36:57.468Z",
+    "keySource": "builder-control/.attestation-key",
+    "scope": "Proves this record was produced by this machine's adapter and is unmodified. Does NOT prove human approval and does not defend against a process that can read the key."
+  }
+}

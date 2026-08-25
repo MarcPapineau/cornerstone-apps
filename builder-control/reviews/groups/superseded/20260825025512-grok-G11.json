@@ -1,0 +1,93 @@
+{
+  "reviewId": "REV-20260825025512-grok",
+  "ts": "2026-08-25T02:55:12.862Z",
+  "reviewer": "grok",
+  "reviewerModel": "grok-cli (grok-macos-aarch64)",
+  "packetId": "PKT-20260823-ENGINEERING-OS-V1",
+  "reviewOf": {
+    "diffSha256": "1e83dcecae483b5c753395daeec229e2c9f9f777839f19facfb66a30203ec488",
+    "changedPaths": [
+      "builder-control/review-chunker.cjs",
+      "builder-control/review-sign.cjs",
+      "builder-control/tool-router.cjs"
+    ]
+  },
+  "disposition": "REJECT",
+  "findings": [
+    {
+      "severity": "HIGH",
+      "file": "builder-control/review-sign.cjs",
+      "location": "attestationPayload (lines 129-154); schema field `supersedes`",
+      "problem": "The attestation covers `reviewId` because that is how supersession names its target, but it does not cover the `supersedes` pointer itself. A hand-edit that adds or retargets `supersedes` on an already-signed record still verifies. That is the remaining way to retire a REJECT without the signing key and without changing `disposition`.",
+      "evidence": "Executed: signed APPROVE (REV-proof-approve) and REJECT (REV-proof-reject) for the same subject/reviewer/packet; both verified. Setting `approve.supersedes = 'REV-proof-reject'` left verify() at `{ ok: true }`. attestationPayload() lists reviewId, ts, unavailableReason, group, subjectSha256, changedPaths, packetId, packetDigest, reviewer, reviewerModel, disposition, and a findings subset — not `supersedes`. engineering-os.cjs:830-858 honours `rec.supersedes` after loadReview() has already accepted the HMAC. review-sign.test.cjs D5 'every load-bearing field' mutates reviewId/groupId/disposition and never `supersedes`.",
+      "impact": "The control this file exists to add — 'hand-editing a verdict is detected' — does not hold for the one field the gate uses to drop a record. Given any previously-signed same-reviewer APPROVE on this subject, a filesystem edit can retire a later REJECT (or a later UNAVAILABLE) and the gate will treat the edit as authentic. The gate's own recovery text ('Resolve by adding \"supersedes\"') instructs that unsigned edit.",
+      "requiredCorrection": "Include `supersedes` (and any other gate-interpreted replacement field) in attestationPayload so adding, clearing, or retargeting it after signing yields ATTESTATION-INVALID. Adapters/chunker must set `supersedes` at sign time; recovery must not depend on editing a signed file.",
+      "verificationMethod": "Red proof: sign APPROVE without supersedes; assign supersedes after the fact; assert verify().ok === false and code ATTESTATION-INVALID. Second proof: sign APPROVE with supersedes set; changing the pointer after signing must also fail. Existing D5 loop must include the field.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": "builder-control/review-chunker.cjs",
+      "location": "cmdAggregate (lines 445-505) vs cmdRun archive (lines 321-337)",
+      "problem": "G9 finding #2 archived predecessor GROUP records so a re-run could clear. The record the gate actually reads is the top-level aggregate, and cmdAggregate always writes a new `${timestamp}-aggregate.json` with no `supersedes` and no archive of the previous aggregate. The documented recovery — re-run the failed group, then --aggregate — therefore leaves two same-reviewer records on the same subject.",
+      "evidence": "cmdAggregate always does `fs.writeFileSync(outPath, ...)` including when `!a.ok` (UNAVAILABLE is still written, lines 477-484). `supersedes` does not appear in review-chunker.cjs. Out path is `REVIEWS_DIR/${14-digit-stamp}-aggregate.json` (a new file every second). collectReviewPaths() in engineering-os.cjs reads only top-level reviews/*.json; two grok/codex aggregates for the same subjectSha256 hit ENGOS-AMBIGUOUS-REVIEWS (engineering-os.cjs:864-871). Tests in review-chunker.test.cjs assert group archive via source grep (`/superseded/` + `/renameSync/`) and never invoke cmdAggregate or inspect reviews/*.json.",
+      "impact": "The recovery path this module documents cannot clear the gate. A premature or failed --aggregate writes UNAVAILABLE; the later successful aggregate is a second active verdict. The gate blocks as AMBIGUOUS (or, if the unsigned-supersedes hole is used, the block is cleared by an unattested pointer). Happy-path once-through still works; every retry of the same subject fails closed for the wrong reason.",
+      "requiredCorrection": "Mirror the group replacement rule at aggregate level: archive previous top-level `*-aggregate.json` for this subject into an attic the gate does not read, and/or sign the new aggregate with `supersedes` set to the previous aggregate's reviewId. Do not require a hand-edit of a signed file.",
+      "verificationMethod": "Write a first UNAVAILABLE aggregate and a second APPROVE aggregate for the same subject without deleting files; run the gate's collect/partition/ambiguity rules (or --gate-done) and assert exactly one active record for that reviewer. A source-grep for renameSync in cmdRun must not be treated as proof that aggregates replace.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": "builder-control/review-chunker.cjs",
+      "location": "aggregate() lines 409-413 and 435; loadGroupRecords() lines 383-394; cmdRun archive loop lines 328-337",
+      "problem": "Any signed group JSON whose subject hash does not match is pushed as GROUP-STALE-SUBJECT into `problems`, and `ok` requires `problems.length === 0`. Leftover group files from a previous subject or a previous plan with extra group IDs therefore make a fully covering current review UNAVAILABLE. The gate, on the same foreign-subject pattern, IGNORES those records. cmdRun only archives filenames ending in `-${currentGroupId}.json` for the current plan, so G6..Gn from a larger prior plan remain.",
+      "evidence": "Executed against the live groups directory: one signed group whose changedPaths equalled the current 43-path subject produced `{ ok: true, disposition: 'APPROVE', cov.ok: true, covered: 43 }`. Adding a second signed file bound to `'f'.repeat(64)` produced `{ ok: false, disposition: 'UNAVAILABLE', problems: ['GROUP-STALE-SUBJECT :: PROOF-stale-G99.json is bound to a different subject…'] }` with coverage still exact (`cov.ok: true, covered: 43, usable: 1`). Contrast engineering-os.cjs:800-814: foreign-subject reviews 'were IGNORED (they neither approve nor block this change)'. review-chunker.test.cjs never calls C.aggregate() against GROUPS_DIR.",
+      "impact": "Chunked review is not isolated per subject. After a 12-group run, a later 5-group subject (cmdRun archives G1-G5 only) cannot aggregate even when G1-G5 cover it exactly. The operator sees 'not consumable' after doing the documented run-all + aggregate steps. Tests still pass because they never load the shared groups directory.",
+      "requiredCorrection": "Ignore (or attic) group records whose reviewOf.diffSha256 is not the subject being aggregated; do not put them in `problems`. Optionally, on --run-all, archive every top-level groups/*.json not in the current plan, not only matching groupIds. Foreign-subject leftovers must be as inert here as they are at the gate.",
+      "verificationMethod": "Repeat the planted-file proof: covering groups for subject A plus a leftover signed group for subject B must yield ok: true for A. Repeat with leftover G6 from a prior 12-group plan of a different hash. Add a test that actually calls aggregate() against a temp groups dir, not a source grep.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": "builder-control/tool-router.cjs",
+      "location": "route() line 199 (`opts.dataClass || 'INTERNAL'`) vs routeRole() lines 152-164",
+      "problem": "routeRole() treats an explicit empty data class as unknown and refuses. route() still uses `||`, so `dataClass: ''` becomes INTERNAL and routes. G9 finding #4 claimed both entry points now share the check; the shared check runs after the defaulting, so the empty-string case never reaches it. The red test for route() omits `''`.",
+      "evidence": "Executed: `route(canon, { task: 'software.review', dataClass: '' })` → `{ ok: true, dataClass: 'INTERNAL', tool: 'codex-local' }`, identical to an absent class. `routeRole('implementation-review', { dataClass: '' })` → `{ ok: false, code: 'DATA_CLASS_UNKNOWN' }`. routeRole comment at lines 149-151 states '`||` would turn an explicitly-passed empty string into the INTERNAL default, which hides a caller bug.' model-routing.test.cjs RED #4 iterates `['typo-class', 'not-a-class', 'Secret']` for route() and has a separate empty-string test only for routeRole (lines 161-165, 181-189).",
+      "impact": "The CLI and any caller of route() that passes an empty --data-class silently ship INTERNAL work (including to specialists). The same value is a hard veto on the model-routing path. Tests pass while the two functions still disagree on the exact D4 case the comments call proven.",
+      "requiredCorrection": "Default to INTERNAL only when dataClass is undefined or null, then refuse any value not in DATA_RANK — the same control flow as routeRole(). Extend RED #4 to include `''` on route(), not only routeRole().",
+      "verificationMethod": "`route(canon, { task: 'software.review', dataClass: '' })` must be ok: false with INVALID_DATA_CLASS (or DATA_CLASS_UNKNOWN). Absent/undefined must still default to INTERNAL and route. Keep the existing unknown-token cases.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "MEDIUM",
+      "file": "builder-control/review-sign.cjs",
+      "location": "attestationPayload (lines 129-154); review-chunker.cjs cmdAggregate lines 459-472; engineering-review.schema.json aggregate description",
+      "problem": "The schema and chunker claim that embedding each group's attestation digest makes an aggregate stop matching if a group is edited later. The `aggregate` object is not in the HMAC payload, and the gate never re-reads group files or compares those digests. Editing aggregate.coverage / aggregate.groups after signing still verifies and still passes --validate-review.",
+      "evidence": "Executed: signed a record with `aggregate: { coverage: 'EXACT', groups: [{ groupId: 'G1', attestationDigest: 'aa' }] }`; set `aggregate.coverage = 'FORGED'` and `aggregate.groups = []`; verify() returned ok: true; `engineering-os.cjs --validate-review` exited 0 with `errors: []`. Schema text (engineering-review.schema.json:260-262): 'Each group's attestation digest is embedded so editing a group after aggregation invalidates the aggregate.' Chunker comment (lines 462-464): 'Editing a group record after aggregation changes its digest and this aggregate stops matching.' Test 'AGGREGATION TAMPERING' only flips a GROUP record's disposition and re-signs that group; it never verifies the aggregate record.",
+      "impact": "Operators and later reviewers are told a control exists that does not. Group files can be rewritten or deleted after a signed APPROVE aggregate and the gate still consumes the snapshot. That does not by itself mint a new approval (top-level disposition and changedPaths are HMAC'd), but it is an over-claimed integrity property on the exact mechanism this change introduces, and the named red proof does not test it.",
+      "requiredCorrection": "Either put a canonical digest of `aggregate` (groupIds, groupDigests, attestationDigests, coverage, problems) inside attestationPayload and have the gate re-check group files against those digests, or delete the claim from the schema, chunker comments, and tests and state honestly that the aggregate is a signed snapshot the groups no longer constrain.",
+      "verificationMethod": "If the claim is kept: mutate aggregate.coverage or a group's attestationDigest on a signed aggregate and assert ATTESTATION-INVALID; delete or edit a referenced group file and assert the gate refuses the aggregate. If the claim is dropped: remove the sentences that say otherwise.",
+      "status": "OPEN"
+    }
+  ],
+  "unverified": [
+    "Did not invoke a live reviewer via --run / --run-all, so adapter write-path interaction with archive-before-run was not observed end-to-end.",
+    "Did not run --gate-done against two planted aggregate files; ENGOS-AMBIGUOUS-REVIEWS is inferred from collectReviewPaths + the ambiguity loop plus cmdAggregate's write behaviour.",
+    "Did not re-run the review-chunker / review-sign / tool-router / model-routing test files in this session (proofs called the production functions directly).",
+    "Did not measure whether git-diff failure (groupBytes returning 0) or the oversize-split iteration guard of 64 can leave a still-oversize multi-file group on a subject larger than the 43-path live tree."
+  ],
+  "group": {
+    "groupId": "G11",
+    "groupDigest": "9713039c9aa1b005617d9b51822d955674aa4cefd8b485be6636c062359341fa"
+  },
+  "attestation": {
+    "v": "aegis-attest-v1",
+    "alg": "HMAC-SHA256",
+    "packetDigest": "dbdb999792b4e95748dd0c03bbad73833ecb19afd45e10988d8f784ca08f18d1",
+    "payloadDigest": "bf5bca4b25b1cb58580165c81348b19e9a2929d741e7ea67775cbfb1678d2494",
+    "mac": "61e8d9ee10dc4dd969b14e6e2b11e25c4800dcb5679bf55cc2375ce67678d993",
+    "signedAt": "2026-08-25T03:04:32.913Z",
+    "keySource": "builder-control/.attestation-key",
+    "scope": "Proves this record was produced by this machine's adapter and is unmodified. Does NOT prove human approval and does not defend against a process that can read the key."
+  }
+}

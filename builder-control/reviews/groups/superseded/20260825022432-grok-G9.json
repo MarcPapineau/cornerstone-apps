@@ -1,0 +1,34 @@
+{
+  "reviewId": "REV-20260825022432-grok",
+  "ts": "2026-08-25T02:24:32.780Z",
+  "reviewer": "grok",
+  "reviewerModel": "grok-cli (grok-macos-aarch64)",
+  "packetId": "PKT-20260823-ENGINEERING-OS-V1",
+  "reviewOf": {
+    "diffSha256": "e3fbcce6aa67b5ab022d826d54f016b53fa37053c28e9f21ced6084fb3856e07",
+    "changedPaths": [
+      "builder-control/review-chunker.cjs",
+      "builder-control/review-sign.cjs",
+      "builder-control/tool-router.cjs"
+    ]
+  },
+  "disposition": "REJECT",
+  "findings": [],
+  "unverified": [
+    "reading the full review prompt and subject files"
+  ],
+  "group": {
+    "groupId": "G9",
+    "groupDigest": "9713039c9aa1b005617d9b51822d955674aa4cefd8b485be6636c062359341fa"
+  },
+  "attestation": {
+    "v": "aegis-attest-v1",
+    "alg": "HMAC-SHA256",
+    "packetDigest": "60a9d9d46124070acc19ea5172026163e48f59d7570ffe6265818bacab3aa3dc",
+    "payloadDigest": "30d9f1f4f3030a24c6428c7bd3c08fdea6b8b6c0a1e6b0766c713405b80c06d9",
+    "mac": "f421ccf8afbb3495d197541b0f4631ec3420030058c50e43eb94f846bbb34941",
+    "signedAt": "2026-08-25T02:34:05.743Z",
+    "keySource": "builder-control/.attestation-key",
+    "scope": "Proves this record was produced by this machine's adapter and is unmodified. Does NOT prove human approval and does not defend against a process that can read the key."
+  }
+}

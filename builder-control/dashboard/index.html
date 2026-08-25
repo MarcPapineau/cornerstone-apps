@@ -1,0 +1,848 @@
+<!doctype html>
+<html lang="en" data-slice="workflow-topology-drift">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AEGIS — Workflow Topology &amp; Drift</title>
+<!--
+  AEGIS vertical visual slice #1 — Workflow Topology + Process Drift.
+
+  RULES THIS FILE OBEYS, AND HOW TO BREAK IT ON PURPOSE IF YOU WANT TO CHECK:
+
+  1. It renders ONLY window.AEGIS_STATE, produced by aegis-state.cjs. There is
+     no second data path, no seed data, and no placeholder object. Delete
+     state.js and the page renders UNAVAILABLE everywhere rather than a
+     confident empty dashboard.
+  2. Nothing animates on a timer. Every motion is bound to a real state value.
+     There is no setInterval anywhere in this file.
+  3. Absence has three renderings and none of them is a healthy colour:
+     UNAVAILABLE (no source), STALE (source older than threshold, age shown),
+     UNVERIFIED (nobody checked).
+  4. Status is never colour-only — every state carries a text label and a glyph.
+  5. 2D is authoritative. There is no WebGL here at all, so "works with 3D
+     disabled" is not a fallback story, it is the only story.
+-->
+<style>
+  :root{
+    --bg-0:#0b0e13; --bg-1:#131820; --bg-2:#1b2230; --line:#2a3444;
+    --text-0:#e6edf7; --text-1:#9fb0c8; --text-2:#6b7c96;
+    --pass:#3fb98a; --active:#4aa3ff; --warn:#e0a33e; --fail:#e5484d;
+    /* --unknown was #566073 and measured 2.81:1 against --bg-1, below the 3:1
+       this design requires of non-text state indicators. UNVERIFIED and UNKNOWN
+       are the states a reader most needs to notice — an unreadable "nobody
+       checked" chip is how an unchecked thing passes for a checked one — so it
+       is lightened to 4.2:1 rather than left as the quietest thing on screen. */
+    --blocked:#b45cf0; --stale:#8a94a6; --unknown:#6b7c96; --focus:#4aa3ff;
+    --sp:4px; --radius:6px;
+    --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg-0);color:var(--text-0);font-family:var(--font)}
+  body{font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  h1,h2,h3{margin:0;font-weight:600;letter-spacing:-0.01em}
+  .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  a{color:var(--active)}
+
+  /* ── L0 context bar ─────────────────────────────────────────────── */
+  header{display:flex;flex-wrap:wrap;gap:calc(var(--sp)*4);align-items:center;
+    padding:calc(var(--sp)*3) calc(var(--sp)*5);background:var(--bg-1);
+    border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+  header h1{font-size:15px}
+  header .sep{color:var(--text-2)}
+  .ctx{display:flex;gap:calc(var(--sp)*2);align-items:center;color:var(--text-1);font-size:12px}
+
+  /* ── layout ─────────────────────────────────────────────────────── */
+  main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:calc(var(--sp)*4);
+    padding:calc(var(--sp)*5);align-items:start}
+  .col{display:flex;flex-direction:column;gap:calc(var(--sp)*4);min-width:0}
+  section{background:var(--bg-1);border:1px solid var(--line);border-radius:var(--radius)}
+  section > h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-1);
+    padding:calc(var(--sp)*3) calc(var(--sp)*4);border-bottom:1px solid var(--line)}
+  .body{padding:calc(var(--sp)*4)}
+
+  /* ── state chips ────────────────────────────────────────────────── */
+  .chip{display:inline-flex;align-items:center;gap:calc(var(--sp)*1.5);
+    padding:2px calc(var(--sp)*2);border-radius:999px;font-size:11px;font-weight:600;
+    letter-spacing:.04em;border:1px solid currentColor;white-space:nowrap}
+  .chip .g{font-size:10px;line-height:1}
+  .s-PASS,.s-HEALTHY,.s-AVAILABLE,.s-FRESH{color:var(--pass)}
+  .s-ACTIVE{color:var(--active)}
+  .s-WARNING,.s-DEGRADED,.s-STALE{color:var(--warn)}
+  .s-FAILED,.s-FAIL,.s-MISSING{color:var(--fail)}
+  .s-BLOCKED{color:var(--blocked)}
+  .s-UNVERIFIED,.s-UNKNOWN,.s-NOT_REQUIRED{color:var(--unknown)}
+    /* FINDING #9: readiness states get their own muted treatment — they are
+       explicitly NOT passes, and colouring them like one is how a dashboard
+       tells its first lie. CONFLICT is loud because it needs a human. */
+    .chip.s-READY_FOR_DETERMINISTIC_VALIDATION,.chip.s-READY_FOR_PR{background:rgba(120,140,190,.14);color:#aebbdb;border-color:rgba(120,140,190,.34)}
+    .chip.s-INCOMPLETE,.chip.s-PENDING{background:rgba(150,150,160,.12);color:#a8adba;border-color:rgba(150,150,160,.3)}
+    .chip.s-IMPORTED,.chip.s-OK,.chip.s-SYNCED{background:rgba(110,160,140,.13);color:#9fc6b4;border-color:rgba(110,160,140,.3)}
+    .chip.s-CONFLICT{background:rgba(214,158,46,.16);color:#e0b055;border-color:rgba(214,158,46,.38)}
+    .chip.s-REFUSED{background:rgba(190,90,90,.14);color:#d99;border-color:rgba(190,90,90,.34)}
+  .s-UNAVAILABLE,.s-DISCONNECTED,.s-AUTH_EXPIRED{color:var(--stale)}
+
+  /* ── topology ───────────────────────────────────────────────────── */
+  .stages{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+  .stepno{display:inline-block;min-width:2.1em;font-variant-numeric:tabular-nums;color:var(--muted);font-size:.78rem;letter-spacing:.04em}
+  .cost-head{display:flex;flex-wrap:wrap;gap:.35rem .9rem;align-items:baseline}
+  .cost-total{font-variant-numeric:tabular-nums;font-size:1.05rem;font-weight:600}
+  .cost-caveat{color:var(--warn);font-size:.8rem;line-height:1.45}
+  .cost-auth{color:var(--muted);font-size:.8rem}
+  .stage{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:calc(var(--sp)*3);
+    align-items:center;padding:calc(var(--sp)*3);border:1px solid transparent;
+    border-radius:var(--radius);cursor:pointer;background:none;color:inherit;
+    font:inherit;text-align:left;width:100%}
+  .stage:hover{background:var(--bg-2)}
+  .stage:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  .stage[aria-current="true"]{background:var(--bg-2);border-color:var(--line)}
+  .rail{position:relative;display:flex;justify-content:center;height:100%;min-height:34px}
+  .rail::before{content:"";position:absolute;top:0;bottom:0;width:2px;background:var(--line)}
+  .stage:first-child .rail::before{top:50%}
+  .stage:last-child .rail::before{bottom:50%}
+  .dot{position:relative;width:12px;height:12px;border-radius:50%;align-self:center;
+    background:var(--bg-0);border:2px solid currentColor}
+  /* A BROKEN rail is the drift signal: the line itself is severed, so the
+     path visibly does not continue past a stage with no evidence. */
+  .stage.broken .rail::before{background:repeating-linear-gradient(
+      to bottom,var(--fail) 0 4px,transparent 4px 8px)}
+  /* Both are spans inside a <button> (a button may not contain block-level
+     children), so they need an explicit display:block or the label and its
+     reason render as one run-on sentence. */
+  .stage .label{display:block;font-weight:500}
+  .stage .why{display:block;color:var(--text-2);font-size:12px;margin-top:2px}
+  .row .name,.row .meta{display:block}
+
+  /* Motion is bound to state, never to time. Only a genuinely ACTIVE stage
+     pulses, and nothing else in this file moves at all. */
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+  .stage.is-active .dot{animation:pulse 2s ease-in-out infinite}
+  @media (prefers-reduced-motion: reduce){
+    .stage.is-active .dot{animation:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--active) 35%,transparent)}
+    *{transition:none!important}
+  }
+
+  /* ── lists ──────────────────────────────────────────────────────── */
+  .rows{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:calc(var(--sp)*2)}
+  .row{display:flex;justify-content:space-between;gap:calc(var(--sp)*3);align-items:flex-start;
+    padding:calc(var(--sp)*2) 0;border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:0}
+  .row .name{font-weight:500}
+  .row .meta{color:var(--text-2);font-size:12px;margin-top:2px}
+  .badges{display:flex;gap:calc(var(--sp)*1.5);flex-wrap:wrap;justify-content:flex-end}
+
+  /* ── inspector ──────────────────────────────────────────────────── */
+  .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:calc(var(--sp)*2) calc(var(--sp)*3);font-size:13px}
+  .kv dt{color:var(--text-2)}
+  .kv dd{margin:0;word-break:break-word}
+  .prov{margin-top:calc(var(--sp)*3);padding-top:calc(var(--sp)*3);border-top:1px solid var(--line);
+    color:var(--text-2);font-size:11px}
+  .prov code{color:var(--text-1)}
+  .empty{color:var(--text-2);font-size:13px}
+
+  .note{margin:calc(var(--sp)*3) 0 0;padding:calc(var(--sp)*3);background:var(--bg-2);
+    border-left:2px solid var(--warn);border-radius:0 var(--radius) var(--radius) 0;
+    color:var(--text-1);font-size:12px}
+  .fatal{border-left-color:var(--fail)}
+
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+  /* ── responsive (§M) ────────────────────────────────────────────── */
+  @media (max-width:1279px){ main{grid-template-columns:minmax(0,1fr)} }
+  @media (max-width:719px){
+    main{padding:calc(var(--sp)*3);gap:calc(var(--sp)*3)}
+    header{padding:calc(var(--sp)*3)}
+    .stage{grid-template-columns:24px minmax(0,1fr);grid-template-areas:"rail label" ". badge"}
+    .stage .badges{grid-area:badge;justify-content:flex-start}
+  }
+  /* Command Center: readable across a room. Only DEGRADED-or-worse survives. */
+  @media (min-width:1920px){
+    body{font-size:17px}
+    main{grid-template-columns:minmax(0,1fr) 460px;padding:calc(var(--sp)*8);gap:calc(var(--sp)*6)}
+    header h1{font-size:19px}
+    body[data-mode="command"] .calm{display:none}
+  }
+
+  /* ── switchboard: intake + run controls ────────────────────────────── */
+  .field{display:flex;flex-direction:column;gap:calc(var(--sp)*1.5);margin-bottom:calc(var(--sp)*3)}
+  .field label{font-size:12px;color:var(--text-1)}
+  .field .req{color:var(--warn)}
+  .field input,.field textarea,.field select{
+    background:var(--bg-2);color:var(--text-0);border:1px solid var(--line);border-radius:var(--radius);
+    padding:calc(var(--sp)*2);font:inherit;font-family:inherit;resize:vertical}
+  .field input:focus,.field textarea:focus,.field select:focus{outline:2px solid var(--focus);outline-offset:1px}
+  .field .hint{color:var(--text-2);font-size:11px}
+  .btn-row{display:flex;flex-wrap:wrap;gap:calc(var(--sp)*2)}
+  button.action{background:var(--bg-2);color:var(--text-0);border:1px solid var(--line);border-radius:var(--radius);
+    padding:calc(var(--sp)*2) calc(var(--sp)*3);font:inherit;cursor:pointer}
+  button.action:hover{background:var(--bg-1);border-color:var(--active)}
+  button.action:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  button.action:disabled{opacity:.5;cursor:not-allowed}
+  button.action.primary{border-color:var(--active);color:var(--active)}
+  button.action.warn{border-color:var(--warn);color:var(--warn)}
+  .api-msg{margin-top:calc(var(--sp)*3);padding:calc(var(--sp)*3);border-radius:var(--radius);font-size:12px;
+    border:1px solid var(--line);background:var(--bg-2)}
+  .api-msg.ok{border-color:var(--pass);color:var(--pass)}
+  .api-msg.err{border-color:var(--fail);color:var(--fail)}
+  .run-card{border:1px solid var(--line);border-radius:var(--radius);padding:calc(var(--sp)*3);margin-bottom:calc(var(--sp)*3)}
+  .run-card h3{font-size:13px;margin-bottom:calc(var(--sp)*1.5)}
+  .run-card .meta{color:var(--text-2);font-size:12px;margin-bottom:calc(var(--sp)*2)}
+  .limitation{margin:0 0 calc(var(--sp)*3);padding:calc(var(--sp)*3);background:var(--bg-2);
+    border-left:2px solid var(--warn);border-radius:0 var(--radius) var(--radius) 0;color:var(--text-1);font-size:12px}
+</style>
+</head>
+<body>
+<a class="sr" href="#topology">Skip to workflow topology</a>
+
+<header>
+  <h1>AEGIS</h1>
+  <span class="sep">/</span>
+  <span class="ctx" id="ctx-entity">Workflow Topology &amp; Drift</span>
+  <span class="sep">·</span>
+  <span class="ctx mono" id="ctx-subject">subject —</span>
+  <span class="sep">·</span>
+  <span class="ctx mono" id="ctx-generated">—</span>
+  <span class="ctx" id="ctx-verdict"></span>
+</header>
+
+<div id="fatal"></div>
+
+<main>
+  <div class="col">
+    <section aria-labelledby="intake-h">
+      <h2 id="intake-h">Objective intake</h2>
+      <div class="body">
+        <p class="limitation" id="limitation-notice">
+          <strong>Known limitation.</strong> Start prepares an isolated worktree only; it does not
+          yet launch an asynchronous builder. Pause is unavailable for any run — there is no active
+          build process to suspend until an asynchronous worker exists.
+        </p>
+        <form id="intake-form" novalidate>
+          <div class="field">
+            <label for="in-objective">Objective <span class="req" aria-hidden="true">*</span><span class="sr"> required</span></label>
+            <textarea id="in-objective" name="objective" rows="3" required aria-required="true"></textarea>
+          </div>
+          <div class="field">
+            <label for="in-project">Project <span class="hint">(optional)</span></label>
+            <input id="in-project" name="project" type="text" maxlength="100">
+          </div>
+          <div class="field">
+            <label for="in-constraints">Constraints <span class="hint">(optional, one per line)</span></label>
+            <textarea id="in-constraints" name="constraints" rows="2"></textarea>
+          </div>
+          <div class="field">
+            <label for="in-acceptance">Acceptance criteria <span class="hint">(optional, one per line)</span></label>
+            <textarea id="in-acceptance" name="acceptance" rows="2"></textarea>
+          </div>
+          <div class="field">
+            <label for="in-dataclass">Data classification <span class="hint">(optional, default INTERNAL)</span></label>
+            <select id="in-dataclass" name="dataClass">
+              <option value="">INTERNAL (default)</option>
+              <option value="PUBLIC">PUBLIC</option>
+              <option value="INTERNAL">INTERNAL</option>
+              <option value="CONFIDENTIAL">CONFIDENTIAL</option>
+              <option value="RESTRICTED">RESTRICTED</option>
+            </select>
+          </div>
+          <div class="btn-row">
+            <button type="submit" class="action primary" id="btn-submit-objective">Record objective</button>
+          </div>
+        </form>
+        <div id="intake-result" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="runs-h">
+      <h2 id="runs-h">Runs</h2>
+      <div class="body">
+        <div id="runs-list"><p class="empty">No runs yet. Record an objective above.</p></div>
+      </div>
+    </section>
+
+    <section id="topology" aria-labelledby="topology-h">
+      <h2 id="topology-h">Workflow topology &amp; process drift</h2>
+      <div class="body">
+        <ul class="stages" id="stages" aria-describedby="stages-help"></ul>
+        <p id="stages-help" class="sr">
+          Each item is a required workflow stage with its current state and the reason for it.
+          A severed connector line means the stage has no evidence and the path does not continue.
+        </p>
+        <div id="drift"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="conn-h">
+      <h2 id="conn-h">Connector health <span style="text-transform:none;letter-spacing:0;color:var(--text-2)">— integration plane, never engineering authority</span></h2>
+      <div class="body"><ul class="rows" id="connectors"></ul></div>
+    </section>
+
+    <section aria-labelledby="know-h">
+      <h2 id="know-h">Knowledge mirror <span style="text-transform:none;letter-spacing:0;color:var(--text-2)">— human memory, never engineering authority</span></h2>
+      <div class="body"><ul class="rows" id="knowledge"></ul></div>
+    </section>
+
+    <section aria-labelledby="rev-h">
+      <h2 id="rev-h">Reviewers</h2>
+      <div class="body"><ul class="rows" id="reviewers"></ul></div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section aria-labelledby="insp-h">
+      <h2 id="insp-h">Inspector</h2>
+      <div class="body" id="inspector"><p class="empty">Select a stage, connector or reviewer.</p></div>
+    </section>
+    <section aria-labelledby="cost-h">
+      <h2 id="cost-h">Spend &amp; authorization</h2>
+      <div class="body" id="cost"></div>
+    </section>
+    <section class="calm" aria-labelledby="ev-h">
+      <h2 id="ev-h">Recent gate decisions</h2>
+      <div class="body"><ul class="rows" id="events"></ul></div>
+    </section>
+
+    <section aria-labelledby="live-h">
+      <h2 id="live-h">Live activity <span id="live-conn-state" class="mono" style="text-transform:none;letter-spacing:0;color:var(--text-2)">connecting…</span></h2>
+      <div class="body"><ul class="rows" id="live-activity"><li class="empty">Waiting for the first status push.</li></ul></div>
+    </section>
+  </div>
+</main>
+
+<div class="sr" role="status" aria-live="polite" id="live"></div>
+
+<!-- Real state, generated by aegis-state.cjs. Loaded BEFORE the renderer so the
+     renderer sees either genuine state or genuinely nothing. If this file is
+     absent the page renders UNAVAILABLE everywhere, which is the intended and
+     tested failure path. -->
+<script src="state.js"></script>
+<script>
+(function(){
+  'use strict';
+  var S = window.AEGIS_STATE || null;
+  var $ = function(id){ return document.getElementById(id); };
+  var GLYPH = {
+    PASS:'●', HEALTHY:'●', AVAILABLE:'●', FRESH:'●',
+    ACTIVE:'◐', WARNING:'▲', DEGRADED:'▲', STALE:'◑',
+    FAILED:'✕', MISSING:'✕', BLOCKED:'■',
+    UNVERIFIED:'?', UNKNOWN:'?', NOT_REQUIRED:'–',
+    UNAVAILABLE:'⊘', DISCONNECTED:'⊘', AUTH_EXPIRED:'⊘',
+    // FINDING #9: exact verdicts and statuses are now rendered verbatim rather
+    // than collapsed, so every canonical value needs its own glyph. A readiness
+    // state is deliberately NOT given the PASS dot — it is a waypoint, not an
+    // outcome, and it must not look like one at a glance.
+    READY_FOR_DETERMINISTIC_VALIDATION:'◇', READY_FOR_PR:'◆',
+    INCOMPLETE:'◌', IMPORTED:'⇢',
+    SYNCED:'●', PENDING:'◌', CONFLICT:'⚑', REFUSED:'⊘', OK:'●'
+  };
+
+  function el(tag, cls, text){
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  // Status is colour + label + glyph. Never colour alone (§J).
+  function chip(state){
+    var c = el('span','chip s-'+state);
+    c.appendChild(el('span','g', GLYPH[state] || '?'));
+    c.appendChild(el('span',null,state));
+    return c;
+  }
+
+  // No state at all: say so loudly rather than render an empty, confident page.
+  if (!S) {
+    $('fatal').appendChild((function(){
+      var d = el('div','note fatal');
+      d.appendChild(el('strong',null,'UNAVAILABLE — no AEGIS state is loaded.'));
+      d.appendChild(el('div',null,
+        'state.js is missing or failed to parse. Nothing on this page is being rendered from real state, so nothing on it should be believed. Regenerate with: node builder-control/aegis-state.cjs --out builder-control/dashboard/state.js'));
+      return d;
+    })());
+    $('ctx-verdict').appendChild(chip('UNAVAILABLE'));
+    return;
+  }
+
+  var eng = S.engineering || {};
+  $('ctx-generated').textContent = 'generated ' + (S.generatedAt || 'UNKNOWN');
+  $('ctx-subject').textContent = eng.subjectSha256
+    ? 'subject ' + String(eng.subjectSha256).slice(0,12) + '…'
+    : 'subject UNAVAILABLE';
+  // CONFIRMED FINDING #9: this used to render ANY non-BLOCKED verdict as
+  // "PASS", so READY_FOR_DETERMINISTIC_VALIDATION — which explicitly means the
+  // checks have NOT been run — displayed as a pass. The exact canonical verdict
+  // is now rendered verbatim. If the gate invents a new state tomorrow, this
+  // shows that state rather than guessing which side of the line it falls on.
+  $('ctx-verdict').appendChild(chip(eng.verdict || 'UNAVAILABLE'));
+
+  // ── spend & authorization ───────────────────────────────────────
+  // Recorded telemetry ONLY. A run whose telemetry was lost is counted as
+  // UNRECORDED, never as zero and never estimated — so the headline figure is
+  // "AT LEAST n", which is the only honest thing to say when some runs cannot
+  // report what they cost.
+  (function renderCost(){
+    var host = $('cost'); if (!host) return;
+    var c = S.cost;
+    if (!c || c.state !== 'OK') {
+      host.appendChild(el('p','empty','UNAVAILABLE — ' + ((c && c.reason) || 'no cost projection was produced.')));
+      return;
+    }
+    var head = el('div','cost-head');
+    head.appendChild(el('span','cost-total', c.totalUsd != null ? ('USD ' + c.totalUsd) : 'UNRECORDED'));
+    head.appendChild(el('span','muted', c.recordedRuns + ' run(s) reported cost, ' + c.unrecordedRuns + ' did not'));
+    host.appendChild(head);
+    if (c.caveat) host.appendChild(el('p','cost-caveat', c.caveat));
+    if (c.authorization) {
+      host.appendChild(el('p','cost-auth',
+        'authorized: ' + (c.authorization.approvedBy || 'UNRECORDED') +
+        ' · cap USD ' + (c.authorization.capUsd != null ? c.authorization.capUsd : 'UNRECORDED') +
+        ' · ceiling USD ' + (c.authorization.hardCeilingUsd != null ? c.authorization.hardCeilingUsd : 'UNRECORDED')));
+    }
+    var ul = el('ul','rows');
+    (c.byReviewerRows || Object.keys(c.byReviewer || {}).map(function(k){
+      var v = c.byReviewer[k]; return { reviewer:k, recordedUsd:v.recordedUsd, unrecordedRuns:v.unrecordedRuns };
+    })).forEach(function(r){
+      var li = el('li','row');
+      li.appendChild(el('span','k', r.reviewer));
+      li.appendChild(el('span','v', 'USD ' + r.recordedUsd +
+        (r.unrecordedRuns ? '  (+' + r.unrecordedRuns + ' UNRECORDED)' : '')));
+      ul.appendChild(li);
+    });
+    host.appendChild(ul);
+    var src = el('p','src', 'source: ' + (c.source || 'builder-control/review-raw/*'));
+    host.appendChild(src);
+  })();
+
+  // ── stages ──────────────────────────────────────────────────────
+  var stages = (eng.stages || []);
+  var BREAKS = { MISSING:1, FAILED:1, BLOCKED:1, UNAVAILABLE:1 };
+  var list = $('stages');
+  if (!stages.length) {
+    list.appendChild(el('li','empty','UNAVAILABLE — no stage projection was produced.'));
+  }
+  stages.forEach(function(st, i){
+    var li = el('li');
+    var b = el('button','stage' + (BREAKS[st.state] ? ' broken' : '') + (st.state === 'ACTIVE' ? ' is-active' : ''));
+    b.type = 'button';
+    b.setAttribute('aria-label', st.label + ': ' + st.state + ' — ' + st.reason);
+
+    var rail = el('span','rail'); rail.appendChild(el('span','dot s-'+st.state)); rail.setAttribute('aria-hidden','true');
+    var mid = el('span');
+    // Contract step number. The eleven steps are numbered in the contract, so
+    // the screen numbers them too — "step 8 is unverified" is checkable against
+    // §8 in a way that "bounded corrections is unverified" is not.
+    if (st.step) mid.appendChild(el('span','stepno', String(st.step).padStart(2,'0')));
+    mid.appendChild(el('span','label', st.label));
+    mid.appendChild(el('span','why', st.reason));
+    var badges = el('span','badges'); badges.appendChild(chip(st.state));
+
+    b.appendChild(rail); b.appendChild(mid); b.appendChild(badges);
+    b.addEventListener('click', function(){ select(b, 'stage', st); });
+    b.addEventListener('keydown', function(e){
+      var items = Array.prototype.slice.call(list.querySelectorAll('.stage'));
+      var idx = items.indexOf(b);
+      if (e.key === 'ArrowDown' && idx < items.length-1){ e.preventDefault(); items[idx+1].focus(); }
+      if (e.key === 'ArrowUp' && idx > 0){ e.preventDefault(); items[idx-1].focus(); }
+    });
+    li.appendChild(b); list.appendChild(li);
+  });
+
+  // Drift is stated in words, not implied by a colour.
+  var missing = stages.filter(function(s){ return s.state === 'MISSING'; });
+  if (missing.length){
+    var d = el('div','note');
+    d.appendChild(el('strong',null,'PROCESS DRIFT — verification blocked.'));
+    d.appendChild(el('div',null,'Required stage(s) with no evidence bound to this subject: '
+      + missing.map(function(m){ return m.label; }).join(', ')
+      + '. The path above is severed at each one. This is the gate’s own verdict, not a second opinion.'));
+    $('drift').appendChild(d);
+  }
+
+  // ── knowledge mirror ────────────────────────────────────────────
+  // Its own plane. A CONFLICT shows BOTH values and resolves nothing —
+  // preferring either side would destroy the only signal that they disagree.
+  var kn = S.knowledge || null;
+  var kl = $('knowledge');
+  if (!kn || kn.state !== 'OK'){
+    kl.appendChild(el('li','empty', (kn ? kn.state : 'UNAVAILABLE') + ' — '
+      + ((kn && kn.reason) || 'no knowledge mirror is configured')));
+  } else if (!(kn.records||[]).length){
+    kl.appendChild(el('li','empty','No knowledge records.'));
+  } else {
+    kn.records.forEach(function(r){
+      var li = el('li','row');
+      var left = el('div');
+      left.appendChild(el('div','name', r.title));
+      left.appendChild(el('div','meta', 'human: ' + r.notionStatus
+        + ' · aegis: ' + r.aegisStatus
+        + (r.conflict ? ' · ' + r.conflict.requiredAction : '')));
+      var right = el('div','badges');
+      right.appendChild(chip(r.syncState));
+      li.appendChild(left); li.appendChild(right);
+      kl.appendChild(li);
+    });
+  }
+
+  // ── connectors ──────────────────────────────────────────────────
+  var conn = (S.integration && S.integration.connectors) || {};
+  var cl = $('connectors');
+  if (conn.state !== 'OK'){
+    cl.appendChild(el('li','empty','UNAVAILABLE — ' + (conn.reason || 'connector registry could not be read')));
+  } else if (!(conn.connectors||[]).length){
+    cl.appendChild(el('li','empty','No connectors are configured.'));
+  } else {
+    conn.connectors.forEach(function(c){
+      var li = el('li','row');
+      var left = el('div');
+      var nm = el('div','name', c.label + (c.legacy ? ' — LEGACY/OPTIONAL' : ''));
+      left.appendChild(nm);
+      left.appendChild(el('div','meta', c.provider + ' · ' + c.executionPath
+        + ' · auth ' + c.authStatus));
+      var right = el('div','badges');
+      right.appendChild(chip(c.health));
+      // Staleness qualifies health; it never overwrites or hides it.
+      if (c.staleness && c.staleness.state !== 'FRESH'){
+        var s = chip(c.staleness.state);
+        if (c.staleness.ageMinutes != null) s.lastChild.textContent = 'STALE ' + c.staleness.ageMinutes + 'm';
+        right.appendChild(s);
+      }
+      li.appendChild(left); li.appendChild(right);
+      li.tabIndex = 0; li.style.cursor='pointer';
+      li.addEventListener('click', function(){ select(li,'connector', c); });
+      li.addEventListener('keydown', function(e){ if(e.key==='Enter'){ select(li,'connector', c); } });
+      cl.appendChild(li);
+    });
+  }
+
+  // ── reviewers ───────────────────────────────────────────────────
+  var rv = S.reviewers || {}; var rl = $('reviewers');
+  if (rv.state !== 'OK'){
+    rl.appendChild(el('li','empty','UNAVAILABLE — ' + (rv.reason || 'reviewer state could not be read')));
+  } else {
+    (rv.reviewers||[]).forEach(function(r){
+      var li = el('li','row');
+      var left = el('div');
+      left.appendChild(el('div','name', r.label || r.toolId));
+      left.appendChild(el('div','meta', r.role));
+      var right = el('div','badges');
+      right.appendChild(chip(r.availability));
+      // Available to run is not the same as having run. Say which.
+      var st = stages.filter(function(s){
+        return (r.toolId === 'codex-local' && s.id === 'codex') || (r.toolId === 'grok-cli' && s.id === 'grok');
+      })[0];
+      if (st) right.appendChild(chip(st.state || 'UNKNOWN'));
+      li.appendChild(left); li.appendChild(right);
+      li.tabIndex = 0; li.style.cursor='pointer';
+      li.addEventListener('click', function(){ select(li,'reviewer', r); });
+      li.addEventListener('keydown', function(e){ if(e.key==='Enter'){ select(li,'reviewer', r); } });
+      rl.appendChild(li);
+    });
+  }
+
+  // ── events ──────────────────────────────────────────────────────
+  var ev = S.events || {}; var evl = $('events');
+  if (ev.state !== 'OK'){
+    evl.appendChild(el('li','empty','UNAVAILABLE — ' + (ev.reason || 'ledger could not be read')));
+  } else {
+    (ev.events||[]).forEach(function(e){
+      var li = el('li','row');
+      var left = el('div');
+      left.appendChild(el('div','name', e.gate + (e.blockRule ? ' · ' + e.blockRule : '')));
+      left.appendChild(el('div','meta mono', e.ts));
+      // CONFIRMED FINDING #9: every non-PASS ledger event was rendered
+      // "BLOCKED", which turned a FAILED integration operation into what looked
+      // like a governance refusal. Those are opposite diagnoses — one means a
+      // connector broke, the other means a rule stopped you. The exact status
+      // is now shown.
+      var right = el('div','badges'); right.appendChild(chip(e.status || 'UNKNOWN'));
+      li.appendChild(left); li.appendChild(right); evl.appendChild(li);
+    });
+  }
+
+  // ── inspector ───────────────────────────────────────────────────
+  var current = null;
+  function select(node, kind, data){
+    if (current) current.removeAttribute('aria-current');
+    current = node; node.setAttribute('aria-current','true');
+    var box = $('inspector'); box.textContent = '';
+    var dl = el('dl','kv');
+    function kv(k,v){ dl.appendChild(el('dt',null,k)); dl.appendChild(el('dd',null, v == null ? '—' : String(v))); }
+
+    if (kind === 'stage'){
+      box.appendChild(el('h3',null,data.label));
+      kv('State', data.state); kv('Reason', data.reason);
+      kv('Stage id', data.id);
+      box.appendChild(dl);
+      box.appendChild(prov(eng.source, 'derived from the gate verdict; this view re-expresses it and decides nothing'));
+    } else if (kind === 'connector'){
+      box.appendChild(el('h3',null,data.label));
+      kv('Plane', data.plane + ' — worker, never engineering authority');
+      kv('Health', data.health);
+      kv('Staleness', data.staleness ? (data.staleness.state + (data.staleness.ageMinutes!=null ? ' ('+data.staleness.ageMinutes+'m)' : '')) : '—');
+      kv('Auth', data.authStatus);
+      kv('Execution path', data.executionPath);
+      kv('Supports', (data.capabilities||[]).join(', ') || '—');
+      kv('Declared NOT supported', (data.declaredNotSupported||[]).join(', ') || '—');
+      kv('Failures', data.failureCount);
+      kv('Risk', data.riskLevel);
+      if (data.evidence){ kv('Observed at', data.evidence.observedAt); kv('Method', data.evidence.method); kv('Result', data.evidence.result); }
+      else kv('Evidence','UNVERIFIED — never probed');
+      if (data.authorityNote) kv('Authority', data.authorityNote);
+      box.appendChild(dl); box.appendChild(prov(data.source));
+    } else {
+      box.appendChild(el('h3',null,data.label || data.toolId));
+      kv('Role', data.role); kv('Availability', data.availability);
+      if (data.evidence){ kv('Observed at', data.evidence.observedAt); kv('Method', data.evidence.method); kv('Result', data.evidence.result); }
+      else kv('Evidence','UNVERIFIED');
+      kv('Note','Available to run is not the same as having run. A review counts only when a record is bound to this subject.');
+      box.appendChild(dl); box.appendChild(prov(data.source));
+    }
+    $('live').textContent = (data.label || data.toolId) + ' selected.';
+  }
+  function prov(src, extra){
+    var p = el('div','prov');
+    p.appendChild(document.createTextNode('Source: '));
+    p.appendChild(el('code',null, src || 'UNKNOWN'));
+    if (extra) p.appendChild(el('div',null, extra));
+    return p;
+  }
+
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape' && current){
+      current.removeAttribute('aria-current'); current = null;
+      $('inspector').textContent = '';
+      $('inspector').appendChild(el('p','empty','Select a stage, connector or reviewer.'));
+    }
+  });
+
+  if (window.matchMedia && window.matchMedia('(min-width:1920px)').matches){
+    document.body.setAttribute('data-mode','command');
+  }
+})();
+</script>
+
+<!--
+  Switchboard control layer. Everything below talks ONLY to same-origin
+  /api/* routes over fetch()/EventSource with credentials included, and
+  renders exclusively through textContent/DOM APIs — never innerHTML with a
+  server-supplied field, since every field in an API response is untrusted
+  input from this page's point of view.
+
+  There is no free-text command, model, or filesystem-path field anywhere in
+  this form. Objective intake sends only: objective, project, constraints,
+  acceptance, dataClass — the same five keys aegis-run.cjs's
+  OBJECTIVE_ALLOWED_KEYS accepts, and the server independently refuses any
+  request carrying a shell/model/token/secret/verdict field.
+-->
+<script>
+(function(){
+  'use strict';
+  function $(id){ return document.getElementById(id); }
+  function el(tag, cls, text){
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function linesToArray(raw){
+    return String(raw || '').split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+  }
+
+  function showApiMessage(host, ok, text){
+    host.textContent = '';
+    var d = el('div', 'api-msg ' + (ok ? 'ok' : 'err'), text);
+    host.appendChild(d);
+  }
+
+  async function callApi(path, body){
+    var res = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    var parsed = null;
+    try { parsed = await res.json(); } catch (e) { void e; } // no JSON body
+    if (!res.ok) {
+      var msg = (parsed && parsed.error && parsed.error.message) || ('request failed with status ' + res.status);
+      var code = (parsed && parsed.error && parsed.error.code) || ('HTTP_' + res.status);
+      var err = new Error(msg);
+      err.code = code;
+      throw err;
+    }
+    return parsed;
+  }
+
+  var currentRunId = null;
+
+  function bindRunActions(){
+    var startBtn = $('btn-start-run');
+    if (startBtn) startBtn.addEventListener('click', async function(){
+      var host = $('intake-result');
+      if (!currentRunId) return;
+      startBtn.disabled = true;
+      try {
+        var result = await callApi('/api/start', { runId: currentRunId });
+        showApiMessage(host, true, 'Started: ' + (result.state || 'UNKNOWN') +
+          '. Worktree prepared at ' + ((result.worktree && result.worktree.path) || 'UNKNOWN') +
+          '. Builder execution is a separate governed step and has NOT been launched.');
+      } catch (e) {
+        showApiMessage(host, false, 'Start failed (' + e.code + '): ' + e.message);
+      } finally {
+        startBtn.disabled = false;
+      }
+    });
+  }
+
+  var form = $('intake-form');
+  if (form) form.addEventListener('submit', async function(ev){
+    ev.preventDefault();
+    var resultHost = $('intake-result');
+    var objective = $('in-objective').value.trim();
+    if (!objective) {
+      showApiMessage(resultHost, false, 'Objective is required.');
+      return;
+    }
+    var payload = { objective: objective };
+    var project = $('in-project').value.trim();
+    if (project) payload.project = project;
+    var constraints = linesToArray($('in-constraints').value);
+    if (constraints.length) payload.constraints = constraints;
+    var acceptance = linesToArray($('in-acceptance').value);
+    if (acceptance.length) payload.acceptance = acceptance;
+    var dataClass = $('in-dataclass').value;
+    if (dataClass) payload.dataClass = dataClass;
+
+    var submitBtn = $('btn-submit-objective');
+    submitBtn.disabled = true;
+    try {
+      var result = await callApi('/api/objective', payload);
+      currentRunId = result.runId;
+      resultHost.textContent = '';
+      var msg = el('div', 'api-msg ok');
+      msg.appendChild(el('strong', null, result.state === 'INTAKE_RECORDED' ? 'INTAKE_RECORDED' : String(result.state)));
+      msg.appendChild(el('div', null, 'Run ' + result.runId + ' recorded.'));
+      resultHost.appendChild(msg);
+      var startRow = el('div', 'btn-row');
+      var startBtn = el('button', 'action primary', 'Start (prepare isolated worktree)');
+      startBtn.type = 'button';
+      startBtn.id = 'btn-start-run';
+      startRow.appendChild(startBtn);
+      resultHost.appendChild(startRow);
+      bindRunActions();
+    } catch (e) {
+      showApiMessage(resultHost, false, 'Objective rejected (' + e.code + '): ' + e.message);
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+
+  // ── run cards, driven only by /api/status's minimized `runs` array ────────
+  var STATE_GLYPH = { INTAKE_RECORDED:'●', ROUTED:'◐', WORKTREE_READY:'◐', BUILDING:'◐',
+    BUILT:'●', CHECKS_PASSED:'●', CHECKS_FAILED:'✕', BUILD_FAILED:'✕', CORRECTING:'▲',
+    CHECKPOINTED:'◆', ROLLED_BACK:'■', ABANDONED:'■' };
+
+  function runActionRow(run){
+    var row = el('div', 'btn-row');
+
+    var pauseBtn = el('button', 'action', 'Pause');
+    pauseBtn.type = 'button';
+    pauseBtn.title = 'Pause is unavailable: there is no active build process to suspend (see the limitation notice above).';
+    pauseBtn.addEventListener('click', async function(){
+      try { await callApi('/api/pause', { runId: run.runId }); }
+      catch (e) { appendActivity('Pause refused for ' + run.runId + ': ' + e.message); }
+    });
+    row.appendChild(pauseBtn);
+
+    var CANCELABLE = ['CREATED','INTAKE_RECORDED','ROUTED','WORKTREE_READY','BUILT','CHECKS_PASSED','REVIEW_BOUND','CORRECTING','BUILD_FAILED','CHECKS_FAILED'];
+    if (CANCELABLE.indexOf(run.state) !== -1) {
+      var cancelBtn = el('button', 'action warn', 'Cancel');
+      cancelBtn.type = 'button';
+      cancelBtn.addEventListener('click', async function(){
+        try { await callApi('/api/cancel', { runId: run.runId }); appendActivity('Cancelled ' + run.runId); }
+        catch (e) { appendActivity('Cancel failed for ' + run.runId + ': ' + e.message); }
+      });
+      row.appendChild(cancelBtn);
+    }
+
+    if (run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED') {
+      var retryBtn = el('button', 'action', 'Retry');
+      retryBtn.type = 'button';
+      retryBtn.addEventListener('click', async function(){
+        try { await callApi('/api/retry', { runId: run.runId }); appendActivity('Retry queued for ' + run.runId); }
+        catch (e) { appendActivity('Retry failed for ' + run.runId + ': ' + e.message); }
+      });
+      row.appendChild(retryBtn);
+    }
+
+    return row;
+  }
+
+  function renderRuns(runs){
+    var host = $('runs-list');
+    if (!host) return;
+    host.textContent = '';
+    if (!runs || !runs.length) {
+      host.appendChild(el('p', 'empty', 'No runs yet. Record an objective above.'));
+      return;
+    }
+    runs.forEach(function(run){
+      var card = el('div', 'run-card');
+      card.appendChild(el('h3', null, run.runId + '  ' + (STATE_GLYPH[run.state] || '?') + ' ' + run.state));
+      card.appendChild(el('div', 'meta', run.objective || '(no objective)'));
+      if (run.checks) card.appendChild(el('div', 'meta', 'checks: ' + run.checks.passed + '/' + run.checks.total));
+      if (run.checkpoint) card.appendChild(el('div', 'meta', 'checkpoint: ' + run.checkpoint));
+      card.appendChild(runActionRow(run));
+      host.appendChild(card);
+    });
+  }
+
+  function appendActivity(text){
+    var host = $('live-activity');
+    if (!host) return;
+    if (host.firstElementChild && host.firstElementChild.classList.contains('empty')) host.textContent = '';
+    var li = el('li', 'row');
+    li.appendChild(el('span', null, text));
+    li.appendChild(el('span', 'meta mono', new Date().toISOString()));
+    host.insertBefore(li, host.firstChild);
+    while (host.children.length > 30) host.removeChild(host.lastChild);
+  }
+
+  function applyStatus(status){
+    renderRuns(status && status.runs);
+    appendActivity('status: engineering=' + ((status.engineering && status.engineering.state) || 'UNKNOWN') +
+      ' runs=' + ((status.runs && status.runs.length) || 0));
+  }
+
+  // Bootstrap: an authenticated GET/api/status confirms the session cookie is
+  // live and gives the first paint before the SSE stream is opened. If this
+  // fails, the page states so honestly rather than opening EventSource blind.
+  (async function bootstrap(){
+    var connState = $('live-conn-state');
+    try {
+      var res = await fetch('/api/status', { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('status ' + res.status);
+      var status = await res.json();
+      applyStatus(status);
+    } catch (e) {
+      if (connState) connState.textContent = 'UNAVAILABLE — could not bootstrap /api/status';
+      return;
+    }
+
+    if (typeof EventSource === 'undefined') {
+      if (connState) connState.textContent = 'UNAVAILABLE — EventSource unsupported';
+      return;
+    }
+    var es = new EventSource('/api/events');
+    es.addEventListener('status', function(ev){
+      if (connState) connState.textContent = 'connected';
+      try { applyStatus(JSON.parse(ev.data)); } catch (e) { void e; } // malformed push, ignored
+    });
+    es.onerror = function(){
+      if (connState) connState.textContent = 'disconnected — the browser will retry automatically';
+    };
+    es.onopen = function(){ if (connState) connState.textContent = 'connected'; };
+  })();
+})();
+</script>
+</body>
+</html>

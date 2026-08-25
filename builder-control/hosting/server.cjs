@@ -1,0 +1,717 @@
+#!/usr/bin/env node
+/**
+ * server.cjs — authenticated, data-minimized host for the AEGIS dashboard.
+ *
+ * THREAT MODEL, STATED PLAINLY
+ * This serves internal engineering process state: which reviewers ran, what
+ * blocked, which connectors are degraded. That is a map of where the soft spots
+ * are. It is not catastrophic if leaked, and it is not something to put on the
+ * open internet either. So:
+ *
+ *   BOUND TO LOOPBACK BY DEFAULT. Exposing it beyond 127.0.0.1 requires an
+ *   explicit flag AND a token AND an acknowledgement, because the failure mode
+ *   of "I'll just bind 0.0.0.0 for a second" is a permanent open port nobody
+ *   remembers opening.
+ *
+ *   AUTHENTICATED ALWAYS. No anonymous mode exists, including on loopback —
+ *   any local process, browser tab, or npm postinstall script can reach
+ *   127.0.0.1. Loopback is not a boundary.
+ *
+ *   DATA-MINIMIZED BY ALLOW-LIST. Exactly two files are servable. Not "the
+ *   dashboard directory" — two named files. The repository, the ledger, raw
+ *   reviewer transcripts, packets, and review records are unreachable by
+ *   construction rather than by filtering, because a filter is a list of the
+ *   leaks someone thought of.
+ *
+ * WHAT IT WILL NOT DO
+ * It does not deploy, publish, tunnel, or register anything. It is a local
+ * process you start and stop.
+ *
+ *   node builder-control/hosting/server.cjs [--port 8791] [--host 127.0.0.1]
+ *        [--token <t>] [--allow-non-loopback --i-understand-the-exposure]
+ *
+ * Exit: 0 clean stop · 2 usage · 3 refused (unsafe configuration)
+ */
+'use strict';
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const AegisRun = require('../aegis-run.cjs');
+const AegisState = require('../aegis-state.cjs');
+
+const HERE = __dirname;
+const DASHBOARD = path.resolve(HERE, '..', 'dashboard');
+
+const EXIT_USAGE = 2;
+const EXIT_REFUSED = 3;
+
+// The complete set of servable resources. Adding to this list is a deliberate
+// act with a visible diff; that is the point.
+const SERVABLE = {
+  '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
+  '/index.html': { file: 'index.html', type: 'text/html; charset=utf-8' },
+  '/state.js': { file: 'state.js', type: 'application/javascript; charset=utf-8' },
+};
+
+// The complete set of authenticated JSON control endpoints. Each is a
+// deliberate, visible addition — same discipline as SERVABLE above. GET
+// /api/status is a read; the four POSTs are the ONLY way this host can move a
+// run, and every one of them is a thin pass-through to the single exported
+// aegis-run authority function named alongside it. Nothing here writes a run
+// file, a ledger entry, or a worktree directly.
+const API_STATUS_PATH = '/api/status';
+const API_EVENTS_PATH = '/api/events';
+const API_POST_ROUTES = {
+  '/api/objective': 'objective',
+  '/api/start': 'start',
+  '/api/pause': 'pause',
+  '/api/cancel': 'cancel',
+  '/api/retry': 'retry',
+};
+
+// The ONLY packet objective intake may build a run against. It never comes
+// from the POSTed body — normalizeObjective already refuses a `packet` key —
+// so a caller cannot point intake at an arbitrary packet on disk.
+const SWITCHBOARD_PACKET = 'builder-control/packets/PKT-20260825-SWITCHBOARD-FOUNDATION.json';
+
+const MAX_API_BODY_BYTES = 16 * 1024;
+
+// The stream sends nothing but the same sanitized snapshot /api/status already
+// produces — never a raw ledger row, a path, a token, or a reviewer
+// transcript. Debounce absorbs a burst of writes to the ledger (each
+// transition is its own file write) into one status push; the heartbeat is a
+// comment line so it never masquerades as a real event.
+const SSE_DEBOUNCE_MS = 200;
+const SSE_HEARTBEAT_MS = 15000;
+
+// The dashboard is self-contained: inline styles, no external anything. The
+// API responses are same-origin JSON, so fetch() from the dashboard's own
+// origin needs an explicit connect-src allowance — 'self' only, nothing else.
+const CSP =
+  "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+// Never servable, even if someone later widens the allow-list by accident.
+// Belt and braces: the allow-list already excludes these, but a second,
+// independent refusal costs nothing and catches a future mistake.
+const NEVER_SERVE = [
+  /ledger/i, /review-raw/i, /reviews?\//i, /packets?\//i, /\.git/i,
+  /\.env/i, /credential/i, /secret/i, /token/i, /\.key$/i, /\.pem$/i,
+];
+
+// The cookie value is an HMAC of the token, not the token. If the cookie jar
+// leaks, it yields a value that is useless against any other run, and the
+// operator's actual token is not in it.
+function sessionFor(token) {
+  return crypto.createHmac('sha256', 'aegis-dashboard-session').update(String(token)).digest('base64url');
+}
+
+function timingSafeEqual(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  // Compare a fixed-length digest so length itself is not a side channel.
+  const ah = crypto.createHash('sha256').update(ab).digest();
+  const bh = crypto.createHash('sha256').update(bb).digest();
+  return crypto.timingSafeEqual(ah, bh);
+}
+
+function parseArgs(argv) {
+  const a = { port: 8791, host: '127.0.0.1' };
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i];
+    if (t === '--port') a.port = Number(argv[++i]);
+    else if (t === '--host') a.host = argv[++i];
+    else if (t === '--token') a.token = argv[++i];
+    else if (t === '--allow-non-loopback') a.allowNonLoopback = true;
+    else if (t === '--i-understand-the-exposure') a.acknowledged = true;
+    else if (t === '--print-config') a.printConfig = true;
+  }
+  return a;
+}
+
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
+
+/**
+ * Validate configuration. Returns {ok, reason, config}. Pure, so the refusal
+ * rules are testable without opening a socket.
+ */
+function validateConfig(args, env = process.env) {
+  if (!Number.isInteger(args.port) || args.port < 1 || args.port > 65535) {
+    return { ok: false, code: 'BAD_PORT', reason: `invalid port ${args.port}` };
+  }
+
+  const loopback = LOOPBACK.has(args.host);
+  if (!loopback) {
+    if (!args.allowNonLoopback) {
+      return {
+        ok: false, code: 'NON_LOOPBACK_REFUSED',
+        reason: `refusing to bind ${args.host}. This serves internal engineering state; binding beyond loopback requires --allow-non-loopback.`,
+      };
+    }
+    if (!args.acknowledged) {
+      return {
+        ok: false, code: 'EXPOSURE_UNACKNOWLEDGED',
+        reason: 'binding beyond loopback additionally requires --i-understand-the-exposure. Two flags, because a temporary open port is rarely temporary.',
+      };
+    }
+  }
+
+  // Auth is mandatory everywhere, including loopback.
+  let token = args.token || env.AEGIS_DASHBOARD_TOKEN || null;
+  let generated = false;
+  if (!token) {
+    if (!loopback) {
+      return {
+        ok: false, code: 'TOKEN_REQUIRED',
+        reason: 'a non-loopback bind requires an explicit --token or AEGIS_DASHBOARD_TOKEN. A generated token printed to a terminal is not an access-control plan for an exposed port.',
+      };
+    }
+    token = crypto.randomBytes(32).toString('base64url');
+    generated = true;
+  }
+  if (token.length < 24) {
+    return { ok: false, code: 'WEAK_TOKEN', reason: `token is ${token.length} characters; minimum 24.` };
+  }
+
+  return { ok: true, config: { ...args, host: args.host, token, generated, loopback } };
+}
+
+function isNeverServe(p) {
+  return NEVER_SERVE.some((re) => re.test(p));
+}
+
+function handler(config) {
+  return (req, res) => {
+    const started = Date.now();
+    const url = new URL(req.url, `http://${config.host}:${config.port}`);
+    const pathname = url.pathname;
+
+    const deny = (status, msg) => {
+      res.writeHead(status, {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'referrer-policy': 'no-referrer',
+      });
+      res.end(msg + '\n');
+      log(req, status, started);
+    };
+
+    const isApiPostRoute = Object.prototype.hasOwnProperty.call(API_POST_ROUTES, pathname);
+    const isApiStatusRoute = pathname === API_STATUS_PATH;
+
+    if (req.method === 'POST') {
+      if (!isApiPostRoute) return deny(405, 'read-only host: only GET and HEAD are served (and the named /api/* POST routes)');
+    } else if (req.method !== 'GET' && req.method !== 'HEAD') {
+      return deny(405, 'read-only host: only GET and HEAD are served (and the named /api/* POST routes)');
+    }
+
+    // Auth first. Nothing below this line runs for an unauthenticated caller.
+    //
+    // THREE ACCEPTED CREDENTIALS, and the third is load-bearing:
+    // a token in the URL authenticates the DOCUMENT but not its SUBRESOURCES.
+    // The browser fetches state.js with no Authorization header and no query
+    // string, so a header-or-query-only design 401s the script tag and renders
+    // a blank dashboard — which is worse than an error, because the page looks
+    // like it loaded. On a valid token we set a derived, HttpOnly session
+    // cookie so subresources authenticate too. The cookie carries an HMAC of
+    // the token rather than the token itself, so the browser's cookie jar
+    // never holds the credential the operator actually typed.
+    const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const queryToken = url.searchParams.get('token') || '';
+    const cookies = Object.fromEntries(
+      String(req.headers.cookie || '').split(';').map((c) => {
+        const i = c.indexOf('=');
+        return i === -1 ? [c.trim(), ''] : [c.slice(0, i).trim(), c.slice(i + 1).trim()];
+      }).filter(([k]) => k)
+    );
+    const sessionValue = sessionFor(config.token);
+    const primary = bearer || queryToken;
+    const authed =
+      (primary && timingSafeEqual(primary, config.token)) ||
+      (cookies.aegis_session && timingSafeEqual(cookies.aegis_session, sessionValue));
+
+    if (!authed) {
+      res.writeHead(401, {
+        'content-type': 'text/plain; charset=utf-8',
+        'www-authenticate': 'Bearer realm="AEGIS"',
+        'cache-control': 'no-store',
+      });
+      res.end('unauthorized\n');
+      log(req, 401, started);
+      return;
+    }
+
+    // Establish the session cookie whenever a primary credential was used, so
+    // the document's subresources can authenticate on the next request.
+    const usedPrimaryCredential = !!(primary && timingSafeEqual(primary, config.token));
+    const setCookie = usedPrimaryCredential
+      ? [`aegis_session=${sessionValue}; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600`]
+      : null;
+
+    if (pathname === API_EVENTS_PATH && req.method === 'GET') {
+      handleSse(req, res, config);
+      log(req, 200, started);
+      return;
+    }
+
+    if (isApiStatusRoute || isApiPostRoute) {
+      handleApi(req, res, config, pathname, { usedPrimaryCredential, setCookie }, started);
+      return;
+    }
+
+    if (isNeverServe(pathname)) return deny(403, 'refused: this class of path is never servable');
+
+    const entry = SERVABLE[pathname];
+    if (!entry) return deny(404, 'not found (only the dashboard projection is served here)');
+
+    // Resolve inside the dashboard directory and verify containment. The
+    // allow-list already prevents traversal; this catches a future mistake in
+    // the allow-list itself.
+    const file = path.resolve(DASHBOARD, entry.file);
+    if (!file.startsWith(DASHBOARD + path.sep)) return deny(403, 'refused: path escapes the dashboard directory');
+    if (!fs.existsSync(file)) {
+      return deny(503, `UNAVAILABLE: ${entry.file} has not been generated. Run:\n  node builder-control/aegis-state.cjs --out builder-control/dashboard/state.js`);
+    }
+
+    const body = fs.readFileSync(file);
+    res.writeHead(200, {
+      ...(setCookie ? { 'set-cookie': setCookie } : {}),
+      'content-type': entry.type,
+      'content-length': body.length,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'x-frame-options': 'DENY',
+      // The dashboard is self-contained: inline styles, no external anything.
+      'content-security-policy': CSP,
+    });
+    if (req.method === 'HEAD') res.end(); else res.end(body);
+    log(req, 200, started);
+  };
+}
+
+// ── authenticated JSON control API ──────────────────────────────────────────
+
+function sendJson(res, status, obj, extraHeaders) {
+  const body = JSON.stringify(obj);
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+    'x-frame-options': 'DENY',
+    'content-security-policy': CSP,
+    ...(extraHeaders || {}),
+  });
+  res.end(body);
+}
+
+function apiError(res, err, extraHeaders, req, started) {
+  if (err instanceof AegisRun.AegisControlError) {
+    sendJson(res, err.httpStatus || 400, { error: { code: err.code, message: err.message } }, extraHeaders);
+  } else {
+    // An unknown error is never echoed: no stack, no message, no path. The
+    // honest external answer to "something we did not anticipate happened" is
+    // a flat, uninformative 500 — anything richer is a leak of internals.
+    sendJson(res, 500, { error: { code: 'INTERNAL_ERROR', message: 'internal error' } }, extraHeaders);
+  }
+  if (req) log(req, (err instanceof AegisRun.AegisControlError && err.httpStatus) || 500, started);
+}
+
+// CSRF, checked before the body is ever read. A cookie is ambient — any page
+// the browser has open can cause one to be sent — so a cookie-authenticated
+// state change requires a same-origin Origin header, no exceptions. A bearer
+// or query token is something the caller had to know and attach on purpose
+// (a non-browser client, e.g. curl, sends none at all), so Origin is optional
+// for that credential — but if a browser using it DOES send an Origin, it
+// still has to match, because a same-origin fetch always sends one and a
+// mismatch there is exactly the cross-origin case this exists to catch.
+function checkOrigin(req, config, usedPrimaryCredential) {
+  const origin = req.headers.origin;
+  const expected = `http://${config.host}:${config.port}`;
+  if (origin === undefined) {
+    if (usedPrimaryCredential) return; // non-browser bearer/query caller
+    throw new AegisRun.AegisControlError('CSRF_ORIGIN_REQUIRED',
+      'a cookie-authenticated state-changing request must carry an Origin header', 403);
+  }
+  if (origin !== expected) {
+    throw new AegisRun.AegisControlError('CSRF_ORIGIN_MISMATCH',
+      `origin "${origin}" does not match ${expected}`, 403);
+  }
+}
+
+// Reads and parses a POSTed JSON body. Rejects before parsing on a wrong
+// content-type or an oversized body; a size violation is enforced while
+// STREAMING, so an attacker cannot force this process to buffer an unbounded
+// payload before the limit is checked.
+function readJsonBody(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const contentType = String(req.headers['content-type'] || '');
+    if (!/^application\/json\s*(;.*)?$/i.test(contentType.trim())) {
+      reject(new AegisRun.AegisControlError('UNSUPPORTED_MEDIA_TYPE', 'content-type must be application/json', 415));
+      req.resume();
+      return;
+    }
+    let total = 0;
+    const chunks = [];
+    let settled = false;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err); else resolve(value);
+    };
+    req.on('data', (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        // Reject now, but do NOT destroy the socket: destroying it here would
+        // tear down the connection before the 413 response below ever reaches
+        // the caller, turning a documented rejection into a silent hang-up.
+        // Simply stop buffering — the remaining bytes are drained and
+        // discarded by this same listener without being retained.
+        finish(new AegisRun.AegisControlError('PAYLOAD_TOO_LARGE', `request body exceeds ${maxBytes} bytes`, 413));
+        chunks.length = 0;
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (settled) return;
+      const raw = Buffer.concat(chunks).toString('utf8');
+      let parsed;
+      try {
+        parsed = raw.trim().length ? JSON.parse(raw) : {};
+      } catch {
+        finish(new AegisRun.AegisControlError('MALFORMED_JSON', 'request body is not valid JSON', 400));
+        return;
+      }
+      finish(null, parsed);
+    });
+    req.on('error', (e) => finish(new AegisRun.AegisControlError('BODY_READ_ERROR', e.message, 400)));
+  });
+}
+
+function isPlainObjectBody(v) {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+// Every runId-only endpoint accepts EXACTLY one field. Not "runId plus
+// whatever else" — a body carrying a second key (command, verdict, packet,
+// anything) is refused rather than silently ignored, because silently
+// ignoring an unexpected field is how a future field starts being honoured
+// by accident.
+function parseRunIdBody(body) {
+  if (!isPlainObjectBody(body)) {
+    throw new AegisRun.AegisControlError('INVALID_REQUEST', 'request body must be a JSON object', 400);
+  }
+  const keys = Object.keys(body);
+  if (keys.length !== 1 || keys[0] !== 'runId') {
+    throw new AegisRun.AegisControlError('INVALID_REQUEST',
+      `request body must contain exactly one field ("runId"); got: ${keys.join(', ') || 'none'}`, 400);
+  }
+  if (typeof body.runId !== 'string' || !body.runId.trim()) {
+    throw new AegisRun.AegisControlError('INVALID_REQUEST', 'runId must be a non-empty string', 400);
+  }
+  return body.runId;
+}
+
+// Every value on this surface is stripped to the fields a browser panel
+// needs to render — never the objects aegis-state.cjs produces for its own
+// full evidence dump. Anything not explicitly copied here is dropped:
+// absolute worktree paths, packet contents, raw reviewer transcripts, the
+// ledger array itself, and any stdout/stderr tail a run recorded.
+function minimizeApiStatus(snap) {
+  const eng = snap.engineering || {};
+  const engineering = eng.state === 'OK'
+    ? {
+        state: 'OK',
+        verdict: eng.verdict,
+        lane: eng.lane,
+        highRisk: eng.highRisk,
+        requiredReviewers: eng.requiredReviewers,
+        stages: (eng.stages || []).map((s) => ({ id: s.id, step: s.step, label: s.label, state: s.state, reason: s.reason })),
+      }
+    : { state: eng.state || 'UNAVAILABLE', reason: eng.reason || null };
+
+  const connectorsSrc = (snap.integration && snap.integration.connectors) || {};
+  const connectors = connectorsSrc.state === 'OK'
+    ? connectorsSrc.connectors.map((c) => ({
+        connectorId: c.connectorId, label: c.label, provider: c.provider,
+        health: c.health, staleness: c.staleness, authStatus: c.authStatus,
+        legacy: c.legacy, riskLevel: c.riskLevel,
+      }))
+    : [];
+
+  const reviewersSrc = snap.reviewers || {};
+  const reviewers = reviewersSrc.state === 'OK'
+    ? reviewersSrc.reviewers.map((r) => ({
+        toolId: r.toolId, role: r.role, label: r.label,
+        availability: r.availability, approvalAuthority: r.approvalAuthority, enabled: r.enabled,
+      }))
+    : [];
+
+  const costSrc = snap.cost || {};
+  const cost = costSrc.state === 'OK'
+    ? {
+        state: 'OK',
+        recordedUsdDisplay: costSrc.recordedUsdDisplay,
+        totalUsd: costSrc.totalUsd,
+        recordedRuns: costSrc.recordedRuns,
+        unrecordedRuns: costSrc.unrecordedRuns,
+        caveat: costSrc.caveat,
+        byReviewer: costSrc.byReviewer,
+      }
+    : { state: costSrc.state || 'UNAVAILABLE', reason: costSrc.reason || null };
+
+  const runsSrc = snap.runs || {};
+  const runs = runsSrc.state === 'OK'
+    ? runsSrc.runs.map((r) => ({
+        runId: r.runId, state: r.state, objective: r.objective, contractStep: r.contractStep,
+        checks: r.checks, checkpoint: r.checkpoint, transitions: r.transitions,
+      }))
+    : [];
+
+  const eventsSrc = snap.events || {};
+  const events = eventsSrc.state === 'OK'
+    ? eventsSrc.events.map((e) => ({ entryId: e.entryId, ts: e.ts, gate: e.gate, status: e.status, agentId: e.agentId }))
+    : [];
+
+  const knowledgeSrc = snap.knowledge || {};
+  const knowledge = {
+    state: knowledgeSrc.state || 'UNKNOWN',
+    conflicts: typeof knowledgeSrc.conflicts === 'number' ? knowledgeSrc.conflicts : null,
+  };
+
+  return {
+    generatedAt: snap.generatedAt,
+    engineering,
+    integration: { connectors },
+    reviewers,
+    cost,
+    runs,
+    events,
+    knowledge,
+  };
+}
+
+function buildApiStatus() {
+  let snap;
+  try {
+    snap = AegisState.snapshot({});
+  } catch {
+    // The exception is never echoed here: a message or stack from AegisState
+    // can carry an absolute path or other internal detail, and this response
+    // is the same data-minimized surface as everything else on /api/status.
+    return {
+      generatedAt: new Date().toISOString(),
+      engineering: { state: 'UNAVAILABLE', reason: 'the engineering snapshot is unavailable' },
+      integration: { connectors: [] },
+      reviewers: [],
+      cost: { state: 'UNAVAILABLE', reason: null },
+      runs: [],
+      events: [],
+      knowledge: { state: 'UNKNOWN', conflicts: null },
+    };
+  }
+  return minimizeApiStatus(snap);
+}
+
+// ── authenticated SSE event stream ──────────────────────────────────────────
+
+// Mirrors the AEGIS_LEDGER_FILE resolution AegisRun's own watchdog uses
+// (aegis-run.cjs, the canonical-ledger cross-check): an explicit override is
+// honoured so an isolated test run watches its own temp ledger, and the
+// default is the same builder-control/ledger.json the writer appends to.
+// There is no client-supplied path anywhere in this resolution.
+function resolveCanonicalLedgerFile() {
+  return process.env.AEGIS_LEDGER_FILE
+    ? path.resolve(process.env.AEGIS_LEDGER_FILE)
+    : path.resolve(HERE, '..', 'ledger.json');
+}
+
+// One watcher, one heartbeat timer, one debounce timer per connection. Every
+// one of them is torn down from a single cleanup() reached from disconnect
+// (req/res 'close'/'error') AND from the server's own 'close' event via
+// config._sseClients, so neither path can outlive the connection or the
+// process.
+function handleSse(req, res, config) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    'connection': 'keep-alive',
+    'x-accel-buffering': 'no',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+  });
+
+  const write = (chunk) => {
+    if (res.writableEnded || res.destroyed) return;
+    try { res.write(chunk); } catch { /* the socket is already gone */ }
+  };
+
+  // Same authority, same minimization as GET /api/status — this is never a
+  // second, divergent status surface.
+  const sendStatus = () => {
+    write(`event: status\ndata: ${JSON.stringify(buildApiStatus())}\n\n`);
+  };
+  sendStatus();
+
+  const heartbeat = setInterval(() => write(': heartbeat\n\n'), SSE_HEARTBEAT_MS);
+
+  let debounceTimer = null;
+  const scheduleStatus = () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      sendStatus();
+    }, SSE_DEBOUNCE_MS);
+  };
+
+  const ledgerFile = resolveCanonicalLedgerFile();
+  const ledgerDir = path.dirname(ledgerFile);
+  const ledgerBase = path.basename(ledgerFile);
+  let watcher = null;
+  try {
+    watcher = fs.watch(ledgerDir, (eventType, filename) => {
+      if (filename && filename !== ledgerBase) return;
+      scheduleStatus();
+    });
+    watcher.on('error', () => { /* a watcher error is not a client-visible event */ });
+  } catch {
+    // The ledger directory does not exist yet. The stream still serves the
+    // initial status and heartbeats; there is simply nothing on disk to
+    // watch until it appears.
+  }
+
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(heartbeat);
+    if (debounceTimer) clearTimeout(debounceTimer);
+    if (watcher) watcher.close();
+    if (config._sseClients) config._sseClients.delete(cleanup);
+    if (!res.writableEnded) { try { res.end(); } catch { /* already closing */ } }
+  };
+  if (!config._sseClients) config._sseClients = new Set();
+  config._sseClients.add(cleanup);
+
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+}
+
+async function handleApi(req, res, config, pathname, ctx, started) {
+  const headers = ctx.setCookie ? { 'set-cookie': ctx.setCookie } : undefined;
+  try {
+    if (pathname === API_STATUS_PATH) {
+      const status = buildApiStatus();
+      const body = JSON.stringify(status);
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'referrer-policy': 'no-referrer',
+        'x-frame-options': 'DENY',
+        'content-security-policy': CSP,
+        ...(headers || {}),
+      });
+      if (req.method === 'HEAD') res.end(); else res.end(body);
+      log(req, 200, started);
+      return;
+    }
+
+    // Every remaining route is a state-changing POST. Origin is checked
+    // before the body is read — a cross-origin request is refused for what
+    // it IS, without the extra step of parsing what it carries.
+    checkOrigin(req, config, ctx.usedPrimaryCredential);
+
+    const body = await readJsonBody(req, MAX_API_BODY_BYTES);
+
+    if (pathname === '/api/objective') {
+      const result = AegisRun.createRunFromObjective(body, { packet: SWITCHBOARD_PACKET });
+      sendJson(res, 200, result, headers);
+      log(req, 200, started);
+      return;
+    }
+
+    const runId = parseRunIdBody(body);
+    let result;
+    if (pathname === '/api/start') result = AegisRun.prepareRun(runId);
+    else if (pathname === '/api/pause') result = AegisRun.pauseRun(runId);
+    else if (pathname === '/api/cancel') result = AegisRun.cancelRun(runId);
+    else if (pathname === '/api/retry') result = AegisRun.retryRun(runId);
+    else throw new AegisRun.AegisControlError('NOT_FOUND', 'unknown API route', 404);
+
+    sendJson(res, 200, result, headers);
+    log(req, 200, started);
+  } catch (e) {
+    apiError(res, e, headers, req, started);
+  }
+}
+
+// Log the path and status, never the token or query string.
+function log(req, status, started) {
+  const p = String(req.url || '').split('?')[0];
+  process.stdout.write(`[aegis-host] ${status} ${req.method} ${p} ${Date.now() - started}ms\n`);
+}
+
+function start(args) {
+  const v = validateConfig(args);
+  if (!v.ok) {
+    process.stderr.write(`\nAEGIS HOSTING REFUSED\n  rule  : ${v.code}\n  reason: ${v.reason}\n\nNothing is listening.\n`);
+    return { ok: false, code: v.code };
+  }
+  const config = v.config;
+  const server = http.createServer(handler(config));
+  // Every open SSE connection registers its own cleanup() in
+  // config._sseClients. A server shutdown must not leave watchers or timers
+  // running past the process that owned them.
+  server.on('close', () => {
+    if (!config._sseClients) return;
+    for (const cleanup of Array.from(config._sseClients)) cleanup();
+  });
+  server.listen(config.port, config.host, () => {
+    process.stdout.write('\nAEGIS DASHBOARD — LOCAL HOST\n');
+    process.stdout.write('='.repeat(56) + '\n');
+    process.stdout.write(`bound   : http://${config.host}:${config.port}  ${config.loopback ? '(loopback only)' : '*** EXPOSED BEYOND LOOPBACK ***'}\n`);
+    process.stdout.write(`auth    : required${config.generated ? ' (token generated for this run)' : ' (token supplied)'}\n`);
+    process.stdout.write(`serves  : ${Object.keys(SERVABLE).join(', ')} — nothing else\n`);
+    // A SUPPLIED token is never echoed. The operator already has it, and this
+    // banner routinely lands in a log file, a scrollback buffer, or a CI
+    // artifact — which would put a live credential at rest in all three.
+    // A GENERATED token has to be shown once or the run is unusable, and it
+    // dies with the process.
+    if (config.generated) {
+      process.stdout.write(`open    : http://${config.host}:${config.port}/?token=${config.token}\n`);
+      process.stdout.write('          ^ generated for this run only; it is not stored and dies with this process.\n');
+    } else {
+      process.stdout.write(`open    : http://${config.host}:${config.port}/?token=<the token you supplied>\n`);
+      process.stdout.write('          (a supplied token is deliberately never echoed — this banner gets logged)\n');
+    }
+    process.stdout.write('\nThe repository, ledger, packets, review records and raw reviewer\n');
+    process.stdout.write('transcripts are NOT reachable from this process.\n');
+  });
+  return { ok: true, server, config };
+}
+
+if (require.main === module) {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.printConfig) {
+    const v = validateConfig(args);
+    console.log(JSON.stringify(v.ok ? { ok: true, host: v.config.host, port: v.config.port, loopback: v.config.loopback, authRequired: true, servable: Object.keys(SERVABLE) } : v, null, 2));
+    process.exit(v.ok ? 0 : EXIT_REFUSED);
+  }
+  const r = start(args);
+  if (!r.ok) process.exit(EXIT_REFUSED);
+}
+
+module.exports = {
+  validateConfig, handler, start, sessionFor, SERVABLE, NEVER_SERVE, isNeverServe, LOOPBACK,
+  API_STATUS_PATH, API_EVENTS_PATH, API_POST_ROUTES, SWITCHBOARD_PACKET, MAX_API_BODY_BYTES, CSP,
+  minimizeApiStatus, buildApiStatus, parseRunIdBody, checkOrigin, resolveCanonicalLedgerFile,
+};

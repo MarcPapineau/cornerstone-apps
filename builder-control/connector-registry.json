@@ -1,0 +1,140 @@
+{
+  "registryVersion": "1.0.0",
+  "note": "Connectors are INTEGRATION-plane workers. None of them may mark work verified, approve its own execution, declare tests or runtime PASS, suppress findings, create a checkpoint, or override the watchdog or a human gate. aegis-state.cjs refuses to load any entry whose plane is not INTEGRATION, and a test proves that refusal. Default health is UNKNOWN: a connector that has never been probed is UNKNOWN, never HEALTHY, because an optimistic default is how an outage stays invisible.",
+  "healthVocabulary": [
+    "HEALTHY",
+    "DEGRADED",
+    "FAILED",
+    "DISCONNECTED",
+    "AUTH_EXPIRED",
+    "RATE_LIMITED",
+    "UNKNOWN"
+  ],
+  "stalenessThresholdMinutes": 60,
+  "connectors": [
+    {
+      "connectorId": "github",
+      "label": "GitHub",
+      "provider": "GitHub",
+      "plane": "INTEGRATION",
+      "type": "SOURCE_OF_MACHINE_TRUTH",
+      "executionPath": "DIRECT_API",
+      "capabilities": [
+        "HEALTH_CHECK",
+        "READ",
+        "SEARCH",
+        "STATUS"
+      ],
+      "declaredNotSupported": [
+        "DELETE",
+        "TRIGGER"
+      ],
+      "authStatus": "AUTHENTICATED",
+      "health": "HEALTHY",
+      "healthEvidence": {
+        "observedAt": "2026-08-25T16:53:19Z",
+        "method": "GitHub CLI authentication probe",
+        "result": "Authenticated active account confirmed; credential value omitted.",
+        "operationId": "github-probe-20260825T165319Z"
+      },
+      "lastSuccess": "2026-08-25T16:53:19Z",
+      "lastFailure": null,
+      "failureCount": 0,
+      "latencyMs": null,
+      "rateLimit": "UNKNOWN",
+      "permissions": [
+        "repo",
+        "read:org",
+        "workflow",
+        "gist"
+      ],
+      "dependentWorkflows": [
+        "required status checks",
+        "branch protection"
+      ],
+      "environment": "production",
+      "riskLevel": "HIGH",
+      "authorityNote": "GitHub records machine truth (what the code does). It does not decide product intent, and a green check is not a verification verdict."
+    },
+    {
+      "connectorId": "notion",
+      "label": "Notion",
+      "provider": "Notion",
+      "plane": "INTEGRATION",
+      "type": "HUMAN_PRODUCT_TRUTH",
+      "executionPath": "DIRECT_API",
+      "capabilities": [
+        "READ",
+        "SEARCH",
+        "CREATE",
+        "UPDATE"
+      ],
+      "declaredNotSupported": [
+        "TRIGGER"
+      ],
+      "authStatus": "AUTHENTICATED",
+      "health": "HEALTHY",
+      "healthEvidence": {
+        "observedAt": "2026-08-25T16:47:01Z",
+        "method": "Codex Notion MCP search followed by page fetch",
+        "result": "The requested UX and Product Experience Architecture page was found and readable; private page contents omitted from connector evidence.",
+        "operationId": "notion-probe-20260825T164701Z"
+      },
+      "lastSuccess": "2026-08-25T16:47:01Z",
+      "lastFailure": null,
+      "failureCount": 0,
+      "latencyMs": null,
+      "rateLimit": "UNKNOWN",
+      "permissions": [
+        "READ",
+        "SEARCH"
+      ],
+      "dependentWorkflows": [
+        "post-checkpoint product-truth sync"
+      ],
+      "environment": "production",
+      "riskLevel": "MEDIUM",
+      "authorityNote": "Notion holds human product intent. A live page is NOT a pin: a packet must pin an approved version or mark the source UNVERIFIED."
+    },
+    {
+      "connectorId": "make",
+      "label": "Make",
+      "provider": "Make",
+      "plane": "INTEGRATION",
+      "type": "AUTOMATION_PLATFORM",
+      "executionPath": "MCP",
+      "capabilities": [
+        "HEALTH_CHECK",
+        "TRIGGER",
+        "STATUS"
+      ],
+      "declaredNotSupported": [
+        "DELETE"
+      ],
+      "authStatus": "AUTHENTICATED",
+      "health": "HEALTHY",
+      "healthEvidence": {
+        "observedAt": "2026-08-25T17:03:41Z",
+        "method": "Authenticated Make MCP toolbox inspection",
+        "result": "AEGIS Integration Plane toolbox is accessible; its credential and Connector Health Probe both report use today. Credential value omitted.",
+        "operationId": "make-probe-20260825T170341Z"
+      },
+      "lastSuccess": "2026-08-25T17:03:41Z",
+      "lastFailure": null,
+      "failureCount": 0,
+      "latencyMs": null,
+      "rateLimit": "UNKNOWN",
+      "permissions": [
+        "HEALTH_CHECK",
+        "TRIGGER",
+        "STATUS"
+      ],
+      "dependentWorkflows": [
+        "multi-system integration workflows"
+      ],
+      "environment": "production",
+      "riskLevel": "HIGH",
+      "authorityNote": "Make executes approved multi-system workflows. It may never approve work, declare tests or runtime PASS, create checkpoints, or override a human or engineering gate."
+    }
+  ]
+}

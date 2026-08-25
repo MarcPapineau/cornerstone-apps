@@ -1,0 +1,59 @@
+{
+  "packetId": "PKT-20260825-REVIEW-WORKERS",
+  "agentId": "claude-code",
+  "objective": "Correct the canonical reviewer capability evidence and dashboard projection from live bounded probes of Codex, Grok, and GitHub Copilot CLI.",
+  "constraints": [
+    "Record observed evidence only and fail closed",
+    "Codex is available from a successful read-only ephemeral probe",
+    "Grok is blocked because the installed CLI reports that it is not authenticated",
+    "Copilot CLI is installed and authenticated; after Copilot Free activation a bounded zero-tool probe returned the exact expected result",
+    "Do not run any additional model inference or metered review",
+    "Copilot remains advisory and cannot approve",
+    "Do not store tokens, account email, organization identifiers, request identifiers, or OAuth URLs",
+    "Do not commit, push, deploy, publish, or release"
+  ],
+  "sourceOfTruth": [
+    "builder-control/TOOL-CAPABILITY-CANON.json",
+    "builder-control/MODEL-ROUTING-POLICY.json",
+    "builder-control/aegis-state.cjs",
+    "builder-control/review-adapters.cjs"
+  ],
+  "filesAllowed": [
+    "builder-control/TOOL-CAPABILITY-CANON.json",
+    "builder-control/MODEL-ROUTING-POLICY.json",
+    "builder-control/aegis-state.cjs",
+    "builder-control/review-adapters.cjs",
+    "builder-control/test/aegis-state.test.cjs",
+    "builder-control/test/review-adapters.test.cjs",
+    "builder-control/dashboard/state.js",
+    "builder-control/packets/PKT-20260825-REVIEW-WORKERS.json"
+  ],
+  "testsRequired": [
+    "node --test builder-control/test/model-routing.test.cjs",
+    "node --test builder-control/test/tool-router.test.cjs",
+    "node builder-control/test/review-adapters.test.cjs",
+    "node --test builder-control/test/aegis-state.test.cjs",
+    "node builder-control/aegis-state.cjs --write builder-control/dashboard/state.js"
+  ],
+  "stopConditions": [
+    "A change would mark an unusable worker AVAILABLE",
+    "A change would make Copilot a required approver",
+    "A change would invoke paid inference",
+    "A required credential or account secret would be written to the repository",
+    "Marc issues STOP or changes scope"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — explicit 2026-08-25 instruction to connect all workers and keep going without pauses where no human input is required",
+    "allowsProtectedPaths": [
+      "builder-control/TOOL-CAPABILITY-CANON.json",
+      "builder-control/MODEL-ROUTING-POLICY.json",
+      "builder-control/aegis-state.cjs",
+      "builder-control/review-adapters.cjs",
+      "builder-control/test/aegis-state.test.cjs",
+      "builder-control/test/review-adapters.test.cjs",
+      "builder-control/dashboard/state.js"
+    ],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

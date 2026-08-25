@@ -1,0 +1,43 @@
+{
+  "packetId": "PKT-20260825-CLAUDE-WORKER",
+  "agentId": "codex",
+  "objective": "Update the canonical capability evidence for the newly installed and authenticated Claude Code subscription worker after a successful bounded execution probe.",
+  "constraints": [
+    "Record observed evidence only",
+    "Claude remains unable to approve its own work",
+    "Never store authentication tokens, organization identifiers, or session identifiers",
+    "Do not alter model routing roles or priority",
+    "Do not deploy, push, or release"
+  ],
+  "sourceOfTruth": [
+    "builder-control/TOOL-CAPABILITY-CANON.json",
+    "builder-control/MODEL-ROUTING-POLICY.json"
+  ],
+  "filesAllowed": [
+    "builder-control/TOOL-CAPABILITY-CANON.json",
+    "builder-control/TOOL-CAPABILITY-CANON-BACKUP-2026-08-25-CLAUDE.json",
+    "builder-control/dashboard/state.js",
+    "builder-control/packets/PKT-20260825-CLAUDE-WORKER.json"
+  ],
+  "testsRequired": [
+    "node --test builder-control/test/model-routing.test.cjs",
+    "node --test builder-control/test/tool-router.test.cjs",
+    "node --test builder-control/test/aegis-state.test.cjs"
+  ],
+  "stopConditions": [
+    "Claude authentication falls back to the ANTHROPIC_API_KEY",
+    "The probe modifies repository files or invokes tools",
+    "The change would permit Claude to approve its own output",
+    "Marc issues STOP, delegate, or canon language"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — explicit instruction on 2026-08-25 to install and connect Claude Code as an AEGIS worker",
+    "allowsProtectedPaths": [
+      "builder-control/TOOL-CAPABILITY-CANON.json",
+      "builder-control/TOOL-CAPABILITY-CANON-BACKUP-2026-08-25-CLAUDE.json",
+      "builder-control/dashboard/state.js"
+    ],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

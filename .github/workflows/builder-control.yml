@@ -19,6 +19,13 @@ on:
       - 'scripts/audit-protocol-content-contract.mjs'
       - 'scripts/test/**'
       - '.github/workflows/builder-control.yml'
+      # The Engineering OS instruction surfaces. Editing what the reviewers are
+      # told is a change to the enforcement, so it re-runs the enforcement.
+      - '.github/copilot-instructions.md'
+      - '.github/agents/**'
+      - '.github/pull_request_template.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
   # No path filter on pull_request — see vitalis-app.yml for the reasoning.
   # `main` requires this check, and a required check that never reports is a
   # deadlock, not a safeguard.
@@ -86,3 +93,188 @@ jobs:
 
       - name: Layer 2 — one owner per job
         run: node builder-control/single-authority-check.cjs
+
+      # ── Engineering OS ────────────────────────────────────────────────────
+      # The multi-model build loop (Claude builds, Codex reviews, Copilot
+      # guards, Grok attacks) is only as good as the part of it that cannot be
+      # talked out of a verdict. These steps are that part. They run on every
+      # push and PR so the workflow activates itself — nobody has to remember
+      # to invoke it, and nobody has to paste a protocol into a chat window.
+      #
+      # Every step here fails the job when it fails. There is no report-only
+      # mode and no environment-variable opt-in: a gate that can be switched
+      # off from repository settings is a suggestion, and the first time it
+      # matters is exactly when someone will be tempted to switch it off.
+
+      - name: Engineering OS — rule fixtures still fire
+        # A classifier that silently stopped classifying would pass every build
+        # and look identical to a healthy one. These fixtures feed it changes
+        # that MUST be refused, and fail if any of them is let through.
+        run: node builder-control/test/engineering-os.test.cjs
+
+      - name: Engineering OS — router, adapter, installer, state and slice fixtures
+        # The router decides which tool is allowed to do a job, the adapters
+        # decide what counts as a review, and the installer decides whether a
+        # copy of this system is complete. All three fail silently when broken —
+        # a router with an empty canon routes nothing and reports no error — so
+        # each one carries fixtures that must be refused.
+        run: |
+          set -euo pipefail
+          node builder-control/test/tool-router.test.cjs
+          node builder-control/test/review-adapters.test.cjs
+          node builder-control/test/install-engineering-os.test.cjs
+          node builder-control/test/model-routing.test.cjs
+          node builder-control/test/knowledge-mirror.test.cjs
+          node builder-control/test/hosting.test.cjs
+          node builder-control/test/review-chunker.test.cjs
+          node builder-control/test/aegis-run.test.cjs
+          node builder-control/test/aegis-state.test.cjs
+          # CONFIRMED FINDING (#3): dashboard/state.js is generated and
+          # gitignored, so a clean runner has no copy and the slice test failed
+          # on arrival. Generate it here — which also proves the generator
+          # itself still runs, rather than only testing a file someone left
+          # lying around locally.
+          node builder-control/aegis-state.cjs --out builder-control/dashboard/state.js
+          node builder-control/test/dashboard-slice.test.cjs
+
+      - name: Engineering OS — compute the subject once
+        # ONE computation of subject paths and subject hash, reused by every
+        # step below. Computing it twice invites two answers, and the whole
+        # value of a bound review is that there is exactly one thing it is
+        # bound to.
+        id: subject
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            # CONFIRMED FINDING #2: this used `--subject` with no refs, which
+            # runs `git diff HEAD` — EMPTY on a clean Actions checkout. The
+            # empty subject was then classified LIGHT and skipped the binding
+            # gate entirely, so the fallback silently disabled enforcement on
+            # exactly the runs that needed it. HEAD's own file list is now
+            # enumerated explicitly, and an empty result fails closed below.
+            echo "Base '$BASE' unavailable — enumerating HEAD's own files."
+            USED_BASE=""
+            HEADFILES=$(git diff-tree --root --no-commit-id -r --name-only HEAD | sed '/^$/d')
+            if [ -z "$HEADFILES" ]; then
+              echo "BLOCKED: no trustworthy file range could be established for HEAD."
+              echo "An unknown subject is never treated as a small one."
+              exit 1
+            fi
+            CHANGEDARGS=()
+            while IFS= read -r f; do [ -n "$f" ] && CHANGEDARGS+=(--changed "$f"); done <<< "$HEADFILES"
+            SUBJ=$(node builder-control/engineering-os.cjs --subject "${CHANGEDARGS[@]}" --json)
+          else
+            USED_BASE="$BASE"
+            SUBJ=$(node builder-control/engineering-os.cjs --subject --base "$BASE" --head HEAD --json)
+          fi
+          echo "$SUBJ"
+          SHA=$(echo "$SUBJ" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).subjectSha256))')
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "$SUBJ" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(j.subjectPaths.join("\n"))})' > /tmp/subject-paths.txt
+          echo "count=$(wc -l < /tmp/subject-paths.txt | tr -d " ")" >> "$GITHUB_OUTPUT"
+          # Record the EXACT base used, so the gate step certifies the same
+          # range rather than recomputing a different one.
+          echo "base=$USED_BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Engineering OS — bind to exactly one task packet
+        # A change that carries two modified packets has two competing
+        # authorizations and no deterministic way to choose between them.
+        # Rather than pick one, this blocks and says so.
+        id: packet
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            CHANGED=$(git diff-tree --no-commit-id --name-only -r HEAD)
+          else
+            CHANGED=$(git diff --name-only "$BASE" HEAD)
+          fi
+          PACKETS=$(echo "$CHANGED" | grep -E '^builder-control/packets/.*\.json$' || true)
+          COUNT=$(if [ -z "$PACKETS" ]; then echo 0; else echo "$PACKETS" | wc -l | tr -d ' '; fi)
+          echo "changed packets: $COUNT"
+          echo "$PACKETS"
+          if [ "$COUNT" -gt 1 ]; then
+            echo ''
+            echo 'BLOCKED: this change modifies more than one task packet.'
+            echo 'Exactly one packet authorizes a change. Two packets means two'
+            echo 'answers to "what was this allowed to touch", and there is no'
+            echo 'honest way to pick. Split the change.'
+            exit 1
+          fi
+          if [ "$COUNT" -eq 1 ]; then
+            echo "active=$PACKETS" >> "$GITHUB_OUTPUT"
+            echo "── pinning intent for $PACKETS"
+            node builder-control/engineering-os.cjs --spec-check --packet "$PACKETS"
+          else
+            echo "active=" >> "$GITHUB_OUTPUT"
+            echo "No task packet added or modified by this change."
+          fi
+
+      - name: Engineering OS — classify the subject
+        id: classify
+        run: |
+          set -euo pipefail
+          SUBJECT_BASE="${{ steps.subject.outputs.base }}"
+          ARGS=()
+          while IFS= read -r f; do [ -n "$f" ] && ARGS+=(--changed "$f"); done < /tmp/subject-paths.txt
+          if [ ${#ARGS[@]} -eq 0 ]; then
+            # FINDING #2: an empty subject used to be declared LIGHT, which is
+            # how a computation failure became a governance bypass. Zero subject
+            # paths after a successful subject computation means the change is
+            # evidence-only; that is reported, and the lane is left UNKNOWN so
+            # the gate step still runs and decides.
+            echo "No subject paths — evidence-only change. Lane left UNKNOWN; the gate still runs."
+            echo "lane=UNKNOWN" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The classifier now refuses LIGHT without a line count (finding #10),
+          # so CI must supply the real one rather than let an unknown size pass.
+          if [ -n "$SUBJECT_BASE" ]; then
+            LINES=$(git diff --numstat "$SUBJECT_BASE" HEAD -- $(cat /tmp/subject-paths.txt | tr '\n' ' ') | awk '{a+=$1+$2} END {print a+0}')
+          else
+            LINES=$(git diff --numstat HEAD -- $(cat /tmp/subject-paths.txt | tr '\n' ' ') | awk '{a+=$1+$2} END {print a+0}')
+          fi
+          echo "subject changed lines: $LINES"
+          node builder-control/engineering-os.cjs --classify "${ARGS[@]}" --diff-lines "$LINES" | tee /tmp/classify.txt
+          LANE=$(awk -F': *' '/^lane /{print $2; exit}' /tmp/classify.txt | awk '{print $1}')
+          echo "lane=$LANE" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Engineering OS — change classification"
+            echo ''
+            echo '```'
+            cat /tmp/classify.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Engineering OS — required review evidence (binding)
+        # Fail-closed. Missing review evidence blocks the merge. A review bound
+        # to a different subject hash does not count. An unavailable reviewer
+        # blocks and is reported as UNAVAILABLE rather than upgraded to a pass.
+        #
+        # --subject-sha is passed explicitly and is mandatory in the CLI: a gate
+        # decision with no bound subject certifies nothing at all.
+        # Runs for FULL and for UNKNOWN. Only a positively-classified LIGHT skips.
+        if: steps.classify.outputs.lane != 'LIGHT'
+        run: |
+          set -euo pipefail
+          ARGS=()
+          while IFS= read -r f; do [ -n "$f" ] && ARGS+=(--changed "$f"); done < /tmp/subject-paths.txt
+          SUBJECT_BASE="${{ steps.subject.outputs.base }}"
+          PACKET="${{ steps.packet.outputs.active }}"
+          PKTARG=()
+          if [ -n "$PACKET" ]; then PKTARG=(--packet "$PACKET"); fi
+          # CONFIRMED FINDING (#2): this previously passed only --changed. The
+          # subject above was computed over BASE..HEAD, but --gate-done with no
+          # refs recomputes over `git diff HEAD` — a different range, therefore
+          # a different hash, therefore ENGOS-SUBJECT-MISMATCH on every real
+          # pull request even when the reviews were correct. The gate must be
+          # handed the exact same range it is being asked to certify.
+          REFARGS=()
+          if [ -n "${SUBJECT_BASE:-}" ]; then REFARGS=(--base "$SUBJECT_BASE" --head HEAD); fi
+          node builder-control/engineering-os.cjs --gate-done \
+            --subject-sha "${{ steps.subject.outputs.sha }}" \
+            "${REFARGS[@]+"${REFARGS[@]}"}" \
+            "${PKTARG[@]+"${PKTARG[@]}"}" "${ARGS[@]}"

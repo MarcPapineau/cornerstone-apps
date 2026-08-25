@@ -4,40 +4,132 @@
   "title": "Builder Control — Evidence Ledger Entry (append-only)",
   "description": "ONE entry schema, consolidating the policy/ledger.json stub shape and the Gate-D runtime-evidence JSON shape (gate/status/trace_id/evidence_paths/notes). Every gate decision — PASS and BLOCK — appends one entry. A change with no ledger entry never happened. The ledger file is an array of these objects; entries are never mutated, only appended.",
   "type": "object",
-  "required": ["entryId", "ts", "agentId", "gate", "status"],
+  "required": [
+    "entryId",
+    "ts",
+    "agentId",
+    "gate",
+    "status"
+  ],
   "properties": {
-    "entryId": { "type": "string", "examples": ["LED-2026-06-22-0001"] },
-    "ts": { "type": "string", "format": "date-time" },
-    "packetId": { "type": ["string", "null"], "description": "The authorizing packet, or null for blocks where no packet was present." },
-    "agentId": { "type": "string", "examples": ["claude-code", "UNREGISTERED"] },
+    "entryId": {
+      "type": "string",
+      "examples": [
+        "LED-2026-06-22-0001"
+      ]
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "packetId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The authorizing packet, or null for blocks where no packet was present."
+    },
+    "agentId": {
+      "type": "string",
+      "examples": [
+        "claude-code",
+        "UNREGISTERED"
+      ]
+    },
     "gate": {
       "type": "string",
       "description": "Which gate produced this entry. 'control' = builder-control gate; 'D' = legacy Gate-D import; 'legacy-import' = migrated policy/ledger.json record.",
-      "examples": ["control", "D", "legacy-import", "release"]
+      "examples": [
+        "control",
+        "D",
+        "legacy-import",
+        "release"
+      ]
     },
-    "status": { "type": "string", "enum": ["PASS", "BLOCKED", "INCOMPLETE", "IMPORTED"] },
-    "blockRule": { "type": ["string", "null"], "description": "The RULE-ID when status=BLOCKED (e.g. BC-PUBLIC-PUSH), else null." },
-    "operation": { "type": ["string", "null"], "description": "e.g. 'push cornerstoneregroup-site -> origin/main' or 'write packages/protocol-core/data/dosing.js'." },
-    "changed": { "type": "array", "items": { "type": "string" }, "description": "Paths created/edited/deleted/moved by this op." },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "BLOCKED",
+        "INCOMPLETE",
+        "IMPORTED",
+        "FAILED"
+      ],
+      "description": "FAILED (added 2026-08-24) records an INTEGRATION operation that genuinely failed. It is distinct from BLOCKED: BLOCKED means a control-plane rule refused, FAILED means an external worker could not complete. Conflating them would let a failed Notion sync read as a governance refusal, or worse, let a governance refusal be dismissed as a flaky connector."
+    },
+    "blockRule": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The RULE-ID when status=BLOCKED (e.g. BC-PUBLIC-PUSH), else null."
+    },
+    "operation": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "e.g. 'push cornerstoneregroup-site -> origin/main' or 'write packages/protocol-core/data/dosing.js'."
+    },
+    "changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Paths created/edited/deleted/moved by this op."
+    },
     "commandsRun": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["cmd", "exit"],
+        "required": [
+          "cmd",
+          "exit"
+        ],
         "properties": {
-          "cmd": { "type": "string" },
-          "exit": { "type": "integer" },
-          "outputTail": { "type": "string", "description": "Last lines of stdout/stderr — proof, not full dump." }
+          "cmd": {
+            "type": "string"
+          },
+          "exit": {
+            "type": "integer"
+          },
+          "outputTail": {
+            "type": "string",
+            "description": "Last lines of stdout/stderr — proof, not full dump."
+          }
         }
       }
     },
-    "testsRun": { "type": "array", "items": { "type": "string" } },
-    "screenshots": { "type": "array", "items": { "type": "string" } },
-    "commitSha": { "type": ["string", "null"] },
-    "bundleHash": { "type": ["string", "null"], "description": "Deploy/bundle hash where applicable (mirrors Gate-D 'Builder hash')." },
+    "testsRun": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "screenshots": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "commitSha": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "bundleHash": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Deploy/bundle hash where applicable (mirrors Gate-D 'Builder hash')."
+    },
     "evidencePaths": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "windmill-job: / file: / brain-compound: references. For protocol packets MUST include a brain-compound discoveryLineage reference (Module 6)."
     },
     "driftChecks": {
@@ -45,18 +137,64 @@
       "description": "Results of every drift script the gate invoked for this op.",
       "items": {
         "type": "object",
-        "required": ["check", "exit"],
+        "required": [
+          "check",
+          "exit"
+        ],
         "properties": {
-          "check": { "type": "string", "examples": ["check-drift.cjs", "audit-protocol-content-contract.mjs --strict", "validateBrain()"] },
-          "exit": { "type": "integer" },
-          "summary": { "type": "string" }
+          "check": {
+            "type": "string",
+            "examples": [
+              "check-drift.cjs",
+              "audit-protocol-content-contract.mjs --strict",
+              "validateBrain()"
+            ]
+          },
+          "exit": {
+            "type": "integer"
+          },
+          "summary": {
+            "type": "string"
+          }
         }
       }
     },
-    "notes": { "type": "string" },
+    "notes": {
+      "type": "string"
+    },
     "langfuseTraceId": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "description": "OPTIONAL (Sprint 1, Anti-Drift Rule 4 observability). Langfuse trace id linking this ledger decision to a run trace. Absent on existing entries (backward-compatible) and on gate runs where no trace id is supplied (--langfuse-trace-id / BC_LANGFUSE_TRACE_ID). Never required."
+    },
+    "operationId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Idempotency key for an external operation. Re-appending an entry with an operationId already present is a NO-OP, not a second record — this is what makes a retry safe rather than duplicating a page, issue, release, or notification."
+    },
+    "correlationId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Groups every attempt and downstream effect of one logical operation, so a retry storm reads as one story rather than N unrelated events."
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based attempt counter. Present so a success on attempt 4 is never mistaken for a clean first-time success."
+    },
+    "result": {
+      "type": "string",
+      "description": "What the external worker actually returned. Required in practice for FAILED entries: an integration failure with no returned error is unactionable."
+    },
+    "plane": {
+      "type": "string",
+      "enum": [
+        "CONTROL",
+        "INTEGRATION"
+      ],
+      "description": "Which plane produced this entry. INTEGRATION entries can never carry engineering authority; the projector reads this to keep the two planes separate."
     }
   },
   "additionalProperties": false,
@@ -70,17 +208,32 @@
       "status": "PASS",
       "blockRule": null,
       "operation": "write luke-app/server/order-ops.js",
-      "changed": ["luke-app/server/order-ops.js", "luke-app/test/order-ops.test.js"],
-      "commandsRun": [
-        { "cmd": "npm --prefix luke-app test -- order-ops", "exit": 0, "outputTail": "12 passing" }
+      "changed": [
+        "luke-app/server/order-ops.js",
+        "luke-app/test/order-ops.test.js"
       ],
-      "testsRun": ["order-ops duplicate-draft regression"],
+      "commandsRun": [
+        {
+          "cmd": "npm --prefix luke-app test -- order-ops",
+          "exit": 0,
+          "outputTail": "12 passing"
+        }
+      ],
+      "testsRun": [
+        "order-ops duplicate-draft regression"
+      ],
       "screenshots": [],
       "commitSha": null,
       "bundleHash": null,
-      "evidencePaths": ["file:luke-app/server/order-ops.js"],
+      "evidencePaths": [
+        "file:luke-app/server/order-ops.js"
+      ],
       "driftChecks": [
-        { "check": "check-drift.cjs", "exit": 0, "summary": "tier matrix authority intact, no forbidden patterns" }
+        {
+          "check": "check-drift.cjs",
+          "exit": 0,
+          "summary": "tier matrix authority intact, no forbidden patterns"
+        }
       ],
       "notes": "Reorder duplicate-draft fix. No protected path touched; packet authorization empty."
     },

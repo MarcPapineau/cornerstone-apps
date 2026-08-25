@@ -1,0 +1,158 @@
+{
+  "policyId": "AEGIS-MODEL-ROUTING-V1",
+  "version": "2026-08-24",
+  "authority": "This policy selects WHO does work. It never decides whether work is correct. A route is an assignment, not a verdict.",
+  "vetoOrder": [
+    "dataSensitivity",
+    "capability",
+    "availability",
+    "cost"
+  ],
+  "vetoOrderNote": "Evaluated in this order and each is a hard veto, not a weight. Data sensitivity is first because a cheaper, more capable, available model is still the wrong answer if the data may not leave the machine. Cost is last because a cheap model that cannot do the job is not a saving.",
+  "roles": {
+    "orchestrator": {
+      "default": "claude",
+      "description": "Plans, decomposes, implements, and reports. Holds no approval authority over its own work.",
+      "mayApproveOwnWork": false,
+      "recursiveDelegation": false,
+      "maxDelegationDepth": 0
+    },
+    "implementation-review": {
+      "default": "codex",
+      "description": "Independent review of implementation correctness and verification of claimed behaviour.",
+      "mayApproveOwnWork": false,
+      "recursiveDelegation": false,
+      "maxDelegationDepth": 0,
+      "mustDifferFrom": [
+        "orchestrator"
+      ]
+    },
+    "adversarial-review": {
+      "default": "grok",
+      "description": "Bounded adversarial pass. Attempts to prove the change wrong.",
+      "mayApproveOwnWork": false,
+      "recursiveDelegation": false,
+      "maxDelegationDepth": 0,
+      "mustDifferFrom": [
+        "orchestrator",
+        "implementation-review"
+      ],
+      "bounds": {
+        "maxTurns": 16,
+        "maxRetries": 0,
+        "subagents": false,
+        "webAccess": false,
+        "toolWrites": false,
+        "boundsNote": "REVISED 2026-08-25 on evidence. This was maxTurns:1, justified as 'one turn forces it to spend its attention on the diff rather than on a conversation'. That reasoning was wrong for an AGENTIC reviewer: turn one is spent opening files, so the run ended with 'max turns reached', no verdict, and USD 0.00717944 charged. Paying for a non-answer is the worst outcome available — worse than paying for a real review and worse than not calling at all.\n\nTurns are the wrong cost lever. Spend is bounded by capUsd against the USD 5 hard ceiling, by the wall-clock timeout, by no web access, and by no sub-agents. maxTurns is a RUNAWAY guard, not a budget: it exists so a stuck agent stops, not so a working one is cut off mid-sentence. It is now set for task completion on ONE chunk — Grok used 9 and 13 turns on the whole subject, and a chunk is roughly a quarter of that, so 16 leaves real headroom without being unbounded.",
+        "maxTurnsPurpose": "runaway guard — NOT a cost control. Cost is controlled by capUsd, the hard ceiling, the timeout, and the absence of web and sub-agents."
+      }
+    },
+    "repository-guardian": {
+      "default": "copilot",
+      "description": "Advisory repository-integrity check on a pull request.",
+      "mayApproveOwnWork": false,
+      "recursiveDelegation": false,
+      "maxDelegationDepth": 0,
+      "advisoryOnly": true,
+      "advisoryNote": "Cannot approve. Can block on CRITICAL/HIGH. Its comments are never a substitute for a required status check, and no record it produces is accepted by the review gate — the adapter refuses to launch it as a gate reviewer at all, so this is enforced rather than promised."
+    }
+  },
+  "recursiveDelegationDefault": false,
+  "recursiveDelegationNote": "Off everywhere by default. A sub-agent that can spawn sub-agents turns one bounded budget into an unbounded tree, and the failure is invisible until the bill or the context window arrives. Enabling it requires an explicit per-role override plus a declared depth.",
+  "dataClasses": {
+    "PUBLIC": {
+      "rank": 0,
+      "description": "Already public or intended to be."
+    },
+    "INTERNAL": {
+      "rank": 1,
+      "description": "Repository code and process state. Default for engineering work."
+    },
+    "SENSITIVE": {
+      "rank": 2,
+      "description": "Credentials, customer data, financial or health information."
+    }
+  },
+  "models": {
+    "claude": {
+      "label": "Claude (Claude Code)",
+      "execution": "SUBSCRIPTION",
+      "capabilities": [
+        "orchestration",
+        "implementation",
+        "analysis",
+        "documentation"
+      ],
+      "maxDataClass": "INTERNAL",
+      "availabilityProbe": "in-process — this policy is read by the running orchestrator",
+      "costPerRouteUsd": 0
+    },
+    "codex": {
+      "label": "Codex CLI (ChatGPT.app)",
+      "execution": "SUBSCRIPTION",
+      "capabilities": [
+        "implementation-review",
+        "verification",
+        "analysis"
+      ],
+      "maxDataClass": "INTERNAL",
+      "availabilityProbe": "review-adapters.cjs --doctor (local executable check) plus a read-only ephemeral zero-tool probe; the probe result is recorded in the Tool Capability Canon under codex-local",
+      "costPerRouteUsd": 0
+    },
+    "grok": {
+      "label": "Grok CLI",
+      "execution": "METERED",
+      "capabilities": [
+        "adversarial-review",
+        "red-team"
+      ],
+      "maxDataClass": "INTERNAL",
+      "availabilityProbe": "review-adapters.cjs --doctor (local executable check only — it cannot observe authentication) plus an explicit authentication check; the result is recorded in the Tool Capability Canon under grok-cli",
+      "costPerRouteUsd": null,
+      "costNote": "Observed 0.87 USD for one bounded review on 2026-08-23. Recorded as an observation, not a guarantee — it is not used as a prediction. As of 2026-08-25 `grok login` completed as marc@cornerstoneregroup.ca and a read-only `grok models` check exited 0, so the canon now holds it AVAILABLE. No review has run under this authenticated state and no cost has been observed for it."
+    },
+    "copilot": {
+      "label": "GitHub Copilot CLI (repository guardian)",
+      "execution": "METERED",
+      "capabilities": [
+        "repository-guardian"
+      ],
+      "maxDataClass": "INTERNAL",
+      "availabilityProbe": "review-adapters.cjs --doctor (local executable check) plus a bounded zero-tool probe with tools disabled; the probe result is recorded in the Tool Capability Canon under copilot-cli",
+      "costPerRouteUsd": null,
+      "costNote": "Copilot Free was activated on this machine before the probe, and no per-route price has ever been observed. Execution stays METERED on purpose: an unpriced plan is not a proven-free plan, and METERED is what forces a named human and a cap before any route runs.",
+      "approvalAuthority": "NONE"
+    }
+  },
+  "budgets": {
+    "defaultMeteredUsd": 0,
+    "defaultMeteredNote": "Zero. Metered execution is opt-in per route, never ambient.",
+    "hardCeilingUsd": 5,
+    "hardCeilingNote": "No single route may authorize more than this, regardless of who asks. A ceiling that can be raised inline is not a ceiling.",
+    "meteredRequires": [
+      "namedHuman",
+      "capUsd"
+    ],
+    "meteredRequiresNote": "A bare --allow-metered boolean is refused. Spending money requires a name attached to the decision and a number attached to the spend."
+  },
+  "fallbacks": {
+    "note": "A fallback is a DIFFERENT model with the required capability. It is never the same model retried, and never a general model imitating a specialist.",
+    "implementation-review": [
+      "codex"
+    ],
+    "adversarial-review": [
+      "grok"
+    ],
+    "fallbackExhaustedBehaviour": "REFUSE",
+    "fallbackExhaustedNote": "When no eligible model remains, the router refuses and the gate blocks. It does not fall back to the orchestrator — self-review is the failure this whole system exists to prevent, and it is most tempting precisely when the reviewer is unavailable."
+  },
+  "prohibited": [
+    "Routing implementation-review or adversarial-review to the same model that produced the work.",
+    "Substituting a general model for a declared specialist capability.",
+    "Retrying a refused metered route by re-issuing it with a higher cap inline.",
+    "Escalating data class to make a model eligible.",
+    "Treating a model's self-report of its own availability as an availability probe."
+  ],
+  "availabilityAuthority": "builder-control/TOOL-CAPABILITY-CANON.json",
+  "availabilityAuthorityNote": "Current availability, with dated evidence, lives ONLY in the Tool Capability Canon. The availabilityProbe field below states how a worker is checked, never whether it is usable right now. Restating availability in two files means one of them is eventually wrong, and the wrong one is always the one that says yes."
+}

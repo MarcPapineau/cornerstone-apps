@@ -1,0 +1,58 @@
+{
+  "packetId": "PKT-20260825-NOTION-CONNECTOR",
+  "agentId": "codex",
+  "objective": "Implement an evidence-backed Notion integration worker receipt and health probe for AEGIS; preserve Notion as non-authoritative, expose honest auth and staleness state in the dashboard, and add deterministic tests.",
+  "constraints": [
+    "Reuse the canonical connector registry and AEGIS projector",
+    "A Notion worker may never grant engineering authority or mark work verified",
+    "Never report healthy without dated successful probe evidence",
+    "Do not expose tokens, page contents, or private workspace data in dashboard state",
+    "Do not deploy, push, release, or mutate Notion"
+  ],
+  "sourceOfTruth": [
+    "builder-control/specs/AEGIS-AMENDMENT-INTEGRATION-BUS-2026-08-23.md",
+    "builder-control/specs/AEGIS-AMENDMENT-KNOWLEDGE-MIRROR-2026-08-24.md",
+    "builder-control/connector-registry.json"
+  ],
+  "filesAllowed": [
+    "builder-control/connector-receipt.cjs",
+    "builder-control/connector-registry.json",
+    "builder-control/connector-registry-BACKUP-2026-08-25.json",
+    "builder-control/aegis-state.cjs",
+    "builder-control/dashboard/index.html",
+    "builder-control/dashboard/state.js",
+    "builder-control/dashboard/state-BACKUP-2026-08-25.js",
+    "builder-control/test/connector-receipt.test.cjs",
+    "builder-control/test/aegis-state.test.cjs",
+    "builder-control/test/dashboard-slice.test.cjs",
+    "builder-control/packets/PKT-20260825-NOTION-CONNECTOR.json"
+  ],
+  "testsRequired": [
+    "node --test builder-control/test/connector-receipt.test.cjs",
+    "node --test builder-control/test/aegis-state.test.cjs",
+    "node --test builder-control/test/dashboard-slice.test.cjs"
+  ],
+  "stopConditions": [
+    "The implementation would require access to or storage of a Notion OAuth token",
+    "The implementation would create a second connector registry or engineering authority",
+    "The connector cannot distinguish fresh, stale, failed, and unauthorized evidence",
+    "Marc issues STOP, delegate, or canon language"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — explicit instruction on 2026-08-25 to connect Notion and integrate it into AEGIS",
+    "allowsProtectedPaths": [
+      "builder-control/connector-receipt.cjs",
+      "builder-control/connector-registry.json",
+      "builder-control/connector-registry-BACKUP-2026-08-25.json",
+      "builder-control/aegis-state.cjs",
+      "builder-control/dashboard/index.html",
+      "builder-control/dashboard/state.js",
+      "builder-control/dashboard/state-BACKUP-2026-08-25.js",
+      "builder-control/test/connector-receipt.test.cjs",
+      "builder-control/test/aegis-state.test.cjs",
+      "builder-control/test/dashboard-slice.test.cjs"
+    ],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

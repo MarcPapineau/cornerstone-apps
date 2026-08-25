@@ -1,0 +1,43 @@
+{
+  "reviewId": "REV-20260823232004-grok",
+  "ts": "2026-08-23T23:20:04.395Z",
+  "reviewer": "grok",
+  "reviewerModel": "grok-cli (grok-macos-aarch64)",
+  "packetId": "PKT-20260823-ENGINEERING-OS-V1",
+  "reviewOf": {
+    "diffSha256": "e396274d9c59e2ae00212d3d1feebb99a076b7a62baa33560ceab4b0ef37c969",
+    "changedPaths": [
+      ".github/agents/repo-guardian.md",
+      ".github/copilot-instructions.md",
+      ".github/pull_request_template.md",
+      ".github/workflows/builder-control.yml",
+      ".gitignore",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "builder-control/AI-ENGINEERING-OS.md",
+      "builder-control/INITIALIZATION-REPORT-2026-08-23.md",
+      "builder-control/TOOL-CAPABILITY-CANON.json",
+      "builder-control/aegis-state.cjs",
+      "builder-control/connector-registry.json",
+      "builder-control/dashboard/index.html",
+      "builder-control/engineering-os.cjs",
+      "builder-control/install-engineering-os.cjs",
+      "builder-control/review-adapters.cjs",
+      "builder-control/schemas/engineering-review.schema.json",
+      "builder-control/specs/AEGIS-AMENDMENT-INTEGRATION-BUS-2026-08-23.md",
+      "builder-control/specs/AEGIS-JARVIS-VISUAL-ARCHITECTURE-2026-08-23.md",
+      "builder-control/specs/AEGIS-V1-ARCHITECTURE-CONTRACT-2026-08-23.md",
+      "builder-control/specs/AI-ENGINEERING-OS-OWNER-BRIEF-2026-08-23.md",
+      "builder-control/test/aegis-state.test.cjs",
+      "builder-control/test/dashboard-slice.test.cjs",
+      "builder-control/test/engineering-os.test.cjs",
+      "builder-control/test/install-engineering-os.test.cjs",
+      "builder-control/test/review-adapters.test.cjs",
+      "builder-control/test/tool-router.test.cjs",
+      "builder-control/tool-router.cjs"
+    ]
+  },
+  "disposition": "UNAVAILABLE",
+  "unavailableReason": "the reviewer ran but produced no parseable JSON review record",
+  "findings": []
+}

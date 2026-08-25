@@ -52,3 +52,31 @@ node_modules/
 builder-control/.receipts/
 builder-control/bypass.log
 builder-control/watchdog.log
+
+# === builder-control workflow backups ===
+# A dated backup is required before editing an enforcement workflow, so that a
+# bad edit to the gate can be reverted without relying on the gate that was just
+# edited. The backup is machine-local safety, not shared history: committing it
+# would put a second, stale copy of the workflow in the repo, and "which one is
+# the gate?" is exactly the duplicate-authority failure single-authority-check
+# exists to catch.
+.github/workflows/*.bak-*
+
+# === AEGIS dashboard generated state ===
+# state.js is a timestamped snapshot produced by aegis-state.cjs. It is
+# regenerable, machine-local, and changes on every run because it carries
+# `generatedAt` — so tracking it would make the review subject hash change for
+# reasons that have nothing to do with the code, invalidating bound reviews on
+# every refresh. The slice REQUIRES it to render (that is the point: no state,
+# no dashboard), and dashboard-slice.test.cjs fails if it is missing, so this
+# cannot quietly become a dashboard with no data source.
+builder-control/dashboard/state.js
+
+# Attestation key — machine-local, never committed.
+builder-control/.attestation-key
+
+builder-control/ledger.json.lock
+builder-control/ledger.json.tmp-*
+
+# Transient test fixtures — must never enter a subject diff.
+builder-control/.test-*.json

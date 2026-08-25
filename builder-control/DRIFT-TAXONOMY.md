@@ -55,7 +55,7 @@ These are emitted by `scripts/lib/agent-health-compiler.js` into `data/agent-hea
 | fail_reason | Drift type | Notes |
 |---|---|---|
 | `scorecards_untrusted` | Runtime | scorecards stale / all-zero / placeholder → not trustworthy |
-| `legacy_n8n_dependency_blocked` | Capability | n8n decommissioning; legacy dependency, migration candidate not bug |
+| `legacy_automation_dependency_blocked` | Capability | legacy automation platform decommissioning; legacy dependency, migration candidate not bug |
 | `protocol_drafter_quarantined` | Goal / Specification | Protocol Drafter bypassed canon (Angela incident) → quarantined |
 | `agent_down` | Runtime | claimed-functional agent has no proven current output path |
 | `agent_degraded` | Runtime | partial / cadence-gap operation |

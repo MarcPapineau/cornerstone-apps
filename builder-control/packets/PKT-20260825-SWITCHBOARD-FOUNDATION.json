@@ -1,0 +1,65 @@
+{
+  "packetId": "PKT-20260825-SWITCHBOARD-FOUNDATION",
+  "agentId": "claude-code",
+  "objective": "Add the smallest honest local AEGIS switchboard: authenticated objective intake, governed run preparation, run controls with explicit unsupported-active-build refusals, same-origin status, and SSE projection updates without creating a second authority.",
+  "constraints": [
+    "The dashboard remains a projection and never writes run files, ledger entries, verdicts, permissions, routes, model selections, shell commands, or credentials directly",
+    "All run state changes must use exported aegis-run functions and transition(), which records the canonical ledger",
+    "Reuse the existing loopback, token, HttpOnly session, security-header, and exact static allow-list controls",
+    "Add API routes explicitly; do not widen filesystem serving",
+    "POST bodies are JSON only, size bounded, schema bounded, origin checked, and reject shell-command, authority, verdict, token, secret, and arbitrary-path fields",
+    "Objective intake may reference only a validated repository task packet and must not accept a shell command",
+    "Start means route and prepare the isolated worktree; it must not silently execute a build command",
+    "Pause and cancel may operate only when no active synchronous build is running; BUILDING must return 409 CONTROL_UNAVAILABLE",
+    "Retry may only transition failed runs into the existing bounded CORRECTING path; actual builder execution remains a separate governed worker step",
+    "SSE streams compact projections derived from canonical state; it is notification, not authority",
+    "No fake animation, seeded demo state, placeholder success, external network call, commit, push, deployment, publication, or release"
+  ],
+  "sourceOfTruth": [
+    "builder-control/aegis-run.cjs",
+    "builder-control/aegis-state.cjs",
+    "builder-control/ledger-writer.cjs",
+    "builder-control/hosting/server.cjs",
+    "builder-control/specs/AEGIS-V1-ARCHITECTURE-CONTRACT-2026-08-23.md"
+  ],
+  "filesAllowed": [
+    "builder-control/aegis-run.cjs",
+    "builder-control/aegis-state.cjs",
+    "builder-control/hosting/server.cjs",
+    "builder-control/hosting/README.md",
+    "builder-control/dashboard/index.html",
+    "builder-control/test/aegis-run.test.cjs",
+    "builder-control/test/hosting.test.cjs",
+    "builder-control/test/dashboard-slice.test.cjs",
+    "builder-control/packets/PKT-20260825-SWITCHBOARD-FOUNDATION.json"
+  ],
+  "testsRequired": [
+    "node --test builder-control/test/aegis-run.test.cjs",
+    "node --test builder-control/test/hosting.test.cjs",
+    "node --test builder-control/test/dashboard-slice.test.cjs",
+    "node --test builder-control/test/aegis-state.test.cjs"
+  ],
+  "stopConditions": [
+    "The browser would gain a path to execute arbitrary commands or choose a model/provider",
+    "The API would mutate runs or the ledger without canonical runtime transitions",
+    "Pause or cancel would claim control of a currently blocking synchronous build",
+    "A second event store, workflow authority, permission system, or verdict system would be introduced",
+    "Authentication or loopback defaults would be weakened",
+    "Marc issues STOP or changes scope"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — explicit 2026-08-25 approval to keep building the local AEGIS switchboard and integrate the tools without pausing where no human input is required",
+    "allowsProtectedPaths": [
+      "builder-control/aegis-run.cjs",
+      "builder-control/aegis-state.cjs",
+      "builder-control/hosting/server.cjs",
+      "builder-control/hosting/README.md",
+      "builder-control/dashboard/index.html",
+      "builder-control/test/aegis-run.test.cjs",
+      "builder-control/test/hosting.test.cjs",
+      "builder-control/test/dashboard-slice.test.cjs"
+    ],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

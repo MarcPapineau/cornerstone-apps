@@ -1,0 +1,549 @@
+{
+  "version": "1.0.0",
+  "defaultMeteredBudgetUsd": 0,
+  "taskTypes": [
+    {
+      "taskId": "software.build",
+      "label": "Software implementation",
+      "requiredCapabilities": [
+        "repository-write",
+        "tests",
+        "terminal"
+      ],
+      "preferredToolIds": [
+        "claude-code"
+      ],
+      "generalistFallback": "HUMAN_APPROVAL_REQUIRED",
+      "requiredInputs": [
+        "approved requirement",
+        "pinned specs",
+        "isolated worktree"
+      ],
+      "requiredOutputs": [
+        "subject diff",
+        "test evidence"
+      ]
+    },
+    {
+      "taskId": "software.review",
+      "label": "Independent software review",
+      "requiredCapabilities": [
+        "repository-read",
+        "diff-review",
+        "evidence-findings"
+      ],
+      "preferredToolIds": [
+        "codex-local"
+      ],
+      "generalistFallback": "FORBIDDEN",
+      "requiredInputs": [
+        "objective",
+        "pinned specs",
+        "subject diff",
+        "test evidence"
+      ],
+      "requiredOutputs": [
+        "diff-bound review record"
+      ]
+    },
+    {
+      "taskId": "software.red-team",
+      "label": "Adversarial software review",
+      "requiredCapabilities": [
+        "repository-read",
+        "adversarial-review",
+        "evidence-findings"
+      ],
+      "preferredToolIds": [
+        "grok-cli"
+      ],
+      "generalistFallback": "FORBIDDEN",
+      "requiredInputs": [
+        "objective",
+        "pinned specs",
+        "subject diff",
+        "test evidence"
+      ],
+      "requiredOutputs": [
+        "diff-bound red-team record"
+      ]
+    },
+    {
+      "taskId": "media.video-generate",
+      "label": "Generate or edit video",
+      "requiredCapabilities": [
+        "video-generation",
+        "media-export"
+      ],
+      "preferredToolIds": [
+        "openart-video"
+      ],
+      "generalistFallback": "FORBIDDEN",
+      "requiredInputs": [
+        "creative brief",
+        "brand assets",
+        "reference attachments when supplied"
+      ],
+      "requiredOutputs": [
+        "video asset",
+        "generation metadata"
+      ]
+    },
+    {
+      "taskId": "marketing.advertising",
+      "label": "Create or operate advertising",
+      "requiredCapabilities": [
+        "advertising-specialist",
+        "campaign-artifacts"
+      ],
+      "preferredToolIds": [
+        "advertising-specialist-slot"
+      ],
+      "generalistFallback": "FORBIDDEN",
+      "requiredInputs": [
+        "approved offer",
+        "audience",
+        "budget",
+        "brand assets",
+        "platform constraints"
+      ],
+      "requiredOutputs": [
+        "campaign artifacts",
+        "approval evidence",
+        "performance instrumentation"
+      ]
+    },
+    {
+      "taskId": "knowledge.notion-sync",
+      "label": "Synchronize verified documentation to Notion",
+      "requiredCapabilities": [
+        "notion-read-write",
+        "artifact-attachment"
+      ],
+      "preferredToolIds": [
+        "notion-connector"
+      ],
+      "generalistFallback": "FORBIDDEN",
+      "requiredInputs": [
+        "verified checkpoint",
+        "approved documentation change"
+      ],
+      "requiredOutputs": [
+        "sync receipt",
+        "target page identifier"
+      ]
+    },
+    {
+      "taskId": "design.visual-architecture",
+      "label": "Visual/information architecture design",
+      "requiredCapabilities": [
+        "information-architecture",
+        "interaction-design",
+        "frontend-architecture"
+      ],
+      "preferredToolIds": [
+        "codex-local"
+      ],
+      "generalistFallback": "HUMAN_APPROVAL_REQUIRED",
+      "requiredInputs": [
+        "approved requirement",
+        "real state contract",
+        "accessibility and performance constraints"
+      ],
+      "requiredOutputs": [
+        "information architecture",
+        "interaction spec",
+        "motion and token plan",
+        "2D/3D responsibility map"
+      ]
+    },
+    {
+      "taskId": "design.visual-critique",
+      "label": "Independent visual/architecture critique",
+      "requiredCapabilities": [
+        "design-critique",
+        "accessibility-review",
+        "adversarial-review"
+      ],
+      "preferredToolIds": [
+        "grok-cli"
+      ],
+      "generalistFallback": "FORBIDDEN",
+      "requiredInputs": [
+        "the design under review",
+        "the real state contract"
+      ],
+      "requiredOutputs": [
+        "evidence-backed findings"
+      ],
+      "note": "generalistFallback FORBIDDEN and preferredToolIds deliberately EXCLUDES codex-local: the critic must not be the author. A design critiqued by its own author is not critiqued."
+    },
+    {
+      "taskId": "software.repository-guardian",
+      "label": "Advisory repository-integrity check",
+      "requiredCapabilities": [
+        "repository-read",
+        "repository-integrity-advisory",
+        "evidence-findings"
+      ],
+      "preferredToolIds": [
+        "copilot-cli"
+      ],
+      "generalistFallback": "FORBIDDEN",
+      "requiredInputs": [
+        "objective",
+        "subject diff"
+      ],
+      "requiredOutputs": [
+        "advisory findings"
+      ],
+      "note": "ADVISORY ONLY. Nothing produced under this task may approve a change or satisfy a required review. The tasks whose output the gate accepts are software.review and software.red-team, and copilot-cli deliberately appears in the preferredToolIds of neither."
+    }
+  ],
+  "tools": [
+    {
+      "toolId": "claude-code",
+      "label": "Claude Code",
+      "provider": "Anthropic",
+      "taskIds": [
+        "software.build"
+      ],
+      "capabilities": [
+        "repository-write",
+        "tests",
+        "terminal"
+      ],
+      "executionModes": [
+        "SUBSCRIPTION_CLI"
+      ],
+      "enabled": true,
+      "availability": "AVAILABLE",
+      "costClass": "INCLUDED",
+      "maxDataClassification": "CONFIDENTIAL",
+      "selectionPriority": 1,
+      "availabilityEvidence": {
+        "observedAt": "2026-08-25T17:09:25Z",
+        "method": "Claude Code 2.1.245 auth status plus a one-turn --print probe with ANTHROPIC_API_KEY explicitly unset",
+        "result": "Authenticated via claude.ai Max subscription; the worker returned the exact expected AEGIS_CLAUDE_WORKER_OK result with zero tools, zero file modifications, one turn, and no permission denials.",
+        "note": "This records the headless Claude Code CLI path. The probe reported USD 0.207138 of cost-equivalent telemetry; that value is observable telemetry, not evidence of a separate API charge. Subscription authentication and API-key authentication remain distinct paths."
+      },
+      "strengths": [
+        "primary software builder",
+        "repository navigation",
+        "implementation"
+      ],
+      "notFor": [
+        "self-approval",
+        "video generation",
+        "advertising execution"
+      ],
+      "requiredInputs": [
+        "task packet",
+        "pinned specs",
+        "isolated worktree"
+      ],
+      "outputArtifacts": [
+        "subject diff",
+        "test evidence"
+      ],
+      "verification": [
+        "independent review",
+        "deterministic checks",
+        "runtime evidence"
+      ]
+    },
+    {
+      "toolId": "codex-local",
+      "label": "Codex local client",
+      "provider": "OpenAI",
+      "taskIds": [
+        "design.visual-architecture",
+        "software.review"
+      ],
+      "capabilities": [
+        "diff-review",
+        "evidence-findings",
+        "frontend-architecture",
+        "information-architecture",
+        "interaction-design",
+        "repository-read"
+      ],
+      "executionModes": [
+        "SUBSCRIPTION_CLI",
+        "BUILT_IN"
+      ],
+      "enabled": true,
+      "availability": "AVAILABLE",
+      "costClass": "INCLUDED",
+      "maxDataClassification": "CONFIDENTIAL",
+      "selectionPriority": 1,
+      "availabilityEvidence": {
+        "observedAt": "2026-08-25T13:21:47-04:00",
+        "method": "Codex CLI 0.149.0-alpha.4.1 at the recorded absolute path, run as a read-only ephemeral probe with zero tools enabled",
+        "result": "The probe returned the exact expected token AEGIS_CODEX_REVIEWER_OK. No files were modified.",
+        "note": "Two non-blocking warnings were emitted during the probe — a plugin icon warning and a state-database fallback warning. Neither changed the result; both are recorded so a later reader does not mistake a known-benign warning for a new fault."
+      },
+      "strengths": [
+        "independent engineering review",
+        "architecture review"
+      ],
+      "notFor": [
+        "approving unreviewed diffs",
+        "specialist media generation"
+      ],
+      "requiredInputs": [
+        "objective",
+        "pinned specs",
+        "subject diff",
+        "test evidence"
+      ],
+      "outputArtifacts": [
+        "diff-bound review record"
+      ],
+      "verification": [
+        "review schema validation",
+        "subject hash equality"
+      ]
+    },
+    {
+      "toolId": "grok-cli",
+      "label": "Grok adversarial reviewer",
+      "provider": "xAI",
+      "taskIds": [
+        "design.visual-critique",
+        "software.red-team"
+      ],
+      "capabilities": [
+        "accessibility-review",
+        "adversarial-review",
+        "design-critique",
+        "evidence-findings",
+        "repository-read"
+      ],
+      "executionModes": [
+        "SUBSCRIPTION_CLI",
+        "DESKTOP_ASSISTED"
+      ],
+      "enabled": true,
+      "availability": "AVAILABLE",
+      "costClass": "UNKNOWN",
+      "maxDataClassification": "INTERNAL",
+      "selectionPriority": 1,
+      "availabilityEvidence": {
+        "observedAt": "2026-08-25T00:00:00-04:00",
+        "method": "Grok CLI 1.0.5 at /Users/marcpapineau/.grok/bin/grok; `grok login` completed as marc@cornerstoneregroup.ca, then the read-only `grok models` command run as an authentication check",
+        "result": "Exit code 0. Reported logged in with grok.com, default model grok-4.6, available models grok-4.6 and grok-4.5.",
+        "note": "This corrects the prior BLOCKED record, which observed an unauthenticated state on the same CLI. No review has run under this authenticated state yet, and no review verdict is claimed here — this is an availability record, not a review record."
+      },
+      "strengths": [
+        "late adversarial review",
+        "independent assumption challenge"
+      ],
+      "notFor": [
+        "routine light-lane work",
+        "repository writes"
+      ],
+      "requiredInputs": [
+        "objective",
+        "pinned specs",
+        "subject diff",
+        "test evidence"
+      ],
+      "outputArtifacts": [
+        "diff-bound red-team record"
+      ],
+      "verification": [
+        "review schema validation",
+        "subject hash equality",
+        "finding evidence check"
+      ]
+    },
+    {
+      "toolId": "openart-video",
+      "label": "OpenArt video generation",
+      "provider": "OpenArt",
+      "taskIds": [
+        "media.video-generate"
+      ],
+      "capabilities": [
+        "video-generation",
+        "media-export"
+      ],
+      "executionModes": [
+        "DESKTOP_ASSISTED",
+        "API_METERED"
+      ],
+      "enabled": true,
+      "availability": "UNVERIFIED",
+      "costClass": "UNKNOWN",
+      "maxDataClassification": "INTERNAL",
+      "selectionPriority": 1,
+      "availabilityEvidence": {
+        "observedAt": "2026-08-23T00:00:00-04:00",
+        "method": "owner preference recorded; connector probe not yet run",
+        "result": "Preferred specialist is approved, but no authenticated connector has been verified"
+      },
+      "strengths": [
+        "video generation",
+        "creative media workflows"
+      ],
+      "notFor": [
+        "software engineering",
+        "code review"
+      ],
+      "requiredInputs": [
+        "creative brief",
+        "brand assets",
+        "reference attachments"
+      ],
+      "outputArtifacts": [
+        "video file",
+        "generation metadata"
+      ],
+      "verification": [
+        "visual QA",
+        "duration and format check",
+        "brand and prompt fidelity review"
+      ]
+    },
+    {
+      "toolId": "advertising-specialist-slot",
+      "label": "Advertising specialist — tool to be selected",
+      "provider": "UNSELECTED",
+      "taskIds": [
+        "marketing.advertising"
+      ],
+      "capabilities": [
+        "advertising-specialist",
+        "campaign-artifacts"
+      ],
+      "executionModes": [
+        "PLUGIN_MCP"
+      ],
+      "enabled": false,
+      "availability": "DISABLED",
+      "costClass": "UNKNOWN",
+      "maxDataClassification": "PUBLIC",
+      "selectionPriority": 1,
+      "availabilityEvidence": {
+        "observedAt": "2026-08-23T00:00:00-04:00",
+        "method": "architecture review",
+        "result": "No advertising specialist has been selected or connected"
+      },
+      "strengths": [
+        "reserved capability slot"
+      ],
+      "notFor": [
+        "execution before owner selects a provider"
+      ],
+      "requiredInputs": [
+        "provider decision",
+        "connector",
+        "approval policy"
+      ],
+      "outputArtifacts": [
+        "campaign artifacts",
+        "performance instrumentation"
+      ],
+      "verification": [
+        "provider health check",
+        "campaign preview",
+        "human approval before activation"
+      ]
+    },
+    {
+      "toolId": "notion-connector",
+      "label": "Notion connector",
+      "provider": "Notion",
+      "taskIds": [
+        "knowledge.notion-sync"
+      ],
+      "capabilities": [
+        "notion-read-write",
+        "artifact-attachment"
+      ],
+      "executionModes": [
+        "PLUGIN_MCP",
+        "DESKTOP_ASSISTED"
+      ],
+      "enabled": true,
+      "availability": "UNVERIFIED",
+      "costClass": "UNKNOWN",
+      "maxDataClassification": "CONFIDENTIAL",
+      "selectionPriority": 1,
+      "availabilityEvidence": {
+        "observedAt": "2026-08-23T00:00:00-04:00",
+        "method": "current Codex capability inspection",
+        "result": "No callable Notion connector verified in this build session"
+      },
+      "strengths": [
+        "verified documentation synchronization",
+        "attachments"
+      ],
+      "notFor": [
+        "owning workflow state",
+        "sync before checkpoint"
+      ],
+      "requiredInputs": [
+        "verified checkpoint",
+        "approved target page"
+      ],
+      "outputArtifacts": [
+        "sync receipt",
+        "page identifier"
+      ],
+      "verification": [
+        "read-after-write comparison",
+        "attachment presence check"
+      ]
+    },
+    {
+      "toolId": "copilot-cli",
+      "label": "GitHub Copilot CLI",
+      "provider": "GitHub",
+      "taskIds": [
+        "software.repository-guardian"
+      ],
+      "capabilities": [
+        "repository-read",
+        "repository-integrity-advisory",
+        "evidence-findings"
+      ],
+      "executionModes": [
+        "SUBSCRIPTION_CLI"
+      ],
+      "enabled": true,
+      "availability": "AVAILABLE",
+      "approvalAuthority": "NONE",
+      "advisoryOnly": true,
+      "costClass": "UNKNOWN",
+      "maxDataClassification": "INTERNAL",
+      "selectionPriority": 1,
+      "availabilityEvidence": {
+        "observedAt": "2026-08-25T13:21:47-04:00",
+        "method": "GitHub Copilot CLI 1.0.80 at the recorded absolute path, OAuth-authenticated; bounded probe run in a temporary directory with tools disabled",
+        "result": "After Copilot Free was activated the probe returned the exact expected token AEGIS_COPILOT_GUARDIAN_OK and created no files in the probe directory.",
+        "note": "AVAILABLE here means the worker answered a bounded probe. It does not make Copilot an approver: approvalAuthority is NONE, and the review gate accepts no record from it."
+      },
+      "strengths": [
+        "advisory repository-integrity commentary on a pull request"
+      ],
+      "notFor": [
+        "approving a change",
+        "satisfying a required review",
+        "repository writes",
+        "adversarial review"
+      ],
+      "requiredInputs": [
+        "objective",
+        "subject diff"
+      ],
+      "outputArtifacts": [
+        "advisory findings"
+      ],
+      "verification": [
+        "a human or a required reviewer confirms anything it raises"
+      ]
+    }
+  ]
+}

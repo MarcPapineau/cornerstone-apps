@@ -1,0 +1,42 @@
+{
+  "packetId": "PKT-20260825-MAKE-CONNECTOR",
+  "agentId": "codex",
+  "objective": "Register the existing Make AEGIS Integration Plane toolbox as an evidence-backed integration worker and expose its honest health state through the canonical AEGIS projection.",
+  "constraints": [
+    "Reuse the canonical connector registry and receipt writer",
+    "Never store or expose the Make MCP key",
+    "Make remains an INTEGRATION worker and has no engineering authority",
+    "Do not create, edit, or execute Make scenarios in this pass",
+    "Do not deploy, push, or release"
+  ],
+  "sourceOfTruth": [
+    "builder-control/specs/AEGIS-AMENDMENT-INTEGRATION-BUS-2026-08-23.md",
+    "builder-control/connector-registry.json"
+  ],
+  "filesAllowed": [
+    "builder-control/connector-registry.json",
+    "builder-control/connector-registry-BACKUP-2026-08-25-MAKE.json",
+    "builder-control/dashboard/state.js",
+    "builder-control/packets/PKT-20260825-MAKE-CONNECTOR.json"
+  ],
+  "testsRequired": [
+    "node --test builder-control/test/connector-receipt.test.cjs",
+    "node --test builder-control/test/aegis-state.test.cjs",
+    "node --test builder-control/test/dashboard-slice.test.cjs"
+  ],
+  "stopConditions": [
+    "A Make credential would need to be copied into the repository or browser state",
+    "The change would grant Make authority over a gate or verification verdict",
+    "Marc issues STOP, delegate, or canon language"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — explicit instruction on 2026-08-25 to connect all tools through the AEGIS switchboard",
+    "allowsProtectedPaths": [
+      "builder-control/connector-registry.json",
+      "builder-control/connector-registry-BACKUP-2026-08-25-MAKE.json",
+      "builder-control/dashboard/state.js"
+    ],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

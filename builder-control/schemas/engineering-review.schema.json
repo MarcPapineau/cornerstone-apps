@@ -1,0 +1,337 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "builder-control/schemas/engineering-review.schema.json",
+  "title": "Builder Control — Engineering Review Record",
+  "description": "One reviewer's verdict on one specific diff. This schema exists because 'Codex approved it' is a sentence, not evidence. A record is only usable if it names WHAT was reviewed (reviewOf.diffSha256) — so a verdict cannot be recycled onto a later diff — and carries findings with enough structure that severity can be counted mechanically instead of read out of prose. A reviewer that could not run says disposition UNAVAILABLE; that is an honest, gateable state and is never rewritten to PASS.",
+  "type": "object",
+  "required": [
+    "reviewId",
+    "ts",
+    "reviewer",
+    "reviewerModel",
+    "packetId",
+    "reviewOf",
+    "disposition",
+    "findings"
+  ],
+  "properties": {
+    "reviewId": {
+      "type": "string",
+      "pattern": "^REV-[0-9A-Za-z._-]{3,}$",
+      "description": "Unique id for this review record.",
+      "examples": [
+        "REV-2026-08-23-codex-001"
+      ]
+    },
+    "ts": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "Strict ISO-8601 instant with an explicit timezone, e.g. 2026-08-23T04:00:00Z. A loose or local timestamp cannot be ordered against another reviewer's record."
+    },
+    "reviewer": {
+      "type": "string",
+      "enum": [
+        "codex",
+        "copilot",
+        "grok",
+        "claude-self",
+        "human"
+      ],
+      "description": "Which role produced this record. 'claude-self' is recorded for traceability but NEVER satisfies a required-reviewer slot: the builder may not approve its own work."
+    },
+    "reviewerModel": {
+      "type": "string",
+      "minLength": 1,
+      "description": "REQUIRED. The exact model/tool identity that produced this review. 'Codex approved it' is unauditable six months later if nobody recorded which Codex."
+    },
+    "packetId": {
+      "type": "string",
+      "description": "The task packet this review is bound to. Must match the packet being gated."
+    },
+    "reviewOf": {
+      "type": "object",
+      "description": "WHAT was reviewed. This binding is the anti-recycling property of the whole system: a review of diff A does not clear diff B, and the gate compares this hash to the diff it is actually gating.",
+      "required": [
+        "diffSha256",
+        "changedPaths"
+      ],
+      "properties": {
+        "diffSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the SUBJECT diff that was reviewed, from `engineering-os.cjs --subject`. The subject excludes review evidence, so adding this record does not change the hash it names."
+        },
+        "baseRef": {
+          "type": "string",
+          "description": "Base ref/commit the diff was taken against."
+        },
+        "headRef": {
+          "type": "string",
+          "description": "Head ref/commit reviewed."
+        },
+        "changedPaths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "REQUIRED. Every subject path this reviewer actually read. The gate requires exact set equality with the subject: a reviewer that saw 3 of 11 files and returned APPROVE is otherwise indistinguishable from one that saw everything."
+        }
+      },
+      "additionalProperties": false
+    },
+    "disposition": {
+      "type": "string",
+      "enum": [
+        "APPROVE",
+        "APPROVE_WITH_NOTES",
+        "REJECT",
+        "UNAVAILABLE"
+      ],
+      "description": "Exactly one verdict. UNAVAILABLE means the reviewer could not be reached or run — it is reported as UNAVAILABLE and never silently upgraded. For Copilot and Grok, whose native output is PASS/FAIL prose, map REPOSITORY PASS / RED TEAM PASS to APPROVE and the FAIL forms to REJECT when transcribing into this record."
+    },
+    "unavailableReason": {
+      "type": "string",
+      "description": "Required in practice when disposition is UNAVAILABLE: the concrete reason (no credential, no network, tool not installed, quota). The gate prints this rather than inventing a cause."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Structured findings. Empty array is valid and means 'no findings' — which is different from 'not reviewed' (that is disposition UNAVAILABLE).",
+      "items": {
+        "type": "object",
+        "required": [
+          "severity",
+          "problem",
+          "evidence",
+          "status"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "CRITICAL",
+              "HIGH",
+              "MEDIUM",
+              "LOW",
+              "INFORMATIONAL",
+              "FALSE_POSITIVE"
+            ],
+            "description": "CRITICAL and HIGH block while status is OPEN. FALSE_POSITIVE is the disposition for a finding the builder disputed and documented; it never blocks, and recording one requires the dispute note in `builderResponse`."
+          },
+          "file": {
+            "type": "string",
+            "description": "Repo-relative path the finding is in."
+          },
+          "location": {
+            "type": "string",
+            "description": "Line, range, symbol, or function."
+          },
+          "problem": {
+            "type": "string",
+            "description": "What is wrong."
+          },
+          "impact": {
+            "type": "string",
+            "description": "What breaks for a user or the system if it ships. REQUIRED (non-empty) for CRITICAL and HIGH."
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "REQUIRED and non-empty: the quoted code, failing command, or contradicted spec line. A finding with no evidence is an opinion and the schema refuses it."
+          },
+          "requiredCorrection": {
+            "type": "string",
+            "description": "What must change. REQUIRED (non-empty) for CRITICAL and HIGH."
+          },
+          "verificationMethod": {
+            "type": "string",
+            "description": "The command or observation that proves the correction worked. REQUIRED (non-empty) for CRITICAL and HIGH."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "OPEN",
+              "FIXED",
+              "DISPUTED",
+              "ACCEPTED_RISK"
+            ],
+            "description": "OPEN blocks at CRITICAL/HIGH. FIXED requires verifiedByReviewId naming a non-self reviewer record for this same subject. DISPUTED requires builderResponse. ACCEPTED_RISK requires acceptedBy (a human)."
+          },
+          "builderResponse": {
+            "type": "string",
+            "description": "Required when status is DISPUTED or severity is FALSE_POSITIVE: why the builder believes the finding is wrong."
+          },
+          "acceptedBy": {
+            "type": "string",
+            "description": "Required when status is ACCEPTED_RISK: the human who accepted it. An AI may not accept risk on the Product Owner's behalf."
+          },
+          "verifiedByReviewId": {
+            "type": "string",
+            "description": "REQUIRED when status is FIXED: the reviewId of a record that re-verified the fix. It must be an active record bound to this same subject and must not be from 'claude-self' — a builder may not certify its own fix."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "unverified": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Things this reviewer could NOT check. Recorded so 'approved' is never mistaken for 'fully verified'."
+    },
+    "notes": {
+      "type": "string",
+      "description": "Free text. Not parsed by the gate."
+    },
+    "supersedes": {
+      "type": "string",
+      "description": "The reviewId this record replaces. This is the ONE deterministic replacement rule in the system: without it, two records from the same reviewer for the same subject are AMBIGUOUS and block. Resolution is never by timestamp or file order, because that would let whichever record sorted later silently overrule a rejection."
+    },
+    "attestation": {
+      "type": "object",
+      "description": "REQUIRED in practice: the gate refuses any record without a verifying attestation. It is an HMAC over the subject hash, packet authorization digest, reviewer identity, model, disposition and findings — so editing any of those after signing is detected. SCOPE: this proves the record was produced by this machine's adapter and is unmodified. It does NOT prove a human approved anything, and it does not defend against a process that can read the machine-local key.",
+      "required": [
+        "v",
+        "alg",
+        "mac",
+        "payloadDigest",
+        "signedAt"
+      ],
+      "properties": {
+        "v": {
+          "type": "string",
+          "description": "Attestation format version."
+        },
+        "alg": {
+          "type": "string",
+          "description": "MAC algorithm, e.g. HMAC-SHA256."
+        },
+        "mac": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "The MAC itself."
+        },
+        "packetDigest": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Digest of the packet's authorizing content at signing time. If the packet's filesAllowed or authorization changes afterwards, the review no longer describes what it was granted under and verification fails."
+        },
+        "payloadDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "signedAt": {
+          "type": "string"
+        },
+        "keySource": {
+          "type": "string",
+          "description": "Where the signing key came from. The key itself is never recorded."
+        },
+        "scope": {
+          "type": "string",
+          "description": "A plain statement of what this attestation does and does not prove."
+        }
+      },
+      "additionalProperties": false
+    },
+    "group": {
+      "type": "object",
+      "description": "Present on a per-group record from a chunked review. Group records live in reviews/groups/ and are NOT read by the gate — only a signed aggregate is.",
+      "required": [
+        "groupId"
+      ],
+      "properties": {
+        "groupId": {
+          "type": "string"
+        },
+        "groupDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "aggregate": {
+      "type": "object",
+      "description": "Present on an aggregate verdict built from per-group records. It is consumable only when the union of its groups covers the subject exactly, every group is signed and bound to the same subject, and one reviewer and model produced all of them. Each group's attestation digest is embedded so editing a group after aggregation invalidates the aggregate.",
+      "required": [
+        "groupCount",
+        "groups",
+        "coverage"
+      ],
+      "properties": {
+        "groupCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "plannedGroupCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "coverage": {
+          "type": "string",
+          "description": "EXACT, or the coverage failure code."
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "groupId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "groupDigest": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pathCount": {
+                "type": "integer"
+              },
+              "disposition": {
+                "type": "string"
+              },
+              "reviewId": {
+                "type": "string"
+              },
+              "attestationDigest": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "problems": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

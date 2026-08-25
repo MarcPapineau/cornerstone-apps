@@ -1,0 +1,4 @@
+{"type":"error","message":"You’ve reached your free Grok Build usage limit for now. Get SuperGrok for much higher limits, or try again later: https://grok.com/supergrok?referrer=grok-build","usage":{"input_tokens":189621,"cache_read_input_tokens":344832,"cache_creation_input_tokens":0,"output_tokens":14786,"reasoning_tokens":13041,"total_tokens":549239},"num_turns":8,"total_cost_usd":0.640374,"total_cost_usd_ticks":6403740000,"modelUsage":{"grok-4.6":{"inputTokens":189621,"outputTokens":14786,"cacheReadInputTokens":344832,"cacheCreationInputTokens":0,"modelCalls":8,"costUSD":0.640374}}}
+
+--- stderr ---
+Error: You’ve reached your free Grok Build usage limit for now. Get SuperGrok for much higher limits, or try again later: https://grok.com/supergrok?referrer=grok-build

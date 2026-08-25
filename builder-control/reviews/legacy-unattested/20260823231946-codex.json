@@ -1,0 +1,159 @@
+{
+  "reviewId": "REV-20260823231946-codex",
+  "ts": "2026-08-23T23:19:46.694Z",
+  "reviewer": "codex",
+  "reviewerModel": "codex-cli (ChatGPT.app)",
+  "packetId": "PKT-20260823-ENGINEERING-OS-V1",
+  "reviewOf": {
+    "diffSha256": "e396274d9c59e2ae00212d3d1feebb99a076b7a62baa33560ceab4b0ef37c969",
+    "changedPaths": [
+      ".github/agents/repo-guardian.md",
+      ".github/copilot-instructions.md",
+      ".github/pull_request_template.md",
+      ".github/workflows/builder-control.yml",
+      ".gitignore",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "builder-control/AI-ENGINEERING-OS.md",
+      "builder-control/INITIALIZATION-REPORT-2026-08-23.md",
+      "builder-control/TOOL-CAPABILITY-CANON.json",
+      "builder-control/aegis-state.cjs",
+      "builder-control/connector-registry.json",
+      "builder-control/dashboard/index.html",
+      "builder-control/engineering-os.cjs",
+      "builder-control/install-engineering-os.cjs",
+      "builder-control/review-adapters.cjs",
+      "builder-control/schemas/engineering-review.schema.json",
+      "builder-control/specs/AEGIS-AMENDMENT-INTEGRATION-BUS-2026-08-23.md",
+      "builder-control/specs/AEGIS-JARVIS-VISUAL-ARCHITECTURE-2026-08-23.md",
+      "builder-control/specs/AEGIS-V1-ARCHITECTURE-CONTRACT-2026-08-23.md",
+      "builder-control/specs/AI-ENGINEERING-OS-OWNER-BRIEF-2026-08-23.md",
+      "builder-control/test/aegis-state.test.cjs",
+      "builder-control/test/dashboard-slice.test.cjs",
+      "builder-control/test/engineering-os.test.cjs",
+      "builder-control/test/install-engineering-os.test.cjs",
+      "builder-control/test/review-adapters.test.cjs",
+      "builder-control/test/tool-router.test.cjs",
+      "builder-control/tool-router.cjs"
+    ]
+  },
+  "disposition": "REJECT",
+  "findings": [
+    {
+      "severity": "CRITICAL",
+      "file": "builder-control/engineering-os.cjs",
+      "location": "EVIDENCE_EXCLUDE, loadReview(), gateDone() lines 162-166, 620-626, 766-773",
+      "problem": "Required reviewer identity and task authorization are not authenticated or immutably bound. The gate trusts editable JSON fields such as reviewer=\"codex\" and disposition=\"APPROVE\" without a signature or adapter receipt. Task packets are excluded from the subject hash, while reviews bind only to packetId rather than packet content.",
+      "evidence": "engineering-os.test.cjs:81-92 constructs a Codex APPROVE record directly, and lines 208-212 assert that this handcrafted JSON clears the gate. loadReview() only performs schema and semantic validation. gateDone() compares rec.packetId to packetId but never hashes the packet. EVIDENCE_EXCLUDE includes builder-control/packets/**.",
+      "impact": "The builder can manufacture required approvals or alter the packet objective, constraints, source pins, or protected-path authorization after a legitimate review without invalidating it. This defeats the rule that the builder cannot approve its own work.",
+      "requiredCorrection": "Require verifiable reviewer provenance, bind each record to a content hash of the exact packet and pinned-intent manifest, and verify those bindings in the gate. Review evidence should be immutable or signed by the adapter execution identity, including a hash of the preserved raw output.",
+      "verificationMethod": "Add negative tests proving that a manually authored Codex/Grok approval, an edited review record, and a packet changed without changing packetId are all rejected, while an adapter-produced attested record for the unchanged packet is accepted.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": ".github/workflows/builder-control.yml",
+      "location": "Engineering OS subject and gate steps, lines 129-148 and 208-225",
+      "problem": "CI computes the subject hash over BASE..HEAD, but invokes --gate-done with only --changed paths and omits --base/--head. The gate consequently recomputes each path using git diff HEAD, which is empty in a clean runner.",
+      "evidence": "The workflow computes SUBJ with --subject --base \"$BASE\" --head HEAD at line 143, then calls --gate-done with ARGS containing only --changed at lines 218-225. computeSubject() lines 197-202 uses git diff <head> when base is absent. A committed-diff reproduction produced subject 3ac61c4d23c3... over 1065 bytes, while the workflow-shaped gate invocation recomputed e3b0c44298fc... and returned ENGOS-SUBJECT-MISMATCH.",
+      "impact": "Every non-LIGHT pull request with a real committed diff is blocked even when correctly reviewed, so the binding CI gate is unusable.",
+      "requiredCorrection": "Pass the identical validated base and head to classification and gate-done, or serialize the once-computed subject and make downstream steps consume that immutable subject instead of recomputing it.",
+      "verificationMethod": "In a clean temporary clone, create and commit a FULL change plus valid bound records, run the exact workflow commands, and assert the initial subject hash equals the gate's computed hash and the gate reaches its expected ready state.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": ".gitignore",
+      "location": "builder-control/dashboard/state.js rule, lines 65-73",
+      "problem": "The generated dashboard state is ignored, but the required CI test fails when that file is absent and the workflow never generates it.",
+      "evidence": "git ls-files --error-unmatch builder-control/dashboard/state.js reported that the path is unknown to Git; git check-ignore identified .gitignore:73. dashboard-slice.test.cjs:67-73 requires fs.existsSync(STATE_PATH). The local test passed 14/14 only because an ignored 13,285-byte state.js exists in this worktree; workflow lines 121-127 run the test without first invoking aegis-state.cjs --out.",
+      "impact": "A clean GitHub runner fails the deterministic suite, and a fresh clone or installation opens a dashboard with no usable state.",
+      "requiredCorrection": "Generate the snapshot explicitly before tests and before serving/opening the dashboard, or redesign the test to generate an isolated fixture while preserving the dashboard's honest missing-state behavior.",
+      "verificationMethod": "Run the dashboard suite and open the dashboard from a clean clone where no ignored files exist; verify CI passes after an explicit generation step and the loaded state cites real artifacts.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": "builder-control/review-adapters.cjs",
+      "location": "TOOLS, detect(), runTool(), lines 46-81 and 302-320",
+      "problem": "Reviewer execution bypasses the Tool Capability Canon and router. Codex and Grok paths, selection, and availability are hardcoded, and full diffs are sent without applying the canon's enabled state, data-classification ceiling, cost policy, or replacement configuration.",
+      "evidence": "TOOLS hardcodes two absolute binaries at lines 50-61; detect() declares them AVAILABLE solely from executable presence at lines 68-81; runTool() selects those constants directly at lines 302-315. No call to tool-router.cjs or TOOL-CAPABILITY-CANON.json occurs before transmitting the prompt.",
+      "impact": "Disabling or replacing a reviewer in the canon has no effect, dashboard/router state can disagree with actual execution, and sensitive diffs may be sent to a provider whose declared data ceiling forbids them.",
+      "requiredCorrection": "Route every reviewer execution through the canonical router using an explicit data classification and local verified probe. Resolve executable paths from local capability state rather than a second hardcoded registry, and refuse execution when canon policy blocks it.",
+      "verificationMethod": "Add tests that disable or replace grok-cli in the canon and assert the adapter follows that decision; also assert a CONFIDENTIAL subject is refused when the selected reviewer permits only INTERNAL data.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": "builder-control/tool-router.cjs",
+      "location": "parse(), validate(), route(), lines 20-21 and 34-101",
+      "problem": "Subscription-first selection and metered authorization are not implemented as specified. A bare --allow-metered boolean authorizes metered execution without a named human, hard cap, or ledger receipt. Routing also does not verify requiredCapabilities against tool.capabilities and simply selects the first preferred tool and its first execution mode.",
+      "evidence": "AEGIS-V1-ARCHITECTURE-CONTRACT:73-75 requires named human approval and a hard cap. tool-router.cjs:77 checks only opts.allowMetered, and lines 70-85 return the first eligible preferred tool with executionModes[0]. The validator never compares task.requiredCapabilities to tool.capabilities. tool-router.test.cjs:58 explicitly expects the bare flag to permit a metered route.",
+      "impact": "Metered spending can occur without the required authorization record or cap, and a misconfigured tool can be selected despite lacking the specialist capability the task requires.",
+      "requiredCorrection": "Replace the boolean with a validated authorization object containing approver, currency cap, scope, expiry, and ledger receipt. Validate capability and task membership, rank eligible execution modes subscription-first, and select metered modes only after cheaper eligible modes are exhausted.",
+      "verificationMethod": "Add red proofs for missing approver, missing cap, capability mismatch, stale availability evidence, and a canon where a metered tool precedes an eligible subscription tool; all must refuse or choose the subscription route appropriately.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": "builder-control/specs/AEGIS-V1-ARCHITECTURE-CONTRACT-2026-08-23.md",
+      "location": "Sections 2, 3, 8, and 9, lines 24-57 and 126-151",
+      "problem": "The approved V1 vertical slice is materially incomplete. The change provides a CLI gate, static canon, projector, and read-only HTML view, but no durable workflow state machine, local control service, SQLite WAL store, leases, heartbeats, stale-run recovery, objective intake, correction-cycle enforcement, checkpoint/rollback control, cost tracking, or complete end-to-end execution.",
+      "evidence": "The contract requires those facilities at lines 24-57 and an eleven-step complete loop at lines 126-140. Anti-theatre acceptance at lines 148-151 requires end-to-end and negative proofs including stale lease, unauthorized spend, and rollback. aegis-state.cjs:264-267 always reports runtime and checkpoint UNVERIFIED. INITIALIZATION-REPORT:287-301 admits no runtime validation and that software.build does not route.",
+      "impact": "The stated objective of an executable local-first AEGIS Command Center is not delivered; the result is an evidence projector around a partial review gate rather than the approved operating system.",
+      "requiredCorrection": "Implement and exercise the approved durable vertical slice, or obtain explicit Product Owner approval for a narrower incremental packet before representing this change as AEGIS V1.",
+      "verificationMethod": "Execute the complete loop from objective intake through checkpoint and rollback, then run every mandated negative case: missing specialist, stale review, unavailable builder, failed deterministic check, skipped state, unauthorized spend, stale lease, and rollback.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": "builder-control/schemas/ledger-entry.schema.json",
+      "location": "status and additionalProperties contract, lines 18 and 62",
+      "problem": "The existing ledger cannot serve as the specified integration event bus. The amendment requires FAILED events plus operationId, correlationId, attempt, and result, but the canonical ledger schema rejects those values and fields; no integration router or idempotency implementation exists.",
+      "evidence": "AEGIS-AMENDMENT-INTEGRATION-BUS:117-129 requires operationId, correlationId, attempt, result, status PASS|BLOCKED|FAILED, and duplicate-operation no-op behavior. ledger-entry.schema.json:18 permits only PASS, BLOCKED, INCOMPLETE, and IMPORTED, while line 62 sets additionalProperties:false and declares none of the required operation fields.",
+      "impact": "A conforming failed connector event cannot be appended to the canonical ledger, retries cannot be deduplicated, and the claimed integration bus is non-executable.",
+      "requiredCorrection": "Extend the canonical ledger schema and writer compatibly for typed integration events, implement the integration router and deterministic idempotency enforcement, and keep the ledger as the sole event store.",
+      "verificationMethod": "Validate and append a FAILED integration event with all required operation fields, then submit the same operationId twice and prove only one external operation occurs while both attempts remain auditable.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": "builder-control/aegis-state.cjs",
+      "location": "projectEngineering() and deriveStages(), lines 193-273",
+      "problem": "The dashboard projector fabricates positive stage states instead of faithfully rendering gate evidence. Build is always PASS, and a required Codex/Grok stage defaults to PASS whenever the problem is not one of three recognized patterns, including cases where coverage is short, the packet is wrong, reviews are ambiguous, or records are malformed.",
+      "evidence": "deriveStages() line 244 unconditionally returns PASS for build. Lines 249-256 return PASS for a required reviewer after checking only UNAVAILABLE, REJECTED, and MISSING. Gate rules such as ENGOS-REVIEW-COVERAGE-SHORT, ENGOS-REVIEW-WRONG-PACKET, ENGOS-AMBIGUOUS-REVIEWS, and ENGOS-REVIEW-MALFORMED therefore leave the reviewer stage displayed as PASS. dashboard/index.html:368 also converts every ledger status other than PASS into BLOCKED.",
+      "impact": "The command center can show a reviewer or build as passing when its evidence is invalid, and can mislabel INCOMPLETE or IMPORTED events as BLOCKED. This violates the core requirement that every visual state correspond to process truth.",
+      "requiredCorrection": "Have the gate emit explicit structured status for every stage and reviewer, including the validated record ID and subject binding, and render those values verbatim. Unknown or invalid evidence must never fall through to PASS.",
+      "verificationMethod": "Add dashboard projector tests for empty subjects, partial coverage, wrong packet, ambiguous reviews, malformed records, INCOMPLETE events, and IMPORTED events; assert none is rendered as PASS or rewritten to an unrelated status.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "HIGH",
+      "file": "builder-control/install-engineering-os.cjs",
+      "location": "OS_FILES, lines 51-70",
+      "problem": "The installer describes its output as the complete Engineering OS package but omits the AEGIS projector, connector registry, dashboard, integration amendment, visual architecture, and their tests.",
+      "evidence": "OS_FILES contains engineering-os.cjs, router, adapters, one architecture contract, and four tests, but not builder-control/aegis-state.cjs, connector-registry.json, dashboard/index.html, AEGIS-AMENDMENT-INTEGRATION-BUS, AEGIS-JARVIS-VISUAL-ARCHITECTURE, aegis-state.test.cjs, or dashboard-slice.test.cjs. The installer then instructs users to copy the updated Engineering OS CI steps, which reference the omitted tests. install-engineering-os.test.cjs:38-45 verifies only the incomplete self-declared list.",
+      "impact": "A reported successful installation lacks the command center and integration layer and will fail if the current workflow steps are copied, contradicting the generic installable-system objective.",
+      "requiredCorrection": "Include every required AEGIS runtime, specification, dashboard, registry, and test artifact in the installation manifest, or split the installer into explicit versioned components whose completeness is independently enforced.",
+      "verificationMethod": "Install into an empty temporary Git repository, verify every subject runtime asset exists, generate and open the dashboard, and run the exact copied CI commands successfully without relying on files from the source worktree.",
+      "status": "OPEN"
+    },
+    {
+      "severity": "MEDIUM",
+      "file": "builder-control/engineering-os.cjs",
+      "location": "classify(), lines 363-389",
+      "problem": "The documented 150-line LIGHT cap is optional in practice. When --diff-lines is omitted, the implementation treats the line cap as satisfied, and CI never supplies --diff-lines.",
+      "evidence": "Line 367 sets withinLineCap to true when lines is null. Workflow line 197 calls --classify with only --changed arguments. Running --classify --changed docs/guide.md returned LIGHT with the note that only file count was checked.",
+      "impact": "An arbitrarily large unprotected documentation change can bypass the required packet and independent review despite the doctrine claiming that large documentation changes are FULL.",
+      "requiredCorrection": "Compute changed-line count from the same bound base/head diff. If size cannot be determined, fail toward FULL rather than treating the cap as satisfied.",
+      "verificationMethod": "Run the actual workflow classifier against committed 150-line and 151-line documentation changes and assert only the former can enter LIGHT.",
+      "status": "OPEN"
+    }
+  ],
+  "unverified": [
+    "The full authored suites were not run because several tests write temporary files and temporarily mutate tracked registry or policy files while this review environment is read-only.",
+    "Node syntax checks for engineering-os.cjs, review-adapters.cjs, tool-router.cjs, and aegis-state.cjs completed successfully; git diff --check exited 0.",
+    "dashboard-slice.test.cjs passed 14/14 locally, but only with the ignored machine-local state.js present; a real clean GitHub Actions run was not available.",
+    "Live Codex/Grok authentication, Copilot entitlement, browser rendering, and external connector behavior were not exercised."
+  ]
+}
