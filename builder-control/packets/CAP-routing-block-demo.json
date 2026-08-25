@@ -1,0 +1,17 @@
+{
+  "packetId": "CAP-routing-block-demo",
+  "agentId": "claude-code",
+  "objective": "Fixture packet: exercises every capability-check violation class so the routing gate is proven to block, not merely to exist.",
+  "constraints": ["Fixture only — never dispatched. Its purpose is to fail."],
+  "sourceOfTruth": ["builder-control/capability-canon.json", "builder-control/CAPABILITY-CANON.md"],
+  "filesAllowed": ["builder-control/test/**"],
+  "testsRequired": ["node builder-control/capability-check.cjs --packet builder-control/packets/CAP-routing-block-demo.json  (MUST exit 1)"],
+  "stopConditions": ["this packet is ever dispatched as real work"],
+  "routing": [
+    { "capabilityId": "video-generation", "decision": "BUILD" },
+    { "capabilityId": "voice-agent-telephony", "decision": "BUILD", "reason": "we think we can do it cheaper" },
+    { "capabilityId": "charting", "decision": "ROUTE", "tool": "echarts" },
+    { "capabilityId": "podcast-mastering", "decision": "ROUTE", "tool": "whatever" }
+  ],
+  "authorization": { "authorizedBy": "none", "allowsProtectedPaths": [], "allowsPublicPush": false, "allowsRelease": false }
+}

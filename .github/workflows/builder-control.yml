@@ -86,3 +86,16 @@ jobs:
 
       - name: Layer 2 — one owner per job
         run: node builder-control/single-authority-check.cjs
+
+      - name: Capability routing — canon loads and the gate blocks
+        # Fails closed twice over: an unreadable canon exits 2, and the block
+        # fixture MUST exit 1. A routing gate that cannot be shown blocking is
+        # indistinguishable from no gate at all.
+        run: |
+          set -euo pipefail
+          node builder-control/capability-check.cjs --coverage
+          node builder-control/capability-check.cjs --packet builder-control/packets/CAP-routing-pass-demo.json
+          if node builder-control/capability-check.cjs --packet builder-control/packets/CAP-routing-block-demo.json; then
+            echo "FAIL: the routing block fixture passed — capability-check is not enforcing."; exit 1
+          fi
+          echo "Routing gate blocked the fixture as required."
