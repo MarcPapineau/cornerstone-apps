@@ -5,55 +5,154 @@
   "description": "The unit of authorization. No agent may write a protected path, push to a public repo, or run a forbidden-by-default op without a conforming packet. The packet's authorization{} is the ONLY override mechanism in the whole system, and creating one leaves a ledger trail. There is no silent bypass.",
   "type": "object",
   "required": [
-    "packetId", "agentId", "objective", "constraints", "sourceOfTruth",
-    "filesAllowed", "testsRequired", "stopConditions", "authorization"
+    "packetId",
+    "agentId",
+    "objective",
+    "constraints",
+    "sourceOfTruth",
+    "filesAllowed",
+    "testsRequired",
+    "stopConditions",
+    "authorization"
   ],
   "properties": {
-    "packetId": { "type": "string", "pattern": "^B?C?[0-9A-Za-z._-]{3,}$", "examples": ["B1-registry-gate", "PKT-2026-06-22-001"] },
-    "agentId": { "type": "string", "description": "MUST match a key in agent-registry.json.", "examples": ["claude-code", "codex", "daniel"] },
-    "objective": { "type": "string", "description": "One precise sentence: what done looks like." },
+    "packetId": {
+      "type": "string",
+      "pattern": "^B?C?[0-9A-Za-z._-]{3,}$",
+      "examples": [
+        "B1-registry-gate",
+        "PKT-2026-06-22-001"
+      ]
+    },
+    "agentId": {
+      "type": "string",
+      "description": "MUST match a key in agent-registry.json.",
+      "examples": [
+        "claude-code",
+        "codex",
+        "daniel"
+      ]
+    },
+    "objective": {
+      "type": "string",
+      "description": "One precise sentence: what done looks like."
+    },
     "constraints": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Hard rules this work must respect (reuse>rebuild, anti-theater, no parallel canon, etc.)."
     },
     "sourceOfTruth": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Authoritative files this work reads/implements against. Builder packets point at builder-control/CONTROL-CONTRACT.md.",
       "minItems": 1
     },
     "filesAllowed": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Exact paths/globs this packet may create or edit. A write outside this list is HARD-BLOCKED even for a registered agent.",
       "minItems": 1
     },
     "testsRequired": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Commands that must run and pass (or be explicitly INCOMPLETE) before the packet's ledger entry can be PASS."
     },
     "stopConditions": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Conditions under which the agent must STOP and hand off rather than continue (mirrors DIRECT-AGENT-BYPASS-CONTROL stop conditions)."
     },
     "authorization": {
       "type": "object",
       "description": "The override surface. Empty/false everywhere = packet authorizes only ordinary allowed ops. Each true/non-empty field is logged to the ledger.",
-      "required": ["authorizedBy", "allowsProtectedPaths", "allowsPublicPush", "allowsRelease"],
+      "required": [
+        "authorizedBy",
+        "allowsProtectedPaths",
+        "allowsPublicPush",
+        "allowsRelease"
+      ],
       "properties": {
-        "authorizedBy": { "type": "string", "description": "Human/owner who authorized any exception. 'none' if no exception requested.", "examples": ["Marc", "none"] },
+        "authorizedBy": {
+          "type": "string",
+          "description": "Human/owner who authorized any exception. 'none' if no exception requested.",
+          "examples": [
+            "Marc",
+            "none"
+          ]
+        },
         "allowsProtectedPaths": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Exact protected paths this packet may touch. Each must also be a protected-paths.json entry; the gate logs the pairing."
         },
-        "allowsPublicPush": { "type": "boolean", "default": false },
-        "allowsRelease": { "type": "boolean", "default": false, "description": "Permits a customer-facing release; release still requires the KRITE content-contract gate to pass — this flag does not bypass KRITE." }
+        "allowsPublicPush": {
+          "type": "boolean",
+          "default": false
+        },
+        "allowsRelease": {
+          "type": "boolean",
+          "default": false,
+          "description": "Permits a customer-facing release; release still requires the KRITE content-contract gate to pass — this flag does not bypass KRITE."
+        }
       },
       "additionalProperties": false
+    },
+    "routing": {
+      "type": "array",
+      "description": "Capability routing decisions for this packet — one entry per capability the work touches, validated by builder-control/capability-check.cjs against capability-canon.json. Optional for packets predating capability-canon.json v1.0; required for new work that touches a canon capability. This is where 'find the right tool instead of building one' becomes checkable.",
+      "items": {
+        "type": "object",
+        "required": [
+          "capabilityId",
+          "decision"
+        ],
+        "properties": {
+          "capabilityId": {
+            "type": "string",
+            "description": "MUST match an id in capability-canon.json.",
+            "examples": [
+              "video-generation",
+              "charting"
+            ]
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "REUSE",
+              "ROUTE",
+              "BUILD"
+            ],
+            "description": "REUSE something this workspace ships · ROUTE to the canonical external tool · BUILD from scratch (requires reason)."
+          },
+          "tool": {
+            "type": "string",
+            "description": "Required for ROUTE. The tool actually called.",
+            "examples": [
+              "Seedance",
+              "ElevenLabs"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required for BUILD (name the escapeHatch being invoked) and for ROUTE to an off-canon tool."
+          }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": false,
@@ -67,9 +166,18 @@
         "No edits to any protected-paths.json entry",
         "Anti-theater: claim done only with files+commands+tests in the same response"
       ],
-      "sourceOfTruth": ["builder-control/CONTROL-CONTRACT.md", "luke-app/server (order-ops module)"],
-      "filesAllowed": ["luke-app/server/**", "luke-app/test/**"],
-      "testsRequired": ["npm --prefix luke-app test -- order-ops", "curl -s http://localhost:3000/api/orders"],
+      "sourceOfTruth": [
+        "builder-control/CONTROL-CONTRACT.md",
+        "luke-app/server (order-ops module)"
+      ],
+      "filesAllowed": [
+        "luke-app/server/**",
+        "luke-app/test/**"
+      ],
+      "testsRequired": [
+        "npm --prefix luke-app test -- order-ops",
+        "curl -s http://localhost:3000/api/orders"
+      ],
       "stopConditions": [
         "the fix would require editing packages/protocol-core/data/catalog.json",
         "Claude Code fails twice on the same delegated code issue",

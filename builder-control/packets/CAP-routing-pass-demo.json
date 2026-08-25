@@ -1,0 +1,16 @@
+{
+  "packetId": "CAP-routing-pass-demo",
+  "agentId": "claude-code",
+  "objective": "Fixture packet: a correctly-routed build — reuse the chart engine we ship, route the footage to a video service, and say why the one hand-built piece is legitimate.",
+  "constraints": ["Fixture only."],
+  "sourceOfTruth": ["builder-control/capability-canon.json"],
+  "filesAllowed": ["builder-control/test/**"],
+  "testsRequired": ["node builder-control/capability-check.cjs --packet builder-control/packets/CAP-routing-pass-demo.json  (MUST exit 0)"],
+  "stopConditions": ["this packet is ever dispatched as real work"],
+  "routing": [
+    { "capabilityId": "charting", "decision": "REUSE" },
+    { "capabilityId": "video-generation", "decision": "ROUTE", "tool": "Seedance" },
+    { "capabilityId": "video-assembly", "decision": "BUILD", "reason": "escapeHatch: deterministic ffmpeg concatenation of our own chart renders — no creative decisions, no generative model" }
+  ],
+  "authorization": { "authorizedBy": "none", "allowsProtectedPaths": [], "allowsPublicPush": false, "allowsRelease": false }
+}
