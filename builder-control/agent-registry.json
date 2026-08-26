@@ -7,7 +7,7 @@
     "claude-code": {
       "role": "Builder — scoped milestone implementation (BUILD-PROTOCOL Builder identity)",
       "kind": "cli-agent",
-      "allowedOps": ["read", "write", "commit", "validate"],
+      "allowedOps": ["read", "write", "commit", "push", "validate"],
       "allowedPathGlobs": [
         "builder-control/**",
         "research/**",
