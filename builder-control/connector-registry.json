@@ -32,15 +32,22 @@
       "authStatus": "AUTHENTICATED",
       "health": "HEALTHY",
       "healthEvidence": {
-        "observedAt": "2026-08-25T16:53:19Z",
-        "method": "GitHub CLI authentication probe",
-        "result": "Authenticated active account confirmed; credential value omitted.",
-        "operationId": "github-probe-20260825T165319Z",
+        "observedAt": "2026-08-26T21:04:07Z",
+        "method": "GitHub CLI authenticated API probe",
+        "result": "Authenticated account and pushed branch were both readable through GitHub API.",
+        "operationId": "github-health-20260826T210407Z",
         "health": "HEALTHY",
         "outcome": "SUCCESS"
       },
-      "usageEvidence": null,
-      "lastSuccess": "2026-08-25T16:53:19Z",
+      "usageEvidence": {
+        "observedAt": "2026-08-26T21:04:07Z",
+        "runId": "RUN-20260825-d9ed3d68",
+        "method": "Governed Git push",
+        "result": "Pushed tested AEGIS checkpoint branch at commit daf10a3.",
+        "operationId": "github-push-daf10a3-20260826T210407Z",
+        "citedSource": "https://github.com/MarcPapineau/cornerstone-apps"
+      },
+      "lastSuccess": "2026-08-26T21:04:07Z",
       "lastFailure": null,
       "failureCount": 0,
       "latencyMs": null,
@@ -59,17 +66,16 @@
       "riskLevel": "HIGH",
       "authorityNote": "GitHub records machine truth (what the code does). It does not decide product intent, and a green check is not a verification verdict.",
       "authEvidence": {
-        "observedAt": "2026-08-25T16:53:19Z",
+        "observedAt": "2026-08-26T21:04:07Z",
         "authStatus": "AUTHENTICATED",
-        "method": "GitHub CLI authentication probe",
-        "operationId": "github-probe-20260825T165319Z",
-        "derivedFrom": "healthEvidence recorded by the same probe operation"
+        "method": "GitHub CLI authenticated API probe",
+        "operationId": "github-health-20260826T210407Z"
       },
       "verificationEvidence": {
-        "observedAt": "2026-08-25T16:53:19Z",
-        "method": "GitHub CLI authentication probe",
-        "result": "Authenticated active account confirmed; credential value omitted.",
-        "operationId": "github-probe-20260825T165319Z"
+        "observedAt": "2026-08-26T21:04:07Z",
+        "method": "GitHub CLI authenticated API probe",
+        "result": "Authenticated account and pushed branch were both readable through GitHub API.",
+        "operationId": "github-health-20260826T210407Z"
       }
     },
     {
