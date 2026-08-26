@@ -947,6 +947,73 @@ test('finding #3: a probe with no recorded outcome verifies nothing — it is UN
   assert.strictEqual(ver.state, 'UNVERIFIED', 'an unqualified probe was counted as a successful verification');
 });
 
+// ── G1 finding #4: a check dated in the future has observed nothing ────────
+// PROVEN DEFECT (Codex REV-20260826143933-codex finding #4): a HEALTHY/SUCCESS
+// receipt timestamped AFTER the clock was read two ways at once. The inspector
+// said UNVERIFIED but explained it with "did not succeed — it is recorded as
+// SUCCESS", a sentence that argues with itself; the connector row skipped the
+// staleness checks entirely (they tested age === null and age > threshold, but
+// never age < 0) and landed on FRESH with a NEGATIVE age — the most recent
+// check on the page. Both surfaces must fail closed on the same fact and say
+// the same plain thing: the timestamp is in the future, so it is unusable.
+const FUTURE_PROBE = '2026-09-01T00:00:00Z'; // NOW is 2026-08-23T12:00:00Z
+
+// Any key that reads as an age must never publish a negative number: a negative
+// age rendered anywhere is "checked -12960 minutes ago", i.e. fresher than now.
+function assertNoNegativeAges(obj, where) {
+  JSON.stringify(obj, (k, v) => {
+    if (/age/i.test(k) && typeof v === 'number') {
+      assert.ok(v >= 0, `${where}.${k} published a negative age (${v}) a consumer could print as freshness`);
+    }
+    return v;
+  });
+}
+
+test('G1 #4 RED: a future-dated SUCCESSFUL probe is UNVERIFIED, and the prose names the future timestamp instead of calling a SUCCESS "did not succeed"', () => {
+  const c = {
+    connectorId: 'ahead',
+    healthEvidence: { observedAt: FUTURE_PROBE, method: 'probe', result: 'ok', health: 'HEALTHY', outcome: 'SUCCESS' },
+  };
+  const ver = M.projectLastVerified(c, NOW, 60);
+  assert.strictEqual(ver.state, 'UNVERIFIED', 'a future-dated probe was accepted as a verification');
+  assert.strictEqual(ver.ageMinutes, null, 'no freshness age may be published off a future timestamp');
+  assertNoNegativeAges(ver, 'lastVerified');
+  assert.ok(!/did not succeed/.test(ver.plain),
+    `the explanation contradicts itself: "${ver.plain}"`);
+  assert.ok(!/cannot be read as a usable date/.test(ver.plain),
+    `a future date IS readable — saying otherwise misnames the fault: "${ver.plain}"`);
+  assert.ok(/future/i.test(ver.plain), `the explanation must say the timestamp is in the future: "${ver.plain}"`);
+  assert.ok(ver.plain.includes(FUTURE_PROBE), `the explanation must name the offending timestamp: "${ver.plain}"`);
+});
+
+test('G1 #4 RED: the same future-dated SUCCESS never renders FRESH in the connector row, and never publishes a negative age', () => {
+  const p = fixtureRegistry({
+    stalenessThresholdMinutes: 60,
+    healthVocabulary: ['HEALTHY', 'FAILED', 'UNKNOWN'],
+    connectors: [{
+      connectorId: 'ahead', plane: 'INTEGRATION', health: 'HEALTHY', authStatus: 'AUTHENTICATED',
+      authEvidence: { observedAt: '2026-08-23T11:55:00Z', authStatus: 'AUTHENTICATED', method: 'm' },
+      healthEvidence: { observedAt: FUTURE_PROBE, method: 'probe', result: 'ok', health: 'HEALTHY', outcome: 'SUCCESS' },
+    }],
+  });
+  const c = M.projectConnectors(NOW, { registryPath: p }).connectors[0];
+  assert.notStrictEqual(c.staleness.state, 'FRESH', 'a future-dated probe rendered as FRESH');
+  assert.strictEqual(c.staleness.state, 'UNVERIFIED');
+  assert.strictEqual(c.staleness.ageMinutes, undefined,
+    'a future-dated probe must not publish a freshness age a consumer could print');
+  assertNoNegativeAges(c, 'connector');
+  assert.ok(/future/i.test(c.staleness.reason) && c.staleness.reason.includes(FUTURE_PROBE),
+    `the row must say the timestamp is future-dated and name it: "${c.staleness.reason}"`);
+  assert.strictEqual(c.health, 'UNKNOWN',
+    'evidence dated in the future cannot carry a health reading forward — it fails closed to UNKNOWN');
+  assert.strictEqual(c.lastVerified.state, 'UNVERIFIED',
+    'the row and the inspector must reach the same verdict on the same receipt');
+  assert.ok(/future/i.test(c.lastVerified.plain) && !/did not succeed/.test(c.lastVerified.plain),
+    `the inspector prose must stay founder-readable and non-contradictory: "${c.lastVerified.plain}"`);
+  assert.strictEqual(c.authentication.state, 'AUTHENTICATED',
+    'a future-dated health probe must not disturb the separately dated credential fact');
+});
+
 // ── a receipt that disagrees with itself is never a verification ───────────
 // The reported defect: a receipt reading {health:'FAILED', outcome:'SUCCESS'}
 // was trusted verbatim on the outcome word, so the connector dated its

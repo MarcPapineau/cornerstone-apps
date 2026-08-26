@@ -310,9 +310,15 @@ function projectLastVerified(c, now, threshold) {
   const success = verEv
     || (probe && probe.outcome === PROBE_SUCCESS ? probe.observedAt : null)
     || (c && typeof c.lastSuccess === 'string' ? c.lastSuccess : null);
+  const probeAge = probe ? ageMinutes(probe.observedAt, now) : null;
+  // A probe dated in the future has an age, and it is negative. Publishing it
+  // renders as "checked -12240 minute(s) ago", i.e. more recent than now, so
+  // the age is withheld exactly as it is for a failed probe; the timestamp
+  // itself stays visible and the prose below names it.
+  const probeFuture = probeAge !== null && probeAge < 0;
   const latestProbeFact = probe
     ? { observedAt: probe.observedAt, outcome: probe.outcome, declaredOutcome: probe.declaredOutcome,
-        contradictsHealth: probe.contradictsHealth, ageMinutes: ageMinutes(probe.observedAt, now) }
+        contradictsHealth: probe.contradictsHealth, ageMinutes: probeFuture ? null : probeAge }
     : null;
   const base = { thresholdMinutes: threshold, source, latestProbe: latestProbeFact };
 
@@ -322,13 +328,19 @@ function projectLastVerified(c, now, threshold) {
   }
   const successAge = success ? ageMinutes(success, now) : null;
   if (!success || successAge === null || successAge < 0) {
-    const why = success
-      ? `The recorded success time ("${success}") cannot be read as a usable date.`
-      : 'No successful check has ever been recorded for this service.';
+    const why = !success
+      ? 'No successful check has ever been recorded for this service.'
+      : (successAge !== null && successAge < 0
+          ? `The recorded success time ("${success}") is dated in the FUTURE, so nothing was observed at it and it ` +
+            'cannot be used as evidence that this service responded.'
+          : `The recorded success time ("${success}") cannot be read as a usable date.`);
     const probeNote = probe
       ? (probe.contradictsHealth
           ? ' ' + contradictionNote(probe)
-          : ` The most recent check (${probe.observedAt}) did not succeed — it is recorded as ${probe.outcome}.`)
+          : probeFuture
+            ? ` The most recent check (${probe.observedAt}) is dated in the future — a check cannot have happened yet, ` +
+              'so whatever it records is unusable, however successful it claims to be.'
+            : ` The most recent check (${probe.observedAt}) did not succeed — it is recorded as ${probe.outcome}.`)
       : '';
     return { state: 'UNVERIFIED', observedAt: null, ageMinutes: null, ...base, plain: why + probeNote };
   }
@@ -637,6 +649,17 @@ function projectConnectors(now, opts = {}) {
       if (age === null) {
         health = 'UNKNOWN';
         staleness = { state: 'UNVERIFIED', reason: `unparseable observedAt "${ev.observedAt}"` };
+      } else if (age < 0) {
+        // A check dated after the clock has observed nothing. The staleness
+        // branches below all ask "how long ago", and a future timestamp answers
+        // that with a negative number that fell straight through to FRESH — the
+        // most recent reading on the page. Like unparseable evidence, this
+        // fails closed: health is not carried forward, no `ageMinutes` is
+        // published, and the reason names the timestamp.
+        health = 'UNKNOWN';
+        staleness = { state: 'UNVERIFIED', thresholdMinutes: threshold,
+          reason: `the recorded check time "${ev.observedAt}" is dated in the future, so it cannot be used as ` +
+            'evidence that this service was checked at all' };
       } else if (age > threshold) {
         // Staleness does NOT overwrite the last known health — it qualifies it.
         // Overwriting would destroy the only information we have; hiding it
