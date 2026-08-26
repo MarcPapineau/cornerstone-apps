@@ -143,7 +143,6 @@ test('the attestation key is never committed', () => {
   assert.notStrictEqual(tracked.status, 0, 'the attestation key must not be tracked by git');
 });
 
-const failed = process.exitCode ? 'at least 1' : '0';
 // ── PROVEN DEFECT D5 (2026-08-25): attestation coverage gaps ──────────────
 // reviewId, ts, unavailableReason and group were OUTSIDE the signed payload.
 // Two are load-bearing: supersession names its target by reviewId, and coverage
@@ -274,5 +273,213 @@ test('RED #5: aggregate data and group digests are inside the attestation', () =
   assert.strictEqual(mutate((c) => { c.aggregate.groups.push({ groupId: 'G3', attestationDigest: 'x' }); }), false,
     'a group can be appended to the aggregate after signing');
 });
+
+
+// ── PROVEN DEFECT (2026-08-25): a BACKUP packet was resolved as the authority ──
+// packets/ holds in-place backups — PKT-X.json beside PKT-X-BACKUP-<date>.json —
+// and a backup carries the SAME packetId because it is a copy. The resolver
+// returned the first directory match, and `-BACKUP-` sorts before `.json`, so a
+// validly-signed Codex G1 record was digested against a stale copy and REFUSED
+// for a change that never happened. These proofs pin all three outcomes: the
+// active file wins, no active file fails closed, and two active files refuse
+// rather than guess.
+const PKTS_ROOT = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-pkts-'));
+process.on('exit', () => { try { fs.rmSync(PKTS_ROOT, { recursive: true, force: true }); } catch {} });
+let pktDirSeq = 0;
+const packetDir = () => {
+  const d = path.join(PKTS_ROOT, `d${++pktDirSeq}`);
+  fs.mkdirSync(d, { recursive: true });
+  return d;
+};
+const REAL_PACKET = JSON.parse(fs.readFileSync(PACKET, 'utf8'));
+function writePacket(dir, filename, id, over = {}) {
+  const full = path.join(dir, filename);
+  fs.writeFileSync(full, JSON.stringify({ ...REAL_PACKET, packetId: id, ...over }, null, 2));
+  return full;
+}
+
+test('RED: the ACTIVE packet wins over a same-id BACKUP that sorts before it', () => {
+  const dir = packetDir();
+  const active = writePacket(dir, 'PKT-BK.json', 'PKT-BK');
+  const backup = writePacket(dir, 'PKT-BK-BACKUP-2026-08-25-THING.json', 'PKT-BK',
+    { filesAllowed: ['**/*'] });
+  assert.strictEqual(fs.readdirSync(dir).sort()[0], path.basename(backup),
+    'the backup must sort FIRST, or this proof is not reproducing the defect');
+  assert.notStrictEqual(S.packetDigest(active), S.packetDigest(backup),
+    'the two must differ, or which one was chosen could not be observed');
+
+  const r = S.resolvePacket({ packetId: 'PKT-BK' }, { packetsDir: dir });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.path, active, 'a backup was resolved as the authority');
+  assert.deepStrictEqual(r.backups, [backup], 'the backup must still be reported, not silently dropped');
+
+  // End to end, through the resolver both times — the path the gate actually takes.
+  const signed = S.sign(record({ packetId: 'PKT-BK' }), { packetsDir: dir });
+  assert.strictEqual(signed.attestation.packetDigest, S.packetDigest(active));
+  const v = S.verify(signed, { packetsDir: dir });
+  assert.strictEqual(v.ok, true, `a valid review was refused: ${v.code} — ${v.reason}`);
+});
+
+test('RED: with NO active packet left, verification fails CLOSED and names the backup', () => {
+  // Exactly what an in-place backup-then-replace leaves behind if the active
+  // file is lost: the id still exists on disk, but only as a copy.
+  const dir = packetDir();
+  const active = writePacket(dir, 'PKT-GONE.json', 'PKT-GONE');
+  const signed = S.sign(record({ packetId: 'PKT-GONE' }), { packetsDir: dir });
+  assert.strictEqual(S.verify(signed, { packetsDir: dir }).ok, true, 'baseline must verify');
+
+  fs.renameSync(active, path.join(dir, 'PKT-GONE-BACKUP-2026-08-25-THING.json'));
+  const v = S.verify(signed, { packetsDir: dir });
+  assert.strictEqual(v.ok, false, 'a backup must never stand in for the authority it copies');
+  assert.strictEqual(v.code, 'ATTESTATION-PACKET-MISSING');
+  assert.ok(/backup is a copy, not an authority/.test(v.reason),
+    'the refusal must explain WHY nothing was found, or it reads as an empty directory');
+});
+
+test('RED: two ACTIVE packets for one packetId are REFUSED, never guessed', () => {
+  const dir = packetDir();
+  const first = writePacket(dir, 'PKT-AMB.json', 'PKT-AMB');
+  const signed = S.sign(record({ packetId: 'PKT-AMB' }), { packetsDir: dir });
+  assert.strictEqual(S.verify(signed, { packetsDir: dir }).ok, true, 'baseline must verify');
+
+  writePacket(dir, 'PKT-AMB-second.json', 'PKT-AMB', { objective: 'a different objective' });
+  const v = S.verify(signed, { packetsDir: dir });
+  assert.strictEqual(v.ok, false, 'picking one of two authorities is a coin toss dressed as verification');
+  assert.strictEqual(v.code, 'ATTESTATION-PACKET-AMBIGUOUS');
+  assert.ok(/refused rather than guessed/.test(v.reason));
+  assert.ok(/--packet/.test(v.reason), 'the refusal must name the way out');
+
+  assert.throws(() => S.sign(record({ packetId: 'PKT-AMB' }), { packetsDir: dir }),
+    /ATTESTATION-PACKET-AMBIGUOUS/,
+    'signing against an unresolvable packet mints a record that can never verify the same way twice');
+  assert.strictEqual(S.resolvePacketForRecord({ packetId: 'PKT-AMB' }, { packetsDir: dir }), null,
+    'the back-compatible shape must return null on ambiguity, not the first match');
+  assert.ok(fs.existsSync(first), 'nothing is deleted to resolve ambiguity');
+});
+
+test('an EXPLICIT packet path resolves what a directory scan cannot', () => {
+  const dir = packetDir();
+  const p1 = writePacket(dir, 'PKT-EXP.json', 'PKT-EXP');
+  const p2 = writePacket(dir, 'PKT-EXP-second.json', 'PKT-EXP', { objective: 'other' });
+  // Ambiguous by scan…
+  assert.strictEqual(S.resolvePacket({ packetId: 'PKT-EXP' }, { packetsDir: dir }).ok, false);
+  // …but a named authority is a decision the operator has already made.
+  const signed = S.sign(record({ packetId: 'PKT-EXP' }), { packetPath: p1 });
+  assert.strictEqual(S.verify(signed, { packetPath: p1 }).ok, true);
+  const wrong = S.verify(signed, { packetPath: p2 });
+  assert.strictEqual(wrong.ok, false, 'naming a DIFFERENT packet must not verify');
+  assert.strictEqual(wrong.code, 'ATTESTATION-PACKET-CHANGED');
+});
+
+test('the CLI parser reads --packet as a flag, in any order', () => {
+  assert.deepStrictEqual(S.parseCli(['--verify', 'r.json', '--packet', 'p.json']),
+    { mode: 'verify', file: 'r.json', packet: 'p.json' });
+  assert.deepStrictEqual(S.parseCli(['--packet', 'p.json', '--verify', 'r.json']),
+    { mode: 'verify', file: 'r.json', packet: 'p.json' });
+  assert.deepStrictEqual(S.parseCli(['--sign', 'r.json']),
+    { mode: 'sign', file: 'r.json', packet: null });
+  // A dropped flag looks exactly like a check that ran, so it is a usage error.
+  assert.ok(S.parseCli(['--verify', 'r.json', '--pakcet', 'p.json']).error, 'a misspelled flag must not be ignored');
+  assert.ok(S.parseCli(['--verify']).error, '--verify without a record must not be accepted');
+  assert.ok(S.parseCli(['--packet']).error, '--packet without a path must not be accepted');
+});
+
+test('CLI: --verify <record> --packet <path> honours the named packet', () => {
+  const dir = packetDir();
+  const p1 = writePacket(dir, 'PKT-CLI.json', 'PKT-CLI');
+  const p2 = writePacket(dir, 'PKT-CLI-other.json', 'PKT-CLI', { objective: 'other' });
+  const recPath = path.join(dir, 'record.json');
+  fs.writeFileSync(recPath, JSON.stringify(S.sign(record({ packetId: 'PKT-CLI' }), { packetPath: p1 }), null, 2));
+
+  const SIGNCLI = path.join(BC, 'review-sign.cjs');
+  const good = spawnSync('node', [SIGNCLI, '--verify', recPath, '--packet', p1], { cwd: ROOT, encoding: 'utf8' });
+  assert.strictEqual(good.status, 0, `expected exit 0, got ${good.status}: ${good.stdout}${good.stderr}`);
+  assert.ok(/VERIFIED/.test(good.stdout));
+
+  const bad = spawnSync('node', [SIGNCLI, '--verify', recPath, '--packet', p2], { cwd: ROOT, encoding: 'utf8' });
+  assert.strictEqual(bad.status, 3, 'a record verified against the wrong packet must exit 3');
+  assert.ok(/ATTESTATION-PACKET-CHANGED/.test(bad.stdout + bad.stderr));
+
+  // Without --packet the scan finds two active packets and refuses.
+  const scan = spawnSync('node', [SIGNCLI, '--verify', recPath], { cwd: ROOT, encoding: 'utf8' });
+  assert.notStrictEqual(scan.status, 0, 'an unresolvable packetId must not verify by scan');
+
+  const usage = spawnSync('node', [SIGNCLI, '--verify', recPath, '--pakcet', p1], { cwd: ROOT, encoding: 'utf8' });
+  assert.strictEqual(usage.status, 2, 'a misspelled flag is a usage error, not a silent pass');
+});
+
+test('PROOF: a record signed against the ACTIVE packet verifies, implicitly and explicitly', () => {
+  // The live-fixture version of this proof pinned two real files by path:
+  // reviews/groups/20260826010801-codex-G1.json and
+  // packets/PKT-20260825-GOVERNANCE-TRUTH.json. Both are mutable — the packet
+  // is a governance document that gets authorized updates, and each update
+  // legitimately changes its digest. Binding a permanent test to that moving
+  // target meant the test went red every time the packet was updated for a
+  // reason that had nothing to do with backup resolution — the packet content
+  // simply outran the record it was pinned to. That is a false failure, the
+  // same category of harm as the false refusal this file exists to catch.
+  //
+  // What the defect actually depends on — a same-id BACKUP that sorts ahead of
+  // the active file, an active file that resolves and verifies regardless, and
+  // a named backup that fails closed — does not need a live file at all. This
+  // proof builds that fixture from scratch: one canonical active packet, one
+  // same-id backup with genuinely different content, and a record signed
+  // against the active packet the same way the gate signs one.
+  const dir = packetDir();
+  const active = writePacket(dir, 'PKT-G1FIX.json', 'PKT-G1FIX');
+  const backup = writePacket(dir, 'PKT-G1FIX-BACKUP-2026-08-25-FIXTURE.json', 'PKT-G1FIX',
+    { filesAllowed: ['**/*'] });
+  assert.strictEqual(fs.readdirSync(dir).sort()[0], path.basename(backup),
+    'the backup must sort FIRST, or this proof is not reproducing the defect');
+  assert.notStrictEqual(S.packetDigest(active), S.packetDigest(backup),
+    'the active packet and its backup must differ, or which one was chosen could not be observed');
+
+  const rec = S.sign(record({ reviewId: 'REV-g1-fixture', packetId: 'PKT-G1FIX' }), { packetsDir: dir });
+
+  // The defect needs a same-id BACKUP present to reproduce.
+  const r = S.resolvePacket(rec, { packetsDir: dir });
+  assert.strictEqual(r.ok, true, `packet resolution refused: ${r.code} — ${r.reason}`);
+  assert.deepStrictEqual(r.backups, [backup],
+    'this proof is only meaningful while a same-id BACKUP sits beside the active packet — '
+    + 'without one, the ordering bug it covers cannot occur');
+  assert.strictEqual(r.path, active,
+    `resolution picked ${r.path && path.basename(r.path)}; the authority is ${path.basename(active)}, never a backup`);
+
+  // The scan path — what the gate actually calls — must reach VERIFIED.
+  const scanned = S.verify(rec, { packetsDir: dir });
+  assert.strictEqual(scanned.ok, true,
+    `a record signed against the active packet was refused by directory scan: ${scanned.code} — ${scanned.reason}`);
+
+  // And naming the authority explicitly must agree with it. If these two ever
+  // disagreed, one of them is resolving to something other than the packet.
+  const explicit = S.verify(rec, { packetPath: active });
+  assert.strictEqual(explicit.ok, true,
+    `the same record was refused against the named active packet: ${explicit.code} — ${explicit.reason}`);
+  assert.strictEqual(scanned.packetDigest, explicit.packetDigest,
+    'scan and explicit --packet resolved to different packet content');
+});
+
+test('PROOF: the same record is REFUSED against the stale BACKUP copy', () => {
+  // The other half of the same fact. Passing above only means something if
+  // digesting the backup would have produced a different answer — otherwise the
+  // two files are identical and resolution order never mattered. Built from the
+  // same fixture as the proof above, not a live file, for the reason stated there.
+  const dir = packetDir();
+  const active = writePacket(dir, 'PKT-G1BAD.json', 'PKT-G1BAD');
+  const backup = writePacket(dir, 'PKT-G1BAD-BACKUP-2026-08-25-FIXTURE.json', 'PKT-G1BAD',
+    { filesAllowed: ['**/*'] });
+  assert.strictEqual(S.isBackupPacketName(backup), true, 'the backup must be recognised by name');
+  assert.notStrictEqual(S.packetDigest(active), S.packetDigest(backup),
+    'the backup must genuinely differ from the active packet, or this proof shows nothing');
+
+  const rec = S.sign(record({ reviewId: 'REV-g1-fixture-bad', packetId: 'PKT-G1BAD' }), { packetPath: active });
+  const v = S.verify(rec, { packetPath: backup });
+  assert.strictEqual(v.ok, false,
+    'the backup digests identically to the active packet, so this proof shows nothing — '
+    + 'the ordering defect would have been invisible either way');
+  assert.strictEqual(v.code, 'ATTESTATION-PACKET-CHANGED');
+});
+
+const failed = process.exitCode ? 'at least 1' : '0';
 
 console.log(`${passed} passed, ${failed} failed.`);

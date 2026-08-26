@@ -423,6 +423,121 @@ function parseRunIdBody(body) {
 // full evidence dump. Anything not explicitly copied here is dropped:
 // absolute worktree paths, packet contents, raw reviewer transcripts, the
 // ledger array itself, and any stdout/stderr tail a run recorded.
+// Reviewer completeness, stripped to what the founder panel states out loud:
+// who, what their job was, whether they were required, whether they actually
+// ran against THIS subject, what they decided, how much of the change they
+// read, and which paths are covered / missing / stale. Review record ids travel
+// (they are file names on this machine); review CONTENT never does.
+function minimizeReviewerCompleteness(rc) {
+  if (!rc || typeof rc !== 'object') return null;
+  return {
+    subjectSha256: rc.subjectSha256 || null,
+    lane: rc.lane || null,
+    required: rc.required || [],
+    advisory: rc.advisory || [],
+    executed: rc.executed || [],
+    missing: rc.missing || [],
+    complete: !!rc.complete,
+    // The sentence that says WHY coverage is complete or incomplete. Without
+    // it the panel can print "INCOMPLETE" and nothing else, which tells a
+    // founder there is a problem and not what it is. It names reviewers and
+    // changed files — both already travel as their own fields above — and it
+    // is built by the projector, so it carries no reviewer content; the
+    // public text sanitizer below still runs over it like every other string.
+    completeReason: rc.completeReason || null,
+    pathCoverage: rc.pathCoverage || null,
+    rows: (rc.rows || []).map((r) => ({
+      reviewer: r.reviewer, job: r.job, planned: r.planned, required: r.required,
+      executed: r.executed, disposition: r.disposition, reviewId: r.reviewId, score: r.score,
+      coveredPaths: r.coveredPaths || [], missingPaths: r.missingPaths || [], stalePaths: r.stalePaths || [],
+      reason: r.reason,
+    })),
+  };
+}
+
+// ── the public text sanitizer ───────────────────────────────────────────────
+// Nothing on this surface is written by a user, but plenty of it is BUILT by
+// concatenating a file path into a sentence — "<absolute path>: ATTESTATION-
+// PACKET-CHANGED ...". The allow-list above decides which fields travel; it
+// cannot decide what a generated sentence happens to contain. An absolute path
+// names the operator's home directory, their username and their checkout
+// layout, none of which is process state a browser panel needs.
+//
+// So every string copied onto the public object passes through here. Two
+// deterministic rules, applied in order:
+//
+//   1. A path inside THIS repository is republished repo-relative. That is the
+//      form the rest of the surface already uses ("builder-control/reviews/
+//      <id>.json"), so the founder-readable meaning survives whole — the
+//      sentence still names the exact file it is about.
+//   2. Any absolute filesystem path that survives rule 1 — another checkout, a
+//      temp directory, /home, /etc — is reduced to "[path]/<file name>", or to
+//      "[path]" when the last segment is not a file name. A directory segment
+//      is where the username lives, so it is dropped rather than kept.
+//
+// Repo-relative paths, API routes ("/api/status") and URLs are left exactly as
+// they are: the leading "/" only starts a match when the first segment is a
+// real filesystem root, and only at a word boundary.
+//
+// This is a pure function over fresh copies. The snapshot AegisState produced
+// is never mutated, so the internal evidence and audit trail keep the real
+// absolute paths — minimization is a property of the public copy, not a
+// destruction of the record.
+function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+const PUBLIC_PATH_ROOT_RULES = (() => {
+  const repo = path.resolve(HERE, '..', '..');
+  const roots = new Set([repo]);
+  // A macOS temp or symlinked checkout resolves to a different literal prefix
+  // than the one path.resolve() produced, and a path built from either one is
+  // the same file. Both forms are stripped.
+  try { roots.add(fs.realpathSync(repo)); } catch { /* an unresolvable root just means one fewer prefix to strip */ }
+  return [...roots]
+    .sort((a, b) => b.length - a.length)
+    .flatMap((root) => {
+      const esc = escapeRegExp(root);
+      return [
+        { re: new RegExp(`${esc}/+`, 'gi'), to: '' },
+        { re: new RegExp(`${esc}(?![A-Za-z0-9_./-])`, 'gi'), to: '.' },
+      ];
+    });
+})();
+
+// Only these first segments make a leading "/" a filesystem path. "/api/status"
+// and "/state.js" are routes on this very host and must read normally.
+const FS_ROOT_SEGMENT = '(?:Users|home|var|tmp|private|opt|etc|srv|mnt|media|root|usr|bin|sbin|dev|proc|sys|Volumes|Applications|Library|System|Network|cores|snap|run|data)';
+const ABSOLUTE_PATH_RE = new RegExp(
+  `(?<![A-Za-z0-9_.~/-])/${FS_ROOT_SEGMENT}(?![A-Za-z0-9_-])(?:/[^\\s"'\`<>|,;:()\\[\\]{}]*)*`, 'gi');
+
+function redactAbsolutePath(match) {
+  const cleaned = match.replace(/\/+$/, '');
+  const base = cleaned.slice(cleaned.lastIndexOf('/') + 1);
+  // A trailing file name is the part that carries meaning (which review, which
+  // packet); a trailing directory name is the part that carries identity.
+  return /\.[A-Za-z0-9]{1,8}$/.test(base) ? `[path]/${base}` : '[path]';
+}
+
+function sanitizePublicText(value) {
+  if (typeof value !== 'string' || !value.includes('/')) return value;
+  let out = value;
+  for (const rule of PUBLIC_PATH_ROOT_RULES) out = out.replace(rule.re, rule.to);
+  return out.replace(ABSOLUTE_PATH_RE, redactAbsolutePath);
+}
+
+// Copy-on-sanitize: every container is rebuilt, so a string reached through an
+// array the projector still owns cannot be written back into it.
+function sanitizePublicValue(value) {
+  if (typeof value === 'string') return sanitizePublicText(value);
+  if (Array.isArray(value)) return value.map(sanitizePublicValue);
+  if (value instanceof Date) return value;
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[sanitizePublicText(k)] = sanitizePublicValue(v);
+    return out;
+  }
+  return value;
+}
+
 function minimizeApiStatus(snap) {
   const eng = snap.engineering || {};
   const engineering = eng.state === 'OK'
@@ -431,6 +546,18 @@ function minimizeApiStatus(snap) {
         verdict: eng.verdict,
         lane: eng.lane,
         highRisk: eng.highRisk,
+        // CONFIRMED FINDING #7: the founder panel re-renders from THIS payload,
+        // so the evidence it must state has to survive minimization. These are
+        // the classifier's own reasons, the gate's own subject hash, its own
+        // blocking problems and its own reviewer table — repo-relative paths,
+        // reviewer names and generated plain-English reasons only. No packet
+        // body, no transcript, no absolute path, no credential.
+        laneWhy: eng.laneWhy || [],
+        riskReasons: eng.riskReasons || [],
+        subjectSha256: eng.subjectSha256 || null,
+        subjectPaths: eng.subjectPaths || [],
+        problems: (eng.problems || []).map((p) => ({ rule: p.rule, detail: p.detail })),
+        reviewerCompleteness: minimizeReviewerCompleteness(eng.reviewerCompleteness),
         requiredReviewers: eng.requiredReviewers,
         stages: (eng.stages || []).map((s) => ({ id: s.id, step: s.step, label: s.label, state: s.state, reason: s.reason })),
       }
@@ -463,6 +590,10 @@ function minimizeApiStatus(snap) {
         unrecordedRuns: costSrc.unrecordedRuns,
         caveat: costSrc.caveat,
         byReviewer: costSrc.byReviewer,
+        // CAD is carried so the live surface and the generated page cannot
+        // disagree about the currency a founder is reading. It is whatever the
+        // projector produced from dated FX evidence — including UNAVAILABLE.
+        cad: costSrc.cad || { state: 'UNAVAILABLE', reason: 'no CAD projection was produced' },
       }
     : { state: costSrc.state || 'UNAVAILABLE', reason: costSrc.reason || null };
 
@@ -470,9 +601,19 @@ function minimizeApiStatus(snap) {
   const runs = runsSrc.state === 'OK'
     ? runsSrc.runs.map((r) => ({
         runId: r.runId, state: r.state, objective: r.objective, contractStep: r.contractStep,
+        // The run's own authoritative timestamps travel with it. Without them
+        // the browser would be back to picking "current" by array position.
+        createdAt: r.createdAt || null, updatedAt: r.updatedAt || null,
+        packetId: r.packetId || null,
         checks: r.checks, checkpoint: r.checkpoint, transitions: r.transitions,
       }))
     : [];
+  // The binding itself is computed once, by the projector, and shipped — the
+  // browser never re-derives which run is current from the array it was given.
+  const runsBinding = runsSrc.current || {
+    state: 'UNAVAILABLE', runId: null, updatedAt: null, packetId: null, subjectSha256: null,
+    reason: 'the runs projection produced no current-run binding',
+  };
 
   const eventsSrc = snap.events || {};
   const events = eventsSrc.state === 'OK'
@@ -485,16 +626,21 @@ function minimizeApiStatus(snap) {
     conflicts: typeof knowledgeSrc.conflicts === 'number' ? knowledgeSrc.conflicts : null,
   };
 
-  return {
+  // The single boundary between internal evidence and the public surface.
+  // Everything above decided WHICH fields travel; this decides what a travelling
+  // string is allowed to say. Both /api/status and the SSE push return through
+  // here, so there is one place to check, not two.
+  return sanitizePublicValue({
     generatedAt: snap.generatedAt,
     engineering,
     integration: { connectors },
     reviewers,
     cost,
     runs,
+    runsBinding,
     events,
     knowledge,
-  };
+  });
 }
 
 function buildApiStatus() {
@@ -512,6 +658,8 @@ function buildApiStatus() {
       reviewers: [],
       cost: { state: 'UNAVAILABLE', reason: null },
       runs: [],
+      runsBinding: { state: 'UNAVAILABLE', runId: null, updatedAt: null, packetId: null, subjectSha256: null,
+        reason: 'the engineering snapshot is unavailable, so no run could be bound' },
       events: [],
       knowledge: { state: 'UNKNOWN', conflicts: null },
     };
@@ -713,5 +861,6 @@ if (require.main === module) {
 module.exports = {
   validateConfig, handler, start, sessionFor, SERVABLE, NEVER_SERVE, isNeverServe, LOOPBACK,
   API_STATUS_PATH, API_EVENTS_PATH, API_POST_ROUTES, SWITCHBOARD_PACKET, MAX_API_BODY_BYTES, CSP,
-  minimizeApiStatus, buildApiStatus, parseRunIdBody, checkOrigin, resolveCanonicalLedgerFile,
+  minimizeApiStatus, buildApiStatus, sanitizePublicText, sanitizePublicValue, parseRunIdBody, checkOrigin,
+  resolveCanonicalLedgerFile,
 };

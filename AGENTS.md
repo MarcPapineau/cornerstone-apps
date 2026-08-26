@@ -20,10 +20,19 @@ Every meaningful change follows [`builder-control/AI-ENGINEERING-OS.md`](builder
 
 - **LIGHT lane** — a genuinely tiny change to an unprotected document. No task
   packet, no model review. Deterministic checks are the whole gate.
-- **FULL lane** — everything else. Requires a task packet and an independent
-  review bound to this exact change.
+- **FULL lane** — everything else. Requires a task packet and **two** reviews
+  bound to this exact change: **Codex** (independent engineering review) and
+  **Grok** (adversarial red team). Both, every time. A change reaches FULL
+  precisely because nothing in the classifier could confidently call it safe,
+  which is the worst possible moment to drop the reviewer whose job is to
+  disbelieve it.
 - **HIGH-RISK** — auth, secrets, payments, migrations, permissions, crypto,
-  CI workflows, or the control system itself. Adds an adversarial review.
+  CI workflows, agent charters (`AGENTS.md`, `CLAUDE.md` at any depth),
+  `.claude/` control directories, or the control system itself. Same two
+  required reviewers; high-risk raises the scrutiny, not the roster.
+
+Copilot is advisory forever: it can block on a CRITICAL/HIGH finding and it can
+never satisfy a required slot.
 
 ## What "done" means here
 

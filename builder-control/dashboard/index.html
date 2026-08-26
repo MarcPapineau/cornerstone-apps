@@ -209,6 +209,11 @@
 
 <main>
   <div class="col">
+    <section aria-labelledby="founder-h" id="founder-summary">
+      <h2 id="founder-h">Current run</h2>
+      <div class="body" id="founder-body"><p class="empty">Loading current-run summary…</p></div>
+    </section>
+
     <section aria-labelledby="intake-h">
       <h2 id="intake-h">Objective intake</h2>
       <div class="body">
@@ -259,6 +264,9 @@
       </div>
     </section>
 
+    <details id="raw-state">
+      <summary>Raw machine state (for engineers)</summary>
+
     <section id="topology" aria-labelledby="topology-h">
       <h2 id="topology-h">Workflow topology &amp; process drift</h2>
       <div class="body">
@@ -285,6 +293,7 @@
       <h2 id="rev-h">Reviewers</h2>
       <div class="body"><ul class="rows" id="reviewers"></ul></div>
     </section>
+    </details>
   </div>
 
   <div class="col">
@@ -374,22 +383,292 @@
   // shows that state rather than guessing which side of the line it falls on.
   $('ctx-verdict').appendChild(chip(eng.verdict || 'UNAVAILABLE'));
 
+  // ── founder summary: one primary, plain-English "what's happening" panel ──
+  // What was requested / What is happening now / Why blocked / Next action —
+  // stated in words a non-technical reader can act on. Nothing here is a new
+  // judgement: it is the same gate verdict and reviewer-completeness table
+  // rendered in "Raw machine state" below, re-expressed for someone who does
+  // not want to read a rule name to know what to do next.
+  //
+  // CONFIRMED FINDING #7 — two defects, both fixed here:
+  //   1. "Current run" was runs[runs.length - 1] of a FILENAME-sorted array.
+  //      It is now the projector's own binding, selected by the run record's
+  //      updatedAt timestamp, and it names the run, the time, the packet and
+  //      the subject hash it claims to be about. No binding -> UNAVAILABLE.
+  //   2. It rendered once from static state.js and never again, so a founder
+  //      watching the page saw a frozen objective and a frozen verdict. It is
+  //      now a function of a view object, called on first paint AND on every
+  //      /api/status push, and it repaints from whichever is newer.
+  function plainVerdict(v){
+    var NOW_PLAIN = {
+      READY_FOR_PR: 'Ready to open a pull request — required reviews are bound to this exact change and its checks have passed here.',
+      READY_FOR_DETERMINISTIC_VALIDATION: 'Required reviews are in, but the deterministic checks have not been run by this process yet.',
+      BLOCKED: 'Blocked — this change cannot proceed until the item(s) below are resolved.',
+      UNAVAILABLE: 'No verdict is available. The gate has not been run against a current change, or its output could not be read.'
+    };
+    return NOW_PLAIN[v] || ('State: ' + (v || 'UNKNOWN'));
+  }
+
+  // The risk tier in words, with the classifier's own reasons attached. A tier
+  // shown as a bare label is indistinguishable from a default, which is the
+  // whole thing a founder needs to be able to tell apart.
+  function plainRisk(e){
+    var lane = e.lane || 'UNKNOWN';
+    var LANE_PLAIN = {
+      FULL: 'Full review — this change must be read by every required reviewer before it can proceed.',
+      LIGHT: 'Light review — small and low-risk enough that the automated checks are the whole gate.',
+      UNKNOWN: 'The risk tier could not be read. An unknown tier is treated as the strictest one, never the cheapest.'
+    };
+    return { lane: lane, highRisk: e.highRisk === true,
+      plain: LANE_PLAIN[lane] || ('Risk tier ' + lane + '.'),
+      reasons: (e.laneWhy || []).concat(e.riskReasons || []) };
+  }
+
+  // One reviewer row, in a sentence a founder can act on: who, what they were
+  // for, whether they were required, whether they read THIS version, what they
+  // decided, and how much of the change they actually covered.
+  function reviewerLine(row){
+    var required = row.required === 'REQUIRED' ? 'required' :
+      (row.required === 'ADVISORY' ? 'advisory only — cannot unblock anything' : 'not required for this tier');
+    var ran;
+    if (row.executed === 'EXECUTED') {
+      ran = 'reviewed this exact version and ' + (
+        row.disposition === 'REJECT' ? 'rejected it' :
+        row.disposition === 'APPROVE_WITH_NOTES' ? 'approved it with notes' :
+        row.disposition === 'APPROVE' ? 'approved it' :
+        ('returned ' + (row.disposition || 'no disposition')));
+    } else if (row.executed === 'STALE') {
+      ran = 'has only reviewed an older version of this code, so none of it counts here';
+    } else if (row.executed === 'UNAVAILABLE') {
+      ran = 'could not be run, which counts as not reviewed';
+    } else {
+      ran = 'has not reviewed this change';
+    }
+    return row.reviewer + ' (' + row.job + ', ' + required + ') ' + ran + '. Coverage: ' +
+      (row.score || 'UNAVAILABLE') + '.';
+  }
+
+  function renderFounderSummary(view){
+    var host = $('founder-body'); if (!host) return;
+    var e = (view && view.engineering) || {};
+    var runs = (view && view.runs) || [];
+    var bind = (view && view.binding) || null;
+    host.textContent = '';
+
+    // ── the binding itself, stated before anything it is used to claim ──
+    var bindP = el('p');
+    bindP.appendChild(el('strong', null, 'Current run: '));
+    if (bind && bind.state === 'BOUND'){
+      bindP.appendChild(document.createTextNode(bind.runId + ' · last written ' + bind.updatedAt +
+        ' · packet ' + (bind.packetId || 'none recorded') +
+        ' · code version ' + (bind.subjectSha256 ? String(bind.subjectSha256).slice(0,12) + '…' : 'UNAVAILABLE')));
+      bindP.appendChild(el('div','meta', bind.reason || ''));
+    } else {
+      bindP.appendChild(chip('UNAVAILABLE'));
+      bindP.appendChild(el('div','meta', (bind && bind.reason) ||
+        'No run could be bound to this page, so nothing below is attributed to a run.'));
+    }
+    host.appendChild(bindP);
+
+    var boundRun = null;
+    if (bind && bind.state === 'BOUND'){
+      boundRun = runs.filter(function(r){ return r.runId === bind.runId; })[0] || null;
+    }
+
+    var requested = el('p');
+    requested.appendChild(el('strong', null, 'What was requested: '));
+    var objective = (boundRun && boundRun.objective) || (bind && bind.objective) || null;
+    requested.appendChild(document.createTextNode(
+      objective ? objective : 'No run objective is recorded for the current run.'));
+    host.appendChild(requested);
+
+    var happening = el('p');
+    happening.appendChild(el('strong', null, 'What is happening now: '));
+    happening.appendChild(document.createTextNode(plainVerdict(e.verdict)));
+    host.appendChild(happening);
+
+    // ── risk tier, explained ──────────────────────────────────────────
+    var risk = plainRisk(e);
+    var riskP = el('p');
+    riskP.appendChild(el('strong', null, 'Risk tier: '));
+    riskP.appendChild(document.createTextNode(risk.lane + (risk.highRisk ? ' (high-risk)' : '') + ' — ' + risk.plain));
+    host.appendChild(riskP);
+    if (risk.reasons.length){
+      var rl = el('ul','rows');
+      risk.reasons.forEach(function(why){ rl.appendChild(el('li','meta', why)); });
+      host.appendChild(rl);
+    } else {
+      host.appendChild(el('p','meta','No reason for this tier was recorded, which is itself a gap — an unexplained tier cannot be checked.'));
+    }
+
+    var why = el('p');
+    why.appendChild(el('strong', null, 'Why blocked: '));
+    if (e.problems && e.problems.length){
+      why.appendChild(document.createTextNode(e.problems.map(function(p){ return p.detail; }).join(' ')));
+    } else {
+      why.appendChild(document.createTextNode('Nothing is blocking this run.'));
+    }
+    host.appendChild(why);
+
+    var next = el('p');
+    next.appendChild(el('strong', null, 'Next action: '));
+    var actions = [];
+    var rc = e.reviewerCompleteness;
+    if (rc && rc.rows){
+      rc.rows.forEach(function(row){
+        if (row.required === 'REQUIRED' && row.executed !== 'EXECUTED'){
+          actions.push('Get ' + row.reviewer + ' to review this exact change (' + row.job + ').');
+        } else if (row.required === 'REQUIRED' && row.executed === 'EXECUTED' && (row.missingPaths || []).length){
+          actions.push('Get ' + row.reviewer + ' to read the ' + row.missingPaths.length +
+            ' changed file(s) it has not read yet.');
+        }
+      });
+    }
+    if (!actions.length && e.verdict === 'READY_FOR_DETERMINISTIC_VALIDATION'){
+      actions.push('Run the deterministic checks, or re-run the gate with --run-checks.');
+    }
+    if (!actions.length && e.verdict === 'READY_FOR_PR'){
+      actions.push('Open the pull request. This is not a claim the software is correct — that is a separate, unfinished step.');
+    }
+    if (!actions.length && (!e.problems || !e.problems.length) && e.verdict !== 'READY_FOR_PR'){
+      actions.push('No action is available from this page — see Raw machine state below.');
+    }
+    next.appendChild(document.createTextNode(actions.length ? actions.join(' ') : 'No action is currently identified.'));
+    host.appendChild(next);
+
+    // ── who reviewed what, against THIS code version ───────────────────
+    var revP = el('p');
+    revP.appendChild(el('strong', null, 'Who has reviewed this exact version: '));
+    if (!rc || !rc.rows || !rc.rows.length){
+      revP.appendChild(chip('UNAVAILABLE'));
+      revP.appendChild(el('div','meta','No reviewer table was produced for this change, so reviewer coverage is unknown — not zero, and certainly not complete.'));
+      host.appendChild(revP);
+    } else {
+      revP.appendChild(document.createTextNode(
+        rc.complete ? 'Every required reviewer read every changed file of this version.'
+                    : 'Not every required reviewer has read every changed file of this version.'));
+      // FINDING #2 — the headline above is a yes/no. The gate also states WHICH
+      // reviewer fell short, in what way, and what to re-run; without that
+      // sentence on screen a founder reading "not every reviewer" has to open
+      // the raw state to learn what to do about it. Rendered verbatim as text
+      // (never markup) so a reviewer name or a path cannot inject anything, and
+      // stated as an absence when the gate recorded no sentence at all.
+      if (rc.completeReason){
+        revP.appendChild(el('div','meta', rc.completeReason));
+      } else {
+        revP.appendChild(el('div','meta',
+          'The gate recorded no explanation for this coverage verdict, so the reason is UNAVAILABLE — read the reviewer rows below rather than assuming one.'));
+      }
+      host.appendChild(revP);
+      var rul = el('ul','rows');
+      rc.rows.forEach(function(row){
+        var li = el('li','row');
+        var left = el('div');
+        left.appendChild(el('div','name', row.reviewer));
+        left.appendChild(el('div','meta', reviewerLine(row)));
+        var right = el('div','badges');
+        right.appendChild(chip(row.executed || 'UNKNOWN'));
+        li.appendChild(left); li.appendChild(right);
+        rul.appendChild(li);
+      });
+      host.appendChild(rul);
+
+      // File-by-file coverage is real evidence and also the densest thing on
+      // the page, so it is available and collapsed rather than absent.
+      var det = el('details');
+      det.appendChild(el('summary', null, 'Which files each reviewer read (covered, not read, and no longer part of this change)'));
+      var dul = el('ul','rows');
+      rc.rows.forEach(function(row){
+        var li = el('li','row');
+        var left = el('div');
+        left.appendChild(el('div','name', row.reviewer));
+        left.appendChild(el('div','meta','Read: ' + ((row.coveredPaths || []).join(', ') || 'none')));
+        left.appendChild(el('div','meta','Not read: ' + ((row.missingPaths || []).join(', ') || 'none')));
+        left.appendChild(el('div','meta','Claimed files that are not part of this change: ' + ((row.stalePaths || []).join(', ') || 'none')));
+        li.appendChild(left);
+        dul.appendChild(li);
+      });
+      det.appendChild(dul);
+      host.appendChild(det);
+    }
+
+    var others = bind && bind.state === 'BOUND'
+      ? runs.filter(function(r){ return r.runId !== bind.runId; })
+      : runs.slice();
+    if (others.length){
+      var histWrap = el('details');
+      histWrap.appendChild(el('summary', null, 'Previous runs (' + others.length + ')'));
+      var histList = el('ul','rows');
+      others.slice().reverse().forEach(function(r){
+        var li = el('li','row');
+        var left = el('div');
+        left.appendChild(el('div','name', r.runId));
+        left.appendChild(el('div','meta', (r.objective || '(no objective)') +
+          (r.updatedAt ? ' · last written ' + r.updatedAt : ' · no recorded timestamp')));
+        var right = el('div','badges'); right.appendChild(chip(r.state || 'UNKNOWN'));
+        li.appendChild(left); li.appendChild(right);
+        histList.appendChild(li);
+      });
+      histWrap.appendChild(histList);
+      host.appendChild(histWrap);
+    }
+
+    host.appendChild(prov((view && view.source) || e.source,
+      'This summary re-expresses the gate verdict and reviewer-completeness table; it decides nothing new. Last repaint from: ' +
+      ((view && view.origin) || 'UNKNOWN') + '.'));
+  }
+
+  function viewFromState(){
+    return {
+      engineering: eng,
+      runs: (S.runs && S.runs.state === 'OK') ? (S.runs.runs || []) : [],
+      binding: (S.runs && S.runs.current) || null,
+      cost: S.cost || null,
+      source: eng.source,
+      origin: 'the generated snapshot state.js (' + (S.generatedAt || 'UNKNOWN') + ')'
+    };
+  }
+  renderFounderSummary(viewFromState());
+
   // ── spend & authorization ───────────────────────────────────────
   // Recorded telemetry ONLY. A run whose telemetry was lost is counted as
   // UNRECORDED, never as zero and never estimated — so the headline figure is
   // "AT LEAST n", which is the only honest thing to say when some runs cannot
   // report what they cost.
-  (function renderCost(){
+  function renderCost(c){
     var host = $('cost'); if (!host) return;
-    var c = S.cost;
+    host.textContent = '';
     if (!c || c.state !== 'OK') {
       host.appendChild(el('p','empty','UNAVAILABLE — ' + ((c && c.reason) || 'no cost projection was produced.')));
       return;
     }
+    // FOUNDER FIGURE: Canadian dollars, and ONLY from dated FX evidence that
+    // cites its own rate, date and source. There is no network call here and no
+    // constant rate anywhere in this file: with no canonical evidence the
+    // headline reads CAD UNAVAILABLE and the US-dollar audit figures below are
+    // left exactly as the reviewers recorded them.
+    var cad = c.cad || { state: 'UNAVAILABLE', reason: 'no CAD projection was produced' };
     var head = el('div','cost-head');
-    head.appendChild(el('span','cost-total', c.totalUsd != null ? ('USD ' + c.totalUsd) : 'UNRECORDED'));
+    if (cad.state === 'OK' || cad.state === 'STALE'){
+      head.appendChild(el('span','cost-total', 'CAD ' + cad.totalCad));
+      if (cad.state === 'STALE') head.appendChild(chip('STALE'));
+    } else {
+      head.appendChild(el('span','cost-total', 'CAD UNAVAILABLE'));
+      head.appendChild(chip('UNAVAILABLE'));
+    }
     head.appendChild(el('span','muted', c.recordedRuns + ' run(s) reported cost, ' + c.unrecordedRuns + ' did not'));
     host.appendChild(head);
+
+    if (cad.state === 'OK' || cad.state === 'STALE'){
+      host.appendChild(el('p','cost-auth', 'Converted at ' + cad.plain +
+        ' Rate evidence: ' + (cad.source || 'UNKNOWN') + '.'));
+    } else {
+      host.appendChild(el('p','cost-caveat', cad.reason));
+    }
+    // The audit values, in the currency they were actually billed in. These are
+    // never replaced by the converted figure — the conversion is a reading aid.
+    host.appendChild(el('p','cost-auth', 'Source audit values, as recorded: USD ' + c.totalUsd +
+      ' (recorded USD ' + c.recordedUsdDisplay + ').'));
     if (c.caveat) host.appendChild(el('p','cost-caveat', c.caveat));
     if (c.authorization) {
       host.appendChild(el('p','cost-auth',
@@ -403,14 +682,16 @@
     })).forEach(function(r){
       var li = el('li','row');
       li.appendChild(el('span','k', r.reviewer));
-      li.appendChild(el('span','v', 'USD ' + r.recordedUsd +
+      var cadPer = (cad.byReviewerCad && cad.byReviewerCad[r.reviewer]) || null;
+      li.appendChild(el('span','v',
+        (cadPer ? 'CAD ' + cadPer.recordedCad + ' (USD ' + r.recordedUsd + ')' : 'USD ' + r.recordedUsd) +
         (r.unrecordedRuns ? '  (+' + r.unrecordedRuns + ' UNRECORDED)' : '')));
       ul.appendChild(li);
     });
     host.appendChild(ul);
-    var src = el('p','src', 'source: ' + (c.source || 'builder-control/review-raw/*'));
-    host.appendChild(src);
-  })();
+    host.appendChild(el('p','src', 'source: ' + (c.source || 'builder-control/review-raw/*')));
+  }
+  renderCost(S.cost);
 
   // ── stages ──────────────────────────────────────────────────────
   var stages = (eng.stages || []);
@@ -482,6 +763,50 @@
     });
   }
 
+  // CONFIRMED FINDING #10: this row used to collapse every non-USED state into
+  // a flat negative assertion, and to label any historical usage record as a
+  // consultation by the current run without ever checking which run is
+  // current. Both were claims the projector never made. There are FOUR states
+  // and they are four different sentences:
+  //
+  //   UNAVAILABLE  no usage evidence exists at all      -> we do not know
+  //   UNVERIFIED   a claim exists, the ledger disagrees -> unconfirmed claim
+  //   USED (other) ledger-confirmed, a DIFFERENT run    -> last used by run X
+  //   USED (this)  ledger-confirmed, the bound run      -> used by this run
+  //
+  // "for this run" is only ever printed after an exact runId match against the
+  // binding. With no bound run there is no "this run" to compare to, so a
+  // confirmed use stays "last used by run X".
+  function currentRunId(){
+    var b = (S.runs && S.runs.current) || null;
+    return (b && b.state === 'BOUND' && b.runId) ? b.runId : null;
+  }
+  function usageMessage(used, curRunId){
+    if (!used || used.state === 'UNAVAILABLE'){
+      return { state: 'UNAVAILABLE', text:
+        'Usage UNAVAILABLE — no record exists of any run consulting this connector. That is missing evidence, not proof it was unused.' };
+    }
+    if (used.state === 'UNVERIFIED'){
+      return { state: 'UNVERIFIED', text:
+        'Usage UNVERIFIED — this connector claims run ' + (used.claim && used.claim.runId ? used.claim.runId : 'UNKNOWN') +
+        ' used it, and the permanent ledger records no matching use. A claim about itself is not evidence it was consulted.' };
+    }
+    if (used.state === 'USED'){
+      var cited = used.citedSource ? ' — cited ' + used.citedSource : '';
+      var conf = used.ledgerConfirmed ? ' (ledger-confirmed)' : ' (not ledger-confirmed)';
+      if (curRunId && used.runId === curRunId){
+        return { state: 'USED_CURRENT', text:
+          'Used by this run (' + used.runId + ') on ' + used.observedAt + cited + conf + '.' };
+      }
+      return { state: 'USED_HISTORICAL', text:
+        'Last used by run ' + used.runId + ' on ' + used.observedAt + cited + conf +
+        (curRunId ? '. That is not the current run (' + curRunId + '), so nothing here says it was consulted for this one.'
+                  : '. No current run is bound to this page, so this cannot be attributed to one.') };
+    }
+    return { state: 'UNKNOWN', text:
+      'Usage state "' + used.state + '" is not one this page knows how to read, so it is reported as-is rather than guessed at.' };
+  }
+
   // ── connectors ──────────────────────────────────────────────────
   var conn = (S.integration && S.integration.connectors) || {};
   var cl = $('connectors');
@@ -505,6 +830,13 @@
         if (c.staleness.ageMinutes != null) s.lastChild.textContent = 'STALE ' + c.staleness.ageMinutes + 'm';
         right.appendChild(s);
       }
+      // Usage is the one fact that must never be inferred from authentication
+      // or a healthy probe: a connector can be authenticated and freshly
+      // verified and still have been consulted by nothing.
+      var msg = usageMessage(c.lastUsedByRun, currentRunId());
+      var usageLine = el('div','meta', msg.text);
+      usageLine.setAttribute('data-usage-state', msg.state);
+      left.appendChild(usageLine);
       li.appendChild(left); li.appendChild(right);
       li.tabIndex = 0; li.style.cursor='pointer';
       li.addEventListener('click', function(){ select(li,'connector', c); });
@@ -579,6 +911,12 @@
       kv('Health', data.health);
       kv('Staleness', data.staleness ? (data.staleness.state + (data.staleness.ageMinutes!=null ? ' ('+data.staleness.ageMinutes+'m)' : '')) : '—');
       kv('Auth', data.authStatus);
+      // THREE INDEPENDENT FACTS, never inferred from each other: a connector can
+      // be authenticated and freshly verified and still be UNAVAILABLE for
+      // usage, because being reachable is not being consulted.
+      if (data.authentication) kv('Authenticated', data.authentication.state + ' — ' + data.authentication.plain);
+      if (data.lastVerified) kv('Last verified', data.lastVerified.state + ' — ' + data.lastVerified.plain);
+      if (data.lastUsedByRun) kv('Last used by a run', data.lastUsedByRun.state + ' — ' + data.lastUsedByRun.plain);
       kv('Execution path', data.executionPath);
       kv('Supports', (data.capabilities||[]).join(', ') || '—');
       kv('Declared NOT supported', (data.declaredNotSupported||[]).join(', ') || '—');
@@ -617,6 +955,17 @@
   if (window.matchMedia && window.matchMedia('(min-width:1920px)').matches){
     document.body.setAttribute('data-mode','command');
   }
+
+  // The ONE seam between the generated snapshot and the live control surface.
+  // The switchboard below does not own a second copy of these renderers — a
+  // second copy is how two panels on one page start disagreeing — it calls
+  // these, with a view built from whatever /api/status just pushed.
+  window.AEGIS_DASHBOARD = {
+    renderFounderSummary: renderFounderSummary,
+    renderCost: renderCost,
+    usageMessage: usageMessage,
+    viewFromState: viewFromState
+  };
 })();
 </script>
 
@@ -744,13 +1093,14 @@
   function runActionRow(run){
     var row = el('div', 'btn-row');
 
+    // Pause is unavailable for EVERY run today — there is no asynchronous
+    // build process to suspend (see the limitation notice above). Disabled
+    // rather than merely titled, so the impossible action cannot be attempted
+    // and then explained away after the fact.
     var pauseBtn = el('button', 'action', 'Pause');
     pauseBtn.type = 'button';
+    pauseBtn.disabled = true;
     pauseBtn.title = 'Pause is unavailable: there is no active build process to suspend (see the limitation notice above).';
-    pauseBtn.addEventListener('click', async function(){
-      try { await callApi('/api/pause', { runId: run.runId }); }
-      catch (e) { appendActivity('Pause refused for ' + run.runId + ': ' + e.message); }
-    });
     row.appendChild(pauseBtn);
 
     var CANCELABLE = ['CREATED','INTAKE_RECORDED','ROUTED','WORKTREE_READY','BUILT','CHECKS_PASSED','REVIEW_BOUND','CORRECTING','BUILD_FAILED','CHECKS_FAILED'];
@@ -807,10 +1157,28 @@
     while (host.children.length > 30) host.removeChild(host.lastChild);
   }
 
+  // CONFIRMED FINDING #7: this used to refresh run cards and the activity list
+  // and nothing else, so the founder summary and the spend figure kept showing
+  // whatever state.js said when the page was generated — an old objective and
+  // an old verdict presented as current. Every live push now repaints the
+  // founder panel and the spend panel through the SAME renderers the generated
+  // snapshot uses, from the SAME binding the projector computed.
   function applyStatus(status){
     renderRuns(status && status.runs);
+    var D = window.AEGIS_DASHBOARD;
+    if (D && status) {
+      D.renderFounderSummary({
+        engineering: (status.engineering && status.engineering.state === 'OK') ? status.engineering : {},
+        runs: status.runs || [],
+        binding: status.runsBinding || null,
+        source: '/api/status',
+        origin: 'a live /api/status push (' + (status.generatedAt || 'UNKNOWN') + ')'
+      });
+      if (status.cost) D.renderCost(status.cost);
+    }
     appendActivity('status: engineering=' + ((status.engineering && status.engineering.state) || 'UNKNOWN') +
-      ' runs=' + ((status.runs && status.runs.length) || 0));
+      ' runs=' + ((status.runs && status.runs.length) || 0) +
+      ' current=' + ((status.runsBinding && status.runsBinding.runId) || 'UNAVAILABLE'));
   }
 
   // Bootstrap: an authenticated GET/api/status confirms the session cookie is

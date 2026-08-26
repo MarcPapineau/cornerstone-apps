@@ -177,7 +177,12 @@
     "correlationId": {
       "type": "string",
       "minLength": 1,
-      "description": "Groups every attempt and downstream effect of one logical operation, so a retry storm reads as one story rather than N unrelated events."
+      "description": "Groups every attempt and downstream effect of one logical operation, so a retry storm reads as one story rather than N unrelated events. This is ALSO the canonical RUN COORDINATE: on a connector-usage entry, correlationId is the exact run that consumed the connector. There is deliberately no separate `runId` property — a second run coordinate would be a second authority on the same question, and additionalProperties:false means an entry carrying `runId` is rejected rather than silently half-read."
+    },
+    "connectorId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The connector coordinate: WHICH external service this entry is about. Added 2026-08-25 so that a run's consumption of a connector can be recorded as a first-class canonical ledger entry instead of an off-schema shape no writer would accept. Meaningful on INTEGRATION-plane entries with gate \"connector-usage\", where the projector reads connectorId + correlationId (run) + operationId + ts as the authoritative record of a use. Optional here rather than conditionally required because this schema's validator is a deliberately small draft-07 subset with no if/then support; the projector fails closed instead — a connector-usage entry missing any of those four coordinates projects no usage at all rather than a partial one."
     },
     "attempt": {
       "type": "integer",
@@ -255,6 +260,22 @@
       "evidencePaths": [],
       "driftChecks": [],
       "notes": "HARD-BLOCK: push to public repo path with no packet and no allowsPublicPush. Refused, exit 1."
+    },
+    {
+      "entryId": "LED-2026-08-25-USAGE-0001",
+      "ts": "2026-08-25T10:00:00Z",
+      "packetId": "PKT-20260825-GOVERNANCE-TRUTH",
+      "agentId": "claude-code",
+      "gate": "connector-usage",
+      "status": "PASS",
+      "plane": "INTEGRATION",
+      "connectorId": "notion",
+      "correlationId": "RUN-20260825-EXAMPLE",
+      "operationId": "op-notion-fetch-0001",
+      "attempt": 1,
+      "operation": "read Notion page for the nightly brief",
+      "result": "page fetched",
+      "notes": "A run CONSUMED this connector. correlationId is the run; connectorId is the service. This entry — not the connector's own usageEvidence receipt — is what lets the dashboard say lastUsedByRun."
     }
   ]
 }

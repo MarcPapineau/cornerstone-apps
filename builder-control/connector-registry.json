@@ -1,6 +1,6 @@
 {
   "registryVersion": "1.0.0",
-  "note": "Connectors are INTEGRATION-plane workers. None of them may mark work verified, approve its own execution, declare tests or runtime PASS, suppress findings, create a checkpoint, or override the watchdog or a human gate. aegis-state.cjs refuses to load any entry whose plane is not INTEGRATION, and a test proves that refusal. Default health is UNKNOWN: a connector that has never been probed is UNKNOWN, never HEALTHY, because an optimistic default is how an outage stays invisible.",
+  "note": "Connectors are INTEGRATION-plane workers. None of them may mark work verified, approve its own execution, declare tests or runtime PASS, suppress findings, create a checkpoint, or override the watchdog or a human gate. aegis-state.cjs refuses to load any entry whose plane is not INTEGRATION, and a test proves that refusal. Default health is UNKNOWN: a connector that has never been probed is UNKNOWN, never HEALTHY, because an optimistic default is how an outage stays invisible. AUTHENTICATION, VERIFICATION AND USAGE ARE THREE FACTS, NEVER ONE. Each now carries its OWN DATED EVIDENCE: authEvidence says WHEN the credential was checked and what it read (an undated authStatus is not evidence and projects UNAVAILABLE); verificationEvidence records the last probe that POSITIVELY SUCCEEDED, so a later failed probe can never render as a fresh verification; usageEvidence is a CLAIM that one exact run consumed this connector, written only by a USAGE receipt (connector-receipt.cjs). A usage claim is projected as USED only when the append-only ledger independently corroborates it on every axis — same connectorId, same runId, same operationId, a successful consumption entry (plane INTEGRATION, gate \"connector-usage\", status PASS), and a timestamp within the correlation window. Uncorroborated claims read UNVERIFIED; no claim at all reads UNAVAILABLE. connector-receipt.cjs deliberately does NOT write that ledger entry — a receipt corroborating itself would prove nothing — so the control plane that performs the consumption must append it.",
   "healthVocabulary": [
     "HEALTHY",
     "DEGRADED",
@@ -35,8 +35,11 @@
         "observedAt": "2026-08-25T16:53:19Z",
         "method": "GitHub CLI authentication probe",
         "result": "Authenticated active account confirmed; credential value omitted.",
-        "operationId": "github-probe-20260825T165319Z"
+        "operationId": "github-probe-20260825T165319Z",
+        "health": "HEALTHY",
+        "outcome": "SUCCESS"
       },
+      "usageEvidence": null,
       "lastSuccess": "2026-08-25T16:53:19Z",
       "lastFailure": null,
       "failureCount": 0,
@@ -54,7 +57,20 @@
       ],
       "environment": "production",
       "riskLevel": "HIGH",
-      "authorityNote": "GitHub records machine truth (what the code does). It does not decide product intent, and a green check is not a verification verdict."
+      "authorityNote": "GitHub records machine truth (what the code does). It does not decide product intent, and a green check is not a verification verdict.",
+      "authEvidence": {
+        "observedAt": "2026-08-25T16:53:19Z",
+        "authStatus": "AUTHENTICATED",
+        "method": "GitHub CLI authentication probe",
+        "operationId": "github-probe-20260825T165319Z",
+        "derivedFrom": "healthEvidence recorded by the same probe operation"
+      },
+      "verificationEvidence": {
+        "observedAt": "2026-08-25T16:53:19Z",
+        "method": "GitHub CLI authentication probe",
+        "result": "Authenticated active account confirmed; credential value omitted.",
+        "operationId": "github-probe-20260825T165319Z"
+      }
     },
     {
       "connectorId": "notion",
@@ -78,8 +94,11 @@
         "observedAt": "2026-08-25T16:47:01Z",
         "method": "Codex Notion MCP search followed by page fetch",
         "result": "The requested UX and Product Experience Architecture page was found and readable; private page contents omitted from connector evidence.",
-        "operationId": "notion-probe-20260825T164701Z"
+        "operationId": "notion-probe-20260825T164701Z",
+        "health": "HEALTHY",
+        "outcome": "SUCCESS"
       },
+      "usageEvidence": null,
       "lastSuccess": "2026-08-25T16:47:01Z",
       "lastFailure": null,
       "failureCount": 0,
@@ -94,7 +113,20 @@
       ],
       "environment": "production",
       "riskLevel": "MEDIUM",
-      "authorityNote": "Notion holds human product intent. A live page is NOT a pin: a packet must pin an approved version or mark the source UNVERIFIED."
+      "authorityNote": "Notion holds human product intent. A live page is NOT a pin: a packet must pin an approved version or mark the source UNVERIFIED.",
+      "authEvidence": {
+        "observedAt": "2026-08-25T16:47:01Z",
+        "authStatus": "AUTHENTICATED",
+        "method": "Codex Notion MCP search followed by page fetch",
+        "operationId": "notion-probe-20260825T164701Z",
+        "derivedFrom": "healthEvidence recorded by the same probe operation"
+      },
+      "verificationEvidence": {
+        "observedAt": "2026-08-25T16:47:01Z",
+        "method": "Codex Notion MCP search followed by page fetch",
+        "result": "The requested UX and Product Experience Architecture page was found and readable; private page contents omitted from connector evidence.",
+        "operationId": "notion-probe-20260825T164701Z"
+      }
     },
     {
       "connectorId": "make",
@@ -117,8 +149,11 @@
         "observedAt": "2026-08-25T17:03:41Z",
         "method": "Authenticated Make MCP toolbox inspection",
         "result": "AEGIS Integration Plane toolbox is accessible; its credential and Connector Health Probe both report use today. Credential value omitted.",
-        "operationId": "make-probe-20260825T170341Z"
+        "operationId": "make-probe-20260825T170341Z",
+        "health": "HEALTHY",
+        "outcome": "SUCCESS"
       },
+      "usageEvidence": null,
       "lastSuccess": "2026-08-25T17:03:41Z",
       "lastFailure": null,
       "failureCount": 0,
@@ -134,7 +169,20 @@
       ],
       "environment": "production",
       "riskLevel": "HIGH",
-      "authorityNote": "Make executes approved multi-system workflows. It may never approve work, declare tests or runtime PASS, create checkpoints, or override a human or engineering gate."
+      "authorityNote": "Make executes approved multi-system workflows. It may never approve work, declare tests or runtime PASS, create checkpoints, or override a human or engineering gate.",
+      "authEvidence": {
+        "observedAt": "2026-08-25T17:03:41Z",
+        "authStatus": "AUTHENTICATED",
+        "method": "Authenticated Make MCP toolbox inspection",
+        "operationId": "make-probe-20260825T170341Z",
+        "derivedFrom": "healthEvidence recorded by the same probe operation"
+      },
+      "verificationEvidence": {
+        "observedAt": "2026-08-25T17:03:41Z",
+        "method": "Authenticated Make MCP toolbox inspection",
+        "result": "AEGIS Integration Plane toolbox is accessible; its credential and Connector Health Probe both report use today. Credential value omitted.",
+        "operationId": "make-probe-20260825T170341Z"
+      }
     }
   ]
 }

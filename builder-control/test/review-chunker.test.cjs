@@ -398,5 +398,77 @@ test('RED #3b: the archive preserves audit history rather than deleting it', () 
     'no evidence path may delete a record — discarding evidence to clear a gate is the failure this system exists to prevent');
 });
 
+// ── 2026-08-25: group evidence isolation by exact subject hash and reviewer ─
+// A rerun's "predecessor" and an aggregate's "lane" must be found by matching
+// groupId, reviewer AND subject hash exactly — never by filename shape alone,
+// which cannot tell one reviewer's G1 from another's, or this subject's G1
+// from a prior subject's.
+const SHA_A = 'a'.repeat(64);
+const SHA_B = 'b'.repeat(64);
+const laneRecord = (reviewer, groupId, subjectSha, over = {}) => ({
+  reviewer,
+  group: { groupId, groupDigest: 'd'.repeat(64) },
+  reviewOf: { diffSha256: subjectSha, changedPaths: [] },
+  disposition: 'APPROVE',
+  ...over,
+});
+
+test('RED: interleaved Codex/Grok records in the same group are distinct lanes', () => {
+  const codexG1 = laneRecord('codex', 'G1', SHA_A);
+  const grokG1 = laneRecord('grok', 'G1', SHA_A);
+  const lane = { groupId: 'G1', reviewer: 'codex', subjectSha: SHA_A };
+  assert.strictEqual(C.matchesLane(codexG1, lane), true, 'the exact lane must match');
+  assert.strictEqual(C.matchesLane(grokG1, lane), false,
+    'a Codex rerun of G1 must never archive Grok\'s G1 — same group, different reviewer');
+});
+
+test('RED: same-reviewer rerun isolation — a G1 rerun only matches G1, and only this subject', () => {
+  const priorSameSubject = laneRecord('codex', 'G1', SHA_A);
+  const priorOtherGroup = laneRecord('codex', 'G2', SHA_A);
+  const lane = { groupId: 'G1', reviewer: 'codex', subjectSha: SHA_A };
+  assert.strictEqual(C.matchesLane(priorSameSubject, lane), true);
+  assert.strictEqual(C.matchesLane(priorOtherGroup, lane), false,
+    'a G1 rerun must never sweep up G2 for the same reviewer and subject');
+});
+
+test('RED: other-subject isolation — a same-reviewer, same-group record from a prior subject never matches', () => {
+  const priorSubject = laneRecord('codex', 'G1', SHA_B);
+  const lane = { groupId: 'G1', reviewer: 'codex', subjectSha: SHA_A };
+  assert.strictEqual(C.matchesLane(priorSubject, lane), false,
+    'identical groupId and reviewer is not enough — the subject hash must also match exactly');
+});
+
+test('RED: a legacy record missing group/reviewer/subject fields never ambiguously matches a lane', () => {
+  const lane = { groupId: 'G1', reviewer: 'codex', subjectSha: SHA_A };
+  assert.strictEqual(C.matchesLane({ reviewer: 'codex', reviewOf: { diffSha256: SHA_A } }, lane), false,
+    'no group.groupId at all must not be treated as "matches everything"');
+  assert.strictEqual(C.matchesLane({ group: { groupId: 'G1' }, reviewOf: { diffSha256: SHA_A } }, lane), false,
+    'no reviewer field must not be treated as "matches everything"');
+  assert.strictEqual(C.matchesLane({ group: { groupId: 'G1' }, reviewer: 'codex' }, lane), false,
+    'no subject binding at all must not be treated as "matches everything"');
+});
+
+test('RED: --aggregate --reviewer X loads only that reviewer\'s lane for the current subject', () => {
+  const records = [
+    laneRecord('codex', 'G1', SHA_A),
+    laneRecord('codex', 'G2', SHA_A),
+    laneRecord('grok', 'G1', SHA_A),   // same subject, other reviewer — must be excluded, not mixed
+    laneRecord('codex', 'G1', SHA_B),  // other subject entirely — must be excluded
+  ];
+  const lane = C.selectAggregationLane(records, { subjectSha: SHA_A, reviewer: 'codex' });
+  assert.strictEqual(lane.usable.length, 2, 'only the codex+subject-A records may load');
+  assert.ok(lane.usable.every((r) => r.reviewer === 'codex' && r.reviewOf.diffSha256 === SHA_A));
+  assert.strictEqual(lane.excludedReviewer.length, 1, 'the grok record is excluded as a reviewer mismatch');
+  assert.strictEqual(lane.excludedReviewer[0].reviewer, 'grok');
+  assert.strictEqual(lane.excludedSubject.length, 1, 'the other-subject record is excluded, not mixed in');
+});
+
+test('RED: with no --reviewer filter, selectAggregationLane preserves prior mixed-reviewer visibility', () => {
+  const records = [laneRecord('codex', 'G1', SHA_A), laneRecord('grok', 'G2', SHA_A)];
+  const lane = C.selectAggregationLane(records, { subjectSha: SHA_A, reviewer: null });
+  assert.strictEqual(lane.usable.length, 2,
+    'without a --reviewer filter, both lanes still load so GROUP-MIXED-REVIEWER can be detected downstream');
+});
+
 const failed = process.exitCode ? 'at least 1' : '0';
 console.log(`${passed} passed, ${failed} failed.`);

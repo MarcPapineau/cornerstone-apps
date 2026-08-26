@@ -1,0 +1,9 @@
+{
+  "base": "USD",
+  "quote": "CAD",
+  "rate": 1.3839,
+  "asOf": "2026-08-25T00:00:00-04:00",
+  "source": "Bank of Canada — Daily Digest (https://www.bankofcanada.ca/rates/daily-digest/)",
+  "sourceUrl": "https://www.bankofcanada.ca/rates/daily-digest/",
+  "note": "The Bank of Canada publishes these as indicative rates for general information only. They are not sourced from an active market, are not intended for transactions, and the Bank does not guarantee their accuracy. Used here solely to DISPLAY recorded US-dollar spend in Canadian dollars; the USD figure remains the audit value."
+}

@@ -69,6 +69,37 @@ const HIGH_RISK_PATTERNS = [
   { re: /(^|\/)\.github\/workflows\//i, why: 'CI enforcement — this is the gate itself' },
   { re: /(^|\/)builder-control\//i, why: 'the control system itself' },
   { re: /(^|\/)(Dockerfile|docker-compose|terraform|\.tf$|helm|k8s|kubernetes)/i, why: 'infrastructure definition' },
+
+  // ── control-plane surfaces (PKT-20260825-GOVERNANCE-TRUTH) ───────────────
+  // PROVEN HOLE: the light lane is a file-TYPE allow-list, and the files that
+  // govern this system are Markdown. `.github/copilot-instructions.md`,
+  // `.github/agents/*.md` and `.github/pull_request_template.md` all classified
+  // LIGHT with ZERO required reviewers — meaning the instructions handed to the
+  // reviewing agents, and the PR checklist a human reads, could be rewritten
+  // with no review at all. Rewriting the reviewer's brief is not a docs change;
+  // it is a change to the gate, made in a file extension the gate trusted.
+  //
+  // These are matched on PATH, independently of protected-paths.json. AGENTS.md
+  // and CLAUDE.md are listed in that policy today, but a policy is editable and
+  // this class must not depend on an entry surviving in it. Two independent
+  // reasons to reach FULL is the point, not duplication.
+  // CONFIRMED FINDING #2 (REV-20260825234549-codex): this was anchored with
+  // `^(AGENTS|CLAUDE)\.md$`, which matched the ROOT charter and nothing else.
+  // `luke-app/CLAUDE.md` is a real agent charter in this repository and it
+  // classified LIGHT; `docs/AGENTS.md` would have too. A charter governs the
+  // agent that reads it regardless of how deep it sits, so the depth anchor is
+  // gone. Case-sensitive on purpose: these filenames are spelled in caps by
+  // convention, and a case-insensitive match would drag in ordinary prose files
+  // like `agents.md` in a docs tree.
+  { re: /(^|\/)(AGENTS|CLAUDE)\.md$/, why: 'agent charter — the instructions every agent in this tree runs under' },
+  // `.claude/` holds settings, hooks and launch configuration that decide what
+  // an agent is permitted to do and what runs on its behalf. `luke-app/.claude/`
+  // exists here and contains exactly that. It is control, not configuration
+  // trivia, at every depth.
+  { re: /(^|\/)\.claude(\/|$)/i, why: 'agent control directory (.claude — settings, hooks, launch config)' },
+  { re: /(^|\/)\.github\//i, why: 'repository control surface (.github — agent briefs, PR controls, CI)' },
+  { re: /(^|\/)protected-paths[^/]*\.json$/i, why: 'protected-path policy — the file that decides what is protected' },
+  { re: /(^|\/)(CODEOWNERS)$/i, why: 'review-ownership control file' },
 ];
 
 // LIGHT lane is an allow-list, not a deny-list. Anything this does not
@@ -86,6 +117,20 @@ const LIGHT_LANE_PATTERNS = [
 const LIGHT_MAX_FILES = 5;
 const LIGHT_MAX_LINES = 150;
 
+// ── who reviews a FULL lane ─────────────────────────────────────────────────
+// Two reviewers, two different jobs: Codex reads the change as an engineer,
+// Grok attacks it. One frozen list, so the set cannot be narrowed by a
+// conditional somewhere downstream. Copilot is advisory FOREVER — it may block
+// on a CRITICAL/HIGH finding, and it may never satisfy a required slot or
+// unblock the gate by itself.
+const FULL_LANE_REQUIRED_REVIEWERS = Object.freeze(['codex', 'grok']);
+const ADVISORY_ONLY_REVIEWERS = Object.freeze(['copilot']);
+const REVIEWER_JOB = Object.freeze({
+  codex: 'independent engineering review',
+  grok: 'adversarial red team',
+  copilot: 'repository guardian (advisory — can block, cannot approve)',
+});
+
 // ── small helpers ───────────────────────────────────────────────────────────
 const readJSON = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -100,6 +145,73 @@ function die(msg, code) {
 // Raised when the protected-path policy cannot be trusted. Separate from a
 // usage error because it must always fail closed, never degrade to a default.
 class PolicyError extends Error {}
+
+// A PolicyError with its own name, so a refusal to accept a caller-declared
+// change is not reported as "the policy file could not be read". Both fail
+// closed; they are not the same failure and must not read as one.
+class SyntheticInputError extends PolicyError {}
+
+// A path that cannot be reduced to a single canonical spelling. Also a hard
+// block, also named for itself.
+class PathAliasError extends PolicyError {}
+
+// ── path canonicalisation ───────────────────────────────────────────────────
+// CONFIRMED FINDING #2 (REV-20260825234549-codex): every risk pattern here is a
+// regex over a path STRING, so two spellings of one file are two different
+// files as far as the classifier is concerned. `./AGENTS.md` and
+// `dir/../AGENTS.md` are the root agent charter; matched as raw strings they
+// are neither. An alias is not a new file, and a classifier that can be fed
+// aliases is a classifier that can be told the change is somewhere it is not.
+//
+// So nothing is classified until it has exactly one spelling:
+//   dot segments (`./`, `a/../b`)  -> RESOLVED to the canonical path
+//   absolute paths, backslashes    -> REFUSED, because git never emits them;
+//                                     their presence means the path did not
+//                                     come from the canonical path set
+//   escaping the repo root         -> REFUSED, it is not a repository path
+//
+// Refusal is a hard block, not a downgrade to "unknown". A path this cannot
+// reduce to one canonical form is a path whose risk cannot be evaluated, and an
+// unevaluated path has never been allowed to reach the light lane here.
+function canonicalizePath(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) {
+    return { ok: false, reason: 'is not a non-empty string, so it names nothing that can be classified' };
+  }
+  if (raw.includes('\0')) {
+    return { ok: false, reason: 'contains a NUL byte' };
+  }
+  if (raw.includes('\\')) {
+    return { ok: false, reason: 'contains a backslash — git emits `/` separators only, so this did not come from the canonical path set' };
+  }
+  if (raw.startsWith('/') || /^[A-Za-z]:\//.test(raw)) {
+    return { ok: false, reason: 'is absolute — only repository-relative paths can be classified' };
+  }
+  const norm = path.posix.normalize(raw).replace(/\/+$/, '');
+  if (norm === '' || norm === '.') {
+    return { ok: false, reason: 'resolves to the repository root, which is not a changed file' };
+  }
+  if (norm === '..' || norm.startsWith('../')) {
+    return { ok: false, reason: 'escapes the repository root' };
+  }
+  return { ok: true, path: norm };
+}
+
+// Canonicalise a whole set, refusing the batch if any member cannot be reduced.
+// `where` names the input so the block says which surface supplied the bad path.
+function canonicalizePaths(paths, where) {
+  const seen = [];
+  for (const raw of paths) {
+    const c = canonicalizePath(raw);
+    if (!c.ok) {
+      throw new PathAliasError(
+        `${where}: path ${JSON.stringify(String(raw))} ${c.reason}. ` +
+        'Refusing to classify it: a path with more than one spelling can be spelled around every rule below.'
+      );
+    }
+    if (!seen.includes(c.path)) seen.push(c.path);
+  }
+  return seen.sort();
+}
 
 // ── git refs: validated, and never interpolated into a shell ────────────────
 // Every git invocation below goes through execFileSync with an ARGUMENT ARRAY.
@@ -170,8 +282,81 @@ function isEvidencePath(p) {
   return EVIDENCE_EXCLUDE.some((g) => globToRe(g).test(p));
 }
 
+// ── the test-only synthetic-subject boundary ────────────────────────────────
+// CONFIRMED FINDING #1 (REV-20260825234549-codex), CRITICAL, reproduced here
+// before this fix: in a working tree whose real subject was 9 HIGH-RISK
+// builder-control paths, `--gate-done --changed README.md --diff-lines 1
+// --subject-sha e3b0c442…` exited 0 with lane LIGHT, no packet and no required
+// reviews. The gate was not wrong about the tree; it was never shown the tree.
+// The caller handed it a different change and it certified that one.
+//
+// `--changed` and `--diff-lines` exist because the test-suite has to feed the
+// classifier paths that do not exist in any working tree. That is a legitimate
+// need and a lethal capability, so it is now a door with a lock on it rather
+// than an argument anyone can pass:
+//
+//   BOTH are required, together:
+//     --test-only-synthetic-subject      (explicit at the call site)
+//     ENGOS_TEST_ONLY_SYNTHETIC=1        (explicit in the environment)
+//
+// Two independent gestures, in two different channels, neither of which occurs
+// by accident and neither of which is reachable by a CI invocation or a copied
+// command line. Without both, `--changed` and `--diff-lines` are not ignored —
+// ignoring them would silently certify something other than what was asked
+// for — they are a HARD BLOCK naming the rule.
+//
+// In production there is therefore no narrowing left to enforce equality
+// against: the changed-path set and the changed-line count are read from git
+// and from nowhere else.
+const SYNTHETIC_ENV = 'ENGOS_TEST_ONLY_SYNTHETIC';
+
+function syntheticAllowed(args) {
+  return args['test-only-synthetic-subject'] === true && process.env[SYNTHETIC_ENV] === '1';
+}
+
+// Resolve what the commands are actually allowed to use. Every command that
+// classifies or gates goes through this — there is one answer to "what changed",
+// not one per command.
+function resolveSubjectInputs(args, operation) {
+  const wantsChanged = Array.isArray(args.changed) && args.changed.length > 0;
+  const wantsLines = args.diffLines !== undefined && args.diffLines !== null;
+  if (!wantsChanged && !wantsLines) {
+    return { changed: [], diffLines: undefined, synthetic: false };
+  }
+  if (!syntheticAllowed(args)) {
+    const supplied = [wantsChanged ? '--changed' : null, wantsLines ? '--diff-lines' : null].filter(Boolean).join(' and ');
+    throw new SyntheticInputError(
+      `${operation} was given ${supplied}, which would let the caller ` +
+      'decide what this change consists of. The changed-path set and the changed-line count are read from git, ' +
+      `not from arguments. (Test fixtures must pass --test-only-synthetic-subject AND set ${SYNTHETIC_ENV}=1.)`
+    );
+  }
+  return { changed: args.changed.slice(), diffLines: args.diffLines, synthetic: true };
+}
+
+// Canonical changed-line count for a set of subject paths, read from git.
+// `--numstat` reports added/deleted per file; binary files report `-` and
+// contribute 0 lines, which is correct here — a binary blob has no line count
+// and inventing one would be the same fabrication this is closing.
+function gitChangedLines({ base, head, paths }) {
+  if (!paths.length) return 0;
+  const h = assertRef(head || 'HEAD', '--head');
+  const a = ['diff', '--numstat'];
+  if (base) a.push(`${assertRef(base, '--base')}..${h}`);
+  else a.push(h);
+  a.push('--', ...paths);
+  let total = 0;
+  for (const line of git(a).split('\n')) {
+    if (!line.trim()) continue;
+    const [add, del] = line.split('\t');
+    total += (add === '-' ? 0 : Number(add) || 0) + (del === '-' ? 0 : Number(del) || 0);
+  }
+  return total;
+}
+
 // Compute subject paths + the hash reviewers bind to.
-// changedPaths may be supplied explicitly; otherwise it is derived from git.
+// changedPaths come from git. They come from `changed` ONLY behind the
+// test-only boundary above, which the callers enforce before reaching here.
 function computeSubject({ base, head, changed }) {
   let changedPaths;
   if (Array.isArray(changed) && changed.length) {
@@ -185,7 +370,11 @@ function computeSubject({ base, head, changed }) {
       changedPaths = git(['diff', '--name-only', h]).split('\n').filter(Boolean);
     }
   }
-  changedPaths = [...new Set(changedPaths)].sort();
+  // One spelling per path, before anything downstream reads them as strings.
+  // Applied to the git-derived set too: git output is already canonical, so
+  // this costs nothing there and means no path reaches the hash or the
+  // classifier without having passed the same reduction.
+  changedPaths = canonicalizePaths(changedPaths, 'changed path set');
 
   const subjectPaths = changedPaths.filter((p) => !isEvidencePath(p));
   const excluded = changedPaths.filter(isEvidencePath);
@@ -294,11 +483,28 @@ function isProtected(p, globs) {
   return globs.some((g) => globToRe(g).test(p));
 }
 
+// The single place any command asks "what changed, and how much of it".
+// Production: both answers come from git. Test-only synthetic mode: both come
+// from the arguments, and only after resolveSubjectInputs() has confirmed the
+// caller opened that door deliberately, twice.
+//
+// This is also what makes classification a function of the subject alone. In
+// production the caller cannot supply a line count, so re-running --classify on
+// one subject hash cannot produce a different lane the second time.
+function subjectAndLines(args, operation) {
+  const si = resolveSubjectInputs(args, operation);
+  const subject = computeSubject({ base: args.base, head: args.head, changed: si.changed });
+  const diffLines = si.synthetic
+    ? si.diffLines
+    : gitChangedLines({ base: args.base, head: args.head, paths: subject.subjectPaths });
+  return { subject, diffLines };
+}
+
 // ── COMMAND: --subject ──────────────────────────────────────────────────────
 // The identity of the change under review. Reviews bind to subjectSha256,
 // which is what stops a verdict on one diff from clearing another.
 function cmdSubject(args) {
-  const s = computeSubject({ base: args.base, head: args.head, changed: args.changed });
+  const { subject: s } = subjectAndLines(args, '--subject');
   if (args.json) { out(JSON.stringify(s, null, 2)); return EXIT_PASS; }
 
   out('ENGINEERING OS — SUBJECT OF THIS CHANGE');
@@ -337,10 +543,19 @@ function cmdSubject(args) {
   return EXIT_PASS;
 }
 // ── COMMAND: --classify ─────────────────────────────────────────────────────
-function classify(changed, opts = {}) {
+function classify(changedInput, opts = {}) {
   const globs = protectedGlobs();
   const reasons = [];
   const perPath = [];
+
+  // Nothing below reads a path that has not been reduced to one spelling
+  // first (finding #2). computeSubject() already did this for every caller in
+  // this file; repeating it here is deliberate, because classify() is the
+  // function that turns a path into a risk verdict and it must not be possible
+  // to reach it with an alias by adding a caller later. A path that cannot be
+  // canonicalised throws out of here as a PolicyError — a hard block, never a
+  // quiet downgrade to "unknown".
+  const changed = canonicalizePaths(changedInput, 'classification input');
 
   let highRisk = false;
   let anyProtected = false;
@@ -401,9 +616,26 @@ function classify(changed, opts = {}) {
   // contract states Copilot comments are not a substitute for a required status
   // check, so it is recorded as advisory. Advisory still BLOCKS on a CRITICAL or
   // HIGH finding — it cannot approve for you, but it can stop you.
-  const requiredReviewers = [];
-  if (lane === 'FULL') requiredReviewers.push('codex');
-  if (lane === 'FULL' && highRisk) requiredReviewers.push('grok');
+  //
+  // PROVEN HOLE (PKT-20260825-GOVERNANCE-TRUTH): grok was required only when a
+  // high-risk SIGNAL was also present, so an ordinary FULL-lane change — one
+  // that reached FULL precisely because nothing here could confidently call it
+  // safe — was cleared by a single reviewer. The adversarial pass was strongest
+  // exactly where it was skipped: on the changes the classifier could not read.
+  // Every FULL lane now requires both, and the set is a frozen constant so the
+  // requirement cannot be narrowed by a later conditional.
+  const requiredReviewers = lane === 'FULL' ? FULL_LANE_REQUIRED_REVIEWERS.slice() : [];
+
+  // Structural, not advisory. If anyone ever adds copilot to the required set,
+  // this throws rather than letting an advisory worker satisfy a required slot.
+  for (const r of requiredReviewers) {
+    if (ADVISORY_ONLY_REVIEWERS.includes(r)) {
+      throw new PolicyError(
+        `"${r}" is advisory-only and may never appear in requiredReviewers. ` +
+        'An advisory reviewer can block on a CRITICAL/HIGH finding; it can never approve.'
+      );
+    }
+  }
 
   // The LIGHT lane must actually be cheap or nobody will use it, and a lane
   // nobody uses protects nothing. A genuinely tiny change to an unprotected
@@ -430,8 +662,8 @@ function cmdClassify(args) {
   // subject is derived from git; when explicit --changed paths are supplied
   // they are still filtered so a caller cannot accidentally classify its own
   // review records.
-  const subject = computeSubject({ base: args.base, head: args.head, changed: args.changed });
-  const r = classify(subject.subjectPaths, { milestone: args.milestone, novel: args.novel, diffLines: args.diffLines });
+  const { subject, diffLines } = subjectAndLines(args, '--classify');
+  const r = classify(subject.subjectPaths, { milestone: args.milestone, novel: args.novel, diffLines });
   r.subject = {
     subjectSha256: subject.subjectSha256,
     subjectPaths: subject.subjectPaths,
@@ -694,6 +926,28 @@ function cmdValidateReview(args) {
 // evidence directory, so CI does not have to enumerate them.
 function collectReviewPaths(args) {
   const explicit = args.review.slice();
+  // A synthetic subject has no conventional evidence directory.
+  //
+  // reviews/ is resolved from HERE — the control plane's own directory — not
+  // from the subject, so it is the SAME directory no matter what subject is
+  // being gated. That is correct in production, where the records in it are
+  // about the tree the gate just read from git. It is wrong for a synthetic
+  // subject, which describes paths that exist in no working tree: those live
+  // records are evidence about a real change and a real packet, and pulling
+  // them into a fixture run judges them against the fixture's packet, where
+  // they read ATTESTATION-PACKET-CHANGED and block a gate they say nothing
+  // about. That is not the gate catching something — it is the gate being fed
+  // someone else's paperwork.
+  //
+  // So inside the test-only synthetic boundary, evidence must be named with
+  // --review and nothing is discovered implicitly. This cannot loosen
+  // production: the boundary needs BOTH the flag and the environment variable
+  // (see syntheticAllowed above), neither half is reachable from a CI
+  // invocation or a copied command line, and the finding #1 proofs assert that
+  // each half alone is a hard block. A production gate run therefore still
+  // auto-discovers every record in reviews/ and still fails closed on any one
+  // of them that is malformed.
+  if (syntheticAllowed(args)) return [...new Set(explicit)];
   const dir = path.join(HERE, 'reviews');
   // Only the top level of reviews/ is evidence. Subdirectories are archives —
   // notably reviews/legacy-unattested/, which holds records produced before
@@ -718,13 +972,208 @@ function collectReviewPaths(args) {
 const STATE_READY_DET = 'READY_FOR_DETERMINISTIC_VALIDATION';
 const STATE_READY_PR = 'READY_FOR_PR';
 
+// ── reviewer completeness (PKT-20260825-GOVERNANCE-TRUTH) ───────────────────
+// The gate already refused correctly; what it could not do was SAY, in one
+// readable shape, what was supposed to happen versus what actually did. A wall
+// of ENGOS-* rule names tells a founder that something is wrong and nothing
+// about what is missing.
+//
+// Four words, one row per reviewer:
+//   PLANNED   this lane names the reviewer at all
+//   REQUIRED  its approval is a condition of the gate (vs ADVISORY)
+//   EXECUTED  a review actually ran against the EXACT current subject hash
+//   MISSING   nothing bound to this subject exists
+//
+// EXECUTED is deliberately narrow. A record bound to a different subject hash
+// is STALE, never EXECUTED — that is the anti-recycling property, and stating
+// it as its own word is what stops "there is a Codex review in the folder"
+// from being read as "Codex reviewed this".
+//
+// `score` is COVERAGE over the exact current subject — how many subject paths
+// the record claims to have read, out of how many exist. It is UNAVAILABLE when
+// no record is bound to this subject, because nothing was measured. There is no
+// quality score here: no reviewer emits one, and inventing a number would be
+// exactly the fabricated-KPI failure this system exists to prevent.
+function buildReviewerCompleteness({ cls, subject, active, foreign }) {
+  const subjectPaths = subject.subjectPaths || [];
+  const required = cls.requiredReviewers || [];
+  const advisory = cls.advisoryReviewers || [];
+
+  const activeBy = new Map();
+  for (const r of active) {
+    if (!activeBy.has(r.reviewer)) activeBy.set(r.reviewer, []);
+    activeBy.get(r.reviewer).push(r);
+  }
+  const foreignBy = new Map();
+  for (const r of foreign) {
+    if (!foreignBy.has(r.reviewer)) foreignBy.set(r.reviewer, []);
+    foreignBy.get(r.reviewer).push(r);
+  }
+
+  // Every reviewer the lane plans for, plus every reviewer that actually left a
+  // record. A record from an unplanned reviewer must still be visible — hiding
+  // it would make an unexpected verdict disappear.
+  const names = [...new Set([...required, ...advisory, ...activeBy.keys(), ...foreignBy.keys()])].sort();
+
+  const rows = names.map((name) => {
+    const isRequired = required.includes(name);
+    const isAdvisory = advisory.includes(name);
+    const planned = isRequired || isAdvisory;
+    const recs = activeBy.get(name) || [];
+    const stale = (foreignBy.get(name) || []).map((r) => ({
+      reviewId: r.reviewId,
+      boundToSubject: String((r.reviewOf && r.reviewOf.diffSha256) || 'UNKNOWN'),
+    }));
+
+    const row = {
+      reviewer: name,
+      job: REVIEWER_JOB[name] || 'unclassified reviewer',
+      planned: planned ? 'PLANNED' : 'NOT_PLANNED',
+      required: isRequired ? 'REQUIRED' : (isAdvisory ? 'ADVISORY' : 'NOT_REQUIRED'),
+      executed: 'MISSING',
+      disposition: null,
+      reviewId: null,
+      score: 'UNAVAILABLE',
+      coveredPaths: [],
+      missingPaths: subjectPaths.slice(),
+      stalePaths: [],
+      staleRecords: stale,
+      reason: '',
+    };
+
+    // claude-self is recorded for the audit trail and satisfies nothing. Say so
+    // in the row rather than letting a present-looking record read as coverage.
+    const selfNote = name === 'claude-self'
+      ? ' This is the builder\'s own record: it is kept for the audit trail and satisfies no requirement.'
+      : '';
+
+    if (!recs.length) {
+      if (stale.length) {
+        row.executed = 'STALE';
+        row.reason =
+          `${name} has ${stale.length} review record(s), but every one of them is bound to a different version of the code ` +
+          `(this version is ${subject.subjectSha256.slice(0, 12)}…). The code changed after those reviews, so they do not apply here. ` +
+          `Re-run ${name} against the current change.` + selfNote;
+      } else {
+        row.executed = 'MISSING';
+        row.reason = planned
+          ? `${name} has not reviewed this change. No record bound to this version of the code exists.` + selfNote
+          : `${name} is not part of this lane's plan and has produced no record.`;
+      }
+      return row;
+    }
+
+    if (recs.length > 1) {
+      row.executed = 'MISSING';
+      row.reason =
+        `${name} left ${recs.length} conflicting verdicts for this exact change (${recs.map((r) => r.disposition).join(', ')}). ` +
+        'Two verdicts is not one verdict, so none of them counts. One must explicitly supersede the other.' + selfNote;
+      return row;
+    }
+
+    const rec = recs[0];
+    row.disposition = rec.disposition;
+    row.reviewId = rec.reviewId;
+
+    const seen = new Set((rec.reviewOf && rec.reviewOf.changedPaths) || []);
+    row.coveredPaths = subjectPaths.filter((p) => seen.has(p));
+    row.missingPaths = subjectPaths.filter((p) => !seen.has(p));
+    row.stalePaths = [...seen].filter((p) => !subjectPaths.includes(p));
+
+    if (rec.disposition === 'UNAVAILABLE') {
+      row.executed = 'UNAVAILABLE';
+      row.score = 'UNAVAILABLE';
+      row.coveredPaths = [];
+      row.missingPaths = subjectPaths.slice();
+      row.reason =
+        `${name} could not be run: ${rec.unavailableReason || 'no reason was recorded'}. ` +
+        'That was reported honestly — and it still counts as not reviewed.' + selfNote;
+      return row;
+    }
+
+    row.executed = 'EXECUTED';
+    row.score = `${row.coveredPaths.length}/${subjectPaths.length} subject path(s) covered`;
+
+    const verdictPlain = rec.disposition === 'REJECT'
+      ? 'and rejected it'
+      : (rec.disposition === 'APPROVE_WITH_NOTES' ? 'and approved it with notes' : 'and approved it');
+    if (row.missingPaths.length) {
+      row.reason =
+        `${name} reviewed this exact version ${verdictPlain}, but only read ${row.coveredPaths.length} of ${subjectPaths.length} changed file(s). ` +
+        `Not read: ${row.missingPaths.slice(0, 5).join(', ')}${row.missingPaths.length > 5 ? ' …' : ''}. ` +
+        'Reading part of a change is not approving all of it.' + selfNote;
+    } else if (row.stalePaths.length) {
+      row.reason =
+        `${name} reviewed this exact version ${verdictPlain}, but also claims to have read ${row.stalePaths.length} file(s) ` +
+        `that are not part of this change: ${row.stalePaths.slice(0, 5).join(', ')}${row.stalePaths.length > 5 ? ' …' : ''}. ` +
+        'The record does not describe this change, so it does not count as coverage of it. ' +
+        `Re-run ${name} against this exact change.` + selfNote;
+    } else {
+      row.reason = `${name} read all ${subjectPaths.length} changed file(s) of this exact version ${verdictPlain}.` + selfNote;
+    }
+    return row;
+  });
+
+  // Which subject paths a REQUIRED reviewer actually read. A path only counts
+  // as covered when EVERY required reviewer read it — one reviewer seeing a
+  // file is not the lane's coverage.
+  const requiredRows = rows.filter((r) => r.required === 'REQUIRED');
+  const coveredByAll = subjectPaths.filter((p) =>
+    requiredRows.length > 0 && requiredRows.every((r) => r.executed === 'EXECUTED' && r.coveredPaths.includes(p)));
+  const notCovered = subjectPaths.filter((p) => !coveredByAll.includes(p));
+
+  // A required reviewer only counts when its record describes THIS change and
+  // nothing else: it ran, it read every changed file, and it claims no file
+  // outside the change. Extra paths are not a harmless surplus — a record that
+  // covers a wider set than the subject is a record of some other change, and
+  // counting it as complete is how a review of the wrong thing reads as done.
+  const exactRows = requiredRows.filter((r) =>
+    r.executed === 'EXECUTED' && r.missingPaths.length === 0 && r.stalePaths.length === 0);
+  const rcComplete = requiredRows.length > 0 && exactRows.length === requiredRows.length;
+
+  const notExecuted = requiredRows.filter((r) => r.executed !== 'EXECUTED');
+  const shortRows = requiredRows.filter((r) => r.executed === 'EXECUTED' && r.missingPaths.length);
+  const extraRows = requiredRows.filter((r) => r.executed === 'EXECUTED' && !r.missingPaths.length && r.stalePaths.length);
+  const why = [];
+  if (!requiredRows.length) why.push('this lane requires no reviewer, so there is no review coverage to be complete');
+  if (notExecuted.length) why.push(`${notExecuted.map((r) => r.reviewer).join(' and ')} did not review this exact version of the change`);
+  if (shortRows.length) why.push(`${shortRows.map((r) => r.reviewer).join(' and ')} read only part of the change`);
+  if (extraRows.length) {
+    why.push(
+      `${extraRows.map((r) => r.reviewer).join(' and ')} claims file(s) that are not part of this change ` +
+      `(${[...new Set(extraRows.flatMap((r) => r.stalePaths))].slice(0, 5).join(', ')}), so the record describes a different change`);
+  }
+  const rcCompleteReason = rcComplete
+    ? `Every required reviewer (${requiredRows.map((r) => r.reviewer).join(' and ')}) reviewed this exact change and read all ` +
+      `${subjectPaths.length} changed file(s), and no reviewer claims a file outside it.`
+    : `Review coverage is INCOMPLETE: ${why.join('; ')}. Re-run the reviewer(s) named above against this exact change.`;
+
+  return {
+    subjectSha256: subject.subjectSha256,
+    lane: cls.lane,
+    planned: rows.filter((r) => r.planned === 'PLANNED').map((r) => r.reviewer),
+    required: required.slice(),
+    advisory: advisory.slice(),
+    executed: rows.filter((r) => r.required === 'REQUIRED' && r.executed === 'EXECUTED').map((r) => r.reviewer),
+    missing: rows.filter((r) => r.required === 'REQUIRED' && r.executed !== 'EXECUTED').map((r) => r.reviewer),
+    complete: rcComplete,
+    completeReason: rcCompleteReason,
+    pathCoverage: {
+      total: subjectPaths.length,
+      coveredByEveryRequiredReviewer: coveredByAll,
+      notCoveredByEveryRequiredReviewer: notCovered,
+    },
+    rows,
+  };
+}
+
 function gateDone(args) {
   const problems = [];
   const observed = [];
 
   // 1. Subject binding is MANDATORY and always enforced. Without it there is
   //    no answer to "reviewed WHAT?", and every downstream check is decoration.
-  const subject = computeSubject({ base: args.base, head: args.head, changed: args.changed });
+  const { subject, diffLines } = subjectAndLines(args, '--gate-done');
   const claimed = args.subjectSha || args.diffSha || null;
   if (!claimed) {
     problems.push({
@@ -745,8 +1194,9 @@ function gateDone(args) {
     observed.push(`${subject.excludedAsEvidence.length} evidence path(s) excluded from the subject — adding review records does not move this hash`);
   }
 
-  // 2. Lane, computed from the SUBJECT only.
-  const cls = classify(subject.subjectPaths, { milestone: args.milestone, novel: args.novel, diffLines: args.diffLines });
+  // 2. Lane, computed from the SUBJECT only — and, in production, from a line
+  //    count git measured over exactly those subject paths.
+  const cls = classify(subject.subjectPaths, { milestone: args.milestone, novel: args.novel, diffLines });
   observed.push(`lane ${cls.lane}${cls.highRisk ? ' (high-risk)' : ''}; required reviewers: ${cls.requiredReviewers.join(', ') || 'none'}`);
 
   // 3. Packet: required for every lane except LIGHT.
@@ -979,7 +1429,13 @@ function gateDone(args) {
   }
   const state = !ok ? 'BLOCKED' : (ranRealChecks ? STATE_READY_PR : STATE_READY_DET);
 
-  return { ok, state, problems, observed, unverified, classification: cls, subject, reviewsBound: bound.length, reviewsActive: active.length, reviewsForeign: foreign.length, checks };
+  // The gate's own decision, re-expressed as a readable completeness table.
+  // It DECIDES nothing — `problems` above is still the only thing that blocks.
+  // This exists so the answer to "what is missing" is a sentence rather than a
+  // rule name, on both the CLI and the dashboard that projects it.
+  const reviewerCompleteness = buildReviewerCompleteness({ cls, subject, active, foreign });
+
+  return { ok, state, problems, observed, unverified, classification: cls, subject, reviewerCompleteness, reviewsBound: bound.length, reviewsActive: active.length, reviewsForeign: foreign.length, checks };
 }
 
 // Execute the packet's declared testsRequired. These are command strings from a
@@ -1008,6 +1464,29 @@ function cmdGateDone(args) {
   out(`subject         : ${r.subject.subjectSha256.slice(0, 16)}… (${r.subject.subjectPaths.length} path(s))`);
   out(`required        : ${r.classification.requiredReviewers.join(' + ') || 'none — deterministic checks only'}`);
   out(`review records  : ${r.reviewsActive} active / ${r.reviewsBound} bound / ${r.reviewsForeign} ignored (other subject)`);
+
+  // REVIEWER COMPLETENESS — planned vs required vs executed vs missing, in
+  // words. A rule name tells you a rule fired; this tells you what to do.
+  const rc = r.reviewerCompleteness;
+  if (rc) {
+    out('');
+    out('REVIEWER COMPLETENESS (against this exact subject):');
+    out(`  ${'REVIEWER'.padEnd(12)}${'PLANNED'.padEnd(13)}${'REQUIRED'.padEnd(14)}${'EXECUTED'.padEnd(14)}SCORE`);
+    for (const row of rc.rows) {
+      out(`  ${row.reviewer.padEnd(12)}${row.planned.padEnd(13)}${row.required.padEnd(14)}${row.executed.padEnd(14)}${row.score}`);
+    }
+    out('');
+    for (const row of rc.rows) out(`  - ${row.reason}`);
+    out('');
+    out(`  complete                   : ${rc.complete ? 'YES' : 'NO'}`);
+    if (rc.completeReason) out(`  ${rc.completeReason}`);
+    out('');
+    out(`  files changed              : ${rc.pathCoverage.total}`);
+    out(`  read by EVERY required rev.: ${rc.pathCoverage.coveredByEveryRequiredReviewer.length}`);
+    if (rc.pathCoverage.notCoveredByEveryRequiredReviewer.length) {
+      out(`  NOT fully reviewed         : ${rc.pathCoverage.notCoveredByEveryRequiredReviewer.slice(0, 8).join(', ')}${rc.pathCoverage.notCoveredByEveryRequiredReviewer.length > 8 ? ' …' : ''}`);
+    }
+  }
   out('');
   out('OBSERVED:');
   for (const o of r.observed) out(`  - ${o}`);
@@ -1061,8 +1540,8 @@ function appendLedger(entry) {
 // filled in with this change's real subject hash. Nothing to look up, nothing
 // to remember, no prompt to paste.
 function cmdStart(args) {
-  const subject = computeSubject({ base: args.base, head: args.head, changed: args.changed });
-  const cls = classify(subject.subjectPaths, { milestone: args.milestone, novel: args.novel, diffLines: args.diffLines });
+  const { subject, diffLines } = subjectAndLines(args, '--start');
+  const cls = classify(subject.subjectPaths, { milestone: args.milestone, novel: args.novel, diffLines });
   const sha = subject.subjectSha256;
   const pkt = args.packet || '<your-packet>.json';
   const refs = (args.base ? ` --base ${args.base}` : '') + (args.head ? ` --head ${args.head}` : '');
@@ -1127,13 +1606,13 @@ try {
     process.stderr.write(`
 engineering-os.cjs — deterministic half of the AI Engineering OS
 
-  --subject [--base <ref>] [--head <ref>] [--changed <p> ...] [--json]
+  --subject [--base <ref>] [--head <ref>] [--json]
         Compute the SUBJECT of this change: the changed paths minus review
         evidence, and the sha256 every review must bind to.
 
-  --classify [--base <ref>] [--head <ref>] [--changed <p> ...] [--diff-lines N]
-             [--milestone] [--novel] [--json]
+  --classify [--base <ref>] [--head <ref>] [--milestone] [--novel] [--json]
         Which lane, who must review. Classifies the subject. Fails toward FULL.
+        The changed-line count is measured by git over the subject paths.
 
   --spec-check --packet <packet.json> [--json]
         Is the intent pinned? Exit 3 if a source is neither pinnable nor
@@ -1143,11 +1622,19 @@ engineering-os.cjs — deterministic half of the AI Engineering OS
         Is this record usable evidence?
 
   --gate-done --subject-sha <sha> [--packet <p>] [--review <r> ...]
-              [--base <ref>] [--head <ref>] [--changed <p> ...]
+              [--base <ref>] [--head <ref>]
               [--run-checks] [--milestone] [--novel] [--json]
         Fail-closed gate. --subject-sha is MANDATORY. Exit 3 on any unmet rule.
         Reaches READY_FOR_DETERMINISTIC_VALIDATION, or READY_FOR_PR when
         --run-checks actually executed the packet's checks here.
+
+WHAT CHANGED IS NOT AN ARGUMENT
+  --changed and --diff-lines are a TEST-ONLY facility. Supplying either to any
+  command above is a hard block (ENGOS-SYNTHETIC-INPUT-REFUSED) unless BOTH
+  --test-only-synthetic-subject is passed AND ENGOS_TEST_ONLY_SYNTHETIC=1 is set
+  in the environment. In every other invocation the changed-path set and the
+  changed-line count are read from git, so a caller cannot name a smaller change
+  than the one it is asking to certify.
 
 Exit: 0 pass · 2 usage/malformed · 3 hard-block
 `);
@@ -1155,9 +1642,17 @@ Exit: 0 pass · 2 usage/malformed · 3 hard-block
   }
 } catch (e) {
   if (e instanceof PolicyError) {
+    // Name the rule that actually fired. All three fail closed, but "the policy
+    // file is unreadable", "you tried to declare your own change" and "that
+    // path has two spellings" are three different problems with three different
+    // fixes, and collapsing them into one label is how a block gets misread as
+    // an environment glitch and worked around.
+    const rule = e instanceof SyntheticInputError ? 'ENGOS-SYNTHETIC-INPUT-REFUSED'
+      : e instanceof PathAliasError ? 'ENGOS-PATH-NOT-CANONICAL'
+      : 'ENGOS-POLICY-UNAVAILABLE';
     process.stderr.write(`
 ENGINEERING-OS HARD-BLOCK
-  rule:   ENGOS-POLICY-UNAVAILABLE
+  rule:   ${rule}
   reason: ${e.message}
 
 Nothing was evaluated. This fails closed on purpose: a rule that cannot be

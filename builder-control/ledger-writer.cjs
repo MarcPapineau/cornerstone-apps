@@ -34,10 +34,22 @@ const os   = require('os');
 // ledger somewhere else and gate decisions stop being recorded where anyone
 // looks. Confining it to a temp dir makes it useful for isolation and useless
 // for redirecting production evidence into another repository path.
-function resolveLedgerFile() {
-  const override = process.env.AEGIS_LEDGER_FILE;
-  if (!override) return path.join(__dirname, 'ledger.json');
-  const abs = path.resolve(override);
+//
+// INJECTION (2026-08-25, Codex G1 finding #1): the override was env-only and
+// read once at module load, so a test running IN-PROCESS could not aim the
+// writer at its own ledger — which is why the connector-usage tests bypassed
+// this writer entirely and asserted against a shape no writer would accept.
+// `ledgerFile` is now an argument as well as an environment variable. It is the
+// SAME writer, the SAME schema validation and the SAME lock either way; only
+// the destination is injectable, and it is injectable only into a temp dir.
+const CANONICAL_LEDGER = path.join(__dirname, 'ledger.json');
+
+function resolveLedgerFile(override) {
+  const chosen = override != null ? override : process.env.AEGIS_LEDGER_FILE;
+  if (!chosen) return CANONICAL_LEDGER;
+  const abs = path.resolve(chosen);
+  // An explicit request for the canonical ledger is not a redirection.
+  if (abs === CANONICAL_LEDGER) return abs;
   const tmpRoot = fs.realpathSync(os.tmpdir());
   let real;
   try { real = fs.realpathSync(path.dirname(abs)); } catch { real = path.dirname(abs); }
@@ -141,13 +153,14 @@ function loadJSON(filePath) {
 }
 
 // ─── Read the current ledger array (creates empty array if file absent) ────────
-function readLedger() {
-  if (!fs.existsSync(LEDGER_FILE)) return [];
-  const raw = fs.readFileSync(LEDGER_FILE, 'utf8').trim();
+function readLedger(ledgerFile) {
+  const file = ledgerFile ? resolveLedgerFile(ledgerFile) : LEDGER_FILE;
+  if (!fs.existsSync(file)) return [];
+  const raw = fs.readFileSync(file, 'utf8').trim();
   if (!raw) return [];
   const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed)) {
-    throw new Error(`Ledger at ${LEDGER_FILE} is not a JSON array — aborting to prevent data loss`);
+    throw new Error(`Ledger at ${file} is not a JSON array — aborting to prevent data loss`);
   }
   return parsed;
 }
@@ -173,11 +186,14 @@ const LOCK_FILE = LEDGER_FILE + '.lock';
 const LOCK_TIMEOUT_MS = 10000;
 const LOCK_STALE_MS = 60000;
 
-function acquireLock() {
+// The lock belongs to the ledger being written, not to the module. An injected
+// ledger gets its own lock beside it, so isolation is real rather than nominal.
+function acquireLock(lockFile) {
+  const lock = lockFile || LOCK_FILE;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   for (;;) {
     try {
-      const fd = fs.openSync(LOCK_FILE, 'wx');
+      const fd = fs.openSync(lock, 'wx');
       fs.writeFileSync(fd, String(process.pid));
       return fd;
     } catch (e) {
@@ -186,8 +202,8 @@ function acquireLock() {
       // forever, but "stale" has to be generous enough that a slow-but-alive
       // writer is never stolen from.
       try {
-        const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
-        if (age > LOCK_STALE_MS) { fs.unlinkSync(LOCK_FILE); continue; }
+        const age = Date.now() - fs.statSync(lock).mtimeMs;
+        if (age > LOCK_STALE_MS) { fs.unlinkSync(lock); continue; }
       } catch { /* raced with the holder releasing it */ }
       if (Date.now() > deadline) {
         throw new Error(`could not acquire the ledger lock within ${LOCK_TIMEOUT_MS}ms (held by another process). Refusing to write rather than risk clobbering it.`);
@@ -200,23 +216,45 @@ function acquireLock() {
   }
 }
 
-function releaseLock(fd) {
+function releaseLock(fd, lockFile) {
   try { fs.closeSync(fd); } catch { /* already closed */ }
-  try { fs.unlinkSync(LOCK_FILE); } catch { /* already gone */ }
+  try { fs.unlinkSync(lockFile || LOCK_FILE); } catch { /* already gone */ }
 }
 
-// Append under an exclusive lock. Returns {appended, length, duplicate}.
-function appendAtomic(newEntry) {
-  const fd = acquireLock();
+// Append under an exclusive lock. Returns {appended, length, duplicate, ledgerFile}.
+// `opts.ledgerFile` aims this at an injected (temp-dir-confined) ledger; omitted,
+// it writes wherever LEDGER_FILE resolved. Atomicity and idempotency are
+// identical on both paths — there is one append implementation, not two.
+function appendAtomic(newEntry, opts) {
+  // SCHEMA FIRST, BEFORE ANY WRITE.
+  //
+  // Validation used to live only in appendEntry() — the CLI path. Any
+  // in-process caller reaching appendAtomic() directly wrote whatever object it
+  // held, so "the ledger is schema-valid" was a property of one entry point
+  // rather than of the store. That is what let an off-schema connector-usage
+  // shape be storable in principle while the projector was reading it in
+  // practice. The gate belongs to the write itself.
+  //
+  // It runs before acquireLock() deliberately: creating the lock file is a
+  // write. A refused entry must leave nothing behind at all — no lock, no temp
+  // file, no ledger.
+  const invalid = validateEntry(newEntry);
+  if (invalid.length) {
+    throw new Error(
+      'entry fails ledger-entry.schema.json and was NOT written: ' + invalid.join(' | '));
+  }
+  const file = opts && opts.ledgerFile ? resolveLedgerFile(opts.ledgerFile) : LEDGER_FILE;
+  const lock = file + '.lock';
+  const fd = acquireLock(lock);
   try {
     // Re-read INSIDE the lock. This is the fix: the base is whatever is on
     // disk right now, never a snapshot taken before the lock was held.
-    const current = fs.existsSync(LEDGER_FILE) ? readLedger() : [];
+    const current = fs.existsSync(file) ? readLedger(file) : [];
 
     if (newEntry.operationId) {
       const existing = current.find((e) => e && e.operationId === newEntry.operationId);
       if (existing) {
-        return { appended: false, duplicate: true, length: current.length, existingEntryId: existing.entryId };
+        return { appended: false, duplicate: true, length: current.length, existingEntryId: existing.entryId, ledgerFile: file };
       }
     }
     if (newEntry.entryId && current.some((e) => e && e.entryId === newEntry.entryId)) {
@@ -224,31 +262,51 @@ function appendAtomic(newEntry) {
     }
 
     const next = [...current, newEntry];
-    const tmp = LEDGER_FILE + '.tmp-' + process.pid;
+    const tmp = file + '.tmp-' + process.pid;
     fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
-    fs.renameSync(tmp, LEDGER_FILE); // atomic within a filesystem
-    return { appended: true, duplicate: false, length: next.length };
+    fs.renameSync(tmp, file); // atomic within a filesystem
+    return { appended: true, duplicate: false, length: next.length, ledgerFile: file };
   } finally {
-    releaseLock(fd);
+    releaseLock(fd, lock);
   }
 }
 
 // Retained for callers that still expect the old name. It now delegates to the
 // atomic path and ignores the caller's stale snapshot entirely, because using
 // that snapshot as the write base was the defect.
-function writeLedger(_oldEntriesIgnored, newEntry) {
-  return appendAtomic(newEntry).length;
+function writeLedger(_oldEntriesIgnored, newEntry, opts) {
+  return appendAtomic(newEntry, opts).length;
 }
 
 // ─── Validate an entry object against the ledger-entry schema ─────────────────
-function validateEntry(entry) {
+// The schema is parsed once and re-parsed only if the file on disk actually
+// changes. validateEntry() is now on a hot path — aegis-state runs every
+// candidate connector-usage entry in the ledger through it — and re-reading and
+// re-parsing the same JSON per entry would be a pointless per-entry file read.
+// The cache key is the file's size and mtime, so an edited schema is still
+// picked up; it is a read optimisation, never a second contract.
+let _schemaCache = null;
+function loadLedgerSchema() {
+  const st = fs.statSync(SCHEMA_FILE);
+  if (_schemaCache && _schemaCache.mtimeMs === st.mtimeMs && _schemaCache.size === st.size) {
+    return _schemaCache.schema;
+  }
   const schema = loadJSON(SCHEMA_FILE);
+  _schemaCache = { mtimeMs: st.mtimeMs, size: st.size, schema };
+  return schema;
+}
+
+function validateEntry(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return ['#: a ledger entry must be a JSON object'];
+  }
+  const schema = loadLedgerSchema();
   const defs   = schema['$defs'] || {};
   return validateSchema(schema, entry, '#', defs);
 }
 
 // ─── --append <entry.json> ────────────────────────────────────────────────────
-function appendEntry(entryPath) {
+function appendEntry(entryPath, ledgerFile) {
   // Load entry
   let entry;
   try {
@@ -270,7 +328,7 @@ function appendEntry(entryPath) {
   // than written twice — the caller needs to know its retry was absorbed.
   let res;
   try {
-    res = appendAtomic(entry);
+    res = appendAtomic(entry, ledgerFile ? { ledgerFile } : undefined);
   } catch (e) {
     console.error(`[ledger-writer] REFUSED: ${e.message}`);
     process.exit(1);
@@ -280,7 +338,7 @@ function appendEntry(entryPath) {
     console.log('[ledger-writer] The retry was absorbed; no duplicate effect was written.');
     process.exit(0);
   }
-  console.log(`[ledger-writer] Appended entry "${entry.entryId}" to ${LEDGER_FILE}`);
+  console.log(`[ledger-writer] Appended entry "${entry.entryId}" to ${res.ledgerFile}`);
   console.log(`[ledger-writer] Ledger length: ${res.length - 1} → ${res.length}  (grew by 1)`);
   process.exit(0);
 }
@@ -414,19 +472,30 @@ if (require.main !== module) {
 } else if (cmd === '--append') {
   const entryPath = args[1];
   if (!entryPath) {
-    console.error('Usage: node ledger-writer.cjs --append <entry.json>');
+    console.error('Usage: node ledger-writer.cjs --append <entry.json> [--ledger <path>]');
     process.exit(2);
   }
-  appendEntry(entryPath);
+  const flag = args.indexOf('--ledger');
+  const ledgerArg = flag > -1 ? args[flag + 1] : null;
+  if (flag > -1 && !ledgerArg) {
+    console.error('Usage: node ledger-writer.cjs --append <entry.json> [--ledger <path>]');
+    process.exit(2);
+  }
+  try {
+    appendEntry(entryPath, ledgerArg);
+  } catch (e) {
+    console.error(`[ledger-writer] REFUSED: ${e.message}`);
+    process.exit(1);
+  }
 
 } else if (cmd === '--migrate-policy-ledger') {
   migratePolicyLedger();
 
 } else {
   console.error('Usage:');
-  console.error('  node ledger-writer.cjs --append <entry.json>');
+  console.error('  node ledger-writer.cjs --append <entry.json> [--ledger <temp path>]');
   console.error('  node ledger-writer.cjs --migrate-policy-ledger');
   process.exit(2);
 }
 
-module.exports = { appendAtomic, acquireLock, releaseLock, readLedger, validateEntry };
+module.exports = { appendAtomic, acquireLock, releaseLock, readLedger, validateEntry, resolveLedgerFile, LEDGER_FILE, CANONICAL_LEDGER };

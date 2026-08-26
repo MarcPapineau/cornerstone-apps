@@ -32,9 +32,52 @@ let fail = 0;
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'engos-test-'));
 process.on('exit', () => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {} });
 
-function run(args) {
-  const r = spawnSync('node', [CLI, ...args], { cwd: ROOT, encoding: 'utf8' });
+// Two runners, and the difference between them is the point.
+//
+// `runProd()` is what CI, the adapters and a human at a terminal actually get:
+// no synthetic-subject flag, no synthetic-subject environment variable. The
+// negative proofs for finding #1 use this one, because a proof that the gate
+// refuses caller-declared changes is worthless if the harness quietly holds the
+// door open for it.
+//
+// `run()` is the fixture runner. Most cases here feed the classifier paths that
+// exist in no working tree (`src/auth/session.ts`, `a.md`…), which is exactly
+// what the test-only boundary is for. It opens that boundary — both halves of
+// it — ONLY for invocations that actually carry synthetic input, so a case that
+// passes neither --changed nor --diff-lines is still exercising the production
+// path rather than a permissive variant of it.
+function runProd(args, env = {}) {
+  const r = spawnSync('node', [CLI, ...args], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, ENGOS_TEST_ONLY_SYNTHETIC: '', ...env },
+  });
   return { exit: r.status, out: (r.stdout || '') + (r.stderr || '') };
+}
+
+function run(args) {
+  const synthetic = args.includes('--changed') || args.includes('--diff-lines');
+  if (!synthetic) return runProd(args);
+  return runProd([...args, '--test-only-synthetic-subject'], { ENGOS_TEST_ONLY_SYNTHETIC: '1' });
+}
+
+// Assert against a result that has ALREADY been run. The finding-#1 proofs need
+// to choose their own runner and environment, which `expect` cannot express
+// because it builds the invocation itself.
+function expect_raw(name, r, { exit, contains, notContains }) {
+  const okExit = r.exit === exit;
+  const okHas = contains ? [].concat(contains).every((c) => r.out.includes(c)) : true;
+  const okNot = notContains ? ![].concat(notContains).some((c) => r.out.includes(c)) : true;
+  if (okExit && okHas && okNot) {
+    pass++;
+    console.log(`  ok   ${name}  (exit ${r.exit})`);
+  } else {
+    fail++;
+    console.error(`  FAIL ${name}`);
+    console.error(`       expected exit=${exit}${contains ? `, containing ${JSON.stringify([].concat(contains))}` : ''}`);
+    console.error(`       got exit=${r.exit}`);
+    console.error(r.out.split('\n').map((l) => '         ' + l).join('\n'));
+  }
 }
 
 function expect(name, args, { exit, contains, notContains }) {
@@ -242,11 +285,18 @@ expect('FULL lane with no reviews at all is BLOCKED',
    '--changed', 'src/app.ts', '--diff-sha', SHA_A],
   { exit: 3, contains: ['RESULT: BLOCKED', 'ENGOS-REVIEW-MISSING'] });
 
-expect('codex approval clears a FULL non-high-risk change',
+expect('codex AND grok approval clears an ordinary (non-high-risk) FULL change',
   ['--gate-done', '--packet', FIXTURE_PACKET,
    '--changed', 'src/app.ts', '--diff-sha', SHA_A,
-   '--review', writeJSON('ok-codex.json', review())],
+   '--review', writeJSON('ok-codex.json', review()),
+   '--review', writeJSON('ok-grok.json', review({ reviewId: 'REV-test-001-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' }))],
   { exit: 0, contains: 'RESULT: READY_FOR_DETERMINISTIC_VALIDATION' });
+
+expect('codex approval ALONE does not clear an ordinary FULL change — grok is required too',
+  ['--gate-done', '--packet', FIXTURE_PACKET,
+   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('ok-codex-alone.json', review({ reviewId: 'REV-test-001-alone' }))],
+  { exit: 3, contains: ['ENGOS-REVIEW-MISSING', 'grok'], notContains: 'READY_FOR' });
 
 expect('a review of a DIFFERENT diff does not transfer',
   ['--gate-done', '--packet', FIXTURE_PACKET,
@@ -312,7 +362,8 @@ expect('a FIXED finding no longer blocks',
      reviewId: 'REV-human-verify-001',
      reviewer: 'human',
      reviewerModel: 'Marc Papineau',
-   }))],
+   })),
+   '--review', writeJSON('fixed-grok.json', review({ reviewId: 'REV-fixed-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' }))],
   { exit: 0, contains: 'RESULT: READY_FOR_DETERMINISTIC_VALIDATION' });
 
 expect('a review bound to another packet is rejected',
@@ -329,7 +380,8 @@ expect('LIGHT lane needs no AI reviewer at all',
 expect('unverified items are surfaced, not dropped',
   ['--gate-done', '--packet', FIXTURE_PACKET,
    '--changed', 'src/app.ts', '--diff-sha', SHA_A,
-   '--review', writeJSON('withunver.json', review({ unverified: ['no browser available to test the modal'] }))],
+   '--review', writeJSON('withunver.json', review({ unverified: ['no browser available to test the modal'] })),
+   '--review', writeJSON('withunver-grok.json', review({ reviewId: 'REV-withunver-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' }))],
   { exit: 0, contains: ['UNVERIFIED', 'no browser available to test the modal'] });
 
 // ── no bypass ───────────────────────────────────────────────────────────────
@@ -447,6 +499,7 @@ expect('a review claiming paths OUTSIDE the subject blocks',
 expect('a stale CRITICAL finding bound to another subject does NOT contaminate this one',
   ['--gate-done', '--packet', PKT, '--changed', 'src/app.ts', '--subject-sha', SHA_A,
    '--review', writeJSON('rp-clean.json', review({ reviewId: 'REV-rp-clean' })),
+   '--review', writeJSON('rp-clean-grok.json', review({ reviewId: 'REV-rp-clean-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' })),
    '--review', writeJSON('rp-stale-critical.json', review({
      reviewId: 'REV-rp-stalecrit',
      reviewer: 'grok',
@@ -472,7 +525,8 @@ expect('an explicit supersedes declaration resolves the ambiguity deterministica
    '--review', writeJSON('rp-sup-old.json', review({ reviewId: 'REV-rp-sup-old', disposition: 'REJECT' })),
    '--review', writeJSON('rp-sup-new.json', review({
      reviewId: 'REV-rp-sup-new', disposition: 'APPROVE', supersedes: 'REV-rp-sup-old',
-   }))],
+   })),
+   '--review', writeJSON('rp-sup-grok.json', review({ reviewId: 'REV-rp-sup-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' }))],
   { exit: 0, contains: ['READY_FOR_DETERMINISTIC_VALIDATION', 'superseded'] });
 
 console.log('\nRED PROOF — RECORD FIELDS THAT CANNOT BE EMPTY');
@@ -644,6 +698,325 @@ console.log('\nRED PROOF — ZERO CHECKS IS NOT EVIDENCE');
     console.error('  FAIL this suite mutates canonical evidence: ' + offenders.join('; '));
   }
 })();
+
+// ════════════════════════════════════════════════════════════════════════════
+// CORRECTION CYCLE 1 — PKT-20260825-GOVERNANCE-TRUTH
+// The prior suite proved "high-risk needs grok too" but never proved the plain
+// case: an ORDINARY FULL change — no high-risk signal at all — also requires
+// both reviewers, and control/security documents never slip into LIGHT just
+// because they end in .md. These are the exact holes the packet named.
+// ════════════════════════════════════════════════════════════════════════════
+
+console.log('\nRED PROOF — ORDINARY FULL REQUIRES BOTH CODEX AND GROK');
+
+expect('an ordinary (no high-risk signal) FULL change with codex approval alone is BLOCKED — codex-only is not enough',
+  ['--gate-done', '--packet', PKT,
+   '--changed', 'src/plain-feature.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('rp-ordinary-codex-only.json', review({
+     reviewId: 'REV-rp-ordinary-codex', reviewOf: reviewOf('src/plain-feature.ts'),
+   }))],
+  { exit: 3, contains: ['ENGOS-REVIEW-MISSING', 'grok'], notContains: 'READY_FOR' });
+
+expect('an ordinary (no high-risk signal) FULL change with grok approval alone is BLOCKED — grok-only is not enough',
+  ['--gate-done', '--packet', PKT,
+   '--changed', 'src/plain-feature.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('rp-ordinary-grok-only.json', review({
+     reviewId: 'REV-rp-ordinary-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+     reviewOf: reviewOf('src/plain-feature.ts'),
+   }))],
+  { exit: 3, contains: ['ENGOS-REVIEW-MISSING', 'codex'], notContains: 'READY_FOR' });
+
+expect('an ordinary (no high-risk signal) FULL change clears ONLY once both codex and grok approve',
+  ['--gate-done', '--packet', PKT,
+   '--changed', 'src/plain-feature.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('rp-ordinary-both-codex.json', review({
+     reviewId: 'REV-rp-ordinary-both-codex', reviewOf: reviewOf('src/plain-feature.ts'),
+   })),
+   '--review', writeJSON('rp-ordinary-both-grok.json', review({
+     reviewId: 'REV-rp-ordinary-both-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+     reviewOf: reviewOf('src/plain-feature.ts'),
+   }))],
+  { exit: 0, contains: 'RESULT: READY_FOR_DETERMINISTIC_VALIDATION' });
+
+console.log('\nRED PROOF — CONTROL AND SECURITY MARKDOWN NEVER ENTERS LIGHT');
+
+expect('a .github control-surface markdown file is FULL despite the .md extension',
+  ['--classify', '--changed', '.github/copilot-instructions.md', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'repository control surface'], notContains: 'lane      : LIGHT' });
+
+expect('the root AGENTS.md charter is FULL despite the .md extension',
+  ['--classify', '--changed', 'AGENTS.md', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'agent charter'], notContains: 'lane      : LIGHT' });
+
+expect('a SECURITY.md file is FULL despite the .md extension — it matches the security-control pattern',
+  ['--classify', '--changed', 'SECURITY.md', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'security control'], notContains: 'lane      : LIGHT' });
+
+expect('a CODEOWNERS review-ownership file is FULL with no extension at all',
+  ['--classify', '--changed', 'CODEOWNERS', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'review-ownership control file'], notContains: 'lane      : LIGHT' });
+
+console.log('\nRED PROOF — REVIEWER COMPLETENESS: EXACT-SUBJECT EXECUTION STATUS');
+
+// EXECUTED requires a valid record bound to the EXACT current subject hash.
+// A record bound to any other subject is STALE; a malformed record that never
+// became evidence is MISSING; two conflicting active records are MISSING
+// (ambiguous, not evidence). None of the three may ever read as EXECUTED.
+(function reviewerCompletenessExecutedOnlyOnExactSubject() {
+  const r = run(['--gate-done', '--packet', PKT,
+    '--changed', 'src/exact-subject.ts', '--subject-sha', SHA_A,
+    '--review', writeJSON('rp-exact-codex.json', review({
+      reviewId: 'REV-rp-exact-codex', reviewOf: reviewOf('src/exact-subject.ts'),
+    })),
+    '--review', writeJSON('rp-exact-grok.json', review({
+      reviewId: 'REV-rp-exact-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+      reviewOf: reviewOf('src/exact-subject.ts'),
+    })),
+    '--json']);
+  let j; try { j = JSON.parse(r.out); } catch { j = null; }
+  const rows = j && j.reviewerCompleteness && j.reviewerCompleteness.rows;
+  const codexRow = rows && rows.find((x) => x.reviewer === 'codex');
+  const grokRow = rows && rows.find((x) => x.reviewer === 'grok');
+  const ok = r.exit === 0 && codexRow && codexRow.executed === 'EXECUTED' &&
+    /1\/1 subject path\(s\) covered/.test(codexRow.score) &&
+    grokRow && grokRow.executed === 'EXECUTED';
+  if (ok) {
+    pass++; console.log('  ok   a record bound to the exact current subject reads EXECUTED with a coverage score');
+  } else {
+    fail++;
+    console.error('  FAIL exact-subject EXECUTED status not reported correctly');
+    console.error(`       exit=${r.exit} codexRow=${JSON.stringify(codexRow)} grokRow=${JSON.stringify(grokRow)}`);
+  }
+})();
+
+(function reviewerCompletenessStaleNeverReadsExecuted() {
+  const r = run(['--gate-done', '--packet', PKT,
+    '--changed', 'src/exact-subject.ts', '--subject-sha', SHA_A,
+    '--review', writeJSON('rp-stale-codex.json', review({
+      reviewId: 'REV-rp-stale-codex', reviewOf: reviewOf('src/exact-subject.ts'),
+    })),
+    '--review', writeJSON('rp-stale-grok-otherversion.json', review({
+      reviewId: 'REV-rp-stale-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+      reviewOf: reviewOf('src/exact-subject.ts', SHA_B),
+    })),
+    '--json']);
+  let j; try { j = JSON.parse(r.out); } catch { j = null; }
+  const rows = j && j.reviewerCompleteness && j.reviewerCompleteness.rows;
+  const grokRow = rows && rows.find((x) => x.reviewer === 'grok');
+  const ok = r.exit === 3 && grokRow && grokRow.executed === 'STALE' &&
+    Array.isArray(grokRow.staleRecords) && grokRow.staleRecords.length === 1 &&
+    grokRow.executed !== 'EXECUTED';
+  if (ok) {
+    pass++; console.log('  ok   a record bound to a DIFFERENT subject reads STALE, never EXECUTED');
+  } else {
+    fail++;
+    console.error('  FAIL a stale-subject record was not reported as STALE');
+    console.error(`       exit=${r.exit} grokRow=${JSON.stringify(grokRow)}`);
+  }
+})();
+
+(function reviewerCompletenessMalformedNeverReadsExecuted() {
+  const malformedGrok = review({ reviewId: 'REV-rp-malformed-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture', reviewOf: reviewOf('src/exact-subject.ts') });
+  delete malformedGrok.reviewerModel; // required by schema — this record cannot become evidence
+  const r = run(['--gate-done', '--packet', PKT,
+    '--changed', 'src/exact-subject.ts', '--subject-sha', SHA_A,
+    '--review', writeJSON('rp-malf-codex.json', review({
+      reviewId: 'REV-rp-malf-codex', reviewOf: reviewOf('src/exact-subject.ts'),
+    })),
+    '--review', writeJSON('rp-malformed-grok.json', malformedGrok),
+    '--json']);
+  let j; try { j = JSON.parse(r.out); } catch { j = null; }
+  const rows = j && j.reviewerCompleteness && j.reviewerCompleteness.rows;
+  const grokRow = rows && rows.find((x) => x.reviewer === 'grok');
+  const malformedNamed = /ENGOS-REVIEW-MALFORMED/.test(r.out);
+  const ok = r.exit === 3 && malformedNamed && grokRow && grokRow.executed !== 'EXECUTED';
+  if (ok) {
+    pass++; console.log(`  ok   a malformed record never becomes evidence and never reads EXECUTED (grok reads ${grokRow.executed})`);
+  } else {
+    fail++;
+    console.error('  FAIL a malformed record was not kept out of EXECUTED');
+    console.error(`       exit=${r.exit} malformedNamed=${malformedNamed} grokRow=${JSON.stringify(grokRow)}`);
+  }
+})();
+
+(function reviewerCompletenessAmbiguousNeverReadsExecuted() {
+  const r = run(['--gate-done', '--packet', PKT,
+    '--changed', 'src/exact-subject.ts', '--subject-sha', SHA_A,
+    '--review', writeJSON('rp-ambig-codex-a.json', review({
+      reviewId: 'REV-rp-ambig-codex-a', disposition: 'APPROVE', reviewOf: reviewOf('src/exact-subject.ts'),
+    })),
+    '--review', writeJSON('rp-ambig-codex-b.json', review({
+      reviewId: 'REV-rp-ambig-codex-b', disposition: 'REJECT', reviewOf: reviewOf('src/exact-subject.ts'),
+    })),
+    '--review', writeJSON('rp-ambig-grok.json', review({
+      reviewId: 'REV-rp-ambig-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+      reviewOf: reviewOf('src/exact-subject.ts'),
+    })),
+    '--json']);
+  let j; try { j = JSON.parse(r.out); } catch { j = null; }
+  const rows = j && j.reviewerCompleteness && j.reviewerCompleteness.rows;
+  const codexRow = rows && rows.find((x) => x.reviewer === 'codex');
+  const ok = r.exit === 3 && /ENGOS-AMBIGUOUS-REVIEWS/.test(r.out) &&
+    codexRow && codexRow.executed !== 'EXECUTED';
+  if (ok) {
+    pass++; console.log(`  ok   two conflicting active records never read EXECUTED (codex reads ${codexRow.executed})`);
+  } else {
+    fail++;
+    console.error('  FAIL ambiguous conflicting records were not kept out of EXECUTED');
+    console.error(`       exit=${r.exit} codexRow=${JSON.stringify(codexRow)}`);
+  }
+})();
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CORRECTION CYCLE — REV-20260825234549-codex, findings #1, #2, #8
+// ═══════════════════════════════════════════════════════════════════════════
+
+console.log('\nRED PROOF — FINDING #1: THE CALLER CANNOT DECLARE ITS OWN CHANGE');
+
+// The exact reproduction from the review. In THIS working tree the real subject
+// is a set of HIGH-RISK builder-control paths; before the fix, naming an
+// unchanged README.md and a 1-line count returned ok:true, lane LIGHT, no
+// packet and no required reviewers. runProd() is used deliberately: this must
+// hold for the invocation a human or CI actually makes, with no test-only
+// boundary opened anywhere.
+expect_raw('a dirty builder-control tree cannot be certified LIGHT by naming README.md',
+  runProd(['--gate-done', '--changed', 'README.md', '--diff-lines', '1',
+           '--subject-sha', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', '--json']),
+  { exit: 3, contains: ['ENGOS-SYNTHETIC-INPUT-REFUSED'], notContains: ['"lane": "LIGHT"', '"ok": true'] });
+
+expect_raw('--changed alone is refused in production, not silently honoured',
+  runProd(['--classify', '--changed', 'README.md', '--json']),
+  { exit: 3, contains: ['ENGOS-SYNTHETIC-INPUT-REFUSED'], notContains: '"lane": "LIGHT"' });
+
+expect_raw('--diff-lines alone is refused in production — the size cap is git\'s to measure',
+  runProd(['--classify', '--diff-lines', '1', '--json']),
+  { exit: 3, contains: ['ENGOS-SYNTHETIC-INPUT-REFUSED'] });
+
+expect_raw('the flag alone does not open the boundary — the environment must agree',
+  runProd(['--classify', '--changed', 'README.md', '--diff-lines', '1', '--test-only-synthetic-subject', '--json']),
+  { exit: 3, contains: ['ENGOS-SYNTHETIC-INPUT-REFUSED'] });
+
+expect_raw('the environment alone does not open the boundary — the flag must be explicit',
+  runProd(['--classify', '--changed', 'README.md', '--diff-lines', '1', '--json'],
+          { ENGOS_TEST_ONLY_SYNTHETIC: '1' }),
+  { exit: 3, contains: ['ENGOS-SYNTHETIC-INPUT-REFUSED'] });
+
+// A forged subject hash, supplied with no synthetic narrowing at all, must be
+// caught by the binding check against the REAL tree — and the lane reported
+// must be the real tree's lane, not the forged one's.
+expect_raw('a forged subject hash is refused against the real tree',
+  runProd(['--gate-done',
+           '--subject-sha', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855', '--json']),
+  { exit: 3, contains: ['ENGOS-SUBJECT-MISMATCH'], notContains: '"ok": true' });
+
+// Finding #1's second verification requirement: one subject hash cannot
+// classify two ways because the caller changed --diff-lines. In production the
+// caller has no --diff-lines to change, so the check is that repeated runs of
+// the real tree agree with each other exactly.
+(function classificationIsAFunctionOfTheSubjectAlone() {
+  const a = runProd(['--classify', '--json']);
+  const b = runProd(['--classify', '--json']);
+  let ja, jb;
+  try { ja = JSON.parse(a.out); jb = JSON.parse(b.out); } catch { ja = jb = null; }
+  const ok = ja && jb &&
+    ja.subject.subjectSha256 === jb.subject.subjectSha256 &&
+    ja.lane === jb.lane &&
+    ja.caps.linesSeen === jb.caps.linesSeen &&
+    typeof ja.caps.linesSeen === 'number' &&
+    JSON.stringify(ja.requiredReviewers) === JSON.stringify(jb.requiredReviewers);
+  if (ok) {
+    pass++;
+    console.log(`  ok   one subject hash classifies one way (${ja.lane}, ${ja.caps.linesSeen} git-measured lines, twice)`);
+  } else {
+    fail++;
+    console.error('  FAIL classification of one subject hash was not stable');
+    console.error(`       a=${JSON.stringify(ja && { lane: ja.lane, lines: ja.caps.linesSeen })} b=${JSON.stringify(jb && { lane: jb.lane, lines: jb.caps.linesSeen })}`);
+  }
+})();
+
+console.log('\nRED PROOF — FINDING #2: ONE PATH HAS ONE SPELLING');
+
+// Every alias of the root charter must reach the same canonical path and the
+// same FULL/HIGH-RISK verdict. Before the fix `./AGENTS.md` classified LIGHT.
+for (const alias of ['./AGENTS.md', 'dir/../AGENTS.md', 'a/b/../../AGENTS.md']) {
+  expect(`the alias ${alias} resolves to AGENTS.md and is FULL`,
+    ['--classify', '--changed', alias, '--diff-lines', '5'],
+    { exit: 0, contains: ['lane      : FULL', 'agent charter', 'AGENTS.md'], notContains: 'lane      : LIGHT' });
+}
+
+// Charters below the root. luke-app/CLAUDE.md is a real agent charter in this
+// repository and classified LIGHT before the fix.
+expect('a nested charter luke-app/CLAUDE.md is FULL at its real depth',
+  ['--classify', '--changed', 'luke-app/CLAUDE.md', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'agent charter'], notContains: 'lane      : LIGHT' });
+
+expect('a charter inside a docs tree (docs/AGENTS.md) is FULL, not documentation',
+  ['--classify', '--changed', 'docs/AGENTS.md', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'agent charter'], notContains: 'lane      : LIGHT' });
+
+// Real .claude control files in this repository.
+expect('an existing .claude settings file is FULL — it decides what an agent may do',
+  ['--classify', '--changed', 'luke-app/.claude/settings.json', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'agent control directory'], notContains: 'lane      : LIGHT' });
+
+expect('an existing .claude launch config is FULL',
+  ['--classify', '--changed', 'luke-app/.claude/launch.json', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'agent control directory'], notContains: 'lane      : LIGHT' });
+
+expect('a .claude hook is FULL — it runs on the agent\'s behalf',
+  ['--classify', '--changed', './luke-app/.claude/hooks/x.sh', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'agent control directory'], notContains: 'lane      : LIGHT' });
+
+// Paths that cannot be reduced to one canonical spelling are refused outright,
+// never classified as anything — including never as LIGHT.
+expect('an absolute path is refused, not classified',
+  ['--classify', '--changed', '/etc/passwd', '--diff-lines', '1'],
+  { exit: 3, contains: ['ENGOS-PATH-NOT-CANONICAL', 'absolute'], notContains: 'lane      : LIGHT' });
+
+expect('a backslash path is refused — git never emits one',
+  ['--classify', '--changed', 'docs\\AGENTS.md', '--diff-lines', '1'],
+  { exit: 3, contains: ['ENGOS-PATH-NOT-CANONICAL', 'backslash'], notContains: 'lane      : LIGHT' });
+
+expect('a path escaping the repository root is refused',
+  ['--classify', '--changed', '../outside/notes.md', '--diff-lines', '1'],
+  { exit: 3, contains: ['ENGOS-PATH-NOT-CANONICAL', 'escapes'], notContains: 'lane      : LIGHT' });
+
+// The canonicalisation must not quietly promote ordinary documents.
+expect('canonicalisation does not drag an ordinary doc out of the light lane',
+  ['--classify', '--changed', './docs/guide.md', '--diff-lines', '20'],
+  { exit: 0, contains: ['lane      : LIGHT'] });
+
+console.log('\nRED PROOF — FINDING #8: EVERY FULL SUBJECT REQUIRES CODEX AND GROK');
+
+// This is the already-approved rule and it is NOT weakened to match the stale
+// documentation. The docs were corrected instead. An ordinary FULL change —
+// one that reached FULL precisely because nothing could confidently call it
+// safe — requires both reviewers.
+expect('an ordinary FULL change requires codex AND grok',
+  ['--classify', '--changed', 'src/plain-feature.ts', '--diff-lines', '10'],
+  { exit: 0, contains: ['lane      : FULL', 'codex + grok (required)'] });
+
+expect('a HIGH-RISK change requires codex AND grok',
+  ['--classify', '--changed', 'src/auth/session.ts', '--diff-lines', '10'],
+  { exit: 0, contains: ['lane      : FULL', 'high-risk : YES', 'codex + grok (required)'] });
+
+expect('a control-plane charter change requires codex AND grok',
+  ['--classify', '--changed', 'luke-app/CLAUDE.md', '--diff-lines', '5'],
+  { exit: 0, contains: ['lane      : FULL', 'codex + grok (required)'] });
+
+(function requiredReviewerSetIsStableAcrossRepeatedClassification() {
+  const seen = new Set();
+  for (let i = 0; i < 3; i++) {
+    const r = run(['--classify', '--changed', 'src/plain-feature.ts', '--diff-lines', '10', '--json']);
+    let j; try { j = JSON.parse(r.out); } catch { j = null; }
+    seen.add(j ? JSON.stringify(j.requiredReviewers) : `parse-error-${i}`);
+  }
+  const ok = seen.size === 1 && seen.has('["codex","grok"]');
+  if (ok) { pass++; console.log('  ok   the required-reviewer set is identical on repeated classification'); }
+  else { fail++; console.error(`  FAIL required-reviewer set varied across runs: ${[...seen].join(' | ')}`); }
+})();
+
 
 console.log(`\n${pass} passed, ${fail} failed.`);
 process.exit(fail === 0 ? 0 : 1);

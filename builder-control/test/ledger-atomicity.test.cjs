@@ -72,6 +72,23 @@ function appendViaCli(ledger, e) {
     });
   } finally { try { fs.unlinkSync(f); } catch {} }
 }
+
+// The second injection form: an explicit --ledger argument, with NO environment
+// variable set at all. Added 2026-08-25 (Codex G1 finding #1) because the
+// env-only override is read once at module load, so an in-process caller could
+// not aim the writer anywhere — which is why the connector-usage tests skipped
+// the writer entirely and asserted a shape it would have refused.
+function appendViaCliFlag(ledger, e) {
+  const f = path.join(TMP, `entry-${Math.random().toString(36).slice(2)}.json`);
+  fs.writeFileSync(f, JSON.stringify(e));
+  const env = { ...process.env };
+  delete env.AEGIS_LEDGER_FILE;
+  try {
+    return spawnSync('node', [WRITER, '--append', f, '--ledger', ledger], {
+      cwd: ROOT, encoding: 'utf8', env,
+    });
+  } finally { try { fs.unlinkSync(f); } catch {} }
+}
 const read = (l) => JSON.parse(fs.readFileSync(l, 'utf8'));
 
 console.log('AEGIS ledger — atomicity and idempotency red proofs');
@@ -210,7 +227,7 @@ test('RED: this suite never writes to the REAL production ledger', () => {
   const before = JSON.parse(REAL_LEDGER_BEFORE);
   const now = JSON.parse(fs.readFileSync(REAL_LEDGER, 'utf8'));
 
-  const OURS = /^LED-(CONC-|IDEM-|DUP$|FIRST$|OTHER$|STALE$|FAILED$|CLEAN$|IN-A|IN-B$|FOREIGN$)/;
+  const OURS = /^LED-(CONC-|IDEM-|DUP$|FIRST$|OTHER$|STALE$|FAILED$|CLEAN$|IN-A|IN-B$|FOREIGN$|USAGE-INJECT$|BAD-INJECT$|INJECT-|DECOY)/;
   const ourStrays = now.filter((e) => OURS.test(String(e.entryId || '')));
   assert.deepStrictEqual(ourStrays.map((e) => e.entryId), [],
     'entries from this suite reached the real production ledger — isolation is broken');
@@ -223,6 +240,93 @@ test('RED: this suite never writes to the REAL production ledger', () => {
   const strays = fs.readdirSync(BC).filter((f) =>
     f.startsWith('.test-') || f.startsWith('ledger.json.tmp-') || f === 'ledger.json.lock');
   assert.deepStrictEqual(strays, [], `stray fixtures left in builder-control/: ${strays.join(', ')}`);
+});
+
+// ── INJECTED LEDGER PATH ───────────────────────────────────────────────────
+// One writer, one schema, one lock — only the destination moves. These prove
+// the injected path is the SAME path, not a relaxed sibling of it.
+
+// A canonical connector-usage entry: the shape the projector reads as "a run
+// consumed this connector". connectorId is the service; correlationId is the
+// run. There is deliberately no `runId` property — see the schema.
+const usageEntry = (id, extra = {}) => entry(id, {
+  gate: 'connector-usage',
+  plane: 'INTEGRATION',
+  connectorId: 'notion',
+  correlationId: 'RUN-LEDGER-INJECT',
+  operationId: `op-${id}`,
+  attempt: 1,
+  result: 'page fetched',
+  ...extra,
+});
+
+test('RED: a canonical connector-usage entry validates and appends through the writer', () => {
+  const L = isolatedLedger();
+  const e = usageEntry('LED-USAGE-INJECT');
+  assert.deepStrictEqual(require(WRITER).validateEntry(e), [],
+    'a connector-usage entry is not accepted by the canonical ledger schema');
+  const r = appendViaCliFlag(L, e);
+  assert.strictEqual(r.status, 0, `a conforming connector-usage entry must append: ${r.stderr}`);
+  const stored = read(L);
+  assert.strictEqual(stored.length, 1);
+  assert.deepStrictEqual(stored[0], e, 'the writer altered the entry it stored');
+});
+
+test('RED: --ledger injects the target WITHOUT the environment variable, and the schema still gates it', () => {
+  const L = isolatedLedger();
+  // Missing agentId and carrying a top-level runId: the exact off-schema shape
+  // the usage tests used to assert against. Injection must not soften this.
+  const bad = { entryId: 'LED-BAD-INJECT', ts: new Date().toISOString(), gate: 'connector-usage',
+    status: 'PASS', plane: 'INTEGRATION', connectorId: 'notion', runId: 'RUN-X', operationId: 'op-x' };
+  const r = appendViaCliFlag(L, bad);
+  assert.notStrictEqual(r.status, 0, 'the injected path stored an entry the canonical path would refuse');
+  assert.ok(/missing required property "agentId"/.test(r.stderr), r.stderr.slice(0, 300));
+  assert.ok(/additional property "runId"/.test(r.stderr), r.stderr.slice(0, 300));
+  assert.deepStrictEqual(read(L), [], 'a schema-invalid entry reached the injected ledger');
+});
+
+test('RED: an in-process injected append is still atomic and still idempotent', () => {
+  const W = require(WRITER);
+  const L = isolatedLedger();
+  const first = W.appendAtomic(usageEntry('LED-INJECT-A', { operationId: 'OP-INJECT' }), { ledgerFile: L });
+  assert.strictEqual(first.appended, true);
+  assert.strictEqual(first.ledgerFile, L, 'the writer ignored the injected destination');
+  // Same operationId, different entryId: a retry, not a second use.
+  const second = W.appendAtomic(usageEntry('LED-INJECT-B', { operationId: 'OP-INJECT' }), { ledgerFile: L });
+  assert.strictEqual(second.appended, false, 'idempotency was lost on the injected path');
+  assert.strictEqual(second.duplicate, true);
+  assert.strictEqual(read(L).length, 1, 'a retried operation created a second entry on the injected path');
+  // A duplicate entryId is still refused there too.
+  assert.throws(() => W.appendAtomic(usageEntry('LED-INJECT-A', { operationId: 'OP-OTHER' }), { ledgerFile: L }),
+    /already exists/, 'a duplicate entryId was accepted on the injected path');
+  assert.ok(!fs.existsSync(L + '.lock'), 'the injected ledger\'s lock leaked');
+});
+
+test('RED: injected appends to DIFFERENT ledgers cannot see each other', () => {
+  const W = require(WRITER);
+  const A = isolatedLedger();
+  const B = isolatedLedger();
+  W.appendAtomic(usageEntry('LED-INJECT-IN-A', { operationId: 'OP-A' }), { ledgerFile: A });
+  W.appendAtomic(usageEntry('LED-INJECT-IN-B', { operationId: 'OP-B' }), { ledgerFile: B });
+  assert.strictEqual(read(A).length, 1);
+  assert.strictEqual(read(B).length, 1);
+  assert.strictEqual(read(A)[0].entryId, 'LED-INJECT-IN-A');
+  assert.strictEqual(read(B)[0].entryId, 'LED-INJECT-IN-B');
+});
+
+test('RED: the ARGUMENT form of the override is confined to a temp dir too', () => {
+  // Injectability must not become an evidence-hiding switch by the back door:
+  // the containment rule belongs to the resolver, not to the env-var reader.
+  const W = require(WRITER);
+  const decoy = path.join(BC, 'decoy-injected-ledger.json');
+  assert.throws(() => W.appendAtomic(entry('LED-DECOY'), { ledgerFile: decoy }),
+    /must point inside/, 'an arbitrary injected path was accepted');
+  assert.ok(!fs.existsSync(decoy), 'a decoy ledger was created');
+
+  const r = appendViaCliFlag(decoy, entry('LED-DECOY-CLI'));
+  assert.notStrictEqual(r.status, 0, '--ledger accepted a non-temp destination');
+  assert.ok(/must point inside/.test(r.stderr), r.stderr.slice(0, 200));
+  assert.ok(!fs.existsSync(decoy), 'a decoy ledger was created via the CLI');
 });
 
 test('RED: the ledger override cannot redirect evidence outside a temp dir', () => {

@@ -307,6 +307,38 @@ function checkCoverage(groups, subjectPaths) {
   return { ok: true, covered: seen.size };
 }
 
+// ── lane isolation ──────────────────────────────────────────────────────────
+// A group record belongs to a lane (one groupId, one reviewer, one subject)
+// only when ALL THREE match exactly. A record missing a field — a legacy or
+// malformed record — does not "probably" match; it simply fails the check.
+// This is what stops a Codex G1 rerun from archiving Grok's G1, or a G1 left
+// over from a different subject: those are different lanes, not the same one
+// with fewer facts.
+function matchesLane(rec, lane) {
+  if (!rec) return false;
+  if (lane.groupId != null && (!rec.group || rec.group.groupId !== lane.groupId)) return false;
+  if (lane.reviewer != null && rec.reviewer !== lane.reviewer) return false;
+  if (lane.subjectSha != null && (!rec.reviewOf || rec.reviewOf.diffSha256 !== lane.subjectSha)) return false;
+  return true;
+}
+
+// Splits an already-verified record list into the requested reviewer's lane
+// for the current subject, plus what was excluded and why. Pure — no fs, no
+// signing — so the aggregation policy can be proven without writing evidence
+// to disk. `reviewer: null` means "no lane filter", matching the pre-existing
+// mixed-reviewer detection behaviour when --reviewer is not supplied.
+function selectAggregationLane(records, { subjectSha, reviewer }) {
+  const usable = [];
+  const excludedSubject = [];
+  const excludedReviewer = [];
+  for (const rec of records) {
+    if (!rec.reviewOf || rec.reviewOf.diffSha256 !== subjectSha) { excludedSubject.push(rec); continue; }
+    if (reviewer && rec.reviewer !== reviewer) { excludedReviewer.push(rec); continue; }
+    usable.push(rec);
+  }
+  return { usable, excludedSubject, excludedReviewer };
+}
+
 // ── per-group review ────────────────────────────────────────────────────────
 function cmdRun(args) {
   if (!args.packet) return usage('--packet is required');
@@ -325,14 +357,31 @@ function cmdRun(args) {
   // clear. A re-run REPLACES its predecessor: the superseded record is archived
   // rather than deleted, because discarding evidence to make a gate pass is the
   // thing this system exists to prevent.
+  //
+  // "predecessor" means the SAME groupId, the SAME reviewer, and the SAME
+  // subject — matched by reading each candidate's content, not by filename
+  // suffix. A filename-suffix match (old behaviour) archived any file ending
+  // in "-G1.json", which could not tell Codex's G1 from Grok's G1, nor this
+  // subject's G1 from a G1 left over from a previous one.
+  const reviewerLane = args.reviewer || 'codex';
   for (const g of wanted) {
-    const stale = fs.readdirSync(GROUPS_DIR).filter((f) => f.endsWith(`-${g.groupId}.json`));
+    const candidates = fs.readdirSync(GROUPS_DIR, { withFileTypes: true })
+      .filter((d) => d.isFile() && d.name.endsWith('.json'));
+    const stale = [];
+    for (const d of candidates) {
+      let rec;
+      try { rec = JSON.parse(fs.readFileSync(path.join(GROUPS_DIR, d.name), 'utf8')); }
+      catch { continue; } // unreadable — ambiguous, left in place rather than guessed at
+      if (matchesLane(rec, { groupId: g.groupId, reviewer: reviewerLane, subjectSha: subject.subjectSha256 })) {
+        stale.push(d.name);
+      }
+    }
     if (stale.length) {
       const attic = path.join(GROUPS_DIR, 'superseded');
       fs.mkdirSync(attic, { recursive: true });
       for (const f of stale) {
         fs.renameSync(path.join(GROUPS_DIR, f), path.join(attic, f));
-        console.log(`[review-chunker] archived superseded record for ${g.groupId}: ${f}`);
+        console.log(`[review-chunker] archived superseded record for ${reviewerLane} ${g.groupId}: ${f}`);
       }
     }
   }
@@ -422,7 +471,8 @@ function aggregate(args) {
     }
   }
 
-  const usable = [];
+  const wantedReviewer = args.reviewer || null;
+  const verified = [];
   for (const l of loaded) {
     if (l.stale) continue;
     if (!l.rec) { problems.push({ code: 'GROUP-UNREADABLE', detail: `${path.basename(l.path)}: ${l.error}` }); continue; }
@@ -430,14 +480,16 @@ function aggregate(args) {
     // smaller piece of evidence — it is no evidence.
     const v = require('./review-sign.cjs').verify(l.rec, { packetPath: args.packet });
     if (!v.ok) { problems.push({ code: 'GROUP-UNSIGNED', detail: `${path.basename(l.path)}: ${v.code} — ${v.reason}` }); continue; }
-    if (!l.rec.reviewOf || l.rec.reviewOf.diffSha256 !== subject.subjectSha256) {
-      // Reached only when a stale record could not be archived (read-only dir).
-      // Still excluded, still not a blocking problem: it is evidence about
-      // another revision, not a defect in this one.
-      continue;
-    }
-    usable.push(l.rec);
+    verified.push(l.rec);
   }
+
+  // --aggregate --reviewer X loads only that reviewer's lane for this subject.
+  // A record bound to another reviewer is not mixed in and not a problem — it
+  // simply was never asked for. Records bound to another subject are excluded
+  // the same way (normally already archived above; this is the fallback for
+  // when archiving could not happen).
+  const lane = selectAggregationLane(verified, { subjectSha: subject.subjectSha256, reviewer: wantedReviewer });
+  const usable = lane.usable;
 
   // One reviewer, one model, across every group. Mixing them produces an
   // aggregate nobody can attribute — "Codex approved it" would be true of some
@@ -463,6 +515,10 @@ function aggregate(args) {
   if (setAside.length) {
     // Reported, never hidden — an operator must be able to see what was moved.
     problems.push({ code: 'GROUPS-ARCHIVED-OTHER-SUBJECT', detail: `${setAside.length} group record(s) bound to a different subject were archived to groups/other-subjects/ (${setAside.map((x) => `${x.file}@${x.boundTo}`).join(', ')}). They neither approve nor block this subject.`, informational: true });
+  }
+  if (wantedReviewer && lane.excludedReviewer.length) {
+    const others = [...new Set(lane.excludedReviewer.map((r) => r.reviewer))];
+    problems.push({ code: 'GROUPS-EXCLUDED-OTHER-REVIEWER', detail: `${lane.excludedReviewer.length} group record(s) reviewed by ${others.join(', ')} were excluded from the ${wantedReviewer} aggregation lane for this subject. They neither approve nor block it.`, informational: true });
   }
   const findings = usable.flatMap((r) => r.findings || []);
   const disposition = !ok ? 'UNAVAILABLE'
@@ -623,4 +679,4 @@ if (require.main === module) {
   process.exit(code);
 }
 
-module.exports = { planGroups, checkCoverage, aggregate, buildGroupArgv, roleOf, ROLES, DEFAULT_GROUPS, MAX_GROUP_BYTES };
+module.exports = { planGroups, checkCoverage, aggregate, buildGroupArgv, roleOf, ROLES, DEFAULT_GROUPS, MAX_GROUP_BYTES, matchesLane, selectAggregationLane };

@@ -28,8 +28,8 @@
  * than left for someone to discover, because an over-claimed control is worse
  * than a missing one — it stops people looking.
  *
- *   node builder-control/review-sign.cjs --sign <record.json>
- *   node builder-control/review-sign.cjs --verify <record.json>
+ *   node builder-control/review-sign.cjs --sign <record.json> [--packet <packet.json>]
+ *   node builder-control/review-sign.cjs --verify <record.json> [--packet <packet.json>]
  *   node builder-control/review-sign.cjs --keyinfo
  *
  * Exit: 0 ok · 2 usage · 3 verification failed
@@ -113,16 +113,68 @@ function packetDigest(packetPath) {
   }));
 }
 
-function resolvePacketForRecord(rec) {
-  if (!fs.existsSync(PACKETS_DIR)) return null;
-  for (const f of fs.readdirSync(PACKETS_DIR)) {
-    if (!f.endsWith('.json')) continue;
-    const full = path.join(PACKETS_DIR, f);
-    try {
-      if (JSON.parse(fs.readFileSync(full, 'utf8')).packetId === rec.packetId) return full;
-    } catch { /* skip unreadable */ }
+/**
+ * PROVEN DEFECT (2026-08-25): a BACKUP was treated as an authority.
+ *
+ * Packets are backed up in place, beside the original — packets/PKT-X.json and
+ * packets/PKT-X-BACKUP-2026-08-25-SOMETHING.json — and a backup carries the SAME
+ * packetId, because it is a copy. resolvePacketForRecord() scanned the directory
+ * and returned the FIRST match, and on this filesystem `-BACKUP-` sorts before
+ * `.json`, so the backup won. A Codex G1 record signed against the live packet
+ * was then digested against a stale copy and reported
+ * ATTESTATION-PACKET-CHANGED: a real, valid review refused for a change that
+ * never happened. A false refusal is not the safe direction of a wrong answer —
+ * it teaches an operator that the check is noise.
+ *
+ * Two rules follow, and they are different rules:
+ *   1. A backup is never an authority. It is excluded by name, always.
+ *   2. If two ACTIVE packets still claim one packetId, that is not resolvable by
+ *      reading a directory, so it is REFUSED rather than guessed. Picking either
+ *      one would be a coin toss dressed as a verification.
+ */
+const BACKUP_NAME_RE = /(^|[-_.])BACKUP[-_.]/i;
+
+/** Name-based, deliberately: content cannot say "I am the copy" — a copy is identical. */
+function isBackupPacketName(name) {
+  const base = path.basename(name);
+  return BACKUP_NAME_RE.test(base) || /\.bak(\.json)?$/i.test(base) || /~$/.test(base);
+}
+
+/**
+ * Resolve the ONE active packet a record was authorized by.
+ *   { ok: true,  path: <string|null> }  — exactly one active packet, or none
+ *   { ok: false, code: 'ATTESTATION-PACKET-AMBIGUOUS' } — more than one
+ * `backups` is always reported so a caller can explain a miss ("the only file
+ * with that id is a backup") instead of saying nothing was found.
+ */
+function resolvePacket(rec, opts = {}) {
+  const dir = opts.packetsDir || PACKETS_DIR;
+  const active = [];
+  const backups = [];
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir).sort()) {
+      if (!f.endsWith('.json')) continue;
+      const full = path.join(dir, f);
+      let id;
+      try { id = JSON.parse(fs.readFileSync(full, 'utf8')).packetId; }
+      catch { continue; /* unreadable is not an authority either */ }
+      if (!rec || id !== rec.packetId) continue;
+      (isBackupPacketName(f) ? backups : active).push(full);
+    }
   }
-  return null;
+  if (active.length > 1) {
+    return {
+      ok: false, code: 'ATTESTATION-PACKET-AMBIGUOUS', path: null, active, backups,
+      reason: `${active.length} active packet files declare packetId ${rec.packetId} (${active.map((p) => path.basename(p)).join(', ')}). Which one authorized this review cannot be decided by reading a directory, so it is refused rather than guessed. Name the authority explicitly with --packet <path>.`,
+    };
+  }
+  return { ok: true, path: active[0] || null, active, backups };
+}
+
+/** Back-compatible shape: a path, or null when there is no single active packet. */
+function resolvePacketForRecord(rec, opts = {}) {
+  const r = resolvePacket(rec, opts);
+  return r.ok ? r.path : null;
 }
 
 /** The exact bytes an attestation covers. */
@@ -177,7 +229,15 @@ function attestationPayload(rec, pktDigest) {
 
 function sign(rec, opts = {}) {
   const { key, source } = loadKey();
-  const pkt = opts.packetPath || resolvePacketForRecord(rec);
+  let pkt = opts.packetPath || null;
+  if (!pkt) {
+    // Signing against an ambiguously-resolved packet would mint a record that
+    // can never be verified the same way twice. Refuse at the point of signing,
+    // where the operator can still fix the directory.
+    const r = resolvePacket(rec, opts);
+    if (!r.ok) throw new Error(`${r.code}: ${r.reason}`);
+    pkt = r.path;
+  }
   const pd = packetDigest(pkt);
   const payload = attestationPayload(rec, pd);
   const mac = crypto.createHmac(ALG, key).update(payload).digest('hex');
@@ -206,7 +266,14 @@ function verify(rec, opts = {}) {
   try { key = loadKey({ create: false }).key; }
   catch (e) { return { ok: false, code: 'ATTESTATION-NO-KEY', reason: `cannot verify: ${e.message}. Refusing to accept an unverifiable record.` }; }
 
-  const pkt = opts.packetPath || resolvePacketForRecord(rec);
+  let pkt = opts.packetPath || null;
+  let backups = [];
+  if (!pkt) {
+    const r = resolvePacket(rec, opts);
+    if (!r.ok) return { ok: false, code: r.code, reason: r.reason };
+    pkt = r.path;
+    backups = r.backups;
+  }
   const pd = packetDigest(pkt);
 
   // Finding #3: if the packet's authorizing content changed since signing, the
@@ -218,7 +285,8 @@ function verify(rec, opts = {}) {
   if (a.packetDigest && !pd) {
     return {
       ok: false, code: 'ATTESTATION-PACKET-MISSING',
-      reason: 'this record was signed against a task packet that can no longer be read. A review cannot be verified against an authorization that no longer exists.',
+      reason: 'this record was signed against a task packet that can no longer be read. A review cannot be verified against an authorization that no longer exists.'
+        + (backups.length ? ` The only file(s) declaring that packetId are backups (${backups.map((b) => path.basename(b)).join(', ')}), and a backup is a copy, not an authority — restore the active packet or name one with --packet <path>.` : ''),
     };
   }
   if (a.packetDigest && pd && a.packetDigest !== pd) {
@@ -243,26 +311,70 @@ function verify(rec, opts = {}) {
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
+/**
+ * Flags, not positions. The old parser read the file from argv[1], so
+ * `--verify rec.json --packet p.json` silently ignored --packet and re-ran the
+ * directory scan — the very scan that resolved a BACKUP as the authority. An
+ * operator naming the authority explicitly had no way to be obeyed.
+ *
+ * Unknown arguments are a usage error rather than something to ignore: a
+ * misspelled --packet that gets dropped looks exactly like a check that ran.
+ */
+function parseCli(argv) {
+  const a = { mode: null, file: null, packet: null };
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i];
+    if (t === '--sign' || t === '--verify') {
+      if (a.mode) return { error: `only one of --sign/--verify/--keyinfo at a time (saw ${a.mode} and ${t.slice(2)})` };
+      a.mode = t.slice(2);
+      if (argv[i + 1] && !argv[i + 1].startsWith('--')) a.file = argv[++i];
+    } else if (t === '--keyinfo') {
+      if (a.mode) return { error: `only one of --sign/--verify/--keyinfo at a time (saw ${a.mode} and keyinfo)` };
+      a.mode = 'keyinfo';
+    } else if (t === '--packet') {
+      // `--packet --verify r.json` used to consume `--verify` AS the path, then
+      // fail somewhere downstream reading a file named `--verify`. A flag is
+      // never a path.
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) return { error: '--packet needs a path' };
+      if (a.packet) return { error: 'only one --packet' };
+      a.packet = argv[++i];
+    } else if (!t.startsWith('--') && !a.file) {
+      a.file = t;
+    } else {
+      return { error: `unknown argument ${t}` };
+    }
+  }
+  if ((a.mode === 'sign' || a.mode === 'verify') && !a.file) return { error: `--${a.mode} needs a record path` };
+  if (!a.mode) return { error: 'nothing to do' };
+  // --keyinfo takes no operands. Checked after the loop so it holds in either
+  // order. Accepting `--keyinfo rec.json --packet p.json` would print the key
+  // source and exit 0, which reads exactly like a record was checked.
+  if (a.mode === 'keyinfo' && (a.file || a.packet)) {
+    return { error: `--keyinfo takes no other arguments (saw ${[a.file, a.packet && `--packet ${a.packet}`].filter(Boolean).join(', ')})` };
+  }
+  return a;
+}
+
 if (require.main === module) {
-  const argv = process.argv.slice(2);
-  const file = argv[1];
+  const a = parseCli(process.argv.slice(2));
   let code = EXIT_PASS;
   try {
-    if (argv[0] === '--keyinfo') {
+    if (a.error) {
+      process.stderr.write(`\n[review-sign] ${a.error}\n`);
+      process.stderr.write('usage: review-sign.cjs --sign|--verify <record.json> [--packet <packet.json>] | --keyinfo\n');
+      code = EXIT_USAGE;
+    } else if (a.mode === 'keyinfo') {
       const k = loadKey({ create: false });
       console.log(`attestation key source: ${k.source}`);
       console.log('the key itself is never printed and is never committed');
-    } else if (argv[0] === '--sign' && file) {
-      const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
-      fs.writeFileSync(file, JSON.stringify(sign(rec), null, 2) + '\n');
-      console.log(`signed ${path.relative(ROOT, file)}`);
-    } else if (argv[0] === '--verify' && file) {
-      const r = verify(JSON.parse(fs.readFileSync(file, 'utf8')));
-      console.log(r.ok ? `VERIFIED  ${path.relative(ROOT, file)}` : `REFUSED   ${path.relative(ROOT, file)}\n  ${r.code}: ${r.reason}`);
-      code = r.ok ? EXIT_PASS : EXIT_FAIL;
+    } else if (a.mode === 'sign') {
+      const rec = JSON.parse(fs.readFileSync(a.file, 'utf8'));
+      fs.writeFileSync(a.file, JSON.stringify(sign(rec, a.packet ? { packetPath: a.packet } : {}), null, 2) + '\n');
+      console.log(`signed ${path.relative(ROOT, a.file)}`);
     } else {
-      process.stderr.write('usage: review-sign.cjs --sign|--verify <record.json> | --keyinfo\n');
-      code = EXIT_USAGE;
+      const r = verify(JSON.parse(fs.readFileSync(a.file, 'utf8')), a.packet ? { packetPath: a.packet } : {});
+      console.log(r.ok ? `VERIFIED  ${path.relative(ROOT, a.file)}` : `REFUSED   ${path.relative(ROOT, a.file)}\n  ${r.code}: ${r.reason}`);
+      code = r.ok ? EXIT_PASS : EXIT_FAIL;
     }
   } catch (e) {
     process.stderr.write(`\n[review-sign] ${e.message}\n`);
@@ -271,4 +383,19 @@ if (require.main === module) {
   process.exit(code);
 }
 
-module.exports = { sign, verify, packetDigest, attestationPayload, canonical, loadKey, resolvePacketForRecord, VERSION };
+/**
+ * Exported deliberately, and nothing else.
+ *
+ *   sign / verify        the API the gate, adapters and chunker call
+ *   packetDigest         so a test can prove a packet edit moves the digest
+ *   resolvePacket        the active-vs-backup decision, provable on its own
+ *   resolvePacketForRecord  back-compatible path-or-null shape
+ *   isBackupPacketName   so the naming rule is assertable without a fixture
+ *   parseCli             so argument handling is testable without spawning
+ *
+ * Not exported: loadKey, canonical, attestationPayload. loadKey MINTS a key as
+ * a side effect of being called with no argument, and an internal helper on the
+ * public surface is an invitation to sign something outside sign().
+ */
+module.exports = { sign, verify, packetDigest,
+  resolvePacket, resolvePacketForRecord, isBackupPacketName, parseCli };

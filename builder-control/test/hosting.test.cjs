@@ -107,11 +107,271 @@ test('switchboard: intake posts to /api/objective, start posts to /api/start', (
   assert.ok(/INTAKE_RECORDED/.test(html), 'no honest INTAKE_RECORDED confirmation rendering');
 });
 
-test('switchboard: pause/cancel/retry controls are wired to their API routes', () => {
+// Cancel and retry are wired because they are operational: cancelRun takes the
+// legal ABANDONED edge that already exists in STATES, and retryRun re-enters a
+// failed run. Pause is NOT wired, and this test exists to keep it that way.
+// Builder execution is a synchronous spawnSync inside cmdBuild — there is no
+// asynchronous worker to suspend and no PAUSED slot in the canonical state
+// machine. The earlier version of this test asserted /api/pause appeared in the
+// page, which would have been satisfied ONLY by shipping a control that cannot
+// do what its label promises. A disabled button that says so is the true
+// rendering; a live button that 409s after the click is theater.
+test('switchboard: cancel and retry are wired; Pause is NOT, because no async worker exists', () => {
   const html = dashboardHtml();
-  assert.ok(/\/api\/pause/.test(html), 'no pause wiring');
   assert.ok(/\/api\/cancel/.test(html), 'no cancel wiring');
   assert.ok(/\/api\/retry/.test(html), 'no retry wiring');
+  assert.ok(!/\/api\/pause/.test(html),
+    'the dashboard wires /api/pause — Pause must stay unwired until an asynchronous worker exists to suspend');
+});
+
+// "Wired" is not the whole contract — cancel and retry must be wired ONLY where
+// they can actually succeed. An always-rendered Cancel on a terminal run is the
+// same defect as a live Pause: a control that looks available and answers with a
+// refusal after the click. Both are gated on the run's state, and BUILDING is
+// excluded from cancel for the same reason pause does not exist — builder
+// execution is synchronous, so there is nothing to interrupt.
+test('RED: cancel and retry render only in states where they are operational', () => {
+  const html = dashboardHtml();
+  const row = html.slice(html.indexOf('function runActionRow'), html.indexOf('function renderRuns'));
+  assert.ok(row.length > 0, 'runActionRow not found — the action-row contract cannot be checked');
+
+  const cancelable = row.slice(row.indexOf('CANCELABLE'), row.indexOf('/api/cancel'));
+  assert.ok(/CANCELABLE\.indexOf\(run\.state\)\s*!==\s*-1/.test(row),
+    'Cancel is rendered unconditionally — it must be gated on the run state');
+  assert.ok(!/'BUILDING'/.test(cancelable),
+    'BUILDING is listed as cancelable — builder execution is synchronous, so there is nothing to interrupt');
+  for (const terminal of ['ABANDONED', 'ROLLED_BACK', 'CHECKPOINTED']) {
+    assert.ok(!new RegExp(`'${terminal}'`).test(cancelable),
+      `${terminal} is listed as cancelable — a terminal run cannot be cancelled, and offering it is theater`);
+  }
+
+  assert.ok(/run\.state\s*===\s*'BUILD_FAILED'\s*\|\|\s*run\.state\s*===\s*'CHECKS_FAILED'/.test(row),
+    'Retry is not gated to the failed states it can actually re-enter');
+  const retryIdx = row.indexOf('/api/retry');
+  assert.ok(row.lastIndexOf('BUILD_FAILED', retryIdx) > row.indexOf('CANCELABLE'),
+    'the retry guard must precede the retry wiring, not trail it');
+});
+
+test('RED: the Pause button is rendered disabled, not merely titled or hidden', () => {
+  const html = dashboardHtml();
+  // The control is present (the founder can see the capability is known and
+  // absent) but structurally un-clickable, so the impossible action cannot be
+  // attempted and then explained away in an error toast afterwards.
+  const idx = html.indexOf("'Pause'");
+  assert.ok(idx !== -1, 'no Pause control is rendered at all — the limitation must be visible, not omitted');
+  const block = html.slice(idx, idx + 400);
+  assert.ok(/\.disabled\s*=\s*true/.test(block), 'the Pause button is not set disabled');
+  assert.ok(!/pauseBtn\.addEventListener/.test(html), 'the Pause button has a click handler — it must have none');
+  assert.ok(/there is no active build process to suspend/i.test(block),
+    'the disabled Pause carries no reason a founder can read');
+});
+
+test('RED: the page states the Pause limitation in prose, not only in a tooltip', () => {
+  const html = dashboardHtml();
+  const notice = html.slice(html.indexOf('id="limitation-notice"'), html.indexOf('id="limitation-notice"') + 600);
+  assert.ok(/Pause is unavailable/i.test(notice), 'the limitation notice does not mention Pause');
+  assert.ok(/asynchronous/i.test(notice), 'the notice does not say WHY pause is unavailable');
+});
+
+// Truthful route exposure: the server keeps /api/pause in its route table. That
+// is not a contradiction — the route exists so that a direct API caller gets a
+// reasoned 409 CONTROL_UNAVAILABLE instead of an ambiguous 404 that reads as
+// "wrong URL". The route is honest precisely because it never mutates.
+test('RED: /api/pause is exposed as a route but is a refusal, never a mutation', () => {
+  assert.ok(Object.keys(S.API_POST_ROUTES || {}).includes('/api/pause'),
+    '/api/pause must remain a declared route so callers get a reason, not a 404');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'aegis-run.cjs'), 'utf8');
+  // Slice the FUNCTION BODY only. Cutting at `function cancelRun` would drag in
+  // cancelRun's doc comment, which legitimately names transition() — a false
+  // positive that would make this proof assert the wrong file region.
+  const start = src.indexOf('function pauseRun');
+  assert.ok(start !== -1, 'pauseRun not found in aegis-run.cjs');
+  const end = src.indexOf('\n}\n', start);
+  assert.ok(end !== -1, 'could not find the end of pauseRun');
+  const body = src.slice(start, end);
+  assert.ok(!/transition\(/.test(body), 'pauseRun calls transition() — pause must never move a run');
+  assert.ok(!/saveRun\(/.test(body), 'pauseRun writes a run file — pause must never mutate');
+  assert.ok(/CONTROL_UNAVAILABLE/.test(body), 'pauseRun does not fail closed with CONTROL_UNAVAILABLE');
+  // Every path out of pauseRun is a throw; there is no returning branch.
+  assert.ok(!/\n\s*return\s/.test(body), 'pauseRun has a returning branch — every state must fail closed');
+});
+
+test('RED: pauseRun refuses BUILDING and non-BUILDING alike, with no PAUSED state anywhere', () => {
+  const AegisRun = require('../aegis-run.cjs');
+  assert.ok(!Object.keys(AegisRun.STATES).includes('PAUSED'),
+    'a PAUSED state exists in the canonical state machine — pause would then be implementable, and this proof is stale');
+  // A run id that cannot resolve still must not produce a success shape.
+  assert.throws(() => AegisRun.pauseRun('RUN-DOES-NOT-EXIST-0000'),
+    (e) => e instanceof AegisRun.AegisControlError,
+    'pauseRun must throw a typed control error, never return');
+});
+
+// ── the live surface must carry what the founder panel re-renders from ────
+// CONFIRMED FINDING #7: the founder summary repaints on every /api/status
+// push. Anything it states out loud — which run is bound, at what time, under
+// what packet and subject hash, why the risk tier is what it is, and which
+// reviewer covered which path — has to survive minimization or the repainted
+// panel is quietly less true than the generated one.
+test('RED: /api/status carries the current-run binding, not just an array of runs', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T', engineering: { state: 'UNAVAILABLE' },
+    runs: { state: 'OK',
+      runs: [{ runId: 'RUN-A', state: 'BUILT', objective: 'o', createdAt: 'c', updatedAt: 'u', packetId: 'p' }],
+      current: { state: 'BOUND', runId: 'RUN-A', updatedAt: 'u', packetId: 'p', subjectSha256: 'sha', reason: 'why' } },
+  });
+  assert.ok(min.runsBinding, 'no runsBinding on the live status surface');
+  assert.strictEqual(min.runsBinding.runId, 'RUN-A');
+  assert.strictEqual(min.runsBinding.subjectSha256, 'sha');
+  assert.ok(min.runsBinding.reason, 'the binding must carry the reason it was selected');
+  assert.strictEqual(min.runs[0].updatedAt, 'u', 'run timestamps must survive minimization');
+  assert.strictEqual(min.runs[0].packetId, 'p', 'the packet id must survive minimization');
+});
+
+test('RED: a missing binding minimizes to UNAVAILABLE, never to the first run in the list', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T', engineering: { state: 'UNAVAILABLE' },
+    runs: { state: 'OK', runs: [{ runId: 'RUN-A', state: 'BUILT' }] },
+  });
+  assert.strictEqual(min.runsBinding.state, 'UNAVAILABLE');
+  assert.strictEqual(min.runsBinding.runId, null);
+});
+
+test('RED: /api/status carries risk reasons, subject hash and reviewer completeness', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T',
+    engineering: { state: 'OK', verdict: 'BLOCKED', lane: 'FULL', highRisk: true,
+      laneWhy: ['a high-risk signal is present'], riskReasons: ['touches a protected path'],
+      subjectSha256: 'sha256value', subjectPaths: ['a.cjs'],
+      problems: [{ rule: 'R', detail: 'd', internalOnly: 'must not travel' }],
+      reviewerCompleteness: { complete: false, subjectSha256: 'sha256value', rows: [
+        { reviewer: 'codex', job: 'j', planned: 'PLANNED', required: 'REQUIRED', executed: 'EXECUTED',
+          disposition: 'REJECT', reviewId: 'REV-1', score: '1/2 subject path(s) covered',
+          coveredPaths: ['a.cjs'], missingPaths: ['b.cjs'], stalePaths: ['gone.cjs'], reason: 'r',
+          rawTranscript: 'SECRET REVIEWER OUTPUT' } ] },
+      stages: [] },
+  });
+  const e = min.engineering;
+  assert.deepStrictEqual(e.riskReasons, ['touches a protected path']);
+  assert.deepStrictEqual(e.laneWhy, ['a high-risk signal is present']);
+  assert.strictEqual(e.subjectSha256, 'sha256value');
+  assert.strictEqual(e.problems[0].detail, 'd');
+  assert.ok(!('internalOnly' in e.problems[0]), 'minimization must drop fields it does not explicitly copy');
+  const row = e.reviewerCompleteness.rows[0];
+  assert.strictEqual(row.disposition, 'REJECT');
+  assert.strictEqual(row.score, '1/2 subject path(s) covered');
+  assert.deepStrictEqual(row.coveredPaths, ['a.cjs']);
+  assert.deepStrictEqual(row.missingPaths, ['b.cjs']);
+  assert.deepStrictEqual(row.stalePaths, ['gone.cjs']);
+  assert.ok(!('rawTranscript' in row), 'raw reviewer output must never reach the browser surface');
+  assert.ok(!JSON.stringify(min).includes('SECRET REVIEWER OUTPUT'), 'reviewer transcript content leaked onto /api/status');
+});
+
+// A panel that prints "INCOMPLETE" and stops has told the founder there is a
+// problem and not what it is. The projector writes the sentence that says
+// which reviewer fell short and how; minimization must not be what deletes it.
+test('RED: the founder-readable INCOMPLETE explanation survives minimization', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T',
+    engineering: { state: 'OK', verdict: 'BLOCKED', lane: 'FULL', highRisk: true,
+      subjectSha256: 'sha256value', problems: [], stages: [],
+      reviewerCompleteness: {
+        complete: false, subjectSha256: 'sha256value', lane: 'FULL',
+        required: ['codex'], advisory: [], executed: [], missing: ['codex'],
+        completeReason: 'Review coverage is INCOMPLETE: codex read only part of the change. ' +
+          'Re-run the reviewer(s) named above against this exact change.',
+        rows: [] },
+      },
+  });
+  const rc = min.engineering.reviewerCompleteness;
+  assert.ok(rc.completeReason, 'the completeness sentence was stripped by minimization');
+  assert.ok(/INCOMPLETE/.test(rc.completeReason), 'the surviving sentence does not state the incomplete verdict');
+  assert.ok(/codex read only part of the change/.test(rc.completeReason),
+    'the surviving sentence does not name the reviewer or say what it fell short on');
+  assert.ok(/Re-run/.test(rc.completeReason), 'the surviving sentence does not state the remedy');
+  assert.strictEqual(rc.complete, false);
+});
+
+test('RED: the complete explanation travels too, so a green panel says why it is green', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T',
+    engineering: { state: 'OK', verdict: 'READY', lane: 'FULL', highRisk: false,
+      subjectSha256: 'sha256value', problems: [], stages: [],
+      reviewerCompleteness: {
+        complete: true, subjectSha256: 'sha256value', lane: 'FULL',
+        required: ['codex'], advisory: [], executed: ['codex'], missing: [],
+        completeReason: 'Every required reviewer (codex) reviewed this exact change and read all ' +
+          '2 changed file(s), and no reviewer claims a file outside it.',
+        rows: [] },
+      },
+  });
+  const rc = min.engineering.reviewerCompleteness;
+  assert.ok(/^Every required reviewer/.test(rc.completeReason || ''),
+    'the complete-coverage sentence did not survive minimization');
+  assert.strictEqual(rc.complete, true);
+});
+
+// The sentence is BUILT by concatenating paths and reviewer names into prose,
+// so it is exactly the kind of string that can carry a home directory onto a
+// browser panel. It must travel sanitized, like every other public string.
+test('RED: the completeness sentence is sanitized and carries no private reviewer data', () => {
+  const repo = path.resolve(__dirname, '..', '..');
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T',
+    engineering: { state: 'OK', verdict: 'BLOCKED', lane: 'FULL', highRisk: true,
+      subjectSha256: 'sha256value', problems: [], stages: [],
+      reviewerCompleteness: {
+        complete: false, subjectSha256: 'sha256value', lane: 'FULL',
+        required: ['codex'], advisory: [], executed: [], missing: ['codex'],
+        completeReason: 'Review coverage is INCOMPLETE: codex claims file(s) that are not part of ' +
+          `this change (${repo}/builder-control/hosting/server.cjs, /Users/someone/secret-checkout/x.cjs), ` +
+          'so the record describes a different change.',
+        rawTranscript: 'SECRET COMPLETENESS TRANSCRIPT',
+        internalOnly: 'must not travel',
+        rows: [] },
+      },
+  });
+  const rc = min.engineering.reviewerCompleteness;
+  assert.ok(!rc.completeReason.includes(repo), 'the repository absolute path leaked in the completeness sentence');
+  assert.ok(/builder-control\/hosting\/server\.cjs/.test(rc.completeReason),
+    'republishing repo-relative must keep the file the sentence is about');
+  assert.ok(!/\/Users\/someone/.test(rc.completeReason), 'a foreign absolute path leaked in the completeness sentence');
+  assert.ok(rc.completeReason.includes('[path]/x.cjs'), 'a foreign path must reduce to [path]/<file>, not vanish');
+  assert.ok(!('rawTranscript' in rc), 'minimization must drop fields it does not explicitly copy');
+  assert.ok(!('internalOnly' in rc), 'minimization must drop fields it does not explicitly copy');
+  assert.ok(!JSON.stringify(min).includes('SECRET COMPLETENESS TRANSCRIPT'),
+    'reviewer transcript content leaked onto /api/status alongside the completeness sentence');
+});
+
+test('a completeness projection with no sentence minimizes to null, never to undefined or a guess', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T',
+    engineering: { state: 'OK', verdict: 'BLOCKED', lane: 'FULL', highRisk: false,
+      subjectSha256: 'sha', problems: [], stages: [],
+      reviewerCompleteness: { complete: false, subjectSha256: 'sha', rows: [] } },
+  });
+  const rc = min.engineering.reviewerCompleteness;
+  assert.ok('completeReason' in rc, 'the field must exist so the panel does not have to guess it away');
+  assert.strictEqual(rc.completeReason, null);
+});
+
+test('RED: /api/status carries the CAD projection, including its UNAVAILABLE state', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T', engineering: { state: 'UNAVAILABLE' },
+    cost: { state: 'OK', recordedUsdDisplay: 1, totalUsd: 1, recordedRuns: 1, unrecordedRuns: 0,
+      caveat: null, byReviewer: {}, cad: { state: 'UNAVAILABLE', reason: 'no canonical FX evidence' } },
+  });
+  assert.strictEqual(min.cost.cad.state, 'UNAVAILABLE');
+  assert.ok(/no canonical FX evidence/.test(min.cost.cad.reason));
+  assert.strictEqual(min.cost.totalUsd, 1, 'the USD audit value must still travel');
+});
+
+test('RED: the founder summary repaints from the live push, through one shared renderer', () => {
+  const html = dashboardHtml();
+  assert.ok(/window\.AEGIS_DASHBOARD\s*=/.test(html), 'no shared renderer seam between the snapshot and the live surface');
+  const apply = html.slice(html.indexOf('function applyStatus'), html.indexOf('function applyStatus') + 1400);
+  assert.ok(/renderFounderSummary/.test(apply), 'applyStatus does not repaint the founder summary');
+  assert.ok(/status\.runsBinding/.test(apply), 'the repaint does not use the pushed binding');
+  assert.ok(/renderCost/.test(apply), 'applyStatus does not repaint the spend panel, which would leave a stale figure');
 });
 
 test('switchboard: status bootstrap and SSE event stream are wired same-origin', () => {

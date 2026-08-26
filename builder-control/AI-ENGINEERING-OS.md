@@ -56,8 +56,8 @@ process gets abandoned.
 |---|---|---|
 | for | a genuinely tiny change to an **unprotected** document | anything meaningful |
 | task packet | **not required** | required |
-| required AI review | **none** | Codex |
-| adversarial red team | no | only if high-risk (§3) |
+| required AI review | **none** | Codex **and** Grok |
+| adversarial red team | no | **yes — on every FULL change** |
 | deterministic checks | yes | yes |
 | spec pin | n/a (no packet) | yes |
 
@@ -77,6 +77,23 @@ FULL. No changed paths supplied is FULL — it will not certify an unknown chang
 as trivial. Light lane also has size caps (5 files, 150 lines): a 400-line
 "docs-only" change is a big change that happens to be in Markdown.
 
+**You also do not get to say what changed.** The changed-path set and the
+changed-line count are read from git and from nowhere else. `--changed` and
+`--diff-lines` are a test-only facility: passing either to `--start`,
+`--subject`, `--classify` or `--gate-done` is a hard block
+(`ENGOS-SYNTHETIC-INPUT-REFUSED`) unless the caller passes
+`--test-only-synthetic-subject` **and** sets `ENGOS_TEST_ONLY_SYNTHETIC=1`.
+Without that, a caller could name an unchanged `README.md`, claim one changed
+line, and have a dirty control-system tree certified LIGHT with no packet and no
+reviewers — which is precisely what it did before this was closed.
+
+Paths are canonicalised before anything reads them, so one file has exactly one
+spelling. `./AGENTS.md` and `dir/../AGENTS.md` resolve to `AGENTS.md`; absolute
+paths, backslash paths and paths escaping the repository root are refused
+outright (`ENGOS-PATH-NOT-CANONICAL`) rather than classified. A rule written as
+a regex over a path string can otherwise be walked around by respelling the
+path.
+
 ---
 
 ## 3. What counts as high-risk
@@ -84,13 +101,23 @@ as trivial. Light lane also has size caps (5 files, 150 lines): a 400-line
 Path-shaped, so it is knowable before anything is read and cannot be argued
 with: auth/session/SSO · secrets, tokens, credentials · payments · database
 migrations and schema · permissions, roles, tenant isolation · cryptography ·
-security controls (CSRF, CORS, sanitisation) · `.github/workflows/**` ·
-`builder-control/**` · infrastructure definitions · anything on
+security controls (CSRF, CORS, sanitisation) · `.github/**` ·
+`builder-control/**` · infrastructure definitions · `CODEOWNERS` ·
+`protected-paths*.json` · agent charters (`**/AGENTS.md`, `**/CLAUDE.md`) ·
+agent control directories (`**/.claude/**`) · anything on
 `protected-paths.json`.
+
+The last three are control changes that happen to be written in Markdown and
+JSON: they govern what the agents are permitted to do. They match at **any**
+depth, not only the repository root — `luke-app/CLAUDE.md` is as much a charter
+as the root one, and it classified LIGHT until this was fixed.
 
 Plus two you declare: `--milestone` and `--novel`.
 
-High-risk adds the red team and nothing else changes.
+High-risk does **not** change the required reviewer set — Codex and Grok are
+required on every FULL change either way (§5). What high-risk changes is the
+depth of scrutiny and the fact that nothing here will ever route such a change
+to the light lane.
 
 ---
 
@@ -114,7 +141,7 @@ PR opened
    ↓
 GitHub CI + Copilot guardian
    ↓                        CI blocks. Copilot advises — and can block on CRITICAL/HIGH.
-Grok red team               HIGH-RISK / novel / security / milestone ONLY. Read-only.
+Grok red team               REQUIRED on every FULL change. Read-only.
    ↓
 runtime validation          the actual app, the actual request, the actual page
    ↓
@@ -144,10 +171,19 @@ standing, and that cuts both ways — it **cannot approve**, it **can block** on
 CRITICAL or HIGH finding. Its comments never substitute for a required status
 check or branch protection.
 
-**Grok — adversarial red team.** Read-only. Enters only after the others believe
-the change is correct, on high-risk work, with minimally contaminated context.
-Never told "everyone thinks this is right". Its job is to find the case where
-tests pass and users still get wrong behaviour.
+**Grok — adversarial red team.** Read-only. Enters after the others believe the
+change is correct, with minimally contaminated context. Never told "everyone
+thinks this is right". Its job is to find the case where tests pass and users
+still get wrong behaviour.
+
+**Required on every FULL change, not only high-risk ones.** This was narrowed to
+high-risk once and the narrowing was the hole: a change reaches FULL because the
+path classifier could not positively recognise it as safe, so the FULL lane is
+where the classifier's own uncertainty lives. Reserving the adversarial pass for
+the changes the classifier *could* name as dangerous skipped it exactly where it
+was worth most. `FULL_LANE_REQUIRED_REVIEWERS` in `engineering-os.cjs` is a
+frozen constant for this reason — the set cannot be narrowed by a conditional
+added downstream later.
 
 **Tests and runtime — final technical arbiter.** They outrank every model.
 
