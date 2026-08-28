@@ -33,6 +33,8 @@
        checked" chip is how an unchecked thing passes for a checked one — so it
        is lightened to 4.2:1 rather than left as the quietest thing on screen. */
     --blocked:#b45cf0; --stale:#8a94a6; --unknown:#6b7c96; --focus:#4aa3ff;
+    --cyan:#39c6ff; --cyan-soft:rgba(57,198,255,.12); --green-soft:rgba(63,185,138,.12);
+    --orange:#f3a536; --orange-soft:rgba(243,165,54,.12); --muted:#6b7c96;
     --sp:4px; --radius:6px;
     --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -53,8 +55,8 @@
   .ctx{display:flex;gap:calc(var(--sp)*2);align-items:center;color:var(--text-1);font-size:12px}
 
   /* ── layout ─────────────────────────────────────────────────────── */
-  main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:calc(var(--sp)*4);
-    padding:calc(var(--sp)*5);align-items:start}
+  main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:calc(var(--sp)*4);
+    padding:calc(var(--sp)*5);align-items:start;max-width:1800px;margin:0 auto}
   .col{display:flex;flex-direction:column;gap:calc(var(--sp)*4);min-width:0}
   section{background:var(--bg-1);border:1px solid var(--line);border-radius:var(--radius)}
   section > h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-1);
@@ -66,8 +68,9 @@
     padding:2px calc(var(--sp)*2);border-radius:999px;font-size:11px;font-weight:600;
     letter-spacing:.04em;border:1px solid currentColor;white-space:nowrap}
   .chip .g{font-size:10px;line-height:1}
-  .s-PASS,.s-HEALTHY,.s-AVAILABLE,.s-FRESH{color:var(--pass)}
-  .s-ACTIVE{color:var(--active)}
+  .s-PASS,.s-HEALTHY,.s-AVAILABLE,.s-FRESH,.s-COMPLETE{color:var(--pass)}
+  .s-ACTIVE,.s-RUNNING,.s-CHECKING{color:var(--active)}
+  .s-IDLE,.s-WAITING{color:var(--stale)}
   .s-WARNING,.s-DEGRADED,.s-STALE{color:var(--warn)}
   .s-FAILED,.s-FAIL,.s-MISSING{color:var(--fail)}
   .s-BLOCKED{color:var(--blocked)}
@@ -104,8 +107,7 @@
     background:var(--bg-0);border:2px solid currentColor}
   /* A BROKEN rail is the drift signal: the line itself is severed, so the
      path visibly does not continue past a stage with no evidence. */
-  .stage.broken .rail::before{background:repeating-linear-gradient(
-      to bottom,var(--fail) 0 4px,transparent 4px 8px)}
+  .stage.broken .rail::before{background:none;border-left:2px dashed var(--fail);width:0}
   /* Both are spans inside a <button> (a button may not contain block-level
      children), so they need an explicit display:block or the label and its
      reason render as one run-on sentence. */
@@ -113,12 +115,10 @@
   .stage .why{display:block;color:var(--text-2);font-size:12px;margin-top:2px}
   .row .name,.row .meta{display:block}
 
-  /* Motion is bound to state, never to time. Only a genuinely ACTIVE stage
-     pulses, and nothing else in this file moves at all. */
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
-  .stage.is-active .dot{animation:pulse 2s ease-in-out infinite}
+  /* ACTIVE is visible without decorative motion. */
+  .stage.is-active .dot{background:color-mix(in srgb,var(--active) 22%,var(--bg-0));
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--active) 24%,transparent)}
   @media (prefers-reduced-motion: reduce){
-    .stage.is-active .dot{animation:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--active) 35%,transparent)}
     *{transition:none!important}
   }
 
@@ -154,6 +154,8 @@
     header{padding:calc(var(--sp)*3)}
     .stage{grid-template-columns:24px minmax(0,1fr);grid-template-areas:"rail label" ". badge"}
     .stage .badges{grid-area:badge;justify-content:flex-start}
+    .command-grid{grid-template-columns:1fr}
+    .mission-head{flex-direction:column}
   }
   /* Command Center: readable across a room. Only DEGRADED-or-worse survives. */
   @media (min-width:1920px){
@@ -187,68 +189,262 @@
   .run-card{border:1px solid var(--line);border-radius:var(--radius);padding:calc(var(--sp)*3);margin-bottom:calc(var(--sp)*3)}
   .run-card h3{font-size:13px;margin-bottom:calc(var(--sp)*1.5)}
   .run-card .meta{color:var(--text-2);font-size:12px;margin-bottom:calc(var(--sp)*2)}
+  .build-evidence{margin:calc(var(--sp)*3) 0;padding:calc(var(--sp)*3);background:var(--bg-2);
+    border-left:2px solid var(--active);border-radius:0 var(--radius) var(--radius) 0}
+  .build-evidence h4{margin:0 0 calc(var(--sp)*2);font:600 11px/1.3 var(--mono);
+    letter-spacing:.08em;text-transform:uppercase;color:var(--text-1)}
+  .build-evidence .meta{margin-top:calc(var(--sp)*1.5)}
+  .output-evidence{margin-top:calc(var(--sp)*2);border-top:1px solid var(--line);padding-top:calc(var(--sp)*2)}
+  .output-evidence summary{cursor:pointer;color:var(--text-1);font-size:12px;font-weight:600}
+  .output-evidence pre{margin:calc(var(--sp)*2) 0 0;padding:calc(var(--sp)*2);white-space:pre-wrap;
+    overflow-wrap:anywhere;max-height:240px;overflow:auto;background:var(--bg-0);color:var(--text-1);
+    border:1px solid var(--line);border-radius:var(--radius);font:11px/1.45 var(--mono)}
   .limitation{margin:0 0 calc(var(--sp)*3);padding:calc(var(--sp)*3);background:var(--bg-2);
     border-left:2px solid var(--warn);border-radius:0 var(--radius) var(--radius) 0;color:var(--text-1);font-size:12px}
+
+  /* ── founder command deck ─────────────────────────────────────── */
+  #founder-summary{border-color:#254762;background:var(--bg-1)}
+  #founder-summary>h2{color:#8cc8ff;border-bottom-color:#254762}
+  .mission-head{display:flex;justify-content:space-between;gap:calc(var(--sp)*4);align-items:flex-start;
+    padding-bottom:calc(var(--sp)*4);border-bottom:1px solid var(--line)}
+  .mission-kicker{font:600 11px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--active)}
+  .mission-title{font-size:clamp(19px,2vw,28px);line-height:1.2;margin-top:calc(var(--sp)*2);max-width:950px}
+  .mission-meta{font:11px/1.5 var(--mono);color:var(--text-2);margin-top:calc(var(--sp)*2)}
+  .command-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(var(--sp)*3);margin-top:calc(var(--sp)*4)}
+  .command-card{min-height:112px;padding:calc(var(--sp)*3);background:rgba(11,14,19,.58);
+    border:1px solid var(--line);border-radius:var(--radius)}
+  .command-card.is-now{border-color:rgba(74,163,255,.6);box-shadow:inset 3px 0 0 var(--active)}
+  .command-card.is-blocked{border-color:rgba(229,72,77,.45);box-shadow:inset 3px 0 0 var(--fail)}
+  .command-card.is-clear{border-color:rgba(63,185,138,.45);box-shadow:inset 3px 0 0 var(--pass)}
+  .command-label{font:600 10px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--text-2)}
+  .command-value{font-size:14px;line-height:1.45;margin-top:calc(var(--sp)*2)}
+  .deck-heading{display:flex;align-items:center;justify-content:space-between;gap:calc(var(--sp)*3);
+    margin:calc(var(--sp)*5) 0 calc(var(--sp)*2)}
+  .deck-heading h3{font:600 11px/1.3 var(--mono);letter-spacing:.11em;text-transform:uppercase;color:var(--text-1)}
+  .route-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:calc(var(--sp)*2)}
+  .route-node{position:relative;padding:calc(var(--sp)*2.5);background:var(--bg-2);border:1px solid var(--line);
+    border-radius:var(--radius);min-width:0}
+  .route-node.is-ACTIVE{border-color:var(--active);box-shadow:0 0 18px rgba(74,163,255,.10)}
+  .route-node.is-MISSING,.route-node.is-FAILED,.route-node.is-BLOCKED{border-color:rgba(229,72,77,.55)}
+  .route-name{display:block;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .route-state{display:block;font:10px/1.4 var(--mono);margin-top:calc(var(--sp)*1.5)}
+  .truth-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:calc(var(--sp)*2)}
+  .truth-card{padding:calc(var(--sp)*3);background:var(--bg-2);border:1px solid var(--line);border-radius:var(--radius)}
+  .truth-card .name{font-weight:600}
+  .truth-card .meta{margin-top:calc(var(--sp)*1.5)}
+  .truth-card .chip{margin-top:calc(var(--sp)*2)}
+  .founder-details{margin-top:calc(var(--sp)*4);border-top:1px solid var(--line);padding-top:calc(var(--sp)*3)}
+  .founder-details>summary,#raw-state>summary{cursor:pointer;color:var(--text-1);font-weight:600;padding:calc(var(--sp)*2) 0}
+  #raw-state{border:1px solid var(--line);border-radius:var(--radius);background:var(--bg-1);padding:0 calc(var(--sp)*4) calc(var(--sp)*4)}
+  #raw-state>section{margin-top:calc(var(--sp)*3)}
+  .muted{color:var(--text-2)}
+
+  /* ── JARVIS operator shell ──
+     This is a presentation layer over the existing state and controls. It
+     creates no score, activity claim, route decision or second authority. */
+  body{min-height:100vh;background:#090d13}
+  .command-header{min-height:72px;padding:12px 20px;border-bottom-color:#1f526d;
+    background:rgba(8,13,20,.96);box-shadow:0 12px 34px rgba(0,0,0,.28)}
+  .brand-lockup{display:flex;align-items:center;gap:12px;min-width:250px;padding-left:12px;border-left:3px solid var(--cyan)}
+  .brand-name{font-size:18px;font-weight:750;letter-spacing:.08em}
+  .brand-sub{color:var(--text-2);font:9px/1.3 var(--mono);letter-spacing:.16em;text-transform:uppercase}
+  .context-strip{display:flex;flex:1;align-items:center;justify-content:flex-end;gap:10px;min-width:0}
+  .context-cell{padding:7px 10px;border:1px solid rgba(57,198,255,.14);border-radius:4px;
+    background:rgba(57,198,255,.035);min-width:0}
+  .context-cell.mono{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .command-shell{display:grid;grid-template-columns:minmax(280px,330px) minmax(520px,1fr) minmax(300px,360px);
+    grid-template-areas:"left center right" "evidence evidence evidence";gap:14px;align-items:start;
+    max-width:1920px;padding:14px;margin:0 auto}
+  .left-rail{grid-area:left}.center-console{grid-area:center}.right-rail{grid-area:right}
+  .evidence-deck{grid-area:evidence;display:grid;grid-template-columns:minmax(250px,7fr) minmax(360px,14fr) minmax(300px,10fr);
+    gap:14px;min-width:0}
+  .left-rail,.center-console,.right-rail{display:flex;flex-direction:column;gap:14px;min-width:0}
+  .command-shell section,.command-shell details.panel{position:relative;overflow:hidden;border-radius:4px;
+    border-color:#243344;background:#111821;
+    box-shadow:0 14px 34px rgba(0,0,0,.18)}
+  .command-shell section::before,.command-shell details.panel::before{content:"";position:absolute;left:0;top:0;
+    width:38px;height:1px;background:var(--cyan);box-shadow:0 0 12px rgba(57,198,255,.55)}
+  .command-shell section>h2,.panel-summary{min-height:40px;padding:11px 14px;color:#9ab2c8;
+    font:650 11px/1.45 var(--mono);letter-spacing:.12em;text-transform:uppercase;border-bottom:1px solid #243344}
+  .panel-summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;list-style:none}
+  .panel-summary::-webkit-details-marker{display:none}
+  .panel-summary::after{content:"+";color:var(--cyan);font:16px/1 var(--mono)}
+  details[open]>.panel-summary::after{content:"−"}
+  .rail-note{font:10px/1.4 var(--mono);letter-spacing:.04em;color:var(--text-2);text-transform:none}
+
+  #founder-summary{border-color:#24516b;background:#101b26}
+  #founder-summary>h2{color:var(--cyan);border-bottom-color:#24516b}
+  #founder-summary>.body{padding:16px}
+  .mission-head{display:flex;border-bottom-color:#24445a;align-items:flex-start}
+  .mission-head>.chip{margin-top:1px}
+  .mission-kicker{color:var(--cyan)}
+  .mission-title{font-size:clamp(20px,1.65vw,27px)}
+  .mission-meta{font-size:12px}
+  .command-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}
+  .command-card{min-height:66px;padding:10px 12px;border-left-width:2px;background:rgba(5,10,16,.55)}
+  .command-card.is-now,.command-card.is-next,.command-card.is-blocked,.command-card.is-clear{grid-column:span 2}
+  .command-value{font-size:14px;line-height:1.4}.command-label{font-size:11px;color:#829bb2}
+  .founder-details{margin-top:12px}.founder-details>summary{font-size:12px;color:#9ab2c8}
+
+  #topology-overview{min-height:220px;border-color:#24516b;background:#0c1620}
+  #topology-live-body{padding:14px 16px;min-height:174px;display:flex;flex-direction:column;justify-content:flex-start}
+  #topology-live-body .deck-heading{margin:0 0 8px}
+  .route-crew{display:flex;align-items:center;gap:10px;margin-bottom:10px;padding:7px 9px;border-left:2px solid var(--cyan);
+    background:#101b26;min-width:0}
+  .route-crew-value{min-width:0;color:var(--text-1);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #topology-live-body .route-strip{display:grid;grid-template-columns:repeat(11,minmax(68px,1fr));gap:10px;
+    align-items:stretch;position:relative}
+  .route-node{appearance:none;color:var(--text-0);text-align:left;font:inherit;cursor:pointer;min-height:70px;
+    padding:9px 8px;border-color:#2b465b;background:#142230;
+    box-shadow:inset 0 0 22px rgba(57,198,255,.025)}
+  .route-node::after{content:"";position:absolute;right:-11px;top:50%;width:10px;height:2px;background:#31536b}
+  .route-node:last-child::after{display:none}
+  .route-node:hover{border-color:var(--cyan);transform:translateY(-1px)}
+  .route-node:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  .route-node.is-PASS{border-color:rgba(63,185,138,.55);box-shadow:inset 0 0 20px rgba(63,185,138,.06)}
+  .route-node.is-ACTIVE{border-color:var(--cyan);box-shadow:0 0 22px rgba(57,198,255,.13),inset 0 0 22px rgba(57,198,255,.08)}
+  .route-state{margin-top:7px;font-size:10px}.route-name{white-space:normal;font-size:12px;line-height:1.4}
+
+  #integration-overview .truth-grid{grid-template-columns:1fr}
+  #integration-overview .truth-card{min-width:0;cursor:pointer;padding:11px 12px;background:rgba(5,10,16,.48);border-color:#293d50}
+  #integration-overview .truth-card .name{font-size:14px}
+  #integration-overview .truth-card .meta{font-size:12px;line-height:1.45;overflow-wrap:anywhere}
+  #integration-overview .truth-card .usage-summary{display:-webkit-box;-webkit-box-orient:vertical;
+    -webkit-line-clamp:3;overflow:hidden}
+  #integration-overview .truth-card:hover{border-color:var(--cyan)}
+  #integration-overview .truth-card:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  #inspector{min-height:104px}.right-rail .body{padding:14px}
+  .objective-composer{border-color:#24516b!important}
+  .objective-composer>h2{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--cyan)!important}
+  .objective-composer .body{padding:12px 14px}
+  .objective-composer textarea#in-objective{min-height:76px;border-color:#31536b;background:#0b131c}
+  .objective-composer .btn-row{margin-top:2px}
+  .objective-composer #btn-submit-objective{width:100%;padding:10px 14px;background:#102b3d;color:#bdeaff}
+  .objective-composer .field{margin-bottom:9px}
+  .control-boundary,.composer-options{margin:0 0 10px;border:1px solid #293d50;border-radius:3px;background:#0b131c}
+  .control-boundary>summary,.composer-options>summary{padding:8px 10px;cursor:pointer;color:#9ab2c8;
+    font:600 11px/1.4 var(--mono);letter-spacing:.03em}
+  .control-boundary p{margin:0;padding:0 10px 10px;color:var(--text-1);font-size:12px;line-height:1.45}
+  .composer-options>.optional-fields{padding:2px 10px 4px;border-top:1px solid #243344}
+  .objective-composer .field:not(:first-child){margin-bottom:8px}
+  .objective-composer .field:not(:first-child) input,
+  .objective-composer .field:not(:first-child) textarea,
+  .objective-composer .field:not(:first-child) select{min-height:34px}
+  .ask-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+  .ask-actions .action{padding:8px 6px;font-size:11px}
+  #ask-aegis-answer{min-height:72px;margin-top:10px;padding:10px 11px;border:1px solid #294257;
+    border-left:2px solid var(--cyan);border-radius:3px;background:#0b131c;color:var(--text-1);font-size:12px;line-height:1.55}
+  #ask-aegis-answer strong{display:block;margin-bottom:4px;color:var(--text-0)}
+  #cost .cost-total{color:var(--pass);font-size:18px}
+  #operator-shell[data-run-status="idle"] .objective-composer{border-color:var(--cyan)!important;box-shadow:0 0 0 1px rgba(57,198,255,.18)}
+  #operator-shell[data-run-status="idle"] .objective-composer #btn-submit-objective{background:#15384e;border-color:var(--cyan);color:#d7f4ff}
+  .live-panel{border-color:rgba(63,185,138,.34)!important}.live-panel::before{background:var(--pass)!important}
+  #live-conn-state{color:var(--pass)!important}
+  .event-panel::before{background:var(--orange)!important}
+  #raw-state{grid-column:1/-1;padding:0;background:rgba(12,18,27,.95);border-color:#243344}
+  #raw-state>.raw-body{padding:14px;display:grid;grid-template-columns:minmax(0,1.3fr) minmax(280px,.7fr);gap:14px}
+  #raw-state section{margin:0}
+  #runs-list .run-card{background:rgba(5,10,16,.42)}
+
+  @media (min-width:1600px){
+    .right-rail{position:sticky;top:86px;max-height:calc(100vh - 100px);overflow:auto;scrollbar-gutter:stable}
+  }
+  @media (max-width:1599px){
+    .command-shell{grid-template-columns:300px minmax(460px,1fr);grid-template-areas:"left center" "right right" "evidence evidence"}
+    .right-rail{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:start}
+    .right-rail>section{align-self:start;width:100%}
+    .evidence-deck{grid-template-columns:repeat(2,minmax(0,1fr))}
+    #raw-state{grid-column:1/-1}
+  }
+  @media (max-width:1199px){
+    #topology-live-body .route-strip{grid-template-columns:repeat(6,minmax(78px,1fr))}
+    .route-node:nth-child(6n)::after{display:none}
+  }
+  @media (max-width:959px){
+    .command-header{align-items:flex-start}.context-strip{justify-content:flex-start;flex-wrap:wrap}
+    .command-shell{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"}
+    .right-rail,.evidence-deck{display:flex;flex-direction:column}
+    #topology-live-body .route-strip{grid-template-columns:repeat(3,minmax(100px,1fr))}
+    .route-node:nth-child(6n)::after{display:block}.route-node:nth-child(3n)::after{display:none}
+    #raw-state>.raw-body{grid-template-columns:1fr}
+    .command-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .command-card.is-now,.command-card.is-next,.command-card.is-blocked,.command-card.is-clear{grid-column:span 1}
+  }
+  @media (max-width:599px){
+    .brand-lockup{min-width:0}.context-strip{width:100%}.context-cell{max-width:100%}
+    #topology-live-body .route-strip{grid-template-columns:1fr}
+    .route-node::after{display:none!important}
+    .ask-actions{grid-template-columns:1fr}
+    .command-grid{grid-template-columns:1fr}
+  }
+  @media (min-width:1600px){
+    .command-shell section>.body{font-size:15px}
+    .ctx{font-size:13px}
+  }
 </style>
 </head>
 <body>
 <a class="sr" href="#topology">Skip to workflow topology</a>
 
-<header>
-  <h1>AEGIS</h1>
-  <span class="sep">/</span>
-  <span class="ctx" id="ctx-entity">Workflow Topology &amp; Drift</span>
-  <span class="sep">·</span>
-  <span class="ctx mono" id="ctx-subject">subject —</span>
-  <span class="sep">·</span>
-  <span class="ctx mono" id="ctx-generated">—</span>
-  <span class="ctx" id="ctx-verdict"></span>
+<header class="command-header">
+  <div class="brand-lockup">
+    <div>
+      <h1 class="brand-name">AEGIS</h1>
+      <div class="brand-sub">Engineering Command</div>
+    </div>
+  </div>
+  <div class="context-strip" aria-label="Current system context">
+    <span class="ctx context-cell" id="ctx-entity">AEGIS Operator</span>
+    <span class="ctx context-cell mono" id="ctx-generated">—</span>
+    <span class="ctx" id="ctx-verdict"></span>
+  </div>
 </header>
 
 <div id="fatal"></div>
 
-<main>
-  <div class="col">
-    <section aria-labelledby="founder-h" id="founder-summary">
-      <h2 id="founder-h">Current run</h2>
-      <div class="body" id="founder-body"><p class="empty">Loading current-run summary…</p></div>
-    </section>
-
-    <section aria-labelledby="intake-h">
-      <h2 id="intake-h">Objective intake</h2>
+<main class="command-shell" id="operator-shell" data-run-status="idle">
+  <aside class="left-rail" aria-label="Objective and controls">
+    <section class="objective-composer" aria-labelledby="intake-h" id="objective-composer">
+      <h2 id="intake-h"><span>Start a governed build</span><span class="rail-note">objective first</span></h2>
       <div class="body">
-        <p class="limitation" id="limitation-notice">
-          <strong>Known limitation.</strong> Start prepares an isolated worktree only; it does not
-          yet launch an asynchronous builder. Pause is unavailable for any run — there is no active
-          build process to suspend until an asynchronous worker exists.
-        </p>
+        <details class="control-boundary" id="limitation-notice">
+          <summary>Control boundary</summary>
+          <p>Start launches one governed asynchronous Claude worker in an isolated worktree. Cancel and bounded
+            Retry are operational. Pause is unavailable until safe suspend/resume semantics and evidence are implemented.</p>
+        </details>
         <form id="intake-form" novalidate>
           <div class="field">
             <label for="in-objective">Objective <span class="req" aria-hidden="true">*</span><span class="sr"> required</span></label>
             <textarea id="in-objective" name="objective" rows="3" required aria-required="true"></textarea>
           </div>
-          <div class="field">
-            <label for="in-project">Project <span class="hint">(optional)</span></label>
-            <input id="in-project" name="project" type="text" maxlength="100">
-          </div>
-          <div class="field">
-            <label for="in-constraints">Constraints <span class="hint">(optional, one per line)</span></label>
-            <textarea id="in-constraints" name="constraints" rows="2"></textarea>
-          </div>
-          <div class="field">
-            <label for="in-acceptance">Acceptance criteria <span class="hint">(optional, one per line)</span></label>
-            <textarea id="in-acceptance" name="acceptance" rows="2"></textarea>
-          </div>
-          <div class="field">
-            <label for="in-dataclass">Data classification <span class="hint">(optional, default INTERNAL)</span></label>
-            <select id="in-dataclass" name="dataClass">
-              <option value="">INTERNAL (default)</option>
-              <option value="PUBLIC">PUBLIC</option>
-              <option value="INTERNAL">INTERNAL</option>
-              <option value="CONFIDENTIAL">CONFIDENTIAL</option>
-              <option value="RESTRICTED">RESTRICTED</option>
-            </select>
-          </div>
+          <details class="composer-options">
+            <summary>Project, constraints &amp; acceptance <span class="hint">optional</span></summary>
+            <div class="optional-fields">
+              <div class="field">
+                <label for="in-project">Project <span class="hint">(optional)</span></label>
+                <input id="in-project" name="project" type="text" maxlength="100">
+              </div>
+              <div class="field">
+                <label for="in-constraints">Constraints <span class="hint">(optional, one per line)</span></label>
+                <textarea id="in-constraints" name="constraints" rows="2"></textarea>
+              </div>
+              <div class="field">
+                <label for="in-acceptance">Acceptance criteria <span class="hint">(optional, one per line)</span></label>
+                <textarea id="in-acceptance" name="acceptance" rows="2"></textarea>
+              </div>
+              <div class="field">
+                <label for="in-dataclass">Data classification <span class="hint">(optional, default INTERNAL)</span></label>
+                <select id="in-dataclass" name="dataClass">
+                  <option value="">INTERNAL (default)</option>
+                  <option value="PUBLIC">PUBLIC</option>
+                  <option value="INTERNAL">INTERNAL</option>
+                  <option value="CONFIDENTIAL">CONFIDENTIAL</option>
+                  <option value="RESTRICTED">RESTRICTED</option>
+                </select>
+              </div>
+            </div>
+          </details>
           <div class="btn-row">
             <button type="submit" class="action primary" id="btn-submit-objective">Record objective</button>
           </div>
@@ -257,18 +453,79 @@
       </div>
     </section>
 
-    <section aria-labelledby="runs-h">
-      <h2 id="runs-h">Runs</h2>
+    <details class="panel" aria-labelledby="runs-h">
+      <summary class="panel-summary" id="runs-h"><span>Run history &amp; controls</span><span class="rail-note">collapsed history</span></summary>
       <div class="body">
         <div id="runs-list"><p class="empty">No runs yet. Record an objective above.</p></div>
       </div>
+    </details>
+  </aside>
+
+  <div class="center-console">
+    <section aria-labelledby="founder-h" id="founder-summary">
+      <h2 id="founder-h">Mission control</h2>
+      <div class="body" id="founder-body"><p class="empty">Loading current-run summary…</p></div>
     </section>
 
-    <details id="raw-state">
-      <summary>Raw machine state (for engineers)</summary>
+    <section id="topology-overview" aria-labelledby="topology-overview-h">
+      <h2 id="topology-overview-h">Build route</h2>
+      <div id="topology-live-body"><p class="empty">Loading exact gate route…</p></div>
+    </section>
 
+    <section class="live-panel" aria-labelledby="live-h">
+      <h2 id="live-h">Live activity <span id="live-conn-state" class="mono rail-note">connecting…</span></h2>
+      <div class="body"><ul class="rows" id="live-activity"><li class="empty">Waiting for the first status push.</li></ul></div>
+    </section>
+  </div>
+
+  <aside class="right-rail" aria-label="Inspector and integrations">
+    <section aria-labelledby="insp-h">
+      <h2 id="insp-h">Inspector</h2>
+      <div class="body" id="inspector"><p class="empty">Select a route stage, connector or reviewer.</p></div>
+    </section>
+    <details class="panel" aria-labelledby="integration-h">
+      <summary class="panel-summary" id="integration-h"><span>Tools &amp; integrations</span><span class="rail-note">details</span></summary>
+      <div class="body" id="integration-overview"><p class="empty">Loading connector evidence…</p></div>
+    </details>
+    <section aria-labelledby="ask-aegis-h" id="ask-aegis">
+      <h2 id="ask-aegis-h">Ask AEGIS <span class="rail-note">context only</span></h2>
+      <div class="body">
+        <div class="ask-actions" role="group" aria-label="Explain the current AEGIS state">
+          <button type="button" class="action" id="ask-aegis-explain" data-aegis-question="explain">Explain status</button>
+          <button type="button" class="action" id="ask-aegis-summarize" data-aegis-question="summarize">Summarize</button>
+          <button type="button" class="action primary" id="ask-aegis-next" data-aegis-question="next">Next action</button>
+        </div>
+        <div id="ask-aegis-answer" aria-live="polite">
+          <strong>Context assistant</strong>
+          Select a command to explain the current evidence. This does not launch a model or modify the build.
+        </div>
+      </div>
+    </section>
+  </aside>
+
+  <div class="evidence-deck" aria-label="Operational evidence deck">
+    <section class="event-panel" aria-labelledby="ev-h">
+      <h2 id="ev-h">Recent gate decisions</h2>
+      <div class="body"><ul class="rows" id="events"></ul></div>
+    </section>
+
+    <details class="panel" aria-labelledby="cost-h">
+      <summary class="panel-summary" id="cost-h"><span>Spend &amp; authorization</span><span class="rail-note">recorded evidence</span></summary>
+      <div class="body" id="cost"></div>
+    </details>
+
+    <details id="raw-state">
+      <summary class="panel-summary">Deep evidence &amp; machine state <span class="rail-note">for engineers</span></summary>
+      <div class="raw-body">
+    <section aria-labelledby="technical-context-h">
+      <h2 id="technical-context-h">Technical context</h2>
+      <div class="body">
+        <p class="meta">Exact subject</p>
+        <p class="mono" id="ctx-subject">subject —</p>
+      </div>
+    </section>
     <section id="topology" aria-labelledby="topology-h">
-      <h2 id="topology-h">Workflow topology &amp; process drift</h2>
+      <h2 id="topology-h">Exact eleven-stage evidence</h2>
       <div class="body">
         <ul class="stages" id="stages" aria-describedby="stages-help"></ul>
         <p id="stages-help" class="sr">
@@ -293,27 +550,8 @@
       <h2 id="rev-h">Reviewers</h2>
       <div class="body"><ul class="rows" id="reviewers"></ul></div>
     </section>
+      </div>
     </details>
-  </div>
-
-  <div class="col">
-    <section aria-labelledby="insp-h">
-      <h2 id="insp-h">Inspector</h2>
-      <div class="body" id="inspector"><p class="empty">Select a stage, connector or reviewer.</p></div>
-    </section>
-    <section aria-labelledby="cost-h">
-      <h2 id="cost-h">Spend &amp; authorization</h2>
-      <div class="body" id="cost"></div>
-    </section>
-    <section class="calm" aria-labelledby="ev-h">
-      <h2 id="ev-h">Recent gate decisions</h2>
-      <div class="body"><ul class="rows" id="events"></ul></div>
-    </section>
-
-    <section aria-labelledby="live-h">
-      <h2 id="live-h">Live activity <span id="live-conn-state" class="mono" style="text-transform:none;letter-spacing:0;color:var(--text-2)">connecting…</span></h2>
-      <div class="body"><ul class="rows" id="live-activity"><li class="empty">Waiting for the first status push.</li></ul></div>
-    </section>
   </div>
 </main>
 
@@ -330,8 +568,8 @@
   var S = window.AEGIS_STATE || null;
   var $ = function(id){ return document.getElementById(id); };
   var GLYPH = {
-    PASS:'●', HEALTHY:'●', AVAILABLE:'●', FRESH:'●',
-    ACTIVE:'◐', WARNING:'▲', DEGRADED:'▲', STALE:'◑',
+    PASS:'●', HEALTHY:'●', AVAILABLE:'●', FRESH:'●', COMPLETE:'●',
+    ACTIVE:'◐', RUNNING:'◐', CHECKING:'◇', IDLE:'○', WAITING:'○', WARNING:'▲', DEGRADED:'▲', STALE:'◑',
     FAILED:'✕', MISSING:'✕', BLOCKED:'■',
     UNVERIFIED:'?', UNKNOWN:'?', NOT_REQUIRED:'–',
     UNAVAILABLE:'⊘', DISCONNECTED:'⊘', AUTH_EXPIRED:'⊘',
@@ -372,16 +610,55 @@
   }
 
   var eng = S.engineering || {};
-  $('ctx-generated').textContent = 'generated ' + (S.generatedAt || 'UNKNOWN');
-  $('ctx-subject').textContent = eng.subjectSha256
-    ? 'subject ' + String(eng.subjectSha256).slice(0,12) + '…'
-    : 'subject UNAVAILABLE';
+  var lastLaunchedBuilder = null;
+  var lastLaunchedRunId = null;
+
+  function runFromView(view){
+    var source = view || {};
+    var binding = source.runsBinding || (source.runs && !Array.isArray(source.runs) ? source.runs.current : null);
+    var runs = Array.isArray(source.runs) ? source.runs :
+      ((source.runs && source.runs.state === 'OK' && source.runs.runs) || []);
+    if (!binding || binding.state !== 'BOUND' || !binding.runId) return null;
+    return runs.filter(function(run){ return run.runId === binding.runId; })[0] || null;
+  }
+
+  function operationalState(run){
+    if (!run) return { state: 'IDLE', plain: 'Nothing is currently running.' };
+    var build = run.build || {};
+    var activity = build.activity || {};
+    if (run.state === 'BUILDING') {
+      if (activity.active === true && (build.status === 'STARTING' || build.status === 'RUNNING')) {
+        return { state: 'RUNNING', plain: activity.summary || 'The builder is running.' };
+      }
+      return { state: 'UNVERIFIED', plain: 'A build is recorded, but active worker evidence is unavailable.' };
+    }
+    if (run.state === 'CHECKPOINTED') return { state: 'COMPLETE', plain: 'This run reached a recorded checkpoint.' };
+    if (run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED') {
+      return { state: 'BLOCKED', plain: 'The current run stopped on a failed build or check.' };
+    }
+    if (run.state === 'BUILT') return { state: 'WAITING', plain: 'The build finished and is waiting for deterministic checks.' };
+    if (run.state === 'CHECKS_PASSED') return { state: 'WAITING', plain: 'Checks passed and the run is waiting for independent review evidence.' };
+    if (run.state === 'REVIEW_BOUND') return { state: 'WAITING', plain: 'Review evidence is bound and the run is waiting for a checkpoint.' };
+    return { state: 'WAITING', plain: 'The run is waiting at ' + String(run.state || 'an unavailable stage').replace(/_/g, ' ').toLowerCase() + '.' };
+  }
+
+  function renderContext(view){
+    var currentView = view || {};
+    var currentEng = currentView.engineering || {};
+    $('ctx-generated').textContent = 'generated ' + (currentView.generatedAt || 'UNAVAILABLE');
+    $('ctx-subject').textContent = currentEng.subjectSha256
+      ? 'subject ' + String(currentEng.subjectSha256).slice(0,12) + '…'
+      : 'subject UNAVAILABLE';
+    var verdict = $('ctx-verdict');
+    verdict.textContent = '';
+    verdict.appendChild(chip(operationalState(runFromView(currentView)).state));
+  }
   // CONFIRMED FINDING #9: this used to render ANY non-BLOCKED verdict as
   // "PASS", so READY_FOR_DETERMINISTIC_VALIDATION — which explicitly means the
   // checks have NOT been run — displayed as a pass. The exact canonical verdict
   // is now rendered verbatim. If the gate invents a new state tomorrow, this
   // shows that state rather than guessing which side of the line it falls on.
-  $('ctx-verdict').appendChild(chip(eng.verdict || 'UNAVAILABLE'));
+  renderContext(S);
 
   // ── founder summary: one primary, plain-English "what's happening" panel ──
   // What was requested / What is happening now / Why blocked / Next action —
@@ -448,12 +725,249 @@
       (row.score || 'UNAVAILABLE') + '.';
   }
 
+  // A zero-length problem array is only a clear signal after two independent
+  // facts are established: the page is bound to a run that actually exists in
+  // the current run set, and the engineering projection positively says OK.
+  // Everything else fails closed in words. Existing problem counts survive an
+  // unavailable binding so a real recorded requirement is never hidden.
+  function blockingStatus(e, bind, boundRun){
+    var problems = (e && Array.isArray(e.problems)) ? e.problems : [];
+    var countText = problems.length
+      ? problems.length + ' unresolved gate requirement' + (problems.length === 1 ? '' : 's') +
+        '. Open Evidence, reviewer coverage & run history for the exact details.'
+      : null;
+    var unavailableReason = null;
+    if (!bind || bind.state !== 'BOUND'){
+      unavailableReason = (bind && bind.reason) || 'no authoritative current-run binding is available.';
+    } else if (!boundRun){
+      unavailableReason = 'the binding names ' + (bind.runId || 'an unavailable run') +
+        ', but no matching run record is present in the current evidence.';
+    } else if (!e || e.state !== 'OK'){
+      unavailableReason = (e && e.reason) || 'the engineering projection is unavailable or has not positively reported OK.';
+    }
+    if (unavailableReason){
+      return {
+        clear: false,
+        text: (countText ? countText + ' ' : '') + 'Blocking status unavailable — ' + unavailableReason
+      };
+    }
+    if (countText) return { clear: false, text: countText };
+    return { clear: true, text: 'Nothing is blocking this run.' };
+  }
+
+  var currentOperatorContext = null;
+  function crewIdentity(run){
+    if (!run) return 'No worker is assigned.';
+    var builder = run.builder || (lastLaunchedRunId === run.runId ? lastLaunchedBuilder : null);
+    if (builder && (builder.provider || builder.model)) {
+      return [builder.model, builder.provider].filter(Boolean).join(' via ');
+    }
+    if (run.build && run.build.activity && run.build.activity.active === true) {
+      return 'Governed builder active · model identity UNAVAILABLE in current status evidence.';
+    }
+    return 'No active worker · assigned model UNAVAILABLE in current status evidence.';
+  }
+
+  function elapsedEvidence(run, evidenceAt){
+    if (!run) return 'Not running.';
+    var build = run.build || {};
+    var started = Date.parse(build.startedAt || '');
+    var ended = Date.parse(build.endedAt || evidenceAt || '');
+    if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) {
+      return 'UNAVAILABLE — no valid start and evidence timestamps.';
+    }
+    var minutes = Math.floor((ended - started) / 60000);
+    if (minutes < 1) return 'Less than one minute as of the latest evidence.';
+    if (minutes < 60) return minutes + ' minute' + (minutes === 1 ? '' : 's') + ' as of the latest evidence.';
+    var hours = Math.floor(minutes / 60);
+    var remainder = minutes % 60;
+    return hours + ' hour' + (hours === 1 ? '' : 's') + (remainder ? ' ' + remainder + ' minutes' : '') +
+      ' as of the latest evidence.';
+  }
+
+  function checkpointEvidence(run){
+    if (!run) return 'No run is active.';
+    var checkpoint = run.checkpoint;
+    if (!checkpoint) return 'No safe checkpoint is recorded for this run.';
+    if (typeof checkpoint === 'string') return checkpoint;
+    if (checkpoint.commit) return 'Commit ' + checkpoint.commit;
+    if (checkpoint.sha) return 'Commit ' + checkpoint.sha;
+    if (checkpoint.state) return String(checkpoint.state).replace(/_/g, ' ').toLowerCase();
+    return 'A checkpoint exists, but its display value is UNAVAILABLE.';
+  }
+
+  function plainStageLabel(stage){
+    var labels = {
+      objective: 'Objective', acceptance: 'Scope & risk', routing: 'Choose builder',
+      worktree: 'Safe workspace', build: 'Build', deterministic: 'Check',
+      review: 'Independent review', correction: 'Corrections', watchdog: 'Safety check',
+      checkpoint: 'Safe checkpoint', surface: 'Evidence'
+    };
+    return labels[stage.id] || stage.label || 'Stage unavailable';
+  }
+
+  function plainStageState(state){
+    var labels = {
+      PASS: 'Ready', ACTIVE: 'Working', BLOCKED: 'Blocked', MISSING: 'Needs attention',
+      FAILED: 'Failed', UNVERIFIED: 'Not checked', UNKNOWN: 'Unknown',
+      UNAVAILABLE: 'Unavailable', NOT_REQUIRED: 'Not required', STALE: 'Out of date'
+    };
+    return labels[state] || String(state || 'UNKNOWN').replace(/_/g, ' ').toLowerCase();
+  }
+
+  function noteLaunchedBuilder(runId, builder){
+    if (!runId || !builder || (!builder.provider && !builder.model)) return;
+    lastLaunchedRunId = runId;
+    lastLaunchedBuilder = { provider: builder.provider || null, model: builder.model || null };
+  }
+
   function renderFounderSummary(view){
     var host = $('founder-body'); if (!host) return;
+    var topologyHost = $('topology-live-body');
+    var integrationHost = $('integration-overview');
     var e = (view && view.engineering) || {};
     var runs = (view && view.runs) || [];
     var bind = (view && view.binding) || null;
     host.textContent = '';
+    if (topologyHost) topologyHost.textContent = '';
+    if (integrationHost) integrationHost.textContent = '';
+
+    var boundRun = null;
+    if (bind && bind.state === 'BOUND'){
+      boundRun = runs.filter(function(r){ return r.runId === bind.runId; })[0] || null;
+    }
+    var deckObjective = (boundRun && boundRun.objective) || (bind && bind.objective) || 'No active task';
+    var blocked = blockingStatus(e, bind, boundRun);
+    var deckActions = [];
+    var deckRc = e.reviewerCompleteness;
+    if (!boundRun) {
+      deckActions.push('Enter an objective and start a governed build.');
+    } else if (deckRc && deckRc.rows){
+      deckRc.rows.forEach(function(row){
+        if (row.required === 'REQUIRED' && row.executed !== 'EXECUTED'){
+          deckActions.push('Get ' + row.reviewer + ' to review this exact change.');
+        } else if (row.required === 'REQUIRED' && row.executed === 'EXECUTED' && (row.missingPaths || []).length){
+          deckActions.push('Complete ' + row.reviewer + ' coverage of ' + row.missingPaths.length + ' unread file(s).');
+        }
+      });
+    }
+    if (!deckActions.length && e.verdict === 'READY_FOR_DETERMINISTIC_VALIDATION') deckActions.push('Run the deterministic checks.');
+    if (!deckActions.length && e.verdict === 'READY_FOR_PR') deckActions.push('Open the pull request for review.');
+    if (!deckActions.length) deckActions.push('No next action is recorded yet.');
+
+    var opState = operationalState(boundRun);
+    var crew = crewIdentity(boundRun);
+    var currentAction = boundRun ? opState.plain : 'Nothing is currently running.';
+    var elapsed = elapsedEvidence(boundRun, view && view.generatedAt);
+    var cleanIdle = !boundRun && !runs.length && (!bind || bind.state === 'UNAVAILABLE');
+    var operatorBlocker = cleanIdle ? 'No blocker — no run has started.' : blocked.text;
+    var safeCheckpoint = checkpointEvidence(boundRun);
+    var shell = $('operator-shell');
+    if (shell) shell.setAttribute('data-run-status', opState.state.toLowerCase());
+
+    // The first screen is a pilot deck: mission, crew, present action, next
+    // stage, warning and last safe state. Implementation plumbing stays below.
+    var mission = el('div','mission-head');
+    var missionText = el('div');
+    missionText.appendChild(el('div','mission-kicker','Mission'));
+    missionText.appendChild(el('h3','mission-title',deckObjective));
+    missionText.appendChild(el('div','mission-meta',opState.plain));
+    mission.appendChild(missionText);
+    mission.appendChild(chip(opState.state));
+    host.appendChild(mission);
+
+    function commandCard(label, value, cls){
+      var card = el('div','command-card ' + (cls || ''));
+      card.setAttribute('data-operator-field', label.toLowerCase().replace(/\s+/g, '-'));
+      card.appendChild(el('div','command-label',label));
+      card.appendChild(el('div','command-value',value));
+      return card;
+    }
+    var commandGrid = el('div','command-grid');
+    commandGrid.appendChild(commandCard('CREW / MODEL', crew, 'is-crew'));
+    commandGrid.appendChild(commandCard('CURRENT ACTION', currentAction, 'is-now'));
+    commandGrid.appendChild(commandCard('ELAPSED', elapsed, 'is-elapsed'));
+    commandGrid.appendChild(commandCard('NEXT STEP', deckActions.join(' '), 'is-next'));
+    commandGrid.appendChild(commandCard('BLOCKER', operatorBlocker,
+      cleanIdle || blocked.clear ? 'is-clear' : 'is-blocked'));
+    commandGrid.appendChild(commandCard('LAST SAFE CHECKPOINT', safeCheckpoint, 'is-checkpoint'));
+    host.appendChild(commandGrid);
+    currentOperatorContext = {
+      objective: deckObjective,
+      verdict: opState.state,
+      now: currentAction,
+      risk: (plainRisk(e).reasons || []).join(' ') || plainRisk(e).plain,
+      next: deckActions.join(' '),
+      blocked: operatorBlocker
+    };
+
+    var routeHead = el('div','deck-heading');
+    routeHead.appendChild(el('h3',null,'Build sequence'));
+    routeHead.appendChild(el('span','muted','Select a stage to inspect its evidence'));
+    (topologyHost || host).appendChild(routeHead);
+    var routeCrew = el('div','route-crew');
+    routeCrew.appendChild(el('span','command-label','Crew / model'));
+    routeCrew.appendChild(el('span','route-crew-value',crew));
+    (topologyHost || host).appendChild(routeCrew);
+    var route = el('div','route-strip');
+    if (!(e.stages || []).length){
+      route.appendChild(el('p','empty','UNAVAILABLE — no live stage projection was produced.'));
+    } else {
+      (e.stages || []).forEach(function(st){
+        var node = el('button','route-node is-' + (st.state || 'UNKNOWN'));
+        node.type = 'button';
+        node.setAttribute('aria-label', plainStageLabel(st) + ': ' + (st.state || 'UNKNOWN') + ' — ' + (st.reason || 'no reason recorded'));
+        node.appendChild(el('span','route-name',(st.step ? String(st.step).padStart(2,'0') + ' · ' : '') + plainStageLabel(st)));
+        node.appendChild(el('span','route-state s-' + (st.state || 'UNKNOWN'), GLYPH[st.state] + ' ' + plainStageState(st.state)));
+        node.title = st.reason || '';
+        node.addEventListener('click', function(){ select(node, 'stage', st); });
+        node.addEventListener('keydown', function(ev){
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            select(node, 'stage', st);
+          }
+        });
+        route.appendChild(node);
+      });
+    }
+    (topologyHost || host).appendChild(route);
+
+    var truthHead = el('div','deck-heading');
+    truthHead.appendChild(el('h3',null,'Models & connector use'));
+    truthHead.appendChild(el('span','muted','Authenticated is not the same as used'));
+    (integrationHost || host).appendChild(truthHead);
+    var truth = el('div','truth-grid');
+    var connectors = view && view.integration && view.integration.connectors &&
+      view.integration.connectors.connectors ? view.integration.connectors.connectors : [];
+    if (!connectors.length){
+      truth.appendChild(el('p','empty','UNAVAILABLE — no connector projection is present.'));
+    } else {
+      connectors.forEach(function(c){
+        var card = el('div','truth-card');
+        card.tabIndex = 0;
+        card.setAttribute('role','button');
+        card.setAttribute('aria-label', c.label + ' connector evidence');
+        card.appendChild(el('div','name',c.label));
+        card.appendChild(el('div','meta','Auth ' + (c.authStatus || 'UNAVAILABLE') + ' · health ' + (c.health || 'UNKNOWN')));
+        var usage = usageMessage(c.lastUsedByRun, bind && bind.state === 'BOUND' ? bind.runId : null);
+        card.appendChild(el('div','meta usage-summary',usage.text));
+        card.appendChild(chip(usage.state === 'USED_CURRENT' ? 'ACTIVE' :
+          (usage.state === 'USED_HISTORICAL' ? 'STALE' : usage.state)));
+        card.addEventListener('click', function(){ select(card, 'connector', c); });
+        card.addEventListener('keydown', function(ev){ if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); select(card, 'connector', c); } });
+        truth.appendChild(card);
+      });
+    }
+    (integrationHost || host).appendChild(truth);
+
+    // Complete governance evidence remains available without occupying the
+    // primary operator surface.
+    var visibleHost = host;
+    var evidence = el('details','founder-details');
+    evidence.appendChild(el('summary',null,'Evidence, reviewer coverage & run history'));
+    var evidenceBody = el('div');
+    evidence.appendChild(evidenceBody);
+    host = evidenceBody;
 
     // ── the binding itself, stated before anything it is used to claim ──
     var bindP = el('p');
@@ -469,11 +983,6 @@
         'No run could be bound to this page, so nothing below is attributed to a run.'));
     }
     host.appendChild(bindP);
-
-    var boundRun = null;
-    if (bind && bind.state === 'BOUND'){
-      boundRun = runs.filter(function(r){ return r.runId === bind.runId; })[0] || null;
-    }
 
     var requested = el('p');
     requested.appendChild(el('strong', null, 'What was requested: '));
@@ -506,7 +1015,7 @@
     if (e.problems && e.problems.length){
       why.appendChild(document.createTextNode(e.problems.map(function(p){ return p.detail; }).join(' ')));
     } else {
-      why.appendChild(document.createTextNode('Nothing is blocking this run.'));
+      why.appendChild(document.createTextNode(blocked.text));
     }
     host.appendChild(why);
 
@@ -616,6 +1125,25 @@
     host.appendChild(prov((view && view.source) || e.source,
       'This summary re-expresses the gate verdict and reviewer-completeness table; it decides nothing new. Last repaint from: ' +
       ((view && view.origin) || 'UNKNOWN') + '.'));
+    visibleHost.appendChild(evidence);
+  }
+
+  function operatorAnswer(question){
+    var ctx = currentOperatorContext;
+    if (!ctx) return { title: 'Evidence unavailable', text: 'No current dashboard context has been rendered.' };
+    if (question === 'next') return { title: 'Next evidence-backed action', text: ctx.next };
+    if (question === 'summarize') {
+      return { title: 'Current build summary', text: ctx.objective + ' — ' + ctx.now + ' ' + ctx.blocked };
+    }
+    if (currentOperatorSelection && currentOperatorSelection.data) {
+      var selected = currentOperatorSelection.data;
+      var selectedName = selected.label || selected.toolId || 'Selected item';
+      var selectedState = selected.state || selected.health || selected.availability || 'UNAVAILABLE';
+      var selectedReason = selected.reason || selected.authorityNote ||
+        'Open the Inspector for the exact recorded evidence.';
+      return { title: selectedName + ' — ' + selectedState, text: selectedReason };
+    }
+    return { title: 'Why the dashboard shows ' + ctx.verdict, text: ctx.now + ' Risk context: ' + ctx.risk };
   }
 
   function viewFromState(){
@@ -624,6 +1152,8 @@
       runs: (S.runs && S.runs.state === 'OK') ? (S.runs.runs || []) : [],
       binding: (S.runs && S.runs.current) || null,
       cost: S.cost || null,
+      integration: S.integration || null,
+      generatedAt: S.generatedAt || null,
       source: eng.source,
       origin: 'the generated snapshot state.js (' + (S.generatedAt || 'UNKNOWN') + ')'
     };
@@ -694,49 +1224,60 @@
   renderCost(S.cost);
 
   // ── stages ──────────────────────────────────────────────────────
-  var stages = (eng.stages || []);
+  // Initial state.js and live /api/status both use this renderer. Clearing the
+  // two hosts first is intentional: a superseded gate row must disappear, not
+  // remain beside the current evidence and look cumulative.
+  var stages = [];
   var BREAKS = { MISSING:1, FAILED:1, BLOCKED:1, UNAVAILABLE:1 };
-  var list = $('stages');
-  if (!stages.length) {
-    list.appendChild(el('li','empty','UNAVAILABLE — no stage projection was produced.'));
-  }
-  stages.forEach(function(st, i){
-    var li = el('li');
-    var b = el('button','stage' + (BREAKS[st.state] ? ' broken' : '') + (st.state === 'ACTIVE' ? ' is-active' : ''));
-    b.type = 'button';
-    b.setAttribute('aria-label', st.label + ': ' + st.state + ' — ' + st.reason);
+  function renderStages(source){
+    var list = $('stages');
+    var drift = $('drift');
+    list.textContent = '';
+    drift.textContent = '';
+    stages = source && Array.isArray(source.stages) ? source.stages : [];
+    if (!stages.length) {
+      list.appendChild(el('li','empty','UNAVAILABLE — ' +
+        ((source && source.reason) || 'no stage projection was produced.')));
+    }
+    stages.forEach(function(st){
+      var li = el('li');
+      var b = el('button','stage' + (BREAKS[st.state] ? ' broken' : '') + (st.state === 'ACTIVE' ? ' is-active' : ''));
+      b.type = 'button';
+      b.setAttribute('aria-label', st.label + ': ' + st.state + ' — ' + st.reason);
 
-    var rail = el('span','rail'); rail.appendChild(el('span','dot s-'+st.state)); rail.setAttribute('aria-hidden','true');
-    var mid = el('span');
-    // Contract step number. The eleven steps are numbered in the contract, so
-    // the screen numbers them too — "step 8 is unverified" is checkable against
-    // §8 in a way that "bounded corrections is unverified" is not.
-    if (st.step) mid.appendChild(el('span','stepno', String(st.step).padStart(2,'0')));
-    mid.appendChild(el('span','label', st.label));
-    mid.appendChild(el('span','why', st.reason));
-    var badges = el('span','badges'); badges.appendChild(chip(st.state));
+      var rail = el('span','rail'); rail.appendChild(el('span','dot s-'+st.state)); rail.setAttribute('aria-hidden','true');
+      var mid = el('span');
+      // Contract step number. The eleven steps are numbered in the contract, so
+      // the screen numbers them too — "step 8 is unverified" is checkable against
+      // §8 in a way that "bounded corrections is unverified" is not.
+      if (st.step) mid.appendChild(el('span','stepno', String(st.step).padStart(2,'0')));
+      mid.appendChild(el('span','label', st.label));
+      mid.appendChild(el('span','why', st.reason));
+      var badges = el('span','badges'); badges.appendChild(chip(st.state));
 
-    b.appendChild(rail); b.appendChild(mid); b.appendChild(badges);
-    b.addEventListener('click', function(){ select(b, 'stage', st); });
-    b.addEventListener('keydown', function(e){
-      var items = Array.prototype.slice.call(list.querySelectorAll('.stage'));
-      var idx = items.indexOf(b);
-      if (e.key === 'ArrowDown' && idx < items.length-1){ e.preventDefault(); items[idx+1].focus(); }
-      if (e.key === 'ArrowUp' && idx > 0){ e.preventDefault(); items[idx-1].focus(); }
+      b.appendChild(rail); b.appendChild(mid); b.appendChild(badges);
+      b.addEventListener('click', function(){ select(b, 'stage', st); });
+      b.addEventListener('keydown', function(e){
+        var items = Array.prototype.slice.call(list.querySelectorAll('.stage'));
+        var idx = items.indexOf(b);
+        if (e.key === 'ArrowDown' && idx < items.length-1){ e.preventDefault(); items[idx+1].focus(); }
+        if (e.key === 'ArrowUp' && idx > 0){ e.preventDefault(); items[idx-1].focus(); }
+      });
+      li.appendChild(b); list.appendChild(li);
     });
-    li.appendChild(b); list.appendChild(li);
-  });
 
-  // Drift is stated in words, not implied by a colour.
-  var missing = stages.filter(function(s){ return s.state === 'MISSING'; });
-  if (missing.length){
-    var d = el('div','note');
-    d.appendChild(el('strong',null,'PROCESS DRIFT — verification blocked.'));
-    d.appendChild(el('div',null,'Required stage(s) with no evidence bound to this subject: '
-      + missing.map(function(m){ return m.label; }).join(', ')
-      + '. The path above is severed at each one. This is the gate’s own verdict, not a second opinion.'));
-    $('drift').appendChild(d);
+    // Drift is stated in words, not implied by a colour.
+    var missing = stages.filter(function(s){ return s.state === 'MISSING'; });
+    if (missing.length){
+      var d = el('div','note');
+      d.appendChild(el('strong',null,'PROCESS DRIFT — verification blocked.'));
+      d.appendChild(el('div',null,'Required stage(s) with no evidence bound to this subject: '
+        + missing.map(function(m){ return m.label; }).join(', ')
+        + '. The path above is severed at each one. This is the gate’s own verdict, not a second opinion.'));
+      drift.appendChild(d);
+    }
   }
+  renderStages(eng);
 
   // ── knowledge mirror ────────────────────────────────────────────
   // Its own plane. A CONFLICT shows BOTH values and resolves nothing —
@@ -777,8 +1318,10 @@
   // "for this run" is only ever printed after an exact runId match against the
   // binding. With no bound run there is no "this run" to compare to, so a
   // confirmed use stays "last used by run X".
-  function currentRunId(){
-    var b = (S.runs && S.runs.current) || null;
+  function boundRunId(source){
+    var b = source && source.runsBinding
+      ? source.runsBinding
+      : ((source && source.runs && source.runs.current) || null);
     return (b && b.state === 'BOUND' && b.runId) ? b.runId : null;
   }
   function usageMessage(used, curRunId){
@@ -808,49 +1351,66 @@
   }
 
   // ── connectors ──────────────────────────────────────────────────
-  var conn = (S.integration && S.integration.connectors) || {};
-  var cl = $('connectors');
-  if (conn.state !== 'OK'){
-    cl.appendChild(el('li','empty','UNAVAILABLE — ' + (conn.reason || 'connector registry could not be read')));
-  } else if (!(conn.connectors||[]).length){
-    cl.appendChild(el('li','empty','No connectors are configured.'));
-  } else {
-    conn.connectors.forEach(function(c){
-      var li = el('li','row');
-      var left = el('div');
-      var nm = el('div','name', c.label + (c.legacy ? ' — LEGACY/OPTIONAL' : ''));
-      left.appendChild(nm);
-      left.appendChild(el('div','meta', c.provider + ' · ' + c.executionPath
-        + ' · auth ' + c.authStatus));
-      var right = el('div','badges');
-      right.appendChild(chip(c.health));
-      // Staleness qualifies health; it never overwrites or hides it.
-      if (c.staleness && c.staleness.state !== 'FRESH'){
-        var s = chip(c.staleness.state);
-        if (c.staleness.ageMinutes != null) s.lastChild.textContent = 'STALE ' + c.staleness.ageMinutes + 'm';
-        right.appendChild(s);
-      }
-      // Usage is the one fact that must never be inferred from authentication
-      // or a healthy probe: a connector can be authenticated and freshly
-      // verified and still have been consulted by nothing.
-      var msg = usageMessage(c.lastUsedByRun, currentRunId());
-      var usageLine = el('div','meta', msg.text);
-      usageLine.setAttribute('data-usage-state', msg.state);
-      left.appendChild(usageLine);
-      li.appendChild(left); li.appendChild(right);
-      li.tabIndex = 0; li.style.cursor='pointer';
-      li.addEventListener('click', function(){ select(li,'connector', c); });
-      li.addEventListener('keydown', function(e){ if(e.key==='Enter'){ select(li,'connector', c); } });
-      cl.appendChild(li);
-    });
+  // The generated snapshot and every live /api/status payload use this same
+  // renderer. The source shape is intentionally accepted in both forms:
+  // state.js keeps the projector envelope under integration.connectors, while
+  // the authenticated live surface carries the same envelope after hosting
+  // minimization. No live update is allowed to retain an old connector row.
+  function renderConnectors(source){
+    var conn = (source && source.integration && source.integration.connectors) || {};
+    var cl = $('connectors');
+    if (!cl) return;
+    cl.textContent = '';
+    if (conn.state !== 'OK'){
+      cl.appendChild(el('li','empty','UNAVAILABLE — ' + (conn.reason || 'connector registry could not be read')));
+    } else if (!(conn.connectors||[]).length){
+      cl.appendChild(el('li','empty','No connectors are configured.'));
+    } else {
+      conn.connectors.forEach(function(c){
+        var li = el('li','row');
+        var left = el('div');
+        var nm = el('div','name', c.label + (c.legacy ? ' — LEGACY/OPTIONAL' : ''));
+        left.appendChild(nm);
+        left.appendChild(el('div','meta', c.provider + ' · ' + (c.executionPath || 'UNKNOWN')
+          + ' · auth ' + (c.authStatus || 'UNAVAILABLE')));
+        var right = el('div','badges');
+        right.appendChild(chip(c.health || 'UNKNOWN'));
+        // Staleness qualifies health; it never overwrites or hides it.
+        if (c.staleness && c.staleness.state !== 'FRESH'){
+          var s = chip(c.staleness.state);
+          if (c.staleness.ageMinutes != null) s.lastChild.textContent = 'STALE ' + c.staleness.ageMinutes + 'm';
+          right.appendChild(s);
+        }
+        // Usage is the one fact that must never be inferred from authentication
+        // or a healthy probe: a connector can be authenticated and freshly
+        // verified and still have been consulted by nothing.
+        var msg = usageMessage(c.lastUsedByRun, boundRunId(source));
+        var usageLine = el('div','meta', msg.text);
+        usageLine.setAttribute('data-usage-state', msg.state);
+        left.appendChild(usageLine);
+        li.appendChild(left); li.appendChild(right);
+        li.tabIndex = 0; li.style.cursor='pointer';
+        li.addEventListener('click', function(){ select(li,'connector', c); });
+        li.addEventListener('keydown', function(e){ if(e.key==='Enter'){ select(li,'connector', c); } });
+        cl.appendChild(li);
+      });
+    }
   }
+  renderConnectors(S);
 
   // ── reviewers ───────────────────────────────────────────────────
-  var rv = S.reviewers || {}; var rl = $('reviewers');
-  if (rv.state !== 'OK'){
-    rl.appendChild(el('li','empty','UNAVAILABLE — ' + (rv.reason || 'reviewer state could not be read')));
-  } else {
-    (rv.reviewers||[]).forEach(function(r){
+  function renderReviewers(source, stageSource){
+    var rl = $('reviewers');
+    rl.textContent = '';
+    var liveRows = Array.isArray(source) ? source : null;
+    var state = liveRows ? 'OK' : ((source && source.state) || 'UNAVAILABLE');
+    var rows = liveRows || ((source && source.reviewers) || []);
+    var stageRows = stageSource && Array.isArray(stageSource.stages) ? stageSource.stages : [];
+    if (state !== 'OK'){
+      rl.appendChild(el('li','empty','UNAVAILABLE — ' + ((source && source.reason) || 'reviewer state could not be read')));
+      return;
+    }
+    rows.forEach(function(r){
       var li = el('li','row');
       var left = el('div');
       left.appendChild(el('div','name', r.label || r.toolId));
@@ -858,7 +1418,7 @@
       var right = el('div','badges');
       right.appendChild(chip(r.availability));
       // Available to run is not the same as having run. Say which.
-      var st = stages.filter(function(s){
+      var st = stageRows.filter(function(s){
         return (r.toolId === 'codex-local' && s.id === 'codex') || (r.toolId === 'grok-cli' && s.id === 'grok');
       })[0];
       if (st) right.appendChild(chip(st.state || 'UNKNOWN'));
@@ -869,13 +1429,20 @@
       rl.appendChild(li);
     });
   }
+  renderReviewers(S.reviewers, eng);
 
   // ── events ──────────────────────────────────────────────────────
-  var ev = S.events || {}; var evl = $('events');
-  if (ev.state !== 'OK'){
-    evl.appendChild(el('li','empty','UNAVAILABLE — ' + (ev.reason || 'ledger could not be read')));
-  } else {
-    (ev.events||[]).forEach(function(e){
+  function renderEvents(source){
+    var evl = $('events');
+    evl.textContent = '';
+    var liveRows = Array.isArray(source) ? source : null;
+    var state = liveRows ? 'OK' : ((source && source.state) || 'UNAVAILABLE');
+    var rows = liveRows || ((source && source.events) || []);
+    if (state !== 'OK'){
+      evl.appendChild(el('li','empty','UNAVAILABLE — ' + ((source && source.reason) || 'ledger could not be read')));
+      return;
+    }
+    rows.forEach(function(e){
       var li = el('li','row');
       var left = el('div');
       left.appendChild(el('div','name', e.gate + (e.blockRule ? ' · ' + e.blockRule : '')));
@@ -889,12 +1456,31 @@
       li.appendChild(left); li.appendChild(right); evl.appendChild(li);
     });
   }
+  renderEvents(S.events);
 
   // ── inspector ───────────────────────────────────────────────────
   var current = null;
+  var currentOperatorSelection = null;
+  function resolvedConnector(data){
+    var live = data || {};
+    var envelope = S && S.integration && S.integration.connectors;
+    var snapshot = envelope && envelope.connectors ? envelope.connectors : [];
+    var fallback = snapshot.filter(function(c){
+      return (live.connectorId && c.connectorId === live.connectorId) ||
+        (!live.connectorId && live.label && c.label === live.label && c.provider === live.provider);
+    })[0] || {};
+    var out = {};
+    Object.keys(fallback).forEach(function(k){ out[k] = fallback[k]; });
+    Object.keys(live).forEach(function(k){ if (live[k] != null) out[k] = live[k]; });
+    return out;
+  }
+  function known(value, unavailable){
+    return value == null || value === '' ? (unavailable || 'UNAVAILABLE — no evidence in the current or generated projection') : value;
+  }
   function select(node, kind, data){
     if (current) current.removeAttribute('aria-current');
     current = node; node.setAttribute('aria-current','true');
+    currentOperatorSelection = { kind: kind, data: data };
     var box = $('inspector'); box.textContent = '';
     var dl = el('dl','kv');
     function kv(k,v){ dl.appendChild(el('dt',null,k)); dl.appendChild(el('dd',null, v == null ? '—' : String(v))); }
@@ -906,26 +1492,31 @@
       box.appendChild(dl);
       box.appendChild(prov(eng.source, 'derived from the gate verdict; this view re-expresses it and decides nothing'));
     } else if (kind === 'connector'){
-      box.appendChild(el('h3',null,data.label));
-      kv('Plane', data.plane + ' — worker, never engineering authority');
-      kv('Health', data.health);
-      kv('Staleness', data.staleness ? (data.staleness.state + (data.staleness.ageMinutes!=null ? ' ('+data.staleness.ageMinutes+'m)' : '')) : '—');
-      kv('Auth', data.authStatus);
+      var connector = resolvedConnector(data);
+      box.appendChild(el('h3',null,known(connector.label, 'Connector')));
+      kv('Plane', known(connector.plane) + (connector.plane ? ' — worker, never engineering authority' : ''));
+      kv('Health', known(connector.health));
+      kv('Staleness', connector.staleness ? (known(connector.staleness.state) +
+        (connector.staleness.ageMinutes!=null ? ' ('+connector.staleness.ageMinutes+'m)' : '')) : known(null));
+      kv('Auth', known(connector.authStatus));
       // THREE INDEPENDENT FACTS, never inferred from each other: a connector can
       // be authenticated and freshly verified and still be UNAVAILABLE for
       // usage, because being reachable is not being consulted.
-      if (data.authentication) kv('Authenticated', data.authentication.state + ' — ' + data.authentication.plain);
-      if (data.lastVerified) kv('Last verified', data.lastVerified.state + ' — ' + data.lastVerified.plain);
-      if (data.lastUsedByRun) kv('Last used by a run', data.lastUsedByRun.state + ' — ' + data.lastUsedByRun.plain);
-      kv('Execution path', data.executionPath);
-      kv('Supports', (data.capabilities||[]).join(', ') || '—');
-      kv('Declared NOT supported', (data.declaredNotSupported||[]).join(', ') || '—');
-      kv('Failures', data.failureCount);
-      kv('Risk', data.riskLevel);
-      if (data.evidence){ kv('Observed at', data.evidence.observedAt); kv('Method', data.evidence.method); kv('Result', data.evidence.result); }
+      if (connector.authentication) kv('Authenticated', known(connector.authentication.state) + ' — ' + known(connector.authentication.plain));
+      else kv('Authenticated', known(connector.authStatus));
+      if (connector.lastVerified) kv('Last verified', known(connector.lastVerified.state) + ' — ' + known(connector.lastVerified.plain));
+      else kv('Last verified', known(null));
+      if (connector.lastUsedByRun) kv('Last used by a run', connector.lastUsedByRun.plain || usageMessage(connector.lastUsedByRun, null).text);
+      else kv('Last used by a run', usageMessage(null, null).text);
+      kv('Execution path', known(connector.executionPath));
+      kv('Supports', (connector.capabilities||[]).join(', ') || 'UNAVAILABLE — no capability list in the current or generated projection');
+      kv('Declared NOT supported', (connector.declaredNotSupported||[]).join(', ') || 'UNAVAILABLE — no exclusion list in the current or generated projection');
+      kv('Failures', known(connector.failureCount));
+      kv('Risk', known(connector.riskLevel));
+      if (connector.evidence){ kv('Observed at', known(connector.evidence.observedAt)); kv('Method', known(connector.evidence.method)); kv('Result', known(connector.evidence.result)); }
       else kv('Evidence','UNVERIFIED — never probed');
-      if (data.authorityNote) kv('Authority', data.authorityNote);
-      box.appendChild(dl); box.appendChild(prov(data.source));
+      if (connector.authorityNote) kv('Authority', connector.authorityNote);
+      box.appendChild(dl); box.appendChild(prov(connector.source || '/api/status'));
     } else {
       box.appendChild(el('h3',null,data.label || data.toolId));
       kv('Role', data.role); kv('Availability', data.availability);
@@ -961,10 +1552,18 @@
   // second copy is how two panels on one page start disagreeing — it calls
   // these, with a view built from whatever /api/status just pushed.
   window.AEGIS_DASHBOARD = {
+    renderContext: renderContext,
     renderFounderSummary: renderFounderSummary,
+    blockingStatus: blockingStatus,
     renderCost: renderCost,
+    renderConnectors: renderConnectors,
+    renderStages: renderStages,
+    renderReviewers: renderReviewers,
+    renderEvents: renderEvents,
     usageMessage: usageMessage,
-    viewFromState: viewFromState
+    viewFromState: viewFromState,
+    operatorAnswer: operatorAnswer,
+    noteLaunchedBuilder: noteLaunchedBuilder
   };
 })();
 </script>
@@ -1021,19 +1620,36 @@
     return parsed;
   }
 
-  var currentRunId = null;
+  function renderAskAnswer(question){
+    var host = $('ask-aegis-answer');
+    var dashboard = window.AEGIS_DASHBOARD;
+    if (!host || !dashboard || !dashboard.operatorAnswer) return;
+    var answer = dashboard.operatorAnswer(question);
+    host.textContent = '';
+    host.appendChild(el('strong', null, answer.title));
+    host.appendChild(document.createTextNode(answer.text));
+  }
+  ['explain','summarize','next'].forEach(function(question){
+    var button = $('ask-aegis-' + question);
+    if (!button) return;
+    button.addEventListener('click', function(){ renderAskAnswer(question); });
+  });
 
-  function bindRunActions(){
-    var startBtn = $('btn-start-run');
+  var intakeRunId = null;
+
+  function bindRunActions(startBtn){
     if (startBtn) startBtn.addEventListener('click', async function(){
       var host = $('intake-result');
-      if (!currentRunId) return;
+      if (!intakeRunId) return;
       startBtn.disabled = true;
       try {
-        var result = await callApi('/api/start', { runId: currentRunId });
-        showApiMessage(host, true, 'Started: ' + (result.state || 'UNKNOWN') +
-          '. Worktree prepared at ' + ((result.worktree && result.worktree.path) || 'UNKNOWN') +
-          '. Builder execution is a separate governed step and has NOT been launched.');
+        var result = await callApi('/api/start', { runId: intakeRunId });
+        var dashboard = window.AEGIS_DASHBOARD;
+        if (dashboard && dashboard.noteLaunchedBuilder) dashboard.noteLaunchedBuilder(result.runId, result.builder);
+        showApiMessage(host, true, 'Worker launched: ' + (result.state || 'UNKNOWN') +
+          '. Governed ' + ((result.builder && result.builder.provider) || 'builder') +
+          ' process ' + (Number.isInteger(result.workerPid) ? ('PID ' + result.workerPid) : 'ownership UNAVAILABLE') +
+          ' is running asynchronously. Live status and output evidence will repaint below.');
       } catch (e) {
         showApiMessage(host, false, 'Start failed (' + e.code + '): ' + e.message);
       } finally {
@@ -1065,19 +1681,19 @@
     submitBtn.disabled = true;
     try {
       var result = await callApi('/api/objective', payload);
-      currentRunId = result.runId;
+      intakeRunId = result.runId;
       resultHost.textContent = '';
       var msg = el('div', 'api-msg ok');
       msg.appendChild(el('strong', null, result.state === 'INTAKE_RECORDED' ? 'INTAKE_RECORDED' : String(result.state)));
       msg.appendChild(el('div', null, 'Run ' + result.runId + ' recorded.'));
       resultHost.appendChild(msg);
       var startRow = el('div', 'btn-row');
-      var startBtn = el('button', 'action primary', 'Start (prepare isolated worktree)');
+      var startBtn = el('button', 'action primary', 'Start governed builder');
       startBtn.type = 'button';
       startBtn.id = 'btn-start-run';
       startRow.appendChild(startBtn);
       resultHost.appendChild(startRow);
-      bindRunActions();
+      bindRunActions(startBtn);
     } catch (e) {
       showApiMessage(resultHost, false, 'Objective rejected (' + e.code + '): ' + e.message);
     } finally {
@@ -1090,26 +1706,103 @@
     BUILT:'●', CHECKS_PASSED:'●', CHECKS_FAILED:'✕', BUILD_FAILED:'✕', CORRECTING:'▲',
     CHECKPOINTED:'◆', ROLLED_BACK:'■', ABANDONED:'■' };
 
+  function hasVerifiedAsyncOwnership(run){
+    return !!(run && run.state === 'BUILDING' && run.build && run.build.mode === 'async' &&
+      Number.isInteger(run.build.workerPid) && run.build.workerPid > 0 &&
+      (run.build.status === 'STARTING' || run.build.status === 'RUNNING'));
+  }
+
+  function buildEvidence(build){
+    var host = el('div', 'build-evidence');
+    host.setAttribute('data-build-evidence', build.status || 'UNKNOWN');
+    host.appendChild(el('h4', null, 'Builder evidence'));
+    var activity = build.activity || {};
+    host.appendChild(el('div', 'meta', 'State: ' + (build.status || 'UNKNOWN') +
+      ' — ' + (activity.summary || 'Current activity UNAVAILABLE')));
+    host.appendChild(el('div', 'meta', 'Activity: ' + (activity.code || 'UNKNOWN') +
+      ' · Phase: ' + (activity.phase || 'UNKNOWN') +
+      ' · Active: ' + (activity.active === true ? 'YES' : 'NO')));
+    host.appendChild(el('div', 'meta', 'Heartbeat: ' + (build.heartbeatAt || 'UNAVAILABLE')));
+    host.appendChild(el('div', 'meta', 'Started: ' + (build.startedAt || 'UNAVAILABLE') +
+      ' · Ended: ' + (build.endedAt || 'not ended')));
+    host.appendChild(el('div', 'meta', 'Exit: ' + (Number.isInteger(build.exit) ? build.exit : 'not recorded') +
+      ' · Timed out: ' + (build.timedOut === true ? 'YES' : 'NO')));
+    return host;
+  }
+
   function runActionRow(run){
     var row = el('div', 'btn-row');
 
-    // Pause is unavailable for EVERY run today — there is no asynchronous
-    // build process to suspend (see the limitation notice above). Disabled
+    // Pause is unavailable for EVERY run today — asynchronous execution exists,
+    // but no tested PAUSED/resume lifecycle exists. Disabled
     // rather than merely titled, so the impossible action cannot be attempted
     // and then explained away after the fact.
     var pauseBtn = el('button', 'action', 'Pause');
     pauseBtn.type = 'button';
     pauseBtn.disabled = true;
-    pauseBtn.title = 'Pause is unavailable: there is no active build process to suspend (see the limitation notice above).';
+    pauseBtn.title = 'Pause is unavailable until safe suspend/resume semantics and evidence exist (see the control boundary above).';
     row.appendChild(pauseBtn);
 
+    if (run.state === 'BUILT') {
+      var checksBtn = el('button', 'action primary', 'Run deterministic checks');
+      checksBtn.type = 'button';
+      checksBtn.addEventListener('click', async function(){
+        checksBtn.disabled = true;
+        checksBtn.textContent = 'Checks running…';
+        try {
+          var result = await callApi('/api/checks', { runId: run.runId });
+          appendActivity('Checks completed for ' + run.runId + ': ' + result.state +
+            '; waiting for live lifecycle evidence.');
+        } catch (e) {
+          checksBtn.disabled = false;
+          checksBtn.textContent = 'Run deterministic checks';
+          appendActivity('Checks failed to run for ' + run.runId + ': ' + e.message);
+        }
+      });
+      row.appendChild(checksBtn);
+    }
+
+    if (run.state === 'CHECKS_PASSED') {
+      row.appendChild(el('div', 'meta',
+        'Independent reviews run outside this functional-beta dashboard. This action only verifies and binds existing exact-subject review evidence; it does not launch or pay for a review.'));
+      var reviewBtn = el('button', 'action primary', 'Verify independent review');
+      reviewBtn.type = 'button';
+      reviewBtn.addEventListener('click', async function(){
+        reviewBtn.disabled = true;
+        reviewBtn.textContent = 'Verifying review evidence…';
+        try {
+          var result = await callApi('/api/review-bind', { runId: run.runId });
+          appendActivity('Review evidence verified for ' + run.runId + ': ' + result.state +
+            '; waiting for live lifecycle evidence. No review was launched by this dashboard.');
+        } catch (e) {
+          reviewBtn.disabled = false;
+          reviewBtn.textContent = 'Verify independent review';
+          appendActivity('Review verification refused for ' + run.runId + ' (' + e.code + '): ' + e.message);
+        }
+      });
+      row.appendChild(reviewBtn);
+    }
+
+    if (run.state === 'REVIEW_BOUND') {
+      row.appendChild(el('div', 'meta',
+        'Independent review evidence is bound. A governed checkpoint is the next stage; checkpoint control is not exposed in this functional beta.'));
+    }
+
     var CANCELABLE = ['CREATED','INTAKE_RECORDED','ROUTED','WORKTREE_READY','BUILT','CHECKS_PASSED','REVIEW_BOUND','CORRECTING','BUILD_FAILED','CHECKS_FAILED'];
-    if (CANCELABLE.indexOf(run.state) !== -1) {
+    if (CANCELABLE.indexOf(run.state) !== -1 || hasVerifiedAsyncOwnership(run)) {
       var cancelBtn = el('button', 'action warn', 'Cancel');
       cancelBtn.type = 'button';
       cancelBtn.addEventListener('click', async function(){
-        try { await callApi('/api/cancel', { runId: run.runId }); appendActivity('Cancelled ' + run.runId); }
-        catch (e) { appendActivity('Cancel failed for ' + run.runId + ': ' + e.message); }
+        cancelBtn.disabled = true;
+        cancelBtn.textContent = 'Cancel requested…';
+        try {
+          await callApi('/api/cancel', { runId: run.runId });
+          appendActivity('Cancel accepted for ' + run.runId + '; waiting for lifecycle evidence.');
+        } catch (e) {
+          cancelBtn.disabled = false;
+          cancelBtn.textContent = 'Cancel';
+          appendActivity('Cancel failed for ' + run.runId + ': ' + e.message);
+        }
       });
       row.appendChild(cancelBtn);
     }
@@ -1139,6 +1832,7 @@
       var card = el('div', 'run-card');
       card.appendChild(el('h3', null, run.runId + '  ' + (STATE_GLYPH[run.state] || '?') + ' ' + run.state));
       card.appendChild(el('div', 'meta', run.objective || '(no objective)'));
+      if (run.build) card.appendChild(buildEvidence(run.build));
       if (run.checks) card.appendChild(el('div', 'meta', 'checks: ' + run.checks.passed + '/' + run.checks.total));
       if (run.checkpoint) card.appendChild(el('div', 'meta', 'checkpoint: ' + run.checkpoint));
       card.appendChild(runActionRow(run));
@@ -1167,14 +1861,21 @@
     renderRuns(status && status.runs);
     var D = window.AEGIS_DASHBOARD;
     if (D && status) {
+      if (D.renderContext) D.renderContext(status);
       D.renderFounderSummary({
-        engineering: (status.engineering && status.engineering.state === 'OK') ? status.engineering : {},
+        engineering: status.engineering || {},
         runs: status.runs || [],
         binding: status.runsBinding || null,
+        integration: status.integration || null,
+        generatedAt: status.generatedAt || null,
         source: '/api/status',
         origin: 'a live /api/status push (' + (status.generatedAt || 'UNKNOWN') + ')'
       });
       if (status.cost) D.renderCost(status.cost);
+      if (D.renderConnectors) D.renderConnectors(status);
+      if (D.renderStages) D.renderStages(status.engineering || null);
+      if (D.renderReviewers) D.renderReviewers(status.reviewers || null, status.engineering || null);
+      if (D.renderEvents) D.renderEvents(status.events || null);
     }
     appendActivity('status: engineering=' + ((status.engineering && status.engineering.state) || 'UNKNOWN') +
       ' runs=' + ((status.runs && status.runs.length) || 0) +

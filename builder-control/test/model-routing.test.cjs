@@ -29,6 +29,14 @@ test('the policy declares the roles the amendment requires', () => {
   assert.strictEqual(p.roles['adversarial-review'].default, 'grok');
 });
 
+test('the orchestrator policy owns the concrete bounded-worker route', () => {
+  const p = R.loadPolicy();
+  const selected = p.roles.orchestrator.default;
+  assert.deepStrictEqual(p.models[selected].workerRoute,
+    { provider: 'claude-subscription', model: 'opus' });
+  assert.strictEqual(p.models[selected].execution, 'SUBSCRIPTION');
+});
+
 test('data sensitivity vetoes BEFORE capability and cost', () => {
   const p = R.loadPolicy();
   assert.deepStrictEqual(p.vetoOrder, ['dataSensitivity', 'capability', 'availability', 'cost']);

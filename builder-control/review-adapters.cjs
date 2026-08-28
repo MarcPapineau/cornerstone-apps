@@ -17,8 +17,9 @@
  *
  * READ-ONLY IS ENFORCED AT THE TOOL, NOT REQUESTED IN THE PROMPT
  * Codex runs under `--sandbox read-only`. Grok runs with a single-turn `-p`
- * prompt and no approval flags, so it has no path to an accepted write. Asking
- * a model nicely not to edit files is not a control.
+ * prompt, a path-scoped Read grant, and every execution/write tool removed.
+ * Both are wrapped in an OS filesystem profile. Asking a model nicely not to
+ * edit files is not a control.
  *
  *   node builder-control/review-adapters.cjs --doctor [--json]
  *   node builder-control/review-adapters.cjs --run --reviewer codex|grok|copilot \
@@ -31,13 +32,26 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const {
+  strictEnvironment,
+  buildMacSandboxProfile,
+  sandboxedCommand,
+  assertSandboxOperational,
+} = require('./sandbox-containment.cjs');
 
 const HERE = __dirname;
 const ROOT = path.resolve(HERE, '..');
 const REVIEWS_DIR = path.join(HERE, 'reviews');
 const RAW_DIR = path.join(HERE, 'review-raw');
 const ENGOS = path.join(HERE, 'engineering-os.cjs');
+const REVIEW_SANDBOX_PREFIX = path.join(os.tmpdir(), 'aegis-bounded-review-');
+const MAX_REVIEW_FILES = 64;
+const MAX_REVIEW_BYTES = 2 * 1024 * 1024;
+const OPERATOR_GROK_AUTH = path.join(os.homedir(), '.grok', 'auth.json');
+const OPERATOR_CODEX_AUTH = path.join(os.homedir(), '.codex', 'auth.json');
 
 const EXIT_PASS = 0;
 const EXIT_USAGE = 2;
@@ -202,12 +216,13 @@ findings to justify the review; zero findings is a valid, useful result.`;
 // The packet requires reviewers to receive authoritative paths, test evidence
 // and explicit unverified items — without them a reviewer cannot tell an
 // intentional design from an accident, and cannot know which claims were
-// actually checked. Bounded: digests and a tail, never whole files.
+// actually checked. The exact bounded files are copied into the private
+// read-only review workspace; this block records their verified digests.
 function evidenceBlock(ctx) {
   if (!ctx) return '';
   const lines = [];
   if (ctx.specs && ctx.specs.length) {
-    lines.push('', 'PINNED SPECIFICATIONS (authoritative intent, by content digest):');
+    lines.push('', 'PINNED SPECIFICATIONS (authoritative intent, available read-only in the review workspace):');
     for (const sp of ctx.specs) lines.push(`  ${sp.path}  sha256:${sp.sha.slice(0, 16)}…`);
   }
   if (ctx.checks && ctx.checks.length) {
@@ -229,7 +244,9 @@ function codexPrompt(objective, subject, diff, ctx) {
 
 Do not assume the implementation is correct. Independently determine what
 correct behaviour should be from the stated objective, then inspect what was
-actually written.
+actually written. The exact bounded subject and specifications are available
+read-only at the listed repository-relative paths in the isolated workspace.
+Read only those paths. Do not inspect parent directories or unrelated files.
 
 OBJECTIVE (from the approved task packet):
 ${objective}
@@ -252,6 +269,10 @@ ${RECORD_CONTRACT}`;
 function grokPrompt(objective, subject, diff, ctx) {
   return `You are the final adversarial reviewer. Assume this change contains a
 serious flaw that previous engineers missed, and try to prove it incorrect.
+
+The exact bounded subject and specifications are available read-only at the
+listed repository-relative paths in the isolated workspace. Read only those
+paths. Do not inspect parent directories or unrelated files.
 
 Attack: requirement interpretation, edge cases, regression paths, authorization,
 security, data integrity, state, concurrency, error paths, dependency
@@ -532,6 +553,165 @@ function canonGate(reviewer) {
   return { ok: true, tool };
 }
 
+// Reviewer CLIs normally inherit the operator's interactive plugins, MCPs,
+// rules and repository context. That is useful interactively and unsafe here:
+// a four-file diff review previously initialized Make and wandered across the
+// repository until both reviewers hit their wall-clock caps. Run from an empty
+// harness with compatibility imports disabled. The entire review subject is
+// already carried in the prompt, so no repository access is needed.
+function safeReviewPath(rel) {
+  if (typeof rel !== 'string' || !rel || path.isAbsolute(rel) || rel.includes('\\')) {
+    throw new Error(`invalid review path: ${JSON.stringify(rel)}`);
+  }
+  const normalized = path.posix.normalize(rel);
+  if (normalized === '..' || normalized.startsWith('../') || normalized.includes('/../')) {
+    throw new Error(`review path escapes repository root: ${rel}`);
+  }
+  if (/(^|\/)(?:\.env(?:\.|$)|auth(?:\.|\/)|credentials?(?:\.|\/)|secrets?(?:\.|\/)|review-raw|ledger\.json$)/i.test(normalized)) {
+    throw new Error(`sensitive or runtime review path refused: ${rel}`);
+  }
+  return normalized;
+}
+
+function resolveBoundedReviewPaths(subject, packet) {
+  if (!subject || !Array.isArray(subject.subjectPaths) || !packet || !Array.isArray(packet.filesAllowed)) {
+    throw new Error('subject paths and packet filesAllowed are required for bounded review');
+  }
+  const allowed = new Set(packet.filesAllowed.map(safeReviewPath));
+  const subjectPaths = subject.subjectPaths.map(safeReviewPath);
+  const outsidePacket = subjectPaths.filter((value) => !allowed.has(value));
+  if (outsidePacket.length) {
+    throw new Error(`review subject is outside packet filesAllowed: ${outsidePacket.join(', ')}`);
+  }
+  const specs = Array.isArray(packet.sourceOfTruth) ? packet.sourceOfTruth.map(safeReviewPath) : [];
+  const combined = [...new Set([...subjectPaths, ...specs])].sort();
+  const rootReal = fs.realpathSync(ROOT);
+  for (const rel of combined) {
+    const candidate = path.resolve(rootReal, rel);
+    if (!candidate.startsWith(rootReal + path.sep)) throw new Error(`review path escaped worktree: ${rel}`);
+    const real = fs.realpathSync(candidate);
+    if (!real.startsWith(rootReal + path.sep)) throw new Error(`review path resolves outside worktree: ${rel}`);
+    const st = fs.lstatSync(real);
+    if (!st.isFile() || st.isSymbolicLink()) throw new Error(`review path is not a regular file: ${rel}`);
+  }
+  return Object.freeze(combined);
+}
+
+function validateReviewSources(reviewPaths = []) {
+  const uniquePaths = [...new Set(reviewPaths.map(safeReviewPath))].sort();
+  if (uniquePaths.length > MAX_REVIEW_FILES) {
+    throw new Error(`review file count ${uniquePaths.length} exceeds ${MAX_REVIEW_FILES}`);
+  }
+  let totalBytes = 0;
+  const sources = [];
+  for (const rel of uniquePaths) {
+    const src = path.resolve(ROOT, rel);
+    if (!src.startsWith(ROOT + path.sep)) throw new Error(`review source escaped repository root: ${rel}`);
+    const st = fs.lstatSync(src);
+    if (!st.isFile() || st.isSymbolicLink()) throw new Error(`review source is not a regular file: ${rel}`);
+    totalBytes += st.size;
+    if (totalBytes > MAX_REVIEW_BYTES) {
+      throw new Error(`review payload ${totalBytes} bytes exceeds ${MAX_REVIEW_BYTES}`);
+    }
+    const sourceSha = crypto.createHash('sha256').update(fs.readFileSync(src)).digest('hex');
+    sources.push(Object.freeze({ rel, src, bytes: st.size, sourceSha }));
+  }
+  return Object.freeze({ sources: Object.freeze(sources), totalBytes });
+}
+
+function prepareReviewSandbox(reviewPaths = []) {
+  // Refuse malformed, oversized or unreadable subjects before a temporary
+  // directory exists and, critically, before any operator auth is copied.
+  const validated = validateReviewSources(reviewPaths);
+  // A fresh directory removes two attack surfaces from the old shared path:
+  // another process cannot pre-populate reviewer config, and a symlink cannot
+  // redirect writes into an operator-owned location. mkdtemp creates the path
+  // atomically; the explicit chmod makes the intended boundary reviewable.
+  const reviewRoot = fs.mkdtempSync(REVIEW_SANDBOX_PREFIX);
+  try {
+    const rootStat = fs.lstatSync(reviewRoot);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || fs.readdirSync(reviewRoot).length !== 0) {
+      throw new Error('review sandbox was not created as a fresh regular directory');
+    }
+    fs.chmodSync(reviewRoot, 0o700);
+    const reviewCwd = path.join(reviewRoot, 'work');
+    const reviewHome = path.join(reviewRoot, 'home');
+    const reviewTmp = path.join(reviewRoot, 'tmp');
+    fs.mkdirSync(reviewCwd, { mode: 0o700 });
+    fs.mkdirSync(reviewHome, { mode: 0o700 });
+    fs.mkdirSync(reviewTmp, { mode: 0o700 });
+    const grokDir = path.join(reviewHome, '.grok');
+    const codexDir = path.join(reviewHome, '.codex');
+    fs.mkdirSync(grokDir, { mode: 0o700 });
+    fs.mkdirSync(codexDir, { mode: 0o700 });
+    const config = [
+      '[compat.claude]',
+      'skills = false', 'rules = false', 'agents = false', 'mcps = false', 'hooks = false', 'sessions = false',
+      '', '[compat.cursor]',
+      'skills = false', 'rules = false', 'agents = false', 'mcps = false', 'hooks = false', 'sessions = false',
+      '', '[compat.codex]', 'sessions = false',
+      '', '[managed_mcps]', 'enabled = false', '',
+    ].join('\n');
+    const configPath = path.join(grokDir, 'config.toml');
+    fs.writeFileSync(configPath, config, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+
+    // Copy and verify the bounded subject before copying credentials. A copy,
+    // read or digest failure can therefore leave neither auth nor a sandbox.
+    const manifest = [];
+    for (const source of validated.sources) {
+      const dest = path.join(reviewCwd, source.rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+      fs.copyFileSync(source.src, dest, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(dest, 0o400);
+      const copiedSha = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex');
+      if (source.sourceSha !== copiedSha) throw new Error(`review copy digest mismatch: ${source.rel}`);
+      manifest.push({ path: source.rel, sha256: source.sourceSha, bytes: source.bytes });
+    }
+
+    // The old shared harness symlinked operator auth into a predictable path.
+    // Copy auth last into this private ephemeral directory, force 0400, and
+    // remove the whole root on every preparation or subprocess outcome.
+    const authPath = path.join(grokDir, 'auth.json');
+    if (fs.existsSync(OPERATOR_GROK_AUTH)) {
+      fs.copyFileSync(OPERATOR_GROK_AUTH, authPath, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(authPath, 0o400);
+    }
+    const codexAuthPath = path.join(codexDir, 'auth.json');
+    if (fs.existsSync(OPERATOR_CODEX_AUTH)) {
+      fs.copyFileSync(OPERATOR_CODEX_AUTH, codexAuthPath, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(codexAuthPath, 0o400);
+    }
+    return Object.freeze({
+      root: reviewRoot,
+      cwd: reviewCwd,
+      home: reviewHome,
+      tmp: reviewTmp,
+      grokConfigPath: configPath,
+      grokAuthPath: fs.existsSync(authPath) ? authPath : null,
+      codexAuthPath: fs.existsSync(codexAuthPath) ? codexAuthPath : null,
+      manifest,
+      totalBytes: validated.totalBytes,
+    });
+  } catch (error) {
+    cleanupReviewSandbox(reviewRoot);
+    throw error;
+  }
+}
+
+function cleanupReviewSandbox(sandbox) {
+  const reviewRoot = typeof sandbox === 'string' ? sandbox : sandbox && sandbox.root;
+  if (!reviewRoot || !path.resolve(reviewRoot).startsWith(path.resolve(REVIEW_SANDBOX_PREFIX))) {
+    throw new Error('refusing to clean a path outside the review sandbox prefix');
+  }
+  if (fs.existsSync(reviewRoot)) {
+    const st = fs.lstatSync(reviewRoot);
+    if (!st.isDirectory() || st.isSymbolicLink()) {
+      throw new Error('refusing to clean a review sandbox that is not a regular directory');
+    }
+    fs.rmSync(reviewRoot, { recursive: true, force: true });
+  }
+}
+
 // Build the exact argument vector a reviewer will be launched with. Exported
 // so a test can assert that every bound the policy DECLARES is actually
 // PRESENT on the command line — the gap that let maxTurns:1 run 13 turns.
@@ -566,9 +746,11 @@ const GROK_REVIEW_SCHEMA = {
   required: ['disposition', 'findings'],
 };
 
-function buildToolArgv(reviewer, prompt, bounds) {
+function buildToolArgv(reviewer, prompt, bounds, reviewCwd) {
   if (reviewer === 'codex') {
-    return ['exec', '--sandbox', 'read-only', '-C', ROOT, '--skip-git-repo-check', prompt];
+    return ['exec', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config',
+      '--ignore-rules', '--skip-git-repo-check', '--color', 'never',
+      '--cd', reviewCwd || '.', prompt];
   }
   // Everything-that-is-not-Codex used to fall through to the Grok argv. That
   // was harmless while Grok was the only other entry and became a trap the
@@ -581,10 +763,47 @@ function buildToolArgv(reviewer, prompt, bounds) {
   }
   // --json-schema implies --output-format json AND constrains the model's
   // output to this shape, so a verdict cannot come back as prose.
-  const argv = ['-p', prompt, '--json-schema', JSON.stringify(GROK_REVIEW_SCHEMA), '--cwd', ROOT];
+  const argv = ['-p', prompt, '--json-schema', JSON.stringify(GROK_REVIEW_SCHEMA),
+    '--cwd', reviewCwd, '--no-subagents', '--verbatim',
+    '--allow', `Read(${reviewCwd}/**)`,
+    '--deny', `Read(${path.dirname(reviewCwd)}/home/**)`,
+    '--deny', 'Read(../**)',
+    '--disallowed-tools', 'Grep,Bash,Edit,MCPTool,WebFetch,WebSearch'];
   if (bounds && Number.isInteger(bounds.maxTurns) && bounds.maxTurns > 0) argv.push('--max-turns', String(bounds.maxTurns));
   if (!bounds || bounds.webAccess === false) argv.push('--disable-web-search');
   return argv;
+}
+
+function reviewerEnvironment(reviewer, sandbox, source = process.env) {
+  const common = {
+    HOME: sandbox.home,
+    TMPDIR: sandbox.tmp,
+  };
+  if (reviewer === 'codex') common.CODEX_HOME = path.join(sandbox.home, '.codex');
+  if (reviewer === 'grok') common.GROK_MANAGED_MCPS_ENABLED = 'false';
+  return strictEnvironment(common, source);
+}
+
+function containedReviewerCommand(reviewer, sandbox, argv) {
+  const tool = TOOLS[reviewer];
+  if (!tool) throw new Error(`unknown reviewer ${reviewer}`);
+  const configReads = reviewer === 'grok' ? [sandbox.grokConfigPath] : [];
+  const credentialReads = reviewer === 'grok'
+    ? [sandbox.grokAuthPath].filter(Boolean)
+    : [sandbox.codexAuthPath].filter(Boolean);
+  const profile = buildMacSandboxProfile({
+    root: sandbox.root,
+    executable: tool.bin,
+    readPaths: [sandbox.cwd, ...configReads],
+    // Both locations are private, one-use copies removed in finally. The
+    // subject remains under sandbox.cwd and is never writable.
+    writePaths: [sandbox.home, sandbox.tmp],
+    processOnlyReadPaths: credentialReads,
+    allowNetwork: true,
+    reviewerRuntime: true,
+  });
+  assertSandboxOperational();
+  return Object.freeze({ ...sandboxedCommand(profile, argv), profile });
 }
 
 function runTool(reviewer, prompt, timeoutSec, opts = {}) {
@@ -610,21 +829,35 @@ function runTool(reviewer, prompt, timeoutSec, opts = {}) {
       return { ok: false, reason: 'policy enables sub-agents for adversarial-review; this adapter deliberately does not implement that path', raw: '' };
     }
   }
-  const argv = buildToolArgv(reviewer, prompt, bounds);
-
-  const r = spawnSync(t.bin, argv, {
-    encoding: 'utf8',
-    timeout: timeoutSec * 1000,
-    maxBuffer: 64 * 1024 * 1024,
-    cwd: ROOT,
-  });
-  const raw = (r.stdout || '') + (r.stderr ? `\n--- stderr ---\n${r.stderr}` : '');
-  if (r.error && r.error.code === 'ETIMEDOUT') {
-    return { ok: false, reason: `${t.label} exceeded the ${timeoutSec}s timeout`, raw };
+  let sandbox;
+  try {
+    sandbox = prepareReviewSandbox(opts.reviewPaths || []);
+  } catch (error) {
+    return { ok: false, reason: `review sandbox preparation failed: ${error.message}`, raw: '' };
   }
-  if (r.error) return { ok: false, reason: `${t.label} failed to start: ${r.error.message}`, raw };
-  if (r.status !== 0) return { ok: false, reason: `${t.label} exited ${r.status}`, raw };
-  return { ok: true, raw };
+  try {
+    const argv = buildToolArgv(reviewer, prompt, bounds, sandbox.cwd);
+    let contained;
+    try { contained = containedReviewerCommand(reviewer, sandbox, argv); }
+    catch (e) { return { ok: false, reason: `OS containment unavailable: ${e.message}`, raw: '' }; }
+    const r = spawnSync(contained.bin, contained.argv, {
+      encoding: 'utf8',
+      timeout: timeoutSec * 1000,
+      maxBuffer: 64 * 1024 * 1024,
+      cwd: sandbox.cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: reviewerEnvironment(reviewer, sandbox),
+    });
+    const raw = (r.stdout || '') + (r.stderr ? `\n--- stderr ---\n${r.stderr}` : '');
+    if (r.error && r.error.code === 'ETIMEDOUT') {
+      return { ok: false, reason: `${t.label} exceeded the ${timeoutSec}s timeout`, raw };
+    }
+    if (r.error) return { ok: false, reason: `${t.label} failed to start: ${r.error.message}`, raw };
+    if (r.status !== 0) return { ok: false, reason: `${t.label} exited ${r.status}`, raw };
+    return { ok: true, raw };
+  } finally {
+    cleanupReviewSandbox(sandbox);
+  }
 }
 
 function cmdRun(args) {
@@ -656,6 +889,13 @@ function cmdRun(args) {
     return EXIT_BLOCK;
   }
 
+  let boundedReviewPaths;
+  try { boundedReviewPaths = resolveBoundedReviewPaths(subject, packet); }
+  catch (e) {
+    console.error(`[review-adapters] refusing unbounded review: ${e.message}`);
+    return EXIT_BLOCK;
+  }
+
   fs.mkdirSync(REVIEWS_DIR, { recursive: true });
   fs.mkdirSync(RAW_DIR, { recursive: true });
   const ts = new Date().toISOString();
@@ -684,9 +924,17 @@ function cmdRun(args) {
   }
 
   const diff = subjectDiff(subject, args);
+  const promptContext = {
+    specs: (packet.sourceOfTruth || []).filter((p) => fs.existsSync(path.join(ROOT, p))).map((p) => ({
+      path: p,
+      sha: crypto.createHash('sha256').update(fs.readFileSync(path.join(ROOT, p))).digest('hex'),
+    })),
+    checks: (packet.testsRequired || []).map((cmd) => ({ cmd, exit: 'declared; verify from gate evidence' })),
+    unverified: packet.stopConditions || [],
+  };
   const prompt = reviewer === 'codex'
-    ? codexPrompt(packet.objective, subject, diff)
-    : grokPrompt(packet.objective, subject, diff);
+    ? codexPrompt(packet.objective, subject, diff, promptContext)
+    : grokPrompt(packet.objective, subject, diff, promptContext);
 
   if (args.dryRun) {
     console.log(`[review-adapters] DRY RUN — ${reviewer}: would send ${prompt.length} chars over ${subject.subjectPaths.length} subject path(s). No tool invoked.`);
@@ -699,6 +947,7 @@ function cmdRun(args) {
     allowMetered: args.allowMetered,
     approvedBy: args.approvedBy,
     capUsd: args.capUsd,
+    reviewPaths: boundedReviewPaths,
   });
   const rawPath = path.join(RAW_DIR, `${stamp}-${reviewer}.txt`);
   fs.writeFileSync(rawPath, res.raw || '(no output captured)', 'utf8');
@@ -848,4 +1097,4 @@ if (require.main === module) {
   process.exit(code);
 }
 
-module.exports = { detect, extractJson, buildRecord, codexPrompt, grokPrompt, isUsableReview, stopWasAbnormal, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, GROK_REVIEW_SCHEMA, TOOLS };
+module.exports = { detect, extractJson, buildRecord, codexPrompt, grokPrompt, isUsableReview, stopWasAbnormal, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, runTool, prepareReviewSandbox, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, GROK_REVIEW_SCHEMA, TOOLS };

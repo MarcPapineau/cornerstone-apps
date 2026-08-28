@@ -104,7 +104,14 @@
         "health": "HEALTHY",
         "outcome": "SUCCESS"
       },
-      "usageEvidence": null,
+      "usageEvidence": {
+        "observedAt": "2026-08-26T23:11:02Z",
+        "runId": "RUN-20260825-d9ed3d68",
+        "method": "Codex Notion MCP workspace search",
+        "result": "Notion workspace was searched for AEGIS Engineering Command architecture; no exact AEGIS page was found, so local AEGIS amendments remain controlling.",
+        "operationId": "notion-search-aegis-20260826T231102Z",
+        "citedSource": null
+      },
       "lastSuccess": "2026-08-25T16:47:01Z",
       "lastFailure": null,
       "failureCount": 0,
@@ -150,20 +157,27 @@
         "DELETE"
       ],
       "authStatus": "AUTHENTICATED",
-      "health": "HEALTHY",
+      "health": "UNKNOWN",
       "healthEvidence": {
-        "observedAt": "2026-08-25T17:03:41Z",
-        "method": "Authenticated Make MCP toolbox inspection",
-        "result": "AEGIS Integration Plane toolbox is accessible; its credential and Connector Health Probe both report use today. Credential value omitted.",
-        "operationId": "make-probe-20260825T170341Z",
-        "health": "HEALTHY",
-        "outcome": "SUCCESS"
+        "observedAt": "2026-08-26T22:17:19Z",
+        "method": "Authenticated Make MCP invocation corroborated by Make scenario execution history.",
+        "result": "Transport and authorization succeeded in under one second; the health-probe tool returned no output payload.",
+        "operationId": "RUN-20260825-d9ed3d68-health-probe-20260826T221715Z",
+        "health": "UNKNOWN",
+        "outcome": "INCONCLUSIVE"
       },
-      "usageEvidence": null,
+      "usageEvidence": {
+        "observedAt": "2026-08-26T22:17:19Z",
+        "runId": "RUN-20260825-d9ed3d68",
+        "method": "Claude Code invoked the connected AEGIS Integration Plane Make MCP tool exactly once.",
+        "result": "Make execution history recorded API success in under one second with 0 operations and 0 credits; the tool returned no health payload.",
+        "operationId": "RUN-20260825-d9ed3d68-health-probe-20260826T221715Z",
+        "citedSource": "https://us2.make.com/2781592/scenarios/6040068/logs/62fefe6998c04394b96dde46e8e065cc"
+      },
       "lastSuccess": "2026-08-25T17:03:41Z",
       "lastFailure": null,
       "failureCount": 0,
-      "latencyMs": null,
+      "latencyMs": 999,
       "rateLimit": "UNKNOWN",
       "permissions": [
         "HEALTH_CHECK",
@@ -177,11 +191,10 @@
       "riskLevel": "HIGH",
       "authorityNote": "Make executes approved multi-system workflows. It may never approve work, declare tests or runtime PASS, create checkpoints, or override a human or engineering gate.",
       "authEvidence": {
-        "observedAt": "2026-08-25T17:03:41Z",
+        "observedAt": "2026-08-26T22:17:19Z",
         "authStatus": "AUTHENTICATED",
-        "method": "Authenticated Make MCP toolbox inspection",
-        "operationId": "make-probe-20260825T170341Z",
-        "derivedFrom": "healthEvidence recorded by the same probe operation"
+        "method": "Authenticated Make MCP invocation corroborated by Make scenario execution history.",
+        "operationId": "RUN-20260825-d9ed3d68-health-probe-20260826T221715Z"
       },
       "verificationEvidence": {
         "observedAt": "2026-08-25T17:03:41Z",

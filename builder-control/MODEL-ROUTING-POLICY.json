@@ -77,6 +77,11 @@
     "claude": {
       "label": "Claude (Claude Code)",
       "execution": "SUBSCRIPTION",
+      "workerRoute": {
+        "provider": "claude-subscription",
+        "model": "opus"
+      },
+      "workerRouteNote": "Concrete worker launch identity for this policy model. The canonical run records the selected policy model and execution; hosting must resolve this declaration and may not choose a provider or Claude model independently.",
       "capabilities": [
         "orchestration",
         "implementation",

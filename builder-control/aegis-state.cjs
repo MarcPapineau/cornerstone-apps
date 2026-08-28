@@ -1215,6 +1215,46 @@ function runSubjectOf(run) {
   return s && isSubjectSha(s.subjectSha256) ? s.subjectSha256 : null;
 }
 
+// A run record may contain child output, environment, launch arguments and
+// other private worker internals.  The dashboard needs only this bounded
+// lifecycle identity.  Keep this allowlist here, before hosting, so a status
+// snapshot can never accidentally carry raw worker data forward.
+function projectWorker(build) {
+  if (!build || typeof build !== 'object' || Array.isArray(build)) return null;
+  const exit = Number.isInteger(build.exit) ? build.exit : null;
+  if (build.mode !== 'async') return { exit };
+  const boundedText = (value, max = 128) =>
+    typeof value === 'string' && value.length <= max ? value : null;
+  const boundedTimestamp = (value) => boundedText(value, 64);
+  const recovery = build.recovery && typeof build.recovery === 'object' && !Array.isArray(build.recovery)
+    ? { reason: boundedText(build.recovery.reason), retrySafe: build.recovery.retrySafe === true }
+    : null;
+  return {
+    mode: 'async',
+    workerState: boundedText(build.workerState),
+    workerPid: Number.isInteger(build.workerPid) && build.workerPid > 0 ? build.workerPid : null,
+    startedAt: boundedTimestamp(build.startedAt),
+    heartbeatAt: boundedTimestamp(build.heartbeatAt),
+    endedAt: boundedTimestamp(build.endedAt),
+    exit,
+    timedOut: build.timedOut === true,
+    recovery,
+  };
+}
+
+// The route is the run's canonical attribution to the model router.  Preserve
+// only its exact safe shape and source marker; browser input and worker output
+// never participate in model identity.
+function projectRoute(route) {
+  if (!route || typeof route !== 'object' || Array.isArray(route)) return null;
+  const keys = Object.keys(route).sort();
+  if (keys.join('\u0000') !== 'execution\u0000model\u0000source') return null;
+  if (route.source !== 'tool-router.cjs routeRole') return null;
+  if (typeof route.model !== 'string' || route.model.length === 0 || route.model.length > 128 ||
+      typeof route.execution !== 'string' || route.execution.length === 0 || route.execution.length > 64) return null;
+  return { model: route.model, execution: route.execution, source: route.source };
+}
+
 // The one binding the founder panel reads. It names all four coordinates the
 // summary claims to be about — run, time, packet, subject hash — and refuses to
 // exist when any of the first two is unknown. A panel bound to nothing renders
@@ -1309,7 +1349,8 @@ function projectRuns(opts = {}) {
         risk: r.risk || null,
         contractStep: (require('./aegis-run.cjs').STATES[r.state] || {}).step ?? null,
         worktree: r.worktree ? r.worktree.path : null,
-        build: r.build ? { exit: r.build.exit } : null,
+        build: projectWorker(r.build),
+        route: projectRoute(r.route),
         checks: r.checks ? { passed: r.checks.passed, total: r.checks.total } : null,
         checkpoint: r.checkpoint ? r.checkpoint.checkpointId : null,
         rollbackPoint: r.checkpoint ? r.checkpoint.rollbackPoint : null,

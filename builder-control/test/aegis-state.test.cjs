@@ -2098,6 +2098,44 @@ test('G1 #5: an injected runs directory is cited as itself, and the default stil
     /must point inside/, 'the runs directory injection accepted a checked-in path');
 });
 
+test('dashboard projection preserves bounded worker lifecycle and canonical route identity only', () => {
+  const hostile = 'PRIVATE_WORKER_OUTPUT_SHOULD_NEVER_REACH_THE_DASHBOARD';
+  const record = runRecord('RUN-LIFECYCLE', {
+    state: 'BUILDING',
+    route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+    build: {
+      mode: 'async', workerState: 'RUNNING', workerPid: 4321,
+      startedAt: '2026-08-27T20:00:00.000Z', heartbeatAt: '2026-08-27T20:00:01.000Z',
+      endedAt: null, exit: null, timedOut: false,
+      stdoutTail: hostile, stderrTail: hostile, modelOutput: hostile, transcript: hostile,
+      recovery: { reason: 'TERMINATION_UNVERIFIED', retrySafe: false, raw: hostile },
+    },
+  });
+  const out = M.projectRuns({ subjectSha256: RUN_SUBJECT, runsDir: fixtureRunsDir([record]) });
+  const projected = out.runs[0];
+  assert.deepStrictEqual(projected.build, {
+    mode: 'async', workerState: 'RUNNING', workerPid: 4321,
+    startedAt: '2026-08-27T20:00:00.000Z', heartbeatAt: '2026-08-27T20:00:01.000Z',
+    endedAt: null, exit: null, timedOut: false,
+    recovery: { reason: 'TERMINATION_UNVERIFIED', retrySafe: false },
+  });
+  assert.deepStrictEqual(projected.route,
+    { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' });
+  assert.ok(!JSON.stringify(projected).includes(hostile), 'raw worker output crossed the projector boundary');
+});
+
+test('dashboard projection rejects unvalidated route identity', () => {
+  for (const route of [
+    { model: 'claude', execution: 'SUBSCRIPTION', source: 'caller' },
+    { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole', provider: 'caller' },
+    { model: '', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+  ]) {
+    const record = runRecord('RUN-ROUTE-CASE', { route });
+    const out = M.projectRuns({ runsDir: fixtureRunsDir([record]) });
+    assert.strictEqual(out.runs[0].route, null, `unvalidated route crossed the boundary: ${JSON.stringify(route)}`);
+  }
+});
+
 test('a run with no parseable timestamp is NEVER selected as current', () => {
   const b = M.bindCurrentRun(M.orderRuns([mkRun('RUN-UNDATED', null)]), 'abc');
   assert.strictEqual(b.state, 'UNAVAILABLE', 'an undated run was promoted to current by list position');

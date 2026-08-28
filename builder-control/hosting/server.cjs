@@ -40,9 +40,11 @@ const path = require('path');
 const crypto = require('crypto');
 const AegisRun = require('../aegis-run.cjs');
 const AegisState = require('../aegis-state.cjs');
+const AegisWorker = require('../aegis-worker.cjs');
 
 const HERE = __dirname;
 const DASHBOARD = path.resolve(HERE, '..', 'dashboard');
+const MODEL_ROUTING_POLICY = path.resolve(HERE, '..', 'MODEL-ROUTING-POLICY.json');
 
 const EXIT_USAGE = 2;
 const EXIT_REFUSED = 3;
@@ -57,7 +59,7 @@ const SERVABLE = {
 
 // The complete set of authenticated JSON control endpoints. Each is a
 // deliberate, visible addition — same discipline as SERVABLE above. GET
-// /api/status is a read; the four POSTs are the ONLY way this host can move a
+// /api/status is a read; these named POSTs are the ONLY way this host can move a
 // run, and every one of them is a thin pass-through to the single exported
 // aegis-run authority function named alongside it. Nothing here writes a run
 // file, a ledger entry, or a worktree directly.
@@ -69,12 +71,23 @@ const API_POST_ROUTES = {
   '/api/pause': 'pause',
   '/api/cancel': 'cancel',
   '/api/retry': 'retry',
+  '/api/checks': 'checks',
+  '/api/review-bind': 'review-bind',
 };
 
 // The ONLY packet objective intake may build a run against. It never comes
 // from the POSTed body — normalizeObjective already refuses a `packet` key —
 // so a caller cannot point intake at an arbitrary packet on disk.
 const SWITCHBOARD_PACKET = 'builder-control/packets/PKT-20260825-SWITCHBOARD-FOUNDATION.json';
+
+// Browser input is never allowed to select a provider, model, executable,
+// permission mode or shell command. This object owns only the host's bounded
+// wall-clock limit. Provider and model belong to MODEL-ROUTING-POLICY.json and
+// the canonical route recorded on the run; duplicating either value here would
+// create a second routing authority.
+const GOVERNED_BUILDER = Object.freeze({
+  timeoutSec: 900,
+});
 
 const MAX_API_BODY_BYTES = 16 * 1024;
 
@@ -85,6 +98,7 @@ const MAX_API_BODY_BYTES = 16 * 1024;
 // comment line so it never masquerades as a real event.
 const SSE_DEBOUNCE_MS = 200;
 const SSE_HEARTBEAT_MS = 15000;
+const RUN_RECONCILE_INTERVAL_MS = 2000;
 
 // The dashboard is self-contained: inline styles, no external anything. The
 // API responses are same-origin JSON, so fetch() from the dashboard's own
@@ -521,7 +535,11 @@ function sanitizePublicText(value) {
   if (typeof value !== 'string' || !value.includes('/')) return value;
   let out = value;
   for (const rule of PUBLIC_PATH_ROOT_RULES) out = out.replace(rule.re, rule.to);
-  return out.replace(ABSOLUTE_PATH_RE, redactAbsolutePath);
+  out = out.replace(ABSOLUTE_PATH_RE, redactAbsolutePath);
+  // Query strings and fragments are never useful on this public projection;
+  // they can carry access tokens, page ids, or other connector credentials.
+  // Keep the public origin/path citation, but drop everything after ? or #.
+  return out.replace(/(https?:\/\/[^\s"'<>]+?)[?#][^\s"'<>]*/gi, '$1');
 }
 
 // Copy-on-sanitize: every container is rebuilt, so a string reached through an
@@ -536,6 +554,89 @@ function sanitizePublicValue(value) {
     return out;
   }
   return value;
+}
+
+// Raw worker output is evidence for a separately authorized store, never a
+// browser status field. A model can echo source, packet data or an unknown
+// credential shape, so no amount of tail bounding or heuristic redaction can
+// turn stdout/stderr into a safe hosting surface. The public worker object is
+// instead constructed from this closed lifecycle vocabulary.
+const PUBLIC_WORKER_STATES = new Set([
+  'LAUNCH_CLAIMED', 'STARTING', 'RUNNING', 'EXITED', 'FAILED',
+  'SPAWN_FAILED', 'BOOTSTRAP_FAILED', 'TERMINATED',
+  'TERMINATION_UNVERIFIED', 'ORPHANED',
+]);
+const PUBLIC_RECOVERY_CODES = new Set(['TERMINATION_UNVERIFIED', 'ORPHANED']);
+const WORKER_ACTIVITY = Object.freeze({
+  LAUNCH_CLAIMED: Object.freeze({ code: 'LAUNCH_CLAIMED', phase: 'CLAIMED', active: false,
+    summary: 'Builder launch is claimed; process startup is not yet verified' }),
+  STARTING: Object.freeze({ code: 'STARTING', phase: 'STARTING', active: true,
+    summary: 'Builder is starting' }),
+  RUNNING: Object.freeze({ code: 'RUNNING', phase: 'RUNNING', active: true,
+    summary: 'Builder is running' }),
+  EXITED: Object.freeze({ code: 'EXITED', phase: 'SUCCEEDED', active: false,
+    summary: 'Builder finished successfully' }),
+  FAILED: Object.freeze({ code: 'FAILED', phase: 'FAILED', active: false,
+    summary: 'Builder stopped with a failure' }),
+  SPAWN_FAILED: Object.freeze({ code: 'SPAWN_FAILED', phase: 'FAILED', active: false,
+    summary: 'Builder failed before its process started' }),
+  BOOTSTRAP_FAILED: Object.freeze({ code: 'BOOTSTRAP_FAILED', phase: 'FAILED', active: false,
+    summary: 'Builder failed during startup' }),
+  TERMINATED: Object.freeze({ code: 'TERMINATED', phase: 'STOPPED', active: false,
+    summary: 'Builder was terminated' }),
+  TERMINATION_UNVERIFIED: Object.freeze({ code: 'TERMINATION_UNVERIFIED', phase: 'BLOCKED', active: false,
+    summary: 'Termination could not be verified; retry is blocked' }),
+  ORPHANED: Object.freeze({ code: 'ORPHANED', phase: 'BLOCKED', active: false,
+    summary: 'Worker supervisor exited unexpectedly; builder termination is unverified and retry is blocked' }),
+  UNKNOWN: Object.freeze({ code: 'UNKNOWN', phase: 'UNKNOWN', active: false,
+    summary: 'Builder activity is unverified' }),
+});
+
+function publicTimestamp(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return null;
+  return Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function structuredWorkerActivity(status, runState) {
+  if ((status === 'STARTING' || status === 'RUNNING') && runState !== 'BUILDING') {
+    return Object.freeze({ code: 'STATE_MISMATCH', phase: 'BLOCKED', active: false,
+      summary: 'Worker reports running outside an active build' });
+  }
+  if (status === 'EXITED' && runState !== 'BUILT') {
+    return Object.freeze({ code: 'EXITED', phase: 'STOPPED', active: false,
+      summary: 'Builder process exited before the run reached its built state' });
+  }
+  const activity = WORKER_ACTIVITY[status] || WORKER_ACTIVITY.UNKNOWN;
+  return Object.freeze({ ...activity });
+}
+
+function minimizeWorker(build, runState) {
+  if (!build || build.mode !== 'async') return null;
+  const status = PUBLIC_WORKER_STATES.has(build.workerState) ? build.workerState : 'UNKNOWN';
+  return {
+    mode: 'async',
+    status,
+    workerPid: Number.isInteger(build.workerPid) && build.workerPid > 0 ? build.workerPid : null,
+    startedAt: publicTimestamp(build.startedAt),
+    heartbeatAt: publicTimestamp(build.heartbeatAt),
+    endedAt: publicTimestamp(build.endedAt),
+    exit: Number.isInteger(build.exit) ? build.exit : null,
+    timedOut: build.timedOut === true,
+    retrySafe: build.recovery ? build.recovery.retrySafe === true : null,
+    recoveryCode: build.recovery && PUBLIC_RECOVERY_CODES.has(build.recovery.reason)
+      ? build.recovery.reason : null,
+    activity: structuredWorkerActivity(status, runState),
+  };
+}
+
+function minimizeRoute(route) {
+  if (!route || typeof route !== 'object' || Array.isArray(route)) return null;
+  const keys = Object.keys(route).sort();
+  if (keys.join('\u0000') !== 'execution\u0000model\u0000source') return null;
+  if (route.source !== 'tool-router.cjs routeRole' || typeof route.model !== 'string' ||
+      route.model.length === 0 || route.model.length > 128 ||
+      typeof route.execution !== 'string' || route.execution.length === 0 || route.execution.length > 64) return null;
+  return { model: route.model, execution: route.execution, source: route.source };
 }
 
 function minimizeApiStatus(snap) {
@@ -566,9 +667,21 @@ function minimizeApiStatus(snap) {
   const connectorsSrc = (snap.integration && snap.integration.connectors) || {};
   const connectors = connectorsSrc.state === 'OK'
     ? connectorsSrc.connectors.map((c) => ({
-        connectorId: c.connectorId, label: c.label, provider: c.provider,
-        health: c.health, staleness: c.staleness, authStatus: c.authStatus,
-        legacy: c.legacy, riskLevel: c.riskLevel,
+        // Strict display allowlist. Connector internals, probe text, capability
+        // metadata, operation ids and registry paths never cross this boundary.
+        label: c.label, provider: c.provider, executionPath: c.executionPath,
+        health: c.health,
+        staleness: c.staleness ? { state: c.staleness.state, ageMinutes: c.staleness.ageMinutes } : null,
+        authStatus: c.authStatus,
+        lastUsedByRun: c.lastUsedByRun ? {
+          state: c.lastUsedByRun.state, runId: c.lastUsedByRun.runId,
+          observedAt: c.lastUsedByRun.observedAt,
+          citedSource: c.lastUsedByRun.citedSource, ledgerConfirmed: c.lastUsedByRun.ledgerConfirmed,
+          claim: c.lastUsedByRun.claim && c.lastUsedByRun.claim.runId
+            ? { runId: c.lastUsedByRun.claim.runId }
+            : null,
+        } : null,
+        legacy: c.legacy,
       }))
     : [];
 
@@ -605,6 +718,8 @@ function minimizeApiStatus(snap) {
         // the browser would be back to picking "current" by array position.
         createdAt: r.createdAt || null, updatedAt: r.updatedAt || null,
         packetId: r.packetId || null,
+        route: minimizeRoute(r.route),
+        build: minimizeWorker(r.build, r.state),
         checks: r.checks, checkpoint: r.checkpoint, transitions: r.transitions,
       }))
     : [];
@@ -633,7 +748,11 @@ function minimizeApiStatus(snap) {
   return sanitizePublicValue({
     generatedAt: snap.generatedAt,
     engineering,
-    integration: { connectors },
+    integration: connectorsSrc.state === 'OK'
+      ? { connectors: {
+          state: 'OK', connectors,
+        } }
+      : { connectors: { state: connectorsSrc.state || 'UNAVAILABLE', reason: connectorsSrc.reason || null, connectors: [] } },
     reviewers,
     cost,
     runs,
@@ -643,10 +762,31 @@ function minimizeApiStatus(snap) {
   });
 }
 
+function hydrateWorkerEvidence(snap) {
+  if (!snap || !snap.runs || snap.runs.state !== 'OK' || !Array.isArray(snap.runs.runs)) return snap;
+  return {
+    ...snap,
+    runs: {
+      ...snap.runs,
+      runs: snap.runs.runs.map((projected) => {
+        try {
+          const canonical = AegisRun.loadRun(projected.runId);
+          return { ...projected, build: canonical.build || null };
+        } catch {
+          return projected;
+        }
+      }),
+    },
+  };
+}
+
 function buildApiStatus() {
   let snap;
   try {
-    snap = AegisState.snapshot({});
+    snap = AegisState.snapshot({}, {
+      runsDir: AegisRun.RUNS_DIR,
+      ledgerFile: resolveCanonicalLedgerFile(),
+    });
   } catch {
     // The exception is never echoed here: a message or stack from AegisState
     // can carry an absolute path or other internal detail, and this response
@@ -664,7 +804,123 @@ function buildApiStatus() {
       knowledge: { state: 'UNKNOWN', conflicts: null },
     };
   }
-  return minimizeApiStatus(snap);
+  return minimizeApiStatus(hydrateWorkerEvidence(snap));
+}
+
+function routingError(code, message) {
+  return new AegisRun.AegisControlError(code, message, 409);
+}
+
+function loadModelRoutingPolicy() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(MODEL_ROUTING_POLICY, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('policy root is not an object');
+    }
+    return parsed;
+  } catch {
+    throw routingError('ROUTE_POLICY_UNAVAILABLE',
+      'the canonical model-routing policy is unavailable; refusing to launch');
+  }
+}
+
+function canonicalWorkerRoute(run, policy = loadModelRoutingPolicy(), worker = AegisWorker) {
+  const route = run && run.route;
+  if (!route || typeof route !== 'object' || Array.isArray(route)) {
+    throw routingError('ROUTE_MISSING', 'the claimed run has no canonical route; refusing to launch');
+  }
+  const routeKeys = Object.keys(route).sort();
+  const expectedKeys = ['execution', 'model', 'source'];
+  if (routeKeys.length !== expectedKeys.length || routeKeys.some((key, i) => key !== expectedKeys[i])) {
+    throw routingError('ROUTE_MISMATCH',
+      'the claimed run route does not match the canonical routed-run schema; refusing to launch');
+  }
+  if (route.source !== 'tool-router.cjs routeRole' || typeof route.model !== 'string' ||
+      typeof route.execution !== 'string') {
+    throw routingError('ROUTE_MISMATCH',
+      'the claimed run route is not attributable to the canonical model router; refusing to launch');
+  }
+
+  const role = policy.roles && policy.roles.orchestrator;
+  if (!role || typeof role.default !== 'string') {
+    throw routingError('ROUTE_POLICY_INVALID',
+      'the canonical policy has no orchestrator default; refusing to launch');
+  }
+  if (route.model !== role.default) {
+    throw routingError('ROUTE_STALE',
+      'the claimed run route no longer matches the canonical orchestrator route; rerouting is required');
+  }
+  const declared = policy.models && policy.models[route.model];
+  if (!declared || route.execution !== declared.execution) {
+    throw routingError('ROUTE_STALE',
+      'the claimed run execution no longer matches the canonical model declaration; rerouting is required');
+  }
+  if (declared.execution !== 'SUBSCRIPTION' || !declared.workerRoute ||
+      typeof declared.workerRoute !== 'object' || Array.isArray(declared.workerRoute)) {
+    throw routingError('ROUTE_UNSUPPORTED',
+      'the canonical route has no supported subscription worker declaration; refusing to launch');
+  }
+  const workerKeys = Object.keys(declared.workerRoute).sort();
+  if (workerKeys.length !== 2 || workerKeys[0] !== 'model' || workerKeys[1] !== 'provider') {
+    throw routingError('ROUTE_POLICY_INVALID',
+      'the canonical worker route must contain only provider and model; refusing to launch');
+  }
+
+  try {
+    const normalized = worker.normalizeLaunchSpec({
+      provider: declared.workerRoute.provider,
+      model: declared.workerRoute.model,
+      prompt: 'canonical-route-support-check',
+    });
+    return Object.freeze({ provider: normalized.provider, model: normalized.model });
+  } catch {
+    throw routingError('ROUTE_UNSUPPORTED',
+      'the canonical route is not supported by the bounded worker; refusing to launch');
+  }
+}
+
+function buildGovernedLaunchSpec(run, policy) {
+  if (!run || typeof run.runId !== 'string' || typeof run.objective !== 'string') {
+    throw new AegisRun.AegisControlError('INVALID_RUN', 'the governed worker requires a canonical run', 409);
+  }
+  const workerRoute = canonicalWorkerRoute(run, policy);
+  const prompt = [
+    'You are the bounded AEGIS implementation worker.',
+    `Run: ${run.runId}`,
+    `Objective: ${run.objective}`,
+    `Canonical packet: ${run.packet || SWITCHBOARD_PACKET}`,
+    'Work only inside the current isolated worktree and obey the packet file allowlist.',
+    'Do not commit, push, merge, deploy, publish, release, purchase credits, or touch Vitalis.',
+    'Keep n8n excluded. Run focused deterministic checks and report exact evidence.',
+  ].join('\n');
+  return Object.freeze({
+    provider: workerRoute.provider,
+    prompt,
+    model: workerRoute.model,
+    timeoutSec: GOVERNED_BUILDER.timeoutSec,
+  });
+}
+
+function startGovernedRun(runId, authority = AegisRun) {
+  let launchedBuilder;
+  const result = authority.startGovernedWorker(runId, (run) => {
+    const governed = buildGovernedLaunchSpec(run);
+    launchedBuilder = Object.freeze({ provider: governed.provider, model: governed.model });
+    return Object.freeze({
+      provider: governed.provider,
+      prompt: governed.prompt,
+      model: governed.model,
+    });
+  }, { timeoutSec: GOVERNED_BUILDER.timeoutSec });
+  return Object.freeze({
+    runId: result.runId,
+    state: result.state,
+    action: result.action,
+    workerPid: result.workerPid,
+    attempt: result.attempt,
+    nextAction: result.nextAction,
+    builder: launchedBuilder,
+  });
 }
 
 // ── authenticated SSE event stream ──────────────────────────────────────────
@@ -680,7 +936,8 @@ function resolveCanonicalLedgerFile() {
     : path.resolve(HERE, '..', 'ledger.json');
 }
 
-// One watcher, one heartbeat timer, one debounce timer per connection. Every
+// Ledger transitions and run-record heartbeats both drive this projection.
+// The two watchers share one debounce timer, heartbeat timer and cleanup.
 // one of them is torn down from a single cleanup() reached from disconnect
 // (req/res 'close'/'error') AND from the server's own 'close' event via
 // config._sseClients, so neither path can outlive the connection or the
@@ -721,17 +978,28 @@ function handleSse(req, res, config) {
   const ledgerFile = resolveCanonicalLedgerFile();
   const ledgerDir = path.dirname(ledgerFile);
   const ledgerBase = path.basename(ledgerFile);
-  let watcher = null;
+  const watchers = [];
   try {
-    watcher = fs.watch(ledgerDir, (eventType, filename) => {
+    const watcher = fs.watch(ledgerDir, (eventType, filename) => {
       if (filename && filename !== ledgerBase) return;
       scheduleStatus();
     });
     watcher.on('error', () => { /* a watcher error is not a client-visible event */ });
+    watchers.push(watcher);
   } catch {
     // The ledger directory does not exist yet. The stream still serves the
     // initial status and heartbeats; there is simply nothing on disk to
     // watch until it appears.
+  }
+  try {
+    const watcher = fs.watch(AegisRun.RUNS_DIR, (eventType, filename) => {
+      if (filename && !String(filename).endsWith('.json')) return;
+      scheduleStatus();
+    });
+    watcher.on('error', () => { /* a watcher error is not a client-visible event */ });
+    watchers.push(watcher);
+  } catch {
+    // No run directory yet means there can be no worker heartbeat to watch.
   }
 
   let closed = false;
@@ -740,7 +1008,7 @@ function handleSse(req, res, config) {
     closed = true;
     clearInterval(heartbeat);
     if (debounceTimer) clearTimeout(debounceTimer);
-    if (watcher) watcher.close();
+    for (const watcher of watchers) watcher.close();
     if (config._sseClients) config._sseClients.delete(cleanup);
     if (!res.writableEnded) { try { res.end(); } catch { /* already closing */ } }
   };
@@ -789,10 +1057,12 @@ async function handleApi(req, res, config, pathname, ctx, started) {
 
     const runId = parseRunIdBody(body);
     let result;
-    if (pathname === '/api/start') result = AegisRun.prepareRun(runId);
+    if (pathname === '/api/start') result = startGovernedRun(runId);
     else if (pathname === '/api/pause') result = AegisRun.pauseRun(runId);
     else if (pathname === '/api/cancel') result = AegisRun.cancelRun(runId);
     else if (pathname === '/api/retry') result = AegisRun.retryRun(runId);
+    else if (pathname === '/api/checks') result = AegisRun.runChecks(runId);
+    else if (pathname === '/api/review-bind') result = AegisRun.bindIndependentReview(runId);
     else throw new AegisRun.AegisControlError('NOT_FOUND', 'unknown API route', 404);
 
     sendJson(res, 200, result, headers);
@@ -808,6 +1078,31 @@ function log(req, status, started) {
   process.stdout.write(`[aegis-host] ${status} ${req.method} ${p} ${Date.now() - started}ms\n`);
 }
 
+/**
+ * Reconciliation is hosting-owned background work, never a side effect of a
+ * status read. The immediate pass closes already-orphaned BUILDING records;
+ * the bounded interval catches a worker that exits after hosting starts. Both
+ * use aegis-run's canonical claim/transition authority.
+ */
+function startRunReconciler(server, authority = AegisRun, intervalMs = RUN_RECONCILE_INTERVAL_MS) {
+  if (!server || typeof server.once !== 'function' ||
+      !authority || typeof authority.reconcileBuildingRuns !== 'function') {
+    throw new TypeError('run reconciler requires a close-capable server and canonical run authority');
+  }
+  const boundedIntervalMs = Number.isInteger(intervalMs) && intervalMs > 0 ? intervalMs : RUN_RECONCILE_INTERVAL_MS;
+  const pass = () => {
+    try { authority.reconcileBuildingRuns(); }
+    catch (error) {
+      process.stderr.write(`[aegis-host] run reconciliation refused: ${String(error.code || error.message || error)}\n`);
+    }
+  };
+  pass();
+  const timer = setInterval(pass, boundedIntervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  server.once('close', () => clearInterval(timer));
+  return Object.freeze({ stop: () => clearInterval(timer), intervalMs: boundedIntervalMs });
+}
+
 function start(args) {
   const v = validateConfig(args);
   if (!v.ok) {
@@ -816,6 +1111,7 @@ function start(args) {
   }
   const config = v.config;
   const server = http.createServer(handler(config));
+  const reconciler = startRunReconciler(server);
   // Every open SSE connection registers its own cleanup() in
   // config._sseClients. A server shutdown must not leave watchers or timers
   // running past the process that owned them.
@@ -844,7 +1140,7 @@ function start(args) {
     process.stdout.write('\nThe repository, ledger, packets, review records and raw reviewer\n');
     process.stdout.write('transcripts are NOT reachable from this process.\n');
   });
-  return { ok: true, server, config };
+  return { ok: true, server, config, reconciler };
 }
 
 if (require.main === module) {
@@ -862,5 +1158,8 @@ module.exports = {
   validateConfig, handler, start, sessionFor, SERVABLE, NEVER_SERVE, isNeverServe, LOOPBACK,
   API_STATUS_PATH, API_EVENTS_PATH, API_POST_ROUTES, SWITCHBOARD_PACKET, MAX_API_BODY_BYTES, CSP,
   minimizeApiStatus, buildApiStatus, sanitizePublicText, sanitizePublicValue, parseRunIdBody, checkOrigin,
-  resolveCanonicalLedgerFile,
+  resolveCanonicalLedgerFile, GOVERNED_BUILDER, MODEL_ROUTING_POLICY, loadModelRoutingPolicy,
+  canonicalWorkerRoute, buildGovernedLaunchSpec, startGovernedRun,
+  minimizeWorker, hydrateWorkerEvidence,
+  startRunReconciler, RUN_RECONCILE_INTERVAL_MS,
 };

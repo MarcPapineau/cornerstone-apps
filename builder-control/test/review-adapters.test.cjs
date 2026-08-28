@@ -4,6 +4,8 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { spawnSync } = require('child_process');
 const {
   detect,
   extractJson,
@@ -14,12 +16,43 @@ const {
   grokPrompt,
   TOOLS,
   isUsableReview,
+  runTool,
+  prepareReviewSandbox,
+  REVIEW_SANDBOX_PREFIX,
+  MAX_REVIEW_FILES,
+  MAX_REVIEW_BYTES,
 } = require('../review-adapters.cjs');
 
 let passed = 0;
 function test(name, fn) {
   try { fn(); passed++; console.log(`ok   ${name}`); }
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }
+}
+
+function reviewSandboxRoots() {
+  const parent = path.dirname(REVIEW_SANDBOX_PREFIX);
+  const prefix = path.basename(REVIEW_SANDBOX_PREFIX);
+  return fs.readdirSync(parent, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+    .map((entry) => path.join(parent, entry.name))
+    .sort();
+}
+
+function assertNoNewReviewSandbox(before, label) {
+  const after = reviewSandboxRoots();
+  const leaked = after.filter((value) => !before.includes(value));
+  for (const root of leaked) {
+    for (const rel of [path.join('home', '.grok', 'auth.json'), path.join('home', '.codex', 'auth.json')]) {
+      assert.strictEqual(fs.existsSync(path.join(root, rel)), false, `${label}: copied auth survived at ${rel}`);
+    }
+  }
+  assert.deepStrictEqual(after, before, `${label}: review sandbox root survived preparation failure`);
+}
+
+function assertAtomicPreparationFailure(label, action, expected) {
+  const before = reviewSandboxRoots();
+  assert.throws(action, expected);
+  assertNoNewReviewSandbox(before, label);
 }
 
 const subject = {
@@ -248,7 +281,7 @@ test('reviewer binaries are addressed absolutely, never by bare command name', (
 test('RED: every declared Grok bound appears on the real command line', () => {
   const { buildToolArgv } = require('../review-adapters.cjs');
   const bounds = require('../tool-router.cjs').loadPolicy().roles['adversarial-review'].bounds;
-  const argv = buildToolArgv('grok', 'PROMPT', bounds);
+  const argv = buildToolArgv('grok', 'PROMPT', bounds, '/private/tmp/review-fixture');
 
   // Not pinned to a literal: the point of this proof is that WHATEVER the
   // policy declares reaches the command line. Hard-coding the number here is
@@ -262,14 +295,14 @@ test('RED: every declared Grok bound appears on the real command line', () => {
   assert.ok(argv.includes('--disable-web-search'), 'webAccess:false must disable web search');
   assert.ok(!argv.includes('--agents'), 'subagents:false is expressed by omitting --agents entirely');
   assert.ok(argv.includes('-p'), 'must run in single-turn print mode');
-  for (const forbidden of ['--always-approve', '--allow', '--permission-mode']) {
+  for (const forbidden of ['--always-approve', '--permission-mode']) {
     assert.ok(!argv.includes(forbidden), `${forbidden} must never be passed to a read-only reviewer`);
   }
 });
 
 test('RED: a tightened policy bound propagates to the command line', () => {
   const { buildToolArgv } = require('../review-adapters.cjs');
-  const argv = buildToolArgv('grok', 'P', { maxTurns: 3, webAccess: false, subagents: false });
+  const argv = buildToolArgv('grok', 'P', { maxTurns: 3, webAccess: false, subagents: false }, '/private/tmp/review-fixture');
   assert.strictEqual(argv[argv.indexOf('--max-turns') + 1], '3',
     'the adapter must read the bound from the policy, not hardcode it');
 });
@@ -280,6 +313,356 @@ test('RED: Codex runs under a read-only sandbox, always', () => {
   const i = argv.indexOf('--sandbox');
   assert.ok(i !== -1 && argv[i + 1] === 'read-only',
     'read-only must be enforced at the tool, not requested in the prompt');
+});
+
+test('RED: Codex review is isolated from interactive config and persisted sessions', () => {
+  const { buildToolArgv, REVIEW_SANDBOX_PREFIX } = require('../review-adapters.cjs');
+  const argv = buildToolArgv('codex', 'P', null);
+  for (const flag of ['--ephemeral', '--ignore-user-config', '--ignore-rules']) {
+    assert.ok(argv.includes(flag), `Codex review is missing ${flag}`);
+  }
+  assert.ok(!argv.includes(path.resolve(__dirname, '..', '..')),
+    'Codex review must not receive the repository as its working root');
+  assert.ok(REVIEW_SANDBOX_PREFIX.startsWith(require('os').tmpdir()));
+});
+
+test('RED: Grok review disables imported MCPs, subagents and interactive rules', () => {
+  const { buildToolArgv, prepareReviewSandbox, cleanupReviewSandbox } = require('../review-adapters.cjs');
+  const sandbox = prepareReviewSandbox();
+  const argv = buildToolArgv('grok', 'P', { maxTurns: 3, webAccess: false, subagents: false }, sandbox.cwd);
+  assert.strictEqual(argv[argv.indexOf('--cwd') + 1], sandbox.cwd);
+  assert.ok(argv.includes('--no-subagents'));
+  assert.ok(argv.includes('--verbatim'));
+  const deny = argv[argv.indexOf('--disallowed-tools') + 1];
+  assert.ok(!deny.split(',').includes('Read'), 'Read must remain available for the exact copied subject');
+  for (const tool of ['Grep', 'Bash', 'Edit', 'MCPTool', 'WebFetch', 'WebSearch']) {
+    assert.ok(deny.split(',').includes(tool), `Grok review did not disable ${tool}`);
+  }
+  const config = fs.readFileSync(path.join(sandbox.home, '.grok', 'config.toml'), 'utf8');
+  assert.match(config, /\[compat\.claude\][\s\S]*mcps = false/);
+  assert.match(config, /\[managed_mcps\][\s\S]*enabled = false/);
+  const authPath = path.join(sandbox.home, '.grok', 'auth.json');
+  if (fs.existsSync(path.join(require('os').homedir(), '.grok', 'auth.json'))) {
+    assert.ok(fs.lstatSync(authPath).isFile(), 'review harness auth must be a private regular file');
+    assert.ok(!fs.lstatSync(authPath).isSymbolicLink(), 'review harness must not symlink operator auth');
+    assert.strictEqual(fs.statSync(authPath).mode & 0o777, 0o400, 'review auth copy must be immutable and owner-readable only');
+  }
+  assert.ok(!authPath.startsWith(sandbox.cwd + path.sep), 'reviewer auth must be outside the readable source cwd');
+  cleanupReviewSandbox(sandbox);
+  assert.ok(!fs.existsSync(sandbox.root), 'review sandbox must be removable after the subprocess');
+});
+
+test('RED: every review gets a unique private directory with no pre-existing entries', () => {
+  const { prepareReviewSandbox, cleanupReviewSandbox, REVIEW_SANDBOX_PREFIX } = require('../review-adapters.cjs');
+  const a = prepareReviewSandbox();
+  const b = prepareReviewSandbox();
+  try {
+    assert.notStrictEqual(a.root, b.root, 'two reviews reused the same predictable directory');
+    for (const sandbox of [a, b]) {
+      const dir = sandbox.root;
+      assert.ok(dir.startsWith(REVIEW_SANDBOX_PREFIX));
+      const st = fs.lstatSync(dir);
+      assert.ok(st.isDirectory() && !st.isSymbolicLink());
+      assert.strictEqual(st.mode & 0o777, 0o700, 'review directory must be owner-only');
+      assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['home', 'tmp', 'work'],
+        'a newly prepared review directory contains an unexpected pre-existing entry');
+    }
+  } finally {
+    cleanupReviewSandbox(a);
+    cleanupReviewSandbox(b);
+  }
+});
+
+test('RED: reviewer prompts restrict reads to the exact copied subject', () => {
+  const { codexPrompt, grokPrompt } = require('../review-adapters.cjs');
+  for (const prompt of [codexPrompt('o', subject, 'd'), grokPrompt('o', subject, 'd')]) {
+    assert.match(prompt, /exact bounded subject and specifications are available\s+read-only/i);
+    assert.match(prompt, /Read only those\s+paths/i);
+    assert.match(prompt, /Do not inspect parent directories or unrelated files/i);
+  }
+});
+
+test('RED: exact subject copies preserve path, digest and read-only mode while secrets are refused', () => {
+  const { prepareReviewSandbox, cleanupReviewSandbox, safeReviewPath } = require('../review-adapters.cjs');
+  const rel = 'builder-control/TOOL-CAPABILITY-CANON.json';
+  const sandbox = prepareReviewSandbox([rel]);
+  try {
+    const copied = path.join(sandbox.cwd, rel);
+    assert.ok(fs.existsSync(copied));
+    assert.strictEqual(fs.statSync(copied).mode & 0o777, 0o400);
+    assert.strictEqual(sandbox.manifest.length, 1);
+    assert.strictEqual(sandbox.manifest[0].path, rel);
+    assert.strictEqual(sandbox.manifest[0].sha256,
+      require('crypto').createHash('sha256').update(fs.readFileSync(copied)).digest('hex'));
+    assert.throws(() => safeReviewPath('../outside'), /escapes repository root/);
+    assert.throws(() => safeReviewPath('builder-control/ledger.json'), /sensitive or runtime/);
+    assert.throws(() => safeReviewPath('.env'), /sensitive or runtime/);
+  } finally { cleanupReviewSandbox(sandbox); }
+});
+
+test('RED: reviewer sandbox preparation is failure-atomic before and after root creation', () => {
+  assertAtomicPreparationFailure('invalid path',
+    () => prepareReviewSandbox(['../outside']), /escapes repository root/);
+
+  const tooMany = Array.from({ length: MAX_REVIEW_FILES + 1 }, (_, i) => `missing-review-${i}.txt`);
+  assertAtomicPreparationFailure('file-count limit',
+    () => prepareReviewSandbox(tooMany), /file count .* exceeds/);
+
+  const largeName = `.aegis-review-large-${process.pid}-${Date.now()}.bin`;
+  const largePath = path.join(__dirname, largeName);
+  const largeRel = `builder-control/test/${largeName}`;
+  try {
+    fs.writeFileSync(largePath, Buffer.alloc(MAX_REVIEW_BYTES + 1));
+    assertAtomicPreparationFailure('byte limit',
+      () => prepareReviewSandbox([largeRel]), /review payload .* exceeds/);
+  } finally {
+    fs.rmSync(largePath, { force: true });
+  }
+
+  const fixtureName = `.aegis-review-fault-${process.pid}-${Date.now()}.txt`;
+  const fixturePath = path.join(__dirname, fixtureName);
+  const fixtureRel = `builder-control/test/${fixtureName}`;
+  fs.writeFileSync(fixturePath, 'bounded review fixture\n');
+  try {
+    const realCopy = fs.copyFileSync;
+    try {
+      fs.copyFileSync = function injectedCopyFailure(src, dest, flags) {
+        if (String(dest).includes(`${path.sep}work${path.sep}`)) throw new Error('injected review copy failure');
+        return realCopy.call(fs, src, dest, flags);
+      };
+      assertAtomicPreparationFailure('subject copy failure',
+        () => prepareReviewSandbox([fixtureRel]), /injected review copy failure/);
+    } finally {
+      fs.copyFileSync = realCopy;
+    }
+
+    const realRead = fs.readFileSync;
+    try {
+      fs.readFileSync = function injectedReadFailure(target, ...args) {
+        if (path.resolve(String(target)) === path.resolve(fixturePath)) throw new Error('injected review read failure');
+        return realRead.call(fs, target, ...args);
+      };
+      assertAtomicPreparationFailure('subject read failure',
+        () => prepareReviewSandbox([fixtureRel]), /injected review read failure/);
+    } finally {
+      fs.readFileSync = realRead;
+    }
+
+    try {
+      fs.copyFileSync = function injectedDigestMismatch(src, dest, flags) {
+        const result = realCopy.call(fs, src, dest, flags);
+        if (String(dest).includes(`${path.sep}work${path.sep}`)) fs.appendFileSync(dest, 'altered');
+        return result;
+      };
+      assertAtomicPreparationFailure('subject digest mismatch',
+        () => prepareReviewSandbox([fixtureRel]), /review copy digest mismatch/);
+    } finally {
+      fs.copyFileSync = realCopy;
+    }
+
+    const operatorAuthExists = [
+      path.join(os.homedir(), '.grok', 'auth.json'),
+      path.join(os.homedir(), '.codex', 'auth.json'),
+    ].some((value) => fs.existsSync(value));
+    if (operatorAuthExists) {
+      try {
+        fs.copyFileSync = function injectedPostAuthCopyFailure(src, dest, flags) {
+          const result = realCopy.call(fs, src, dest, flags);
+          if (path.basename(dest) === 'auth.json') throw new Error('injected post-auth copy failure');
+          return result;
+        };
+        assertAtomicPreparationFailure('partial auth copy failure',
+          () => prepareReviewSandbox([fixtureRel]), /injected post-auth copy failure/);
+      } finally {
+        fs.copyFileSync = realCopy;
+      }
+    }
+  } finally {
+    fs.rmSync(fixturePath, { force: true });
+  }
+});
+
+test('RED: runTool converts sandbox preparation failure into a structured refusal', () => {
+  const before = reviewSandboxRoots();
+  const result = runTool('codex', 'must never launch', 1, { reviewPaths: ['../outside'] });
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.raw, '');
+  assert.match(result.reason, /review sandbox preparation failed:.*escapes repository root/);
+  assertNoNewReviewSandbox(before, 'runTool structured refusal');
+});
+
+test('RED: reviewer subprocess stdin is closed instead of inherited', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  assert.match(src, /stdio:\s*\['ignore',\s*'pipe',\s*'pipe'\]/,
+    'reviewer stdin must be closed so a headless CLI cannot wait for more input');
+});
+
+test('RED: reviewer sandbox cleanup is guaranteed after every subprocess outcome', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  const start = src.indexOf('function runTool(');
+  const end = src.indexOf('function cmdRun(', start);
+  const runTool = src.slice(start, end);
+  assert.match(runTool, /try\s*\{[\s\S]*spawnSync[\s\S]*\}\s*finally\s*\{[\s\S]*cleanupReviewSandbox\(sandbox\)/,
+    'review temp credentials/config can survive timeout, failure or success');
+});
+
+test('RED: Grok subprocess HOME is the isolated review harness', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  assert.match(src, /HOME:\s*sandbox\.home/,
+    'Grok must not rediscover interactive MCPs and rules through the operator HOME');
+});
+
+test('RED: reviewer environment is a strict allowlist with no operator secrets', () => {
+  const { prepareReviewSandbox, cleanupReviewSandbox, reviewerEnvironment } = require('../review-adapters.cjs');
+  const sandbox = prepareReviewSandbox();
+  try {
+    const source = {
+      LANG: 'en_CA.UTF-8',
+      ANTHROPIC_API_KEY: 'must-not-cross',
+      XAI_API_KEY: 'must-not-cross',
+      GITHUB_TOKEN: 'must-not-cross',
+      AWS_SECRET_ACCESS_KEY: 'must-not-cross',
+    };
+    for (const reviewer of ['codex', 'grok']) {
+      const env = reviewerEnvironment(reviewer, sandbox, source);
+      assert.strictEqual(env.LANG, 'en_CA.UTF-8');
+      for (const secret of ['ANTHROPIC_API_KEY', 'XAI_API_KEY', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY']) {
+        assert.ok(!Object.prototype.hasOwnProperty.call(env, secret), `${reviewer} inherited ${secret}`);
+      }
+      assert.deepStrictEqual(Object.keys(env).sort(),
+        (reviewer === 'codex'
+          ? ['CODEX_HOME', 'HOME', 'LANG', 'PATH', 'TMPDIR']
+          : ['GROK_MANAGED_MCPS_ENABLED', 'HOME', 'LANG', 'PATH', 'TMPDIR']).sort());
+    }
+  } finally { cleanupReviewSandbox(sandbox); }
+});
+
+test('RED: Grok model tools can read only the copied review tree, not credential HOME', () => {
+  const { prepareReviewSandbox, cleanupReviewSandbox, buildToolArgv } = require('../review-adapters.cjs');
+  const sandbox = prepareReviewSandbox();
+  try {
+    const argv = buildToolArgv('grok', 'P', { maxTurns: 1, webAccess: false }, sandbox.cwd);
+    const allowAt = argv.indexOf('--allow');
+    assert.strictEqual(argv[allowAt + 1], `Read(${sandbox.cwd}/**)`);
+    const denyRules = argv.reduce((all, value, index) => value === '--deny' ? [...all, argv[index + 1]] : all, []);
+    assert.ok(denyRules.includes(`Read(${sandbox.home}/**)`));
+    assert.ok(denyRules.includes('Read(../**)'));
+  } finally { cleanupReviewSandbox(sandbox); }
+});
+
+test('RED: packet filesAllowed is the fail-closed review subject authority', () => {
+  const { resolveBoundedReviewPaths } = require('../review-adapters.cjs');
+  const rel = 'builder-control/review-adapters.cjs';
+  assert.deepStrictEqual(resolveBoundedReviewPaths(
+    { subjectPaths: [rel] },
+    { filesAllowed: [rel], sourceOfTruth: [] },
+  ), [rel]);
+  assert.throws(() => resolveBoundedReviewPaths(
+    { subjectPaths: [rel] },
+    { filesAllowed: ['builder-control/aegis-run.cjs'], sourceOfTruth: [] },
+  ), /outside packet filesAllowed/);
+  assert.throws(() => resolveBoundedReviewPaths(
+    { subjectPaths: [rel] },
+    { filesAllowed: [rel], sourceOfTruth: ['builder-control/ledger.json'] },
+  ), /sensitive or runtime/);
+});
+
+test('RED: OS sandbox denies unrelated reads and non-allowlisted writes', () => {
+  if (process.platform !== 'darwin') return;
+  const {
+    buildMacSandboxProfile,
+    sandboxedCommand,
+    strictEnvironment,
+    sandboxCapability,
+  } = require('../sandbox-containment.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-containment-test-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-containment-outside-'));
+  try {
+    const readable = path.join(root, 'allowed.txt');
+    const writable = path.join(root, 'write');
+    const deniedInside = path.join(root, 'denied.txt');
+    const deniedOutside = path.join(outside, 'secret.txt');
+    fs.writeFileSync(readable, 'ALLOWED');
+    fs.mkdirSync(writable);
+    fs.writeFileSync(deniedInside, 'DENIED');
+    fs.writeFileSync(deniedOutside, 'SECRET');
+    const profile = buildMacSandboxProfile({
+      root,
+      executable: '/bin/bash',
+      readPaths: [readable],
+      writePaths: [writable],
+      allowNetwork: false,
+    });
+    const run = (script, args = []) => {
+      const command = sandboxedCommand(profile, ['-c', script, 'aegis-test', ...args]);
+      return spawnSync(command.bin, command.argv, { encoding: 'utf8', env: strictEnvironment() });
+    };
+    const capability = sandboxCapability();
+    if (!capability.available) {
+      const refused = run('exit 0');
+      assert.notStrictEqual(refused.status, 0, 'unavailable OS containment failed open');
+      assert.match(capability.reason, /refusing|failed|unavailable|not permitted/i);
+      return;
+    }
+    assert.strictEqual(run('IFS= read -r value < "$1"; printf "%s" "$value"', [readable]).stdout, 'ALLOWED');
+    assert.notStrictEqual(run('IFS= read -r value < "$1"', [deniedInside]).status, 0);
+    assert.notStrictEqual(run('IFS= read -r value < "$1"', [deniedOutside]).status, 0);
+    assert.strictEqual(run('printf ok > "$1"', [path.join(writable, 'ok.txt')]).status, 0);
+    assert.notStrictEqual(run('printf bad > "$1"', [deniedInside]).status, 0);
+    assert.notStrictEqual(run('printf bad > "$1"', [path.join(outside, 'bad.txt')]).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('RED: reusable worker containment rejects packet paths outside its worktree', () => {
+  const { prepareWorkerContainment } = require('../sandbox-containment.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-worker-containment-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-worker-outside-'));
+  try {
+    const allowed = path.join(root, 'subject.cjs');
+    const writeDir = path.join(root, 'out');
+    const foreign = path.join(outside, 'foreign.cjs');
+    fs.writeFileSync(allowed, 'module.exports = 1;');
+    fs.mkdirSync(writeDir);
+    fs.writeFileSync(foreign, 'secret');
+    assert.throws(() => prepareWorkerContainment({
+      worktree: root,
+      executable: '/bin/bash',
+      packetReadPaths: [allowed, foreign],
+      packetWritePaths: [writeDir],
+    }), /escapes containment root/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('RED: reviewer runtime allowances never leak into the worker profile', () => {
+  const { buildMacSandboxProfile } = require('../sandbox-containment.cjs');
+  if (process.platform !== 'darwin') return;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-runtime-scope-'));
+  try {
+    const allowed = path.join(root, 'allowed.txt');
+    fs.writeFileSync(allowed, 'ok');
+    const worker = buildMacSandboxProfile({
+      root,
+      executable: '/usr/bin/true',
+      readPaths: [allowed],
+      reviewerRuntime: false,
+    }).profile;
+    const reviewer = buildMacSandboxProfile({
+      root,
+      executable: '/usr/bin/true',
+      readPaths: [allowed],
+      reviewerRuntime: true,
+    }).profile;
+    assert.ok(!worker.includes('(allow system-socket)'));
+    assert.ok(!worker.includes('(allow user-preference-read)'));
+    assert.ok(reviewer.includes('(allow system-socket)'));
+    assert.ok(reviewer.includes('(allow user-preference-read)'));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 // ── PROVEN DEFECT D2 (2026-08-25): envelope verdicts were discarded ────────
@@ -430,4 +813,3 @@ test('a single plain verdict is unaffected by multi-object handling', () => {
 
 const failedCount = process.exitCode ? 'at least 1' : '0';
 console.log(`${passed} passed, ${failedCount} failed.`);
-

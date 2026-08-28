@@ -82,7 +82,7 @@ const STATES = {
   INTAKE_RECORDED:  { step: 2,  next: ['ROUTED', 'ABANDONED'] },
   ROUTED:           { step: 3,  next: ['WORKTREE_READY', 'ABANDONED'] },
   WORKTREE_READY:   { step: 4,  next: ['BUILDING', 'ABANDONED'] },
-  BUILDING:         { step: 5,  next: ['BUILT', 'BUILD_FAILED'] },
+  BUILDING:         { step: 5,  next: ['BUILT', 'BUILD_FAILED', 'ABANDONED'] },
   BUILT:            { step: 5,  next: ['CHECKS_PASSED', 'CHECKS_FAILED'] },
   CHECKS_PASSED:    { step: 6,  next: ['REVIEW_BOUND', 'ABANDONED'] },
   REVIEW_BOUND:     { step: 7,  next: ['CHECKPOINTED', 'CORRECTING', 'ABANDONED'] },
@@ -96,9 +96,95 @@ const STATES = {
 };
 
 const MAX_CORRECTIONS = 3;
+const WORKER_LAUNCH_GRACE_MS = 5000;
 
 const nowIso = () => new Date().toISOString();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+/**
+ * Capture the OS identity of this exact process lifetime. PIDs and process
+ * group IDs are reusable, so neither is cancellation authority by itself.
+ * Linux provides a boot-relative start tick and executable through /proc;
+ * macOS and other POSIX hosts use ps start time plus executable.
+ */
+function processIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  const procDir = path.join('/proc', String(pid));
+  try {
+    const stat = fs.readFileSync(path.join(procDir, 'stat'), 'utf8');
+    const close = stat.lastIndexOf(')');
+    if (close === -1) return null;
+    const fields = stat.slice(close + 2).trim().split(/\s+/);
+    const processGroupId = Number(fields[2]);
+    const startMarker = fields[19];
+    const executable = fs.realpathSync(path.join(procDir, 'exe'));
+    if (!Number.isInteger(processGroupId) || !startMarker || !executable) return null;
+    return Object.freeze({ pid, processGroupId, startMarker, executable, source: 'procfs' });
+  } catch { /* non-Linux host or the process exited; fall through to ps */ }
+
+  const psValue = (field) => {
+    const result = spawnSync('ps', ['-p', String(pid), '-o', `${field}=`], {
+      encoding: 'utf8', timeout: 1000,
+    });
+    return result.status === 0 ? String(result.stdout || '').trim() : '';
+  };
+  const processGroupId = Number(psValue('pgid'));
+  const startMarker = psValue('lstart');
+  const executable = psValue('comm');
+  if (!Number.isInteger(processGroupId) || !startMarker || !executable) return null;
+  return Object.freeze({ pid, processGroupId, startMarker, executable, source: 'ps' });
+}
+
+/**
+ * Establish only whether a PID currently exists. Identity inspection and
+ * existence are deliberately separate: a missing identity can mean either a
+ * dead process or an inaccessible live process, and those require opposite
+ * claim decisions. This probe never sends a signal to the target process.
+ */
+function processExistence(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return 'unknown';
+  const procRoot = '/proc';
+  try {
+    if (fs.statSync(procRoot).isDirectory()) {
+      try { fs.lstatSync(path.join(procRoot, String(pid))); return 'present'; }
+      catch (e) { return e.code === 'ENOENT' ? 'absent' : 'unknown'; }
+    }
+  } catch { /* non-Linux host; use a read-only ps query */ }
+
+  const result = spawnSync('ps', ['-p', String(pid), '-o', 'pid='], {
+    encoding: 'utf8', timeout: 1000,
+  });
+  if (result.error || result.signal || result.status === null) return 'unknown';
+  const observed = String(result.stdout || '').trim();
+  if (result.status === 0 && observed.split(/\s+/).includes(String(pid))) return 'present';
+  if (result.status === 1 && !observed) return 'absent';
+  return 'unknown';
+}
+
+function sameProcessIdentity(recorded, observed) {
+  return Boolean(recorded && observed &&
+    recorded.pid === observed.pid &&
+    recorded.processGroupId === observed.processGroupId &&
+    recorded.startMarker === observed.startMarker &&
+    recorded.executable === observed.executable &&
+    recorded.source === observed.source);
+}
+
+function workerOwnershipProof(initialBuild, freshBuild) {
+  if (!initialBuild || !freshBuild ||
+      typeof freshBuild.attemptId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(freshBuild.attemptId) ||
+      initialBuild.attemptId !== freshBuild.attemptId ||
+      initialBuild.attempt !== freshBuild.attempt ||
+      initialBuild.workerPid !== freshBuild.workerPid ||
+      initialBuild.processGroupId !== freshBuild.processGroupId ||
+      freshBuild.processGroupId !== freshBuild.workerPid ||
+      !sameProcessIdentity(initialBuild.processIdentity, freshBuild.processIdentity)) {
+    return null;
+  }
+  const observed = processIdentity(freshBuild.workerPid);
+  return sameProcessIdentity(freshBuild.processIdentity, observed) ? observed : null;
+}
 
 class RunError extends Error {
   constructor(code, msg) { super(msg); this.code = code; }
@@ -287,8 +373,300 @@ function loadRun(runId) {
 }
 function saveRun(run) {
   fs.mkdirSync(RUNS_DIR, { recursive: true });
-  fs.writeFileSync(runPath(run.runId), JSON.stringify(run, null, 2) + '\n');
+  const target = runPath(run.runId);
+  const temporary = `${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(run, null, 2) + '\n', { mode: 0o600 });
+    fs.renameSync(temporary, target);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch {}
+  }
   return run;
+}
+
+function runLockPath(runId) { return `${runPath(runId)}.launch.lock`; }
+
+function readRunLaunchClaim(lockPath) {
+  let stat;
+  try { stat = fs.lstatSync(lockPath); } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    throw e;
+  }
+  // Pre-directory claims and malformed lock objects are preserved. Guessing
+  // that an unreadable owner is stale would turn uncertainty into authority.
+  if (!stat.isDirectory()) return Object.freeze({ blocked: true, reason: 'LEGACY_OR_MALFORMED_CLAIM' });
+  let ownerNames;
+  try { ownerNames = fs.readdirSync(lockPath).filter((name) => name.endsWith('.json')); }
+  catch { return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' }); }
+  if (ownerNames.length !== 1) return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' });
+  const ownerName = ownerNames[0];
+  const ownerPath = path.join(lockPath, ownerName);
+  let claim;
+  try { claim = JSON.parse(fs.readFileSync(ownerPath, 'utf8')); }
+  catch { return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' }); }
+  if (!claim || claim.claimId !== ownerName.slice(0, -'.json'.length) ||
+      typeof claim.claimId !== 'string' || !claim.claimId ||
+      !Number.isInteger(claim.pid) || claim.pid <= 1 || !claim.processIdentity) {
+    return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' });
+  }
+  return Object.freeze({ claim, ownerPath });
+}
+
+function publishRunLaunchClaim(lockPath, claim) {
+  // Build the complete claim away from the canonical name. rename(2) then
+  // publishes the non-empty directory atomically; a crash while constructing
+  // it can leave only a uniquely named, non-authoritative sibling.
+  const publicationPath = `${lockPath}.claim-${claim.pid}-${claim.claimId}.tmp`;
+  const publicationOwner = path.join(publicationPath, `${claim.claimId}.json`);
+  try {
+    fs.mkdirSync(publicationPath, { mode: 0o700 });
+    fs.writeFileSync(publicationOwner, JSON.stringify(claim), { flag: 'wx', mode: 0o600 });
+    fs.renameSync(publicationPath, lockPath);
+    return Object.freeze({ ...claim, lockPath, ownerPath: path.join(lockPath, `${claim.claimId}.json`) });
+  } finally {
+    // This path is claim-specific, so cleanup can never remove another
+    // claimant's publication. A process crash may leave it behind, but such a
+    // sibling is ignored by readers and cannot wedge the canonical claim.
+    try { fs.unlinkSync(publicationOwner); } catch {}
+    try { fs.rmdirSync(publicationPath); } catch {}
+  }
+}
+
+function cleanupOrphanClaimPublications(lockPath) {
+  const parent = path.dirname(lockPath);
+  const prefix = `${path.basename(lockPath)}.claim-`;
+  let names;
+  try { names = fs.readdirSync(parent); } catch { return; }
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
+    const match = name.slice(prefix.length, -'.tmp'.length)
+      .match(/^(\d+)-([0-9a-f]{8}-[0-9a-f-]{27})$/);
+    if (!match || processExistence(Number(match[1])) !== 'absent') continue;
+    const publicationPath = path.join(parent, name);
+    let stat;
+    try { stat = fs.lstatSync(publicationPath); } catch { continue; }
+    if (!stat.isDirectory()) continue;
+    let entries;
+    try { entries = fs.readdirSync(publicationPath); } catch { continue; }
+    if (entries.length === 0) {
+      try { fs.rmdirSync(publicationPath); } catch {}
+      continue;
+    }
+    // A complete but unpublished orphan is removable only when its sole owner
+    // record agrees with the PID and claimId encoded in the unique sibling.
+    if (entries.length !== 1 || entries[0] !== `${match[2]}.json`) continue;
+    const ownerPath = path.join(publicationPath, entries[0]);
+    let owner;
+    try { owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8')); } catch { continue; }
+    if (!owner || owner.pid !== Number(match[1]) || owner.claimId !== match[2]) continue;
+    try { fs.unlinkSync(ownerPath); } catch { continue; }
+    try { fs.rmdirSync(publicationPath); } catch {}
+  }
+}
+
+function acquireRunLaunchClaim(runId, waitMs = 0) {
+  const lockPath = runLockPath(runId);
+  fs.mkdirSync(RUNS_DIR, { recursive: true });
+  const claimId = crypto.randomUUID();
+  const claimantIdentity = processIdentity(process.pid);
+  if (!claimantIdentity) {
+    throw new AegisControlError('CLAIM_IDENTITY_UNAVAILABLE',
+      `cannot prove the process lifetime claiming run ${runId}`, 409);
+  }
+  const claim = { claimId, runId, pid: process.pid, processIdentity: claimantIdentity, claimedAt: nowIso() };
+  cleanupOrphanClaimPublications(lockPath);
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      return publishRunLaunchClaim(lockPath, claim);
+    } catch (e) {
+      if (!['EEXIST', 'ENOTEMPTY'].includes(e.code)) throw e;
+      const existing = readRunLaunchClaim(lockPath);
+      if (!existing || existing.blocked) {
+        if (Date.now() < deadline) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(20, deadline - Date.now()));
+          continue;
+        }
+        throw new AegisControlError('LAUNCH_IN_PROGRESS', `run ${runId} already has an atomic launch claim`, 409);
+      }
+      const existence = processExistence(existing.claim.pid);
+      const observedOwner = existence === 'present' ? processIdentity(existing.claim.pid) : null;
+      // Positive absence is sufficient to reclaim a crashed owner. Unknown
+      // existence, or a live owner whose immutable identity is unavailable,
+      // fails closed. A positive different identity means the PID was reused.
+      const reclaimable = existence === 'absent' ||
+        (existence === 'present' && observedOwner &&
+          !sameProcessIdentity(existing.claim.processIdentity, observedOwner));
+      if (!reclaimable) {
+        if (Date.now() < deadline) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(20, deadline - Date.now()));
+          continue;
+        }
+        throw new AegisControlError('LAUNCH_IN_PROGRESS', `run ${runId} already has an atomic launch claim`, 409);
+      }
+      // The owner filename is claim-specific. If another reclaimer already
+      // removed this stale owner and installed a new claim directory, this
+      // unlink can only address the old claimId and therefore returns ENOENT;
+      // it cannot delete the new owner's differently named file.
+      try { fs.unlinkSync(existing.ownerPath); }
+      catch (unlinkError) {
+        if (unlinkError.code !== 'ENOENT') throw unlinkError;
+        continue;
+      }
+      try { fs.rmdirSync(lockPath); }
+      catch (removeError) {
+        if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(removeError.code)) throw removeError;
+      }
+    }
+  }
+}
+
+function releaseRunLaunchClaim(claim) {
+  let current = null;
+  try { current = JSON.parse(fs.readFileSync(claim.ownerPath, 'utf8')); } catch {}
+  if (current && current.claimId === claim.claimId) {
+    try { fs.unlinkSync(claim.ownerPath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    try { fs.rmdirSync(claim.lockPath); }
+    catch (e) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(e.code)) throw e; }
+  }
+}
+
+function loadOwnedWorkerAttempt(runId, attemptId, workerPid) {
+  const run = loadRun(runId);
+  if (!run.build || run.build.attemptId !== attemptId ||
+      (workerPid !== undefined && run.build.workerPid !== workerPid) || run.state !== 'BUILDING') {
+    throw new RunError('STALE-WORKER-ATTEMPT', `worker attempt ${attemptId} no longer owns run ${runId}`);
+  }
+  return run;
+}
+
+function buildRevision(build) {
+  return Number.isInteger(build && build.revision) && build.revision >= 0 ? build.revision : 0;
+}
+
+function patchOwnedWorkerAttempt(run, attemptId, expectedRevision, patch) {
+  if (!run.build || run.build.attemptId !== attemptId ||
+      buildRevision(run.build) !== expectedRevision || run.state !== 'BUILDING') {
+    throw new RunError('STALE-WORKER-ATTEMPT',
+      `worker attempt ${attemptId} no longer owns run ${run.runId} at revision ${expectedRevision}`);
+  }
+  run.build = { ...run.build, ...patch, revision: expectedRevision + 1 };
+  return run;
+}
+
+function updateWorkerAttempt(runId, attemptId, workerPid, patch) {
+  const claim = acquireRunLaunchClaim(runId, 3000);
+  try {
+    const run = loadOwnedWorkerAttempt(runId, attemptId, workerPid);
+    patchOwnedWorkerAttempt(run, attemptId, buildRevision(run.build), patch);
+    return saveRun(run);
+  } finally { releaseRunLaunchClaim(claim); }
+}
+
+function transitionWorkerAttempt(runId, attemptId, workerPid, to, notes, patch = {}) {
+  const claim = acquireRunLaunchClaim(runId, 3000);
+  try {
+    const run = loadOwnedWorkerAttempt(runId, attemptId, workerPid);
+    patchOwnedWorkerAttempt(run, attemptId, buildRevision(run.build), patch);
+    return transition(run, to, notes);
+  } finally { releaseRunLaunchClaim(claim); }
+}
+
+function unsafeRecoveryPatch(build, reason, observedAt = nowIso()) {
+  return {
+    workerState: reason === 'TERMINATION_UNVERIFIED' ? 'TERMINATION_UNVERIFIED' : 'ORPHANED',
+    endedAt: observedAt,
+    recovery: {
+      reason,
+      observedAt,
+      terminationVerified: false,
+      retrySafe: false,
+      abandonmentAllowed: true,
+      attemptId: build.attemptId,
+    },
+  };
+}
+
+/**
+ * Reconcile one detached worker without ever treating a recorded PID as
+ * signalling authority. The same per-run claim used by launch, heartbeat,
+ * cancellation and finalization serializes the observation and transition.
+ * A missing/mismatched process lifetime proves only that the recorded worker
+ * no longer owns the run; it does not prove that any reused PID is safe to
+ * signal or that a descendant stopped. Recovery therefore fails closed:
+ * BUILD_FAILED, retrySafe=false, with ABANDONED left as the safe operator path.
+ */
+function reconcileWorkerRun(runId, options = {}) {
+  const observedAt = typeof options.observedAt === 'string' ? options.observedAt : nowIso();
+  const launchGraceMs = Number.isInteger(options.launchGraceMs) && options.launchGraceMs >= 0
+    ? options.launchGraceMs : WORKER_LAUNCH_GRACE_MS;
+  const claim = acquireRunLaunchClaim(runId, 0);
+  try {
+    const run = loadRun(runId);
+    if (run.state !== 'BUILDING' || !run.build || run.build.mode !== 'async') {
+      return Object.freeze({ runId, action: 'NOOP', state: run.state });
+    }
+    const build = run.build;
+    if (build.workerState === 'TERMINATION_UNVERIFIED') {
+      patchOwnedWorkerAttempt(run, build.attemptId, buildRevision(build),
+        unsafeRecoveryPatch(build, 'TERMINATION_UNVERIFIED', observedAt));
+      transition(run, 'BUILD_FAILED', 'worker termination could not be verified; retry is blocked');
+      return Object.freeze({ runId, action: 'RECOVERED_UNSAFE', state: 'BUILD_FAILED', reason: 'TERMINATION_UNVERIFIED' });
+    }
+
+    if (!Number.isInteger(build.workerPid) || build.workerPid <= 1) {
+      const startedMs = Date.parse(build.startedAt || '');
+      if (build.workerState === 'LAUNCH_CLAIMED' && Number.isFinite(startedMs) &&
+          Date.parse(observedAt) - startedMs < launchGraceMs) {
+        return Object.freeze({ runId, action: 'LAUNCH_GRACE', state: run.state });
+      }
+      patchOwnedWorkerAttempt(run, build.attemptId, buildRevision(build),
+        unsafeRecoveryPatch(build, 'ORPHANED', observedAt));
+      transition(run, 'BUILD_FAILED', 'detached worker launch ownership was lost; retry is blocked');
+      return Object.freeze({ runId, action: 'RECOVERED_UNSAFE', state: 'BUILD_FAILED', reason: 'ORPHANED' });
+    }
+
+    const observed = processIdentity(build.workerPid);
+    if (observed && sameProcessIdentity(build.processIdentity, observed)) {
+      return Object.freeze({ runId, action: 'ACTIVE', state: run.state });
+    }
+    // If the PID is live but its recorded lifetime cannot be proved, leave the
+    // run untouched. Mutating would falsely claim the live worker is gone;
+    // signalling it would be worse. A later observation can reconcile after
+    // the unverified process exits.
+    if (observed) {
+      return Object.freeze({ runId, action: 'IDENTITY_UNVERIFIED', state: run.state });
+    }
+
+    // An unavailable identity observation is not evidence of death. Consult a
+    // separate no-signal existence probe: only positive absence may close the
+    // attempt. A present or unknown PID preserves BUILDING so transient ps,
+    // procfs, permission, and inspection failures cannot fabricate ORPHANED.
+    const existence = processExistence(build.workerPid);
+    if (existence !== 'absent') {
+      return Object.freeze({ runId, action: 'IDENTITY_UNVERIFIED', state: run.state,
+        reason: existence === 'present' ? 'IDENTITY_INSPECTION_UNAVAILABLE' : 'PROCESS_EXISTENCE_UNKNOWN' });
+    }
+
+    patchOwnedWorkerAttempt(run, build.attemptId, buildRevision(build),
+      unsafeRecoveryPatch(build, 'ORPHANED', observedAt));
+    transition(run, 'BUILD_FAILED', 'detached worker process lifetime ended without finalization; retry is blocked');
+    return Object.freeze({ runId, action: 'RECOVERED_UNSAFE', state: 'BUILD_FAILED', reason: 'ORPHANED' });
+  } finally { releaseRunLaunchClaim(claim); }
+}
+
+function reconcileBuildingRuns(options = {}) {
+  const results = [];
+  for (const run of listRuns()) {
+    if (run.state !== 'BUILDING' || !run.build || run.build.mode !== 'async') continue;
+    try { results.push(reconcileWorkerRun(run.runId, options)); }
+    catch (error) {
+      if (error instanceof AegisControlError && error.code === 'LAUNCH_IN_PROGRESS') {
+        results.push(Object.freeze({ runId: run.runId, action: 'BUSY', state: run.state }));
+      } else throw error;
+    }
+  }
+  return Object.freeze(results);
 }
 
 /**
@@ -324,8 +702,24 @@ function recordTransition(run, from, to, notes) {
   return entry;
 }
 
+const BUILDING_ABANDON_CAPABILITY = Symbol('authenticated BUILDING abandonment');
+
+function hasCurrentAttemptTerminationEvidence(run) {
+  const build = run && run.build;
+  const cancellation = build && build.cancellation;
+  const evidence = build && build.terminationEvidence;
+  return Boolean(build && build.mode === 'async' && typeof build.attemptId === 'string' &&
+    cancellation && cancellation.status === 'TERMINATED' &&
+    cancellation.attemptId === build.attemptId && typeof cancellation.cancellationId === 'string' &&
+    evidence && evidence.controlAuthenticated === true && evidence.terminated === true &&
+    evidence.childCloseObserved === true && evidence.processGroupDrained === true &&
+    evidence.attemptId === build.attemptId &&
+    evidence.cancellationId === cancellation.cancellationId &&
+    sameProcessIdentity(build.childProcessIdentity, evidence.childIdentity));
+}
+
 /** The only way a run changes state. */
-function transition(run, to, notes) {
+function transition(run, to, notes, authority) {
   const from = run.state;
   const def = STATES[from];
   if (!def) throw new RunError('UNKNOWN-STATE', `run is in unknown state ${from}`);
@@ -334,6 +728,12 @@ function transition(run, to, notes) {
     throw new RunError('ILLEGAL-TRANSITION',
       `${from} -> ${to} is not a legal transition (allowed: ${def.next.join(', ') || 'none'}). ` +
       'A run cannot reach a later state by skipping an earlier one, and there is no --force.');
+  }
+  if (from === 'BUILDING' && to === 'ABANDONED' &&
+      (authority !== BUILDING_ABANDON_CAPABILITY || !hasCurrentAttemptTerminationEvidence(run))) {
+    throw new RunError('TERMINATION-EVIDENCE-REQUIRED',
+      'BUILDING -> ABANDONED requires authenticated child-close and process-group-drain evidence ' +
+      'bound to the current worker attempt and cancellation operation.');
   }
   const entry = recordTransition(run, from, to, notes);
   run.state = to;
@@ -441,8 +841,7 @@ function cmdNew(args) {
 // refused route blocks worktree creation, and one place that creates the
 // worktree. It never executes a build or model — that remains --build, a
 // separate governed step.
-function prepareRun(runId) {
-  const run = loadRun(runId);
+function prepareRunClaimed(run) {
   if (run.state !== 'INTAKE_RECORDED') {
     throw new AegisControlError('ILLEGAL_TRANSITION',
       `prepareRun requires state INTAKE_RECORDED, run is ${run.state}`, 409);
@@ -497,6 +896,13 @@ function prepareRun(runId) {
   });
 }
 
+function prepareRun(runId) {
+  const claim = acquireRunLaunchClaim(runId, 1000);
+  try {
+    return prepareRunClaimed(loadRun(runId));
+  } finally { releaseRunLaunchClaim(claim); }
+}
+
 function cmdWorktree(args) {
   let result;
   try {
@@ -532,48 +938,403 @@ function loadRunForControl(runId) {
 }
 
 /**
- * Pause never invents a PAUSED state. Builder execution (--build) is a
- * synchronous spawnSync call inside cmdBuild; there is no running process to
- * suspend and no state machine slot to suspend it into. Every state,
- * including BUILDING, fails closed with no mutation — the honest answer to
- * "pause this" is "that control does not exist yet", not a silent no-op.
+ * Pause never invents a PAUSED state. Async worker execution can be active,
+ * but there is still no canonical lifecycle slot or tested resume contract to
+ * suspend it into. Every state, including BUILDING, therefore fails closed
+ * with no mutation.
  */
 function pauseRun(runId) {
   const run = loadRunForControl(runId);
   if (run.state === 'BUILDING') {
     throw new AegisControlError('CONTROL_UNAVAILABLE',
-      `run ${run.runId} is BUILDING; builder execution is synchronous and there is no PAUSED state. ` +
-      'Pausing an active build requires asynchronous worker control, which this runtime does not have.', 409);
+      `run ${run.runId} is BUILDING; asynchronous worker control is active, but the canonical state machine has no PAUSED state. ` +
+      'Pause is refused until suspend/resume evidence and lifecycle semantics are defined.', 409);
   }
   throw new AegisControlError('CONTROL_UNAVAILABLE',
     `run ${run.runId} is ${run.state}; pause is unavailable because no PAUSED state exists in the canonical state machine.`, 409);
 }
 
 /**
- * Cancel only ever takes the legal ABANDONED edge that already exists in
- * STATES. BUILDING is refused because there is nothing to interrupt
- * synchronously; any state whose `next` does not list ABANDONED is refused
- * for the same reason transition() would refuse it directly.
+ * Claim-aware worker launch. The caller must already own the per-run claim;
+ * keeping this operation non-reentrant lets retry serialize its correction
+ * decision and attempt reservation without releasing ownership in between.
  */
-function cancelRun(runId) {
-  const run = loadRunForControl(runId);
-  if (run.state === 'BUILDING') {
-    throw new AegisControlError('CONTROL_UNAVAILABLE',
-      `run ${run.runId} is BUILDING; cancel cannot interrupt synchronous builder execution.`, 409);
+function startWorkerClaimed(run, launchSpec, options = {}) {
+  if (run.state !== 'WORKTREE_READY' && run.state !== 'CORRECTING') {
+    throw new AegisControlError('ILLEGAL_TRANSITION',
+      `asynchronous build requires WORKTREE_READY or CORRECTING, run is ${run.state}`, 409);
   }
-  const def = STATES[run.state];
-  if (!def || !def.next.includes('ABANDONED')) {
-    throw new AegisControlError('CONTROL_UNAVAILABLE',
-      `run ${run.runId} is ${run.state}; ABANDONED is not a legal next state (allowed: ${def ? def.next.join(', ') || 'none' : 'unknown'}).`, 409);
+  if (!run.worktree || !fs.existsSync(run.worktree.path)) {
+    throw new AegisControlError('NO_WORKTREE',
+      'the run has no existing isolated worktree; refusing to launch a builder', 409);
   }
-  transition(run, 'ABANDONED', 'cancelled via control surface');
-  const fresh = loadRun(run.runId);
+  if (run.build && run.build.workerPid && require('./aegis-worker.cjs').processAlive(run.build.workerPid)) {
+    throw new AegisControlError('WORKER_ALREADY_ACTIVE',
+      `run ${run.runId} already has active worker ${run.build.workerPid}`, 409);
+  }
+  let normalized;
+  try { normalized = require('./aegis-worker.cjs').normalizeLaunchSpec(launchSpec); }
+  catch (e) { throw new AegisControlError(e.code || 'INVALID_LAUNCH_SPEC', e.message, 400); }
+  let timeoutSec;
+  try { timeoutSec = require('./aegis-worker.cjs').normalizeTimeoutSec(options.timeoutSec); }
+  catch (e) { throw new AegisControlError(e.code || 'INVALID_LAUNCH_SPEC', e.message, 400); }
+
+  const attempt = ((run.build && run.build.attempt) || 0) + 1;
+  const attemptId = crypto.randomUUID();
+  run.build = {
+    mode: 'async', attempt, attemptId, launchSpec: normalized,
+    launchSha256: sha256(JSON.stringify(normalized)), workerPid: null,
+    processGroupId: null, workerState: 'LAUNCH_CLAIMED', revision: 0,
+    startedAt: nowIso(), heartbeatAt: null, exit: null, stdoutTail: '', stderrTail: '',
+  };
+  transition(run, 'BUILDING', `asynchronous builder attempt ${attempt} starting`);
+  let launch;
+  try {
+    launch = require('./aegis-worker.cjs').launchWorker({
+      runId: run.runId,
+      attemptId,
+      launchSpec: normalized,
+      timeoutSec,
+    });
+  } catch (e) {
+    const failed = loadOwnedWorkerAttempt(run.runId, attemptId);
+    failed.build = { ...failed.build, endedAt: nowIso(), exit: 127,
+      workerState: 'SPAWN_FAILED', stderrTail: String(e.message || e).slice(0, 1000) };
+    saveRun(failed);
+    transition(failed, 'BUILD_FAILED', 'asynchronous worker spawn failed');
+    throw new AegisControlError('WORKER_SPAWN_FAILED', 'the asynchronous worker could not be launched', 409);
+  }
+
+  const building = loadRun(run.runId);
+  if (!building.build || building.build.attemptId !== attemptId) {
+    // Never signal a numeric PID after ownership changes. The worker's
+    // immutable launch-record check fails and it exits without build authority.
+    throw new AegisControlError('STALE_WORKER_ATTEMPT', 'worker launch ownership changed before metadata was persisted', 409);
+  }
+  building.build = {
+    ...building.build, launchSha256: launch.launchSha256,
+    workerPid: launch.workerPid, processGroupId: launch.processGroupId,
+    control: launch.control,
+    processIdentity: processIdentity(launch.workerPid),
+    workerState: 'STARTING', startedAt: nowIso(), heartbeatAt: null,
+    exit: null, stdoutTail: '', stderrTail: '',
+    revision: buildRevision(building.build) + 1,
+  };
+  saveRun(building);
   return Object.freeze({
-    runId: fresh.runId,
-    state: fresh.state,
-    action: 'cancel',
-    nextAction: 'none',
+    runId: building.runId, state: building.state, action: 'start',
+    workerPid: launch.workerPid, attempt, attemptId, nextAction: 'monitor',
   });
+}
+
+/**
+ * Launches the build as a detached, bounded worker and returns immediately.
+ * The worker may execute only in the already-created isolated worktree. The
+ * existing transition() remains the single lifecycle/ledger authority.
+ */
+function startWorker(runId, launchSpec, options = {}) {
+  let claim;
+  try { claim = acquireRunLaunchClaim(runId, 1000); }
+  catch (e) {
+    if (e instanceof RunError) {
+      if (e.code === 'BAD-RUN-ID') throw new AegisControlError('INVALID_RUN_ID', e.message, 400);
+      if (e.code === 'NO-SUCH-RUN') throw new AegisControlError('RUN_NOT_FOUND', e.message, 404);
+    }
+    throw e;
+  }
+  try {
+    return startWorkerClaimed(loadRunForControl(runId), launchSpec, options);
+  } finally { releaseRunLaunchClaim(claim); }
+}
+
+/**
+ * Dashboard Start authority. Intake preparation, its fresh post-preparation
+ * validation, attempt reservation, and worker launch are one claimed action.
+ * The launch-spec factory is trusted server code and is invoked only after the
+ * fresh WORKTREE_READY record has been loaded while the claim is still held.
+ */
+function startGovernedWorker(runId, launchSpecForRun, options = {}) {
+  let claim;
+  try { claim = acquireRunLaunchClaim(runId, 1000); }
+  catch (e) {
+    if (e instanceof RunError) {
+      if (e.code === 'BAD-RUN-ID') throw new AegisControlError('INVALID_RUN_ID', e.message, 400);
+      if (e.code === 'NO-SUCH-RUN') throw new AegisControlError('RUN_NOT_FOUND', e.message, 404);
+    }
+    throw e;
+  }
+  try {
+    let run = loadRunForControl(runId);
+    if (run.state === 'INTAKE_RECORDED') {
+      prepareRunClaimed(run);
+      run = loadRunForControl(runId);
+    }
+    if (run.state !== 'WORKTREE_READY') {
+      throw new AegisControlError('ILLEGAL_TRANSITION',
+        `start requires INTAKE_RECORDED or WORKTREE_READY, run is ${run.state}`, 409);
+    }
+    if (typeof launchSpecForRun !== 'function') {
+      throw new AegisControlError('INVALID_LAUNCH_SPEC',
+        'dashboard start requires a trusted server launch-spec factory', 400);
+    }
+    const launchSpec = launchSpecForRun(run);
+    return startWorkerClaimed(run, launchSpec, options);
+  } finally { releaseRunLaunchClaim(claim); }
+}
+
+function controlMac(secret, value) {
+  return crypto.createHmac('sha256', secret).update(JSON.stringify(value)).digest('hex');
+}
+
+function validControlMac(secret, value, mac) {
+  if (typeof mac !== 'string' || !/^[0-9a-f]{64}$/.test(mac)) return false;
+  const expected = Buffer.from(controlMac(secret, value), 'hex');
+  const observed = Buffer.from(mac, 'hex');
+  return observed.length === expected.length && crypto.timingSafeEqual(observed, expected);
+}
+
+function privateAtomicJson(target, value) {
+  const temporary = `${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
+  fs.renameSync(temporary, target);
+}
+
+function inspectCancellationResponse(responsePath, control, build, cancellationId) {
+  if (!fs.existsSync(responsePath)) return { status: 'MISSING' };
+  let identity;
+  let response;
+  try {
+    const observed = fs.lstatSync(responsePath);
+    identity = { dev: Number(observed.dev), ino: Number(observed.ino) };
+    if (observed.isSymbolicLink() || !observed.isFile() || (observed.mode & 0o777) !== 0o600) {
+      throw new Error('unsafe response');
+    }
+    response = JSON.parse(fs.readFileSync(responsePath, 'utf8'));
+  } catch {
+    return { status: 'INVALID', identity };
+  }
+  if (!response || !response.body || !validControlMac(control.secret, response.body, response.mac) ||
+      response.body.attemptId !== build.attemptId ||
+      JSON.stringify(response.body.childIdentity) !== JSON.stringify(build.childProcessIdentity)) {
+    return { status: 'INVALID', identity };
+  }
+  if (response.body.cancellationId !== cancellationId) {
+    return { status: 'STALE_AUTHENTICATED', identity };
+  }
+  return { status: 'CURRENT_AUTHENTICATED', identity, body: response.body };
+}
+
+function removeObservedControlFile(filePath, identity) {
+  if (!identity) return false;
+  try {
+    const current = fs.lstatSync(filePath);
+    if (current.isSymbolicLink() || !current.isFile() ||
+        Number(current.dev) !== identity.dev || Number(current.ino) !== identity.ino) return false;
+    fs.unlinkSync(filePath);
+    return true;
+  } catch (error) {
+    return error && error.code === 'ENOENT';
+  }
+}
+
+function requestWorkerCancellation(build, cancellationId, timeoutMs = 2750) {
+  const control = build && build.control;
+  if (!control || typeof control.dir !== 'string' || typeof control.secret !== 'string' ||
+      sha256(control.secret) !== control.secretSha256) {
+    return { terminated: false, reason: 'CONTROL_CAPABILITY_INVALID', observedAt: nowIso() };
+  }
+  let dirReal;
+  try {
+    dirReal = fs.realpathSync(control.dir);
+    const dirStat = fs.statSync(control.dir);
+    if (dirReal !== control.dir || fs.lstatSync(control.dir).isSymbolicLink() ||
+        !dirStat.isDirectory() || (dirStat.mode & 0o777) !== 0o700 || !control.directoryIdentity ||
+        Number(dirStat.dev) !== control.directoryIdentity.dev || Number(dirStat.ino) !== control.directoryIdentity.ino) {
+      throw new Error('unsafe control directory');
+    }
+  } catch {
+    return { terminated: false, reason: 'CONTROL_MAILBOX_REPLACED', observedAt: nowIso() };
+  }
+  const requestPath = path.join(dirReal, 'cancel-request.json');
+  const responsePath = path.join(dirReal, 'cancel-response.json');
+  const priorResponse = inspectCancellationResponse(responsePath, control, build, cancellationId);
+  if (priorResponse.status === 'STALE_AUTHENTICATED') {
+    if (!removeObservedControlFile(responsePath, priorResponse.identity)) {
+      return { terminated: false, reason: 'CONTROL_RESPONSE_REPLACED', observedAt: nowIso() };
+    }
+  } else if (priorResponse.status !== 'MISSING') {
+    removeObservedControlFile(responsePath, priorResponse.identity);
+    return { terminated: false, reason: 'CONTROL_RESPONSE_AUTHENTICATION_FAILED', observedAt: nowIso() };
+  }
+  const body = {
+    attemptId: build.attemptId, cancellationId, requestedAt: nowIso(),
+    expiresAt: Date.now() + 1500, nonce: crypto.randomBytes(16).toString('hex'),
+  };
+  try { privateAtomicJson(requestPath, { body, mac: controlMac(control.secret, body) }); }
+  catch { return { terminated: false, reason: 'CONTROL_REQUEST_WRITE_FAILED', observedAt: nowIso() }; }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = inspectCancellationResponse(responsePath, control, build, cancellationId);
+    if (response.status === 'STALE_AUTHENTICATED') {
+      if (!removeObservedControlFile(responsePath, response.identity)) {
+        try { fs.unlinkSync(requestPath); } catch {}
+        return { terminated: false, reason: 'CONTROL_RESPONSE_REPLACED', observedAt: nowIso() };
+      }
+      continue;
+    }
+    if (response.status === 'INVALID') {
+      try { fs.unlinkSync(requestPath); } catch {}
+      removeObservedControlFile(responsePath, response.identity);
+      return { terminated: false, reason: 'CONTROL_RESPONSE_AUTHENTICATION_FAILED', observedAt: nowIso() };
+    }
+    if (response.status === 'CURRENT_AUTHENTICATED') {
+      try { fs.unlinkSync(requestPath); } catch {}
+      if (!removeObservedControlFile(responsePath, response.identity)) {
+        return { terminated: false, reason: 'CONTROL_RESPONSE_REPLACED', observedAt: nowIso() };
+      }
+      return response.body;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+  }
+  try { fs.unlinkSync(requestPath); } catch {}
+  return { terminated: false, reason: 'CONTROL_RESPONSE_TIMEOUT', observedAt: nowIso() };
+}
+
+/** Cancel BUILDING only through its per-attempt authenticated worker mailbox. */
+function cancelRun(runId, testDependencies) {
+  let dependencies = { requestCancellation: requestWorkerCancellation, beforeClaim: null };
+  if (testDependencies !== undefined) {
+    const keys = testDependencies && typeof testDependencies === 'object'
+      ? Object.keys(testDependencies) : [];
+    if (process.env.NODE_ENV !== 'test' || !testDependencies ||
+        typeof testDependencies.requestCancellation !== 'function' ||
+        keys.some((key) => !['requestCancellation', 'beforeClaim'].includes(key)) ||
+        (testDependencies.beforeClaim !== undefined && typeof testDependencies.beforeClaim !== 'function')) {
+      throw new AegisControlError('INVALID_TEST_SEAM',
+        'cancellation dependencies may be injected only by deterministic tests', 400);
+    }
+    dependencies = { requestCancellation: testDependencies.requestCancellation,
+      beforeClaim: testDependencies.beforeClaim || null };
+  }
+
+  // Preserve the existing not-found/invalid-id response before invoking the
+  // deterministic interleaving seam. This observation is never used to choose
+  // a cancellation path; only the fresh record loaded under the claim is.
+  loadRunForControl(runId);
+  if (dependencies.beforeClaim) dependencies.beforeClaim();
+
+  let owned;
+  let cancellationId;
+  let claim = acquireRunLaunchClaim(runId, 3000);
+  try {
+    owned = loadRunForControl(runId);
+    if (owned.state === 'BUILDING') {
+      // Phase A owns only the run-file mutation. The claim is deliberately
+      // released before signalling so a heartbeat or child-close finalizer can
+      // acquire the same claim rather than deadlocking behind cancellation.
+      cancellationId = crypto.randomUUID();
+      if (owned.state !== 'BUILDING' || !owned.build || owned.build.mode !== 'async' ||
+          !Number.isInteger(owned.build.workerPid)) {
+        throw new AegisControlError('CONTROL_UNAVAILABLE',
+          `run ${owned.runId} has no verified active asynchronous worker to cancel.`, 409);
+      }
+      if (!owned.build.control || !owned.build.childProcessIdentity) {
+        throw new AegisControlError('CONTROL_UNAVAILABLE',
+          `run ${owned.runId} has no authenticated worker cancellation capability.`, 409);
+      }
+      if (owned.build.cancellation && owned.build.cancellation.status === 'REQUESTED') {
+        throw new AegisControlError('CANCELLATION_IN_PROGRESS',
+          `run ${owned.runId} already has cancellation ${owned.build.cancellation.cancellationId} in progress.`, 409);
+      }
+      const requestedAt = nowIso();
+      patchOwnedWorkerAttempt(owned, owned.build.attemptId, buildRevision(owned.build), {
+        cancelRequestedAt: requestedAt,
+        cancellation: { cancellationId, attemptId: owned.build.attemptId, requestedAt, status: 'REQUESTED' },
+      });
+      saveRun(owned);
+    } else {
+      const recovery = owned.build && owned.build.recovery;
+      if (recovery && recovery.terminationVerified === false) {
+        if (owned.state !== 'BUILD_FAILED' || recovery.abandonmentAllowed !== true ||
+            recovery.retrySafe !== false) {
+          throw new AegisControlError('TERMINATION_UNVERIFIED',
+            `run ${owned.runId} cannot be administratively abandoned because its unsafe recovery does not permit that resolution.`, 409);
+        }
+        const resolvedAt = nowIso();
+        owned.build = {
+          ...owned.build,
+          recovery: {
+            ...recovery,
+            terminationVerified: false,
+            retrySafe: false,
+            administrativeResolution: {
+              type: 'ABANDONED_WITHOUT_SIGNAL',
+              resolvedAt,
+              signallingAttempted: false,
+            },
+          },
+        };
+        transition(owned, 'ABANDONED',
+          'administratively abandoned without signalling; worker termination remains unverified');
+      } else {
+        const def = STATES[owned.state];
+        if (!def || !def.next.includes('ABANDONED')) {
+          throw new AegisControlError('CONTROL_UNAVAILABLE',
+            `run ${owned.runId} is ${owned.state}; ABANDONED is not a legal next state (allowed: ${def ? def.next.join(', ') || 'none' : 'unknown'}).`, 409);
+        }
+        transition(owned, 'ABANDONED', 'cancelled via control surface');
+      }
+      const fresh = loadRun(owned.runId);
+      return Object.freeze({
+        runId: fresh.runId,
+        state: fresh.state,
+        action: 'cancel',
+        nextAction: 'none',
+      });
+    }
+  } finally { releaseRunLaunchClaim(claim); }
+
+  const evidence = dependencies.requestCancellation(owned.build, cancellationId);
+
+  // Phase B fresh-loads under the same claim. Heartbeats may have advanced
+  // the revision while signalling was in progress, so the terminal CAS uses
+  // the current revision but still requires the original attempt and cancel
+  // operation. A worker finalizer that already left BUILDING wins honestly.
+  claim = acquireRunLaunchClaim(runId, 3000);
+  try {
+    const stopped = loadRunForControl(runId);
+    if (stopped.state !== 'BUILDING' || !stopped.build ||
+        stopped.build.attemptId !== owned.build.attemptId ||
+        !stopped.build.cancellation ||
+        stopped.build.cancellation.cancellationId !== cancellationId) {
+      throw new AegisControlError('CANCELLATION_SUPERSEDED',
+        `run ${owned.runId} left the cancelled worker attempt before cancellation could record a terminal transition.`, 409);
+    }
+    const revision = buildRevision(stopped.build);
+    if (!evidence.terminated) {
+      patchOwnedWorkerAttempt(stopped, owned.build.attemptId, revision, {
+        workerState: 'TERMINATION_UNVERIFIED',
+        cancellation: { ...stopped.build.cancellation, status: 'TERMINATION_UNVERIFIED' },
+        terminationEvidence: { ...evidence, attemptId: owned.build.attemptId },
+        recovery: { reason: 'TERMINATION_UNVERIFIED', observedAt: nowIso(), terminationVerified: false,
+          retrySafe: false, abandonmentAllowed: false, attemptId: owned.build.attemptId },
+      });
+      saveRun(stopped);
+      throw new AegisControlError('TERMINATION_UNVERIFIED',
+        `worker ${owned.build.workerPid} did not terminate within the bounded grace period; the run remains BUILDING.`, 409);
+    }
+    patchOwnedWorkerAttempt(stopped, owned.build.attemptId, revision, {
+      workerState: 'TERMINATED', endedAt: evidence.observedAt,
+      cancellation: { ...stopped.build.cancellation, status: 'TERMINATED' },
+      terminationEvidence: { ...evidence, attemptId: owned.build.attemptId, cancellationId,
+        controlAuthenticated: true },
+    });
+    transition(stopped, 'ABANDONED',
+      `cancelled after worker ${owned.build.workerPid} termination was observed`,
+      BUILDING_ABANDON_CAPABILITY);
+    const fresh = loadRun(owned.runId);
+    return Object.freeze({ runId: fresh.runId, state: fresh.state, action: 'cancel', nextAction: 'none' });
+  } finally { releaseRunLaunchClaim(claim); }
 }
 
 /**
@@ -584,26 +1345,49 @@ function cancelRun(runId) {
  * matching the CLI's own correction bound.
  */
 function retryRun(runId) {
-  const run = loadRunForControl(runId);
-  if (run.state !== 'BUILD_FAILED' && run.state !== 'CHECKS_FAILED') {
-    throw new AegisControlError('INVALID_RETRY',
-      `run ${run.runId} is ${run.state}; retry requires BUILD_FAILED or CHECKS_FAILED.`, 409);
+  // Preserve the stable control-surface id/not-found errors before the claim
+  // path creates or inspects a lock. All retry decisions are still made only
+  // after a fresh load while the claim is held below.
+  loadRunForControl(runId);
+  let claim;
+  try { claim = acquireRunLaunchClaim(runId, 3000); }
+  catch (e) {
+    if (e instanceof RunError) {
+      if (e.code === 'BAD-RUN-ID') throw new AegisControlError('INVALID_RUN_ID', e.message, 400);
+      if (e.code === 'NO-SUCH-RUN') throw new AegisControlError('RUN_NOT_FOUND', e.message, 404);
+    }
+    throw e;
   }
-  if (run.corrections >= MAX_CORRECTIONS) {
-    throw new AegisControlError('CORRECTION_LIMIT',
-      `run ${run.runId} already used ${run.corrections} correction cycles (max ${MAX_CORRECTIONS}). Escalate rather than loop.`, 409);
-  }
-  run.corrections += 1;
-  saveRun(run);
-  transition(run, 'CORRECTING', `correction cycle ${run.corrections} of ${MAX_CORRECTIONS} via control surface`);
-  const fresh = loadRun(run.runId);
-  return Object.freeze({
-    runId: fresh.runId,
-    state: fresh.state,
-    action: 'retry',
-    correction: fresh.corrections,
-    nextAction: `--build ${fresh.runId} --cmd "<command>"`,
-  });
+  try {
+    const run = loadRunForControl(runId);
+    if (run.state !== 'BUILD_FAILED' && run.state !== 'CHECKS_FAILED') {
+      throw new AegisControlError('INVALID_RETRY',
+        `run ${run.runId} is ${run.state}; retry requires BUILD_FAILED or CHECKS_FAILED.`, 409);
+    }
+    if (run.state === 'BUILD_FAILED' && run.build && run.build.recovery &&
+        run.build.recovery.retrySafe === false) {
+      throw new AegisControlError('RECOVERY_UNSAFE',
+        `run ${run.runId} cannot be retried because its prior worker termination is unverified. ` +
+        'Abandon this run rather than risk overlapping builder processes.', 409);
+    }
+    if (run.corrections >= MAX_CORRECTIONS) {
+      throw new AegisControlError('CORRECTION_LIMIT',
+        `run ${run.runId} already used ${run.corrections} correction cycles (max ${MAX_CORRECTIONS}). Escalate rather than loop.`, 409);
+    }
+    const retryLaunchSpec = run.build && run.build.mode === 'async' && run.build.launchSpec
+      ? run.build.launchSpec : null;
+    run.corrections += 1;
+    transition(run, 'CORRECTING', `correction cycle ${run.corrections} of ${MAX_CORRECTIONS} via control surface`);
+    if (retryLaunchSpec) return startWorkerClaimed(run, retryLaunchSpec);
+    const fresh = loadRun(run.runId);
+    return Object.freeze({
+      runId: fresh.runId,
+      state: fresh.state,
+      action: 'retry',
+      correction: fresh.corrections,
+      nextAction: `--build ${fresh.runId} --cmd "<command>"`,
+    });
+  } finally { releaseRunLaunchClaim(claim); }
 }
 
 // ── step 5: builder execution ───────────────────────────────────────────────
@@ -647,33 +1431,430 @@ function cmdBuild(args) {
 }
 
 // ── step 6: deterministic checks ────────────────────────────────────────────
-function cmdChecks(args) {
-  const run = loadRun(args.runId);
+// This is the one canonical check executor. Both the CLI and the authenticated
+// dashboard control surface enter through runChecks(), which owns the same
+// per-run claim used by every other mutating control. The browser never supplies
+// a command: commands come only from the packet already bound to the run.
+const SWITCHBOARD_PACKET_ID = 'PKT-20260825-SWITCHBOARD-FOUNDATION';
+const SWITCHBOARD_PACKET_FILE = path.join(PACKETS_DIR, `${SWITCHBOARD_PACKET_ID}.json`);
+const DASHBOARD_STATE_GENERATOR_REL = path.join('builder-control', 'aegis-state.cjs');
+const DASHBOARD_STATE_OUTPUT_REL = path.join('builder-control', 'dashboard', 'state.js');
+
+function prepareCanonicalDashboardState(run, pkt, packetReal) {
+  let canonicalPacketReal;
+  try { canonicalPacketReal = fs.realpathSync(SWITCHBOARD_PACKET_FILE); }
+  catch (e) {
+    return { ok: false, code: 'STATE_PACKET_UNAVAILABLE', reason: `canonical switchboard packet is unavailable: ${e.message}` };
+  }
+  if (packetReal !== canonicalPacketReal || pkt.packetId !== SWITCHBOARD_PACKET_ID) {
+    return { ok: true, required: false };
+  }
+
+  let env;
+  try { env = canonicalGitEnvironment(run); }
+  catch (e) {
+    return { ok: false, code: 'STATE_WORKTREE_INVALID', reason: e.message };
+  }
+  const worktreeReal = env.GIT_WORK_TREE;
+  const generatorExpected = path.join(worktreeReal, DASHBOARD_STATE_GENERATOR_REL);
+  const outputDirExpected = path.dirname(path.join(worktreeReal, DASHBOARD_STATE_OUTPUT_REL));
+  const outputExpected = path.join(outputDirExpected, 'state.js');
+  let generatorReal;
+  let outputDirReal;
+  try {
+    generatorReal = fs.realpathSync(generatorExpected);
+    outputDirReal = fs.realpathSync(outputDirExpected);
+  } catch (e) {
+    return { ok: false, code: 'STATE_GENERATOR_UNAVAILABLE', reason: `canonical dashboard state path is unavailable: ${e.message}` };
+  }
+  if (generatorReal !== generatorExpected || !fs.statSync(generatorReal).isFile() ||
+      outputDirReal !== outputDirExpected || !outputDirReal.startsWith(worktreeReal + path.sep)) {
+    return { ok: false, code: 'STATE_PATH_INVALID', reason: 'dashboard state generator/output path is not the canonical regular-file boundary' };
+  }
+  if (fs.existsSync(outputExpected)) {
+    const existing = fs.lstatSync(outputExpected);
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      return { ok: false, code: 'STATE_OUTPUT_INVALID', reason: 'dashboard state output exists but is not a regular file' };
+    }
+  }
+
+  const generated = spawnSync(process.execPath, [generatorReal, '--out', outputExpected], {
+    cwd: worktreeReal, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000,
+  });
+  const exit = generated.status === null ? 124 : generated.status;
+  if (generated.error || exit !== 0) {
+    return {
+      ok: false,
+      code: 'STATE_GENERATION_FAILED',
+      exit,
+      reason: `canonical dashboard state generation failed${generated.error ? `: ${generated.error.message}` : ` (exit ${exit})`}`,
+    };
+  }
+
+  let body;
+  try {
+    const outputStat = fs.lstatSync(outputExpected);
+    const outputReal = fs.realpathSync(outputExpected);
+    if (outputStat.isSymbolicLink() || !outputStat.isFile() || outputReal !== outputExpected ||
+        !outputReal.startsWith(outputDirReal + path.sep)) {
+      throw new Error('output escaped the canonical dashboard directory or is not a regular file');
+    }
+    body = fs.readFileSync(outputReal, 'utf8');
+    if (Buffer.byteLength(body, 'utf8') > 32 * 1024 * 1024) throw new Error('output exceeds 32 MiB');
+  } catch (e) {
+    return { ok: false, code: 'STATE_OUTPUT_INVALID', reason: `generated dashboard state is unavailable: ${e.message}` };
+  }
+  const marker = 'window.AEGIS_STATE = ';
+  const markerAt = body.indexOf(marker);
+  if (!body.startsWith('/* Generated by builder-control/aegis-state.cjs') || markerAt === -1) {
+    return { ok: false, code: 'STATE_OUTPUT_INVALID', reason: 'generated dashboard state lacks its canonical generator header or assignment' };
+  }
+  try {
+    const value = JSON.parse(body.slice(markerAt + marker.length).trim().replace(/;\s*$/, ''));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('state root is not an object');
+  } catch (e) {
+    return { ok: false, code: 'STATE_OUTPUT_INVALID', reason: `generated dashboard state is invalid: ${e.message}` };
+  }
+  return { ok: true, required: true, generator: DASHBOARD_STATE_GENERATOR_REL, output: DASHBOARD_STATE_OUTPUT_REL };
+}
+
+function runChecksClaimed(run) {
   if (run.state !== 'BUILT') {
     throw new RunError('ILLEGAL-TRANSITION', `checks require BUILT, run is ${run.state}`);
   }
-  const packet = run.packet;
-  if (!packet || !fs.existsSync(path.resolve(ROOT, packet))) {
+  const packet = resolvePacketOption(run.packet);
+  if (!packet) {
     throw new RunError('NO-PACKET', 'the run names no readable packet, so there are no declared testsRequired to run');
   }
-  const pkt = JSON.parse(fs.readFileSync(path.resolve(ROOT, packet), 'utf8'));
-  const cmds = (pkt.testsRequired || []).filter((c) => !/--gate-done|aegis-run/.test(c));
+  // A check command is executable authority. Resolve its packet through the
+  // same canonical packets boundary as intake, then prove the recorded run
+  // still names the governed Git worktree/base/branch before reading commands
+  // or spawning a shell. Refusal happens before any run or ledger mutation.
+  const gitEnv = canonicalGitEnvironment(run);
+  const worktreeReal = gitEnv.GIT_WORK_TREE;
+  const packetReal = fs.realpathSync(path.resolve(ROOT, packet));
+  const pkt = JSON.parse(fs.readFileSync(packetReal, 'utf8'));
+  const cmds = (pkt.testsRequired || []).filter((command) => {
+    if (typeof command !== 'string') return false;
+    const tokens = command.trim().split(/\s+/);
+    const entrypoint = tokens[1] && tokens[1].replace(/^\.\//, '');
+    return !(tokens[0] === 'node' && entrypoint === 'builder-control/engineering-os.cjs' &&
+      tokens.includes('--gate-done'));
+  });
   if (!cmds.length) {
     transition(run, 'CHECKS_FAILED', 'the packet declares no runnable testsRequired');
     throw new RunError('NO-CHECKS', 'the packet declares no runnable checks. Zero checks passing is the absence of evidence, not evidence.');
   }
+  const statePreparation = prepareCanonicalDashboardState(run, pkt, packetReal);
+  if (!statePreparation.ok) {
+    run.checks = {
+      ranAt: nowIso(), total: cmds.length, passed: 0,
+      results: cmds.map((cmd) => ({ cmd, exit: null, skipped: 'canonical dashboard state generation failed' })),
+      precondition: {
+        state: 'FAILED', code: statePreparation.code,
+        reason: statePreparation.reason, exit: Number.isInteger(statePreparation.exit) ? statePreparation.exit : null,
+      },
+    };
+    saveRun(run);
+    transition(run, 'CHECKS_FAILED', `0/${run.checks.total} checks passed; ${statePreparation.code}`);
+    const fresh = loadRun(run.runId);
+    return Object.freeze({
+      runId: fresh.runId,
+      state: fresh.state,
+      action: 'checks',
+      checks: Object.freeze({ passed: fresh.checks.passed, total: fresh.checks.total }),
+      nextAction: 'retry',
+    });
+  }
   const results = [];
   for (const cmd of cmds) {
-    const r = spawnSync('bash', ['-lc', cmd], { cwd: run.worktree.path, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    const r = spawnSync('bash', ['-lc', cmd], { cwd: worktreeReal, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     results.push({ cmd, exit: r.status === null ? 124 : r.status });
   }
-  run.checks = { ranAt: nowIso(), total: results.length, passed: results.filter((x) => x.exit === 0).length, results };
+  run.checks = {
+    ranAt: nowIso(), total: results.length, passed: results.filter((x) => x.exit === 0).length, results,
+    ...(statePreparation.required ? { precondition: {
+      state: 'PASSED', generator: statePreparation.generator, output: statePreparation.output,
+    } } : {}),
+  };
   saveRun(run);
   const allPassed = results.every((x) => x.exit === 0);
   transition(run, allPassed ? 'CHECKS_PASSED' : 'CHECKS_FAILED',
     `${run.checks.passed}/${run.checks.total} checks passed`);
-  console.log(`${run.checks.passed}/${run.checks.total} checks passed`);
-  return allPassed ? EXIT_PASS : EXIT_REFUSED;
+  const fresh = loadRun(run.runId);
+  return Object.freeze({
+    runId: fresh.runId,
+    state: fresh.state,
+    action: 'checks',
+    checks: Object.freeze({ passed: fresh.checks.passed, total: fresh.checks.total }),
+    nextAction: allPassed ? 'independent review required' : 'retry',
+  });
+}
+
+function runChecks(runId) {
+  // Preserve stable malformed/missing id errors before attempting a claim.
+  loadRunForControl(runId);
+  let claim;
+  try { claim = acquireRunLaunchClaim(runId, 3000); }
+  catch (e) {
+    if (e instanceof RunError) {
+      if (e.code === 'BAD-RUN-ID') throw new AegisControlError('INVALID_RUN_ID', e.message, 400);
+      if (e.code === 'NO-SUCH-RUN') throw new AegisControlError('RUN_NOT_FOUND', e.message, 404);
+    }
+    throw e;
+  }
+  try {
+    const run = loadRunForControl(runId);
+    try { return runChecksClaimed(run); }
+    catch (e) {
+      if (e instanceof RunError) {
+        if (e.code === 'ILLEGAL-TRANSITION') {
+          throw new AegisControlError('INVALID_CHECKS', e.message, 409);
+        }
+        if (e.code === 'NO-PACKET') {
+          throw new AegisControlError('CHECKS_UNAVAILABLE', e.message, 409);
+        }
+        if (e.code === 'NO-CHECKS') {
+          throw new AegisControlError('NO_CHECKS', e.message, 409);
+        }
+        if (e.code === 'REVIEW-RUN-INVALID' || e.code === 'REVIEW-WORKTREE-INVALID' ||
+            e.code === 'REVIEW-WORKTREE-FOREIGN') {
+          throw new AegisControlError('CHECKS_WORKTREE_INVALID', e.message, 409);
+        }
+      }
+      throw e;
+    }
+  } finally { releaseRunLaunchClaim(claim); }
+}
+
+// ── step 7: exact-subject independent review binding ───────────────────────
+// The runtime deliberately does not interpret review records.  The canonical
+// Engineering OS computes the subject and applies the review gate; this layer
+// only binds that decision to the claimed run after proving that the run's
+// linked worktree belongs to this repository.  GIT_DIR/GIT_WORK_TREE redirect
+// Git reads to the run worktree without executing a copy of engineering-os.cjs
+// from code that is itself under review.
+function canonicalGitEnvironment(run) {
+  const worktreePath = run && run.worktree && run.worktree.path;
+  if (typeof worktreePath !== 'string' || !worktreePath.trim()) {
+    throw new RunError('REVIEW-WORKTREE-INVALID', 'review binding requires a recorded worktree path');
+  }
+  let worktreeReal;
+  try {
+    worktreeReal = fs.realpathSync(worktreePath);
+    if (!fs.statSync(worktreeReal).isDirectory()) throw new Error('not a directory');
+  } catch (e) {
+    throw new RunError('REVIEW-WORKTREE-INVALID', `run worktree is unavailable: ${e.message}`);
+  }
+
+  const inspect = (args, label) => {
+    const r = git(['-C', worktreeReal, ...args]);
+    if (r.status !== 0) {
+      throw new RunError('REVIEW-WORKTREE-INVALID',
+        `cannot prove run worktree ${label}: ${(r.stderr || r.stdout || `git exited ${r.status}`).trim()}`);
+    }
+    return (r.stdout || '').trim();
+  };
+  let topReal;
+  try { topReal = fs.realpathSync(inspect(['rev-parse', '--show-toplevel'], 'top level')); }
+  catch (e) {
+    if (e instanceof RunError) throw e;
+    throw new RunError('REVIEW-WORKTREE-INVALID', `cannot resolve run worktree top level: ${e.message}`);
+  }
+  if (topReal !== worktreeReal) {
+    throw new RunError('REVIEW-WORKTREE-FOREIGN',
+      `recorded worktree is not its Git top level (${worktreeReal} != ${topReal})`);
+  }
+
+  const commonFor = (cwd) => {
+    const r = git(['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+    if (r.status !== 0) {
+      throw new RunError('REVIEW-WORKTREE-INVALID',
+        `cannot prove repository authority: ${(r.stderr || r.stdout || `git exited ${r.status}`).trim()}`);
+    }
+    try { return fs.realpathSync((r.stdout || '').trim()); }
+    catch (e) { throw new RunError('REVIEW-WORKTREE-INVALID', `cannot resolve repository authority: ${e.message}`); }
+  };
+  if (commonFor(worktreeReal) !== commonFor(ROOT)) {
+    throw new RunError('REVIEW-WORKTREE-FOREIGN', 'run worktree belongs to a different Git repository');
+  }
+
+  const gitDir = inspect(['rev-parse', '--absolute-git-dir'], 'git directory');
+  inspect(['rev-parse', '--verify', 'HEAD^{commit}'], 'HEAD commit');
+  const recordedBase = run && run.baseCommit;
+  const worktreeBase = run && run.worktree && run.worktree.baseCommit;
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(recordedBase || '') ||
+      worktreeBase !== recordedBase) {
+    throw new RunError('REVIEW-RUN-INVALID', 'run and worktree do not carry one matching canonical base commit');
+  }
+  inspect(['cat-file', '-e', `${recordedBase}^{commit}`], 'base commit');
+  const recordedBranch = run && run.worktree && run.worktree.branch;
+  const currentBranch = inspect(['symbolic-ref', '--quiet', '--short', 'HEAD'], 'branch');
+  if (typeof recordedBranch !== 'string' || !recordedBranch || currentBranch !== recordedBranch) {
+    throw new RunError('REVIEW-RUN-INVALID',
+      `run worktree branch moved or is not the recorded branch (${recordedBranch || 'missing'} != ${currentBranch || 'detached'})`);
+  }
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith('GIT_') || key === 'NODE_OPTIONS' || key === 'NODE_PATH' ||
+        key === 'ENGOS_TEST_ONLY_SYNTHETIC') continue;
+    env[key] = value;
+  }
+  env.GIT_DIR = gitDir;
+  env.GIT_WORK_TREE = worktreeReal;
+  return env;
+}
+
+function runCanonicalEngineeringOs(args, env) {
+  const r = spawnSync(process.execPath, [ENGOS, ...args], {
+    cwd: ROOT, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000,
+  });
+  if (r.error) {
+    throw new RunError('REVIEW-AUTHORITY-UNAVAILABLE', `engineering-os.cjs could not run: ${r.error.message}`);
+  }
+  let parsed;
+  try { parsed = JSON.parse((r.stdout || '').trim()); }
+  catch {
+    throw new RunError('REVIEW-AUTHORITY-UNAVAILABLE',
+      `engineering-os.cjs returned no parseable JSON${r.status === 0 ? '' : ` (exit ${r.status})`}`);
+  }
+  return { status: r.status === null ? 124 : r.status, parsed };
+}
+
+function validPassedChecks(checks) {
+  return Boolean(checks && Number.isInteger(checks.total) && checks.total > 0 &&
+    checks.passed === checks.total && Array.isArray(checks.results) &&
+    checks.results.length === checks.total &&
+    checks.results.every((result) => result && typeof result.cmd === 'string' &&
+      result.cmd.trim() && result.exit === 0) &&
+    typeof checks.ranAt === 'string' && Number.isFinite(Date.parse(checks.ranAt)));
+}
+
+function sameCanonicalSubject(a, b) {
+  return Boolean(a && b && /^[0-9a-f]{64}$/.test(a.subjectSha256 || '') &&
+    a.subjectSha256 === b.subjectSha256 &&
+    JSON.stringify(a.subjectPaths) === JSON.stringify(b.subjectPaths) &&
+    a.diffBytes === b.diffBytes && a.range === b.range);
+}
+
+function bindIndependentReviewClaimed(run) {
+  if (run.state !== 'CHECKS_PASSED') {
+    throw new RunError('ILLEGAL-TRANSITION', `review binding requires CHECKS_PASSED, run is ${run.state}`);
+  }
+  if (!validPassedChecks(run.checks)) {
+    throw new RunError('REVIEW-CHECKS-INVALID', 'run has no complete, real all-passed deterministic check record');
+  }
+  const packet = resolvePacketOption(run.packet);
+  if (!packet) throw new RunError('REVIEW-PACKET-INVALID', 'review binding requires the packet already bound to the run');
+  const env = canonicalGitEnvironment(run);
+
+  const first = runCanonicalEngineeringOs(['--subject', '--json'], env);
+  const subject = first.parsed;
+  if (first.status !== 0 || !/^[0-9a-f]{64}$/.test(subject.subjectSha256 || '') ||
+      !Array.isArray(subject.subjectPaths) || subject.subjectPaths.length === 0 ||
+      !Number.isInteger(subject.diffBytes) || subject.diffBytes <= 0) {
+    throw new RunError('REVIEW-SUBJECT-INVALID', 'canonical subject is empty, malformed, or unavailable');
+  }
+
+  const gateResult = runCanonicalEngineeringOs([
+    '--gate-done', '--packet', path.resolve(ROOT, packet),
+    '--subject-sha', subject.subjectSha256, '--json',
+  ], env);
+  const gate = gateResult.parsed;
+  const completeness = gate && gate.reviewerCompleteness;
+  if (gateResult.status !== 0 || gate.ok !== true || !completeness || completeness.complete !== true ||
+      !Array.isArray(gate.problems) || gate.problems.length !== 0 ||
+      !gate.subject || !sameCanonicalSubject(subject, gate.subject) ||
+      !completeness.pathCoverage ||
+      !Array.isArray(completeness.pathCoverage.notCoveredByEveryRequiredReviewer) ||
+      completeness.pathCoverage.notCoveredByEveryRequiredReviewer.length !== 0) {
+    const rules = Array.isArray(gate && gate.problems)
+      ? gate.problems.map((problem) => problem && problem.rule).filter(Boolean).join(', ')
+      : '';
+    throw new RunError('REVIEW-GATE-REFUSED',
+      `canonical exact-subject review gate did not pass${rules ? `: ${rules}` : ''}`);
+  }
+
+  // The subject is recomputed after the gate and immediately before the sole
+  // persistence point.  A moving tree can neither borrow nor retain approval.
+  const secondResult = runCanonicalEngineeringOs(['--subject', '--json'], env);
+  if (secondResult.status !== 0 || !sameCanonicalSubject(subject, secondResult.parsed)) {
+    throw new RunError('REVIEW-SUBJECT-MOVED', 'the canonical subject changed while its reviews were being bound');
+  }
+
+  const boundAt = nowIso();
+  run.subject = {
+    subjectSha256: subject.subjectSha256,
+    pathCount: subject.subjectPaths.length,
+    diffBytes: subject.diffBytes,
+    range: subject.range,
+    boundAt,
+    authority: 'engineering-os.cjs --subject',
+  };
+  const classification = gate.classification || {};
+  const coverage = completeness.pathCoverage;
+  run.reviewGate = {
+    subjectSha256: subject.subjectSha256,
+    verifiedAt: boundAt,
+    authority: 'engineering-os.cjs --gate-done',
+    state: gate.state,
+    lane: classification.lane || null,
+    requiredReviewers: Array.isArray(classification.requiredReviewers)
+      ? classification.requiredReviewers.slice(0, 16) : [],
+    activeReviews: Number.isInteger(gate.reviewsActive) ? gate.reviewsActive : 0,
+    exactSubjectReviews: Number.isInteger(gate.reviewsBound) ? gate.reviewsBound : 0,
+    ignoredForeignReviews: Number.isInteger(gate.reviewsForeign) ? gate.reviewsForeign : 0,
+    pathCoverage: {
+      total: Number.isInteger(coverage.total) ? coverage.total : subject.subjectPaths.length,
+      coveredByEveryRequiredReviewer: Array.isArray(coverage.coveredByEveryRequiredReviewer)
+        ? coverage.coveredByEveryRequiredReviewer.length : 0,
+      notCoveredByEveryRequiredReviewer: 0,
+    },
+  };
+  transition(run, 'REVIEW_BOUND',
+    `canonical exact-subject review gate passed for ${subject.subjectSha256.slice(0, 16)}…`);
+  const fresh = loadRun(run.runId);
+  return Object.freeze({
+    runId: fresh.runId,
+    state: fresh.state,
+    action: 'bind-independent-review',
+    subjectSha256: fresh.subject.subjectSha256,
+    nextAction: 'checkpoint',
+  });
+}
+
+function bindIndependentReview(runId) {
+  loadRunForControl(runId);
+  const claim = acquireRunLaunchClaim(runId, 3000);
+  try {
+    const run = loadRunForControl(runId);
+    try { return bindIndependentReviewClaimed(run); }
+    catch (e) {
+      if (e instanceof RunError) {
+        const status = e.code === 'REVIEW-AUTHORITY-UNAVAILABLE' ? 503 : 409;
+        throw new AegisControlError(e.code, e.message, status);
+      }
+      throw e;
+    }
+  } finally { releaseRunLaunchClaim(claim); }
+}
+
+function cmdChecks(args) {
+  let result;
+  try { result = runChecks(args.runId); }
+  catch (e) {
+    if (e instanceof AegisControlError) {
+      const cliCode = {
+        INVALID_RUN_ID: 'BAD-RUN-ID', RUN_NOT_FOUND: 'NO-SUCH-RUN',
+        INVALID_CHECKS: 'ILLEGAL-TRANSITION', CHECKS_UNAVAILABLE: 'NO-PACKET',
+        NO_CHECKS: 'NO-CHECKS',
+      }[e.code] || e.code;
+      throw new RunError(cliCode, e.message);
+    }
+    throw e;
+  }
+  console.log(`${result.checks.passed}/${result.checks.total} checks passed`);
+  return result.state === 'CHECKS_PASSED' ? EXIT_PASS : EXIT_REFUSED;
 }
 
 // ── step 8: automatic bounded correction cycles ─────────────────────────────
@@ -896,6 +2077,7 @@ function parseArgs(argv) {
     else if (t === '--status') { a.cmd_status = true; a.runId = argv[++i]; }
     else if (t === '--worktree') { a.cmd_worktree = true; a.runId = argv[++i]; }
     else if (t === '--build') { a.cmd_build = true; a.runId = argv[++i]; }
+    else if (t === '--build-async') { a.cmd_build_async = true; a.runId = argv[++i]; }
     else if (t === '--checks') { a.cmd_checks = true; a.runId = argv[++i]; }
     else if (t === '--checkpoint') { a.cmd_checkpoint = true; a.runId = argv[++i]; }
     else if (t === '--rollback') { a.cmd_rollback = true; a.runId = argv[++i]; }
@@ -906,6 +2088,7 @@ function parseArgs(argv) {
     else if (t === '--acceptance') a.acceptance = argv[++i];
     else if (t === '--packet') a.packet = argv[++i];
     else if (t === '--cmd') a.cmd = argv[++i];
+    else if (t === '--prompt') a.prompt = argv[++i];
     else if (t === '--timeout') a.timeout = argv[++i];
     else if (t === '--json') a.json = true;
   }
@@ -920,6 +2103,10 @@ if (require.main === module) {
     else if (args.cmd_status) code = cmdStatus(args);
     else if (args.cmd_worktree) code = cmdWorktree(args);
     else if (args.cmd_build) code = cmdBuild(args);
+    else if (args.cmd_build_async) {
+      throw new RunError('GOVERNED-START-REQUIRED',
+        '--build-async cannot select a provider or model. Launch through the dashboard Start authority, which consumes the canonical run route.');
+    }
     else if (args.cmd_checks) code = cmdChecks(args);
     else if (args.cmd_checkpoint) code = cmdCheckpoint(args);
     else if (args.cmd_rollback) code = cmdRollback(args);
@@ -951,4 +2138,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, watchdog, REQUIRED_SEQUENCE, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, pauseRun, cancelRun, retryRun, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, pauseRun, cancelRun, retryRun, runChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, sameProcessIdentity, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
