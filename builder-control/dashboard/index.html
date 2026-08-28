@@ -378,7 +378,16 @@
     .evidence-deck{grid-template-columns:repeat(2,minmax(0,1fr))}
     #raw-state{grid-column:1/-1}
   }
-  @media (max-width:1199px){
+  /* Command View at 1280×720. Between 1200px and 1439px the two-column shell
+     leaves the centre console ~938px, so the strip gets ~906px and each of the
+     eleven route nodes ~73px — 57px once node padding is removed, which is
+     narrower than the single word "Independent". The labels wrapped mid-word
+     and the exact stage a founder is looking for became unreadable. Six columns
+     give 126px of text and wrap the same eleven canonical stages onto two rows.
+     No stage is hidden, merged, renamed or reordered here; only the wrapping
+     changes, and the trailing connector nub is dropped at each row end so the
+     route never points at empty space. */
+  @media (max-width:1439px){
     #topology-live-body .route-strip{grid-template-columns:repeat(6,minmax(78px,1fr))}
     .route-node:nth-child(6n)::after{display:none}
   }

@@ -349,6 +349,123 @@ test('the primary topology is one connected operator route and connector cards c
     'the inspector must retain full connector usage drill-down evidence');
 });
 
+// ── Command View legibility at 1280×720 ───────────────────────────────────
+// A width assertion written as a substring match ("is the 1439 rule present?")
+// proves nothing about what a browser would actually apply, because a later
+// rule of equal specificity silently wins. These helpers resolve the CSS the
+// way the cascade does — every width-matching rule for the selector, in source
+// order, last one wins — so the proof is about the effective layout at a
+// viewport width rather than about the text of one line.
+function styleSrc() {
+  const m = htmlSrc().match(/<style>([\s\S]*?)<\/style>/);
+  assert.ok(m, 'the page has no <style> block to resolve');
+  return m[1].replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+// Flat scan: this stylesheet nests plain rules inside at-rules and nowhere else.
+function cssRules() {
+  const css = styleSrc();
+  const rules = [];
+  const atRules = [];
+  let i = 0;
+  let prelude = '';
+  while (i < css.length) {
+    const ch = css[i];
+    if (ch === '{') {
+      const head = prelude.trim();
+      prelude = '';
+      if (head.startsWith('@')) { atRules.push(head); i += 1; continue; }
+      const end = css.indexOf('}', i);
+      assert.ok(end !== -1, `unterminated rule for selector "${head}"`);
+      rules.push({ at: atRules.slice(), selector: head, body: css.slice(i + 1, end) });
+      i = end + 1;
+      continue;
+    }
+    if (ch === '}') { atRules.pop(); prelude = ''; i += 1; continue; }
+    prelude += ch;
+    i += 1;
+  }
+  return rules;
+}
+
+// Width-only viewport model: a non-width at-rule (reduced motion) is not
+// something a width can satisfy, so rules inside it never count here.
+function appliesAtWidth(atRules, width) {
+  return atRules.every((q) => {
+    if (!/(?:max|min)-width/.test(q)) return false;
+    const max = /max-width:\s*(\d+)px/.exec(q);
+    const min = /min-width:\s*(\d+)px/.exec(q);
+    if (max && width > Number(max[1])) return false;
+    if (min && width < Number(min[1])) return false;
+    return true;
+  });
+}
+
+function routeColumnsAt(width) {
+  let columns = null;
+  for (const rule of cssRules()) {
+    if (!/^#topology-live-body\s+\.route-strip$/.test(rule.selector)) continue;
+    if (!appliesAtWidth(rule.at, width)) continue;
+    const m = /grid-template-columns:\s*repeat\((\d+)/.exec(rule.body);
+    if (m) columns = Number(m[1]);
+  }
+  return columns;
+}
+
+test('the eleven-stage route is legible at 1280 without dropping the wide single-row layout', () => {
+  // The arithmetic this proof depends on, each value asserted below so the
+  // numbers cannot drift out from under the claim:
+  //   1280 viewport − 28px .command-shell padding            = 1252
+  //   − 300px left rail − 14px shell gap                     =  938 centre
+  //   − 32px #topology-live-body horizontal padding          =  906 strip
+  assert.ok(/\.command-shell\{[^}]*padding:14px/.test(code), 'the shell padding changed');
+  assert.ok(/\.command-shell\{[^}]*gap:14px/.test(code), 'the shell column gap changed');
+  assert.ok(/@media\s*\(max-width:1599px\)\{[^@]*?\.command-shell\{grid-template-columns:300px/.test(code),
+    'the 1280 two-column shell no longer reserves a 300px left rail');
+  assert.ok(/#topology-live-body\{[^}]*padding:14px 16px/.test(code), 'the route panel padding changed');
+  assert.ok(/#topology-live-body\s+\.route-strip\{[^}]*gap:10px/.test(code), 'the route strip gap changed');
+  assert.ok(/\.route-node\{[^}]*padding:9px 8px/.test(code), 'the route node padding changed');
+
+  const STRIP = 906;
+  const textWidth = (columns) => Math.floor((STRIP - 10 * (columns - 1)) / columns) - 16;
+  // "Independent", "Corrections" and "Deterministic" are the longest unbreakable
+  // words in plainStageLabel(); at the 12px .route-name size they need roughly
+  // 70px. A 100px floor keeps the label readable rather than merely fitting.
+  const FLOOR = 100;
+
+  const at1280 = routeColumnsAt(1280);
+  assert.strictEqual(at1280, 6,
+    `at 1280 the route must wrap to six columns, resolved to ${at1280}`);
+  assert.ok(textWidth(at1280) >= FLOOR,
+    `at 1280 each route node gets ${textWidth(at1280)}px of text, below the ${FLOOR}px legibility floor`);
+  assert.ok(textWidth(11) < FLOOR,
+    'the eleven-column layout is no longer the cramped case this breakpoint exists to fix');
+
+  // The wide layouts keep the single connected row: this is a wrap for narrow
+  // desktops, not a downgrade of the Command View everywhere.
+  assert.strictEqual(routeColumnsAt(1440), 11, 'the 1440px single-row route regressed');
+  assert.strictEqual(routeColumnsAt(1920), 11, 'the wide-screen single-row route regressed');
+  // Narrower viewports keep their existing, stricter wrapping.
+  assert.strictEqual(routeColumnsAt(1199), 6, 'the 1199px route wrapping changed');
+  assert.strictEqual(routeColumnsAt(900), 3, 'the small-viewport route wrapping changed');
+
+  // A connector nub pointing off the end of a wrapped row is a route that
+  // claims a next stage where the screen shows none.
+  assert.ok(/@media\s*\(max-width:1439px\)\{[\s\S]{0,240}?\.route-node:nth-child\(6n\)::after\{display:none\}/.test(code),
+    'the six-column rows still trail a connector nub into empty space');
+
+  // Founder readability may not buy itself motion or hidden evidence.
+  const block = /@media\s*\(max-width:1439px\)\{([\s\S]*?)\n\s*\}/.exec(code);
+  assert.ok(block, 'the 1280 route breakpoint was not located');
+  assert.ok(!/\banimation\s*:|\btransition\s*:/.test(block[1]),
+    'the 1280 breakpoint introduced motion the reduced-motion block does not name');
+  // Hiding the ::after nub is the point; hiding a node itself would delete a
+  // canonical stage from the operator's view and call it readability.
+  const hidesAStage = block[1].split('}')
+    .some((rule) => /\.route-node/.test(rule) && !/::(?:after|before)/.test(rule) && /display:none/.test(rule));
+  assert.ok(!hidesAStage, 'the 1280 breakpoint hides route nodes instead of wrapping them');
+});
+
 test('the JARVIS shell adds no decorative microphone, fabricated animation control, gradient or CSS-art mark', () => {
   const markup = htmlSrc().replace(/<script[\s\S]*?<\/script>/g, '').replace(/<!--[\s\S]*?-->/g, '');
   assert.ok(!/aria-label="[^"]*microphone/i.test(markup), 'a nonfunctional microphone was added');
@@ -728,6 +845,53 @@ test('DOM: the FIRST sighting of a running build is a starting point, not a hand
   assert.strictEqual(node.attrs['data-handoff-state'], 'INACTIVE',
     'a run that was already BUILDING when the page opened is not evidence of a transition');
   assert.ok(!/handed off/.test(page.text('founder-body')), 'the page invented a handoff from a single observation');
+});
+
+// ── Command View at 1280×720: wrapping is a layout change, not a state change ─
+// The 1280 breakpoint only changes how many route nodes sit on a row. The proof
+// that matters is that the DOM the CSS wraps still carries all eleven canonical
+// stages, each with its own exact state and reason — a "readability" change that
+// quietly rendered ten stages, or collapsed two into one, would look tidier and
+// be a lie about which gate the run is standing at.
+const CANONICAL_STAGES = [
+  ['objective', 'Objective'], ['acceptance', 'Scope & risk'], ['routing', 'Choose builder'],
+  ['worktree', 'Safe workspace'], ['build', 'Build'], ['deterministic', 'Check'],
+  ['review', 'Independent review'], ['correction', 'Corrections'], ['watchdog', 'Safety check'],
+  ['checkpoint', 'Safe checkpoint'], ['surface', 'Evidence'],
+];
+
+test('DOM: the wrapped route still renders all eleven canonical stages with their own state and reason', () => {
+  // The engineering label is deliberately NOT the founder label, so this proof
+  // fails if the route ever falls back to the contract wording instead of the
+  // plain-English one a founder can read.
+  const stages = CANONICAL_STAGES.map(([id], i) => ({
+    id, step: i + 1, label: `contract stage ${id}`,
+    state: i < 4 ? 'PASS' : (i === 4 ? 'ACTIVE' : 'UNVERIFIED'),
+    reason: `recorded reason for ${id}`,
+    evidence: 'builder-control/engineering-os.cjs',
+  }));
+  const page = bootPage(fixtureState({
+    engineering: Object.assign({}, fixtureState().engineering, { stages }),
+  }));
+  const nodes = findByAttr(page.document.getElementById('topology-live-body'), 'aria-label');
+  assert.strictEqual(nodes.length, 11,
+    `the route must render exactly eleven stages, found ${nodes.length}`);
+  nodes.forEach((node, i) => {
+    const [, label] = CANONICAL_STAGES[i];
+    const step = String(i + 1).padStart(2, '0');
+    assert.ok(node.className.includes('route-node'), `stage ${step} is not a route node`);
+    assert.ok(node.textContent.includes(`${step} · ${label}`),
+      `stage ${step} lost its numbered founder-readable label — got: ${node.textContent}`);
+    assert.strictEqual(node.attrs['aria-label'],
+      `${label}: ${stages[i].state} — ${stages[i].reason}`,
+      `stage ${step} does not announce its exact canonical state and reason`);
+  });
+  // Three different canonical states must still read as three different words:
+  // wrapping may not flatten the route into one reassuring colour.
+  const spoken = nodes.map((n) => n.textContent);
+  assert.ok(spoken.some((t) => /Ready/.test(t)), 'no PASS stage renders as Ready');
+  assert.ok(spoken.some((t) => /Working/.test(t)), 'no ACTIVE stage renders as Working');
+  assert.ok(spoken.some((t) => /Not checked/.test(t)), 'no UNVERIFIED stage renders as Not checked');
 });
 
 // ── FINDING #10 RED PROOF: four evidence states, four different sentences ──
