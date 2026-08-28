@@ -85,6 +85,10 @@ if (process.env.FAKE_STDIN_FILE) {
   return;
 }
 if (process.env.FAKE_CLAUDE_MODE === 'fail') { console.log('hello'); console.error('bad'); process.exit(7); }
+if (process.env.FAKE_CLAUDE_MODE === 'auth-fail') {
+  console.error('Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.');
+  process.exit(1);
+}
 if (process.env.FAKE_CLAUDE_MODE === 'tree') {
   process.on('SIGTERM', () => {});
   const descendant = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: 'ignore' });
@@ -106,7 +110,8 @@ if (delay) setTimeout(() => process.exit(0), delay); else { console.log('ok'); p
   const runId = 'RUN-20260827-deadbeef';
   const runFile = path.join(runs, `${runId}.json`);
   fs.writeFileSync(runFile, JSON.stringify({
-    runId, state: 'WORKTREE_READY', worktree: { path: worktree }, packet: packetRelative || packetPath, build: null,
+    runId, objective: prompt, state: 'WORKTREE_READY', worktree: { path: worktree },
+    packet: packetRelative || packetPath, build: null,
     corrections: 0, transitions: [], updatedAt: new Date().toISOString(),
   }, null, 2));
   const env = {
@@ -441,6 +446,20 @@ test('launch binding rejects canonical run-record tamper', () => {
   }), /does not match its canonical launch record/);
 });
 
+test('authorized write digest detects an applied file change without exposing file contents', () => {
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-write-proof-'));
+  const target = path.join(tmp, 'dashboard.txt');
+  const missing = WORKER.authorizedWriteDigest([target]);
+  fs.writeFileSync(target, 'first bounded change');
+  const created = WORKER.authorizedWriteDigest([target]);
+  fs.writeFileSync(target, 'second bounded change');
+  const edited = WORKER.authorizedWriteDigest([target]);
+  assert.notStrictEqual(created, missing, 'creating an authorized file was not detected');
+  assert.notStrictEqual(edited, created, 'editing an authorized file was not detected');
+  assert.match(edited, /^[0-9a-f]{64}$/);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
 test('stale attempt token cannot update or terminate the current attempt', () => {
   const f = fixture('preserve current attempt ownership', { FAKE_SLEEP_MS: '30000' });
   const active = waitFor(f.read, (r) => r.build && r.build.workerState === 'RUNNING');
@@ -514,6 +533,48 @@ test('packet allowlists permit an exact new leaf for write but not read', () => 
     else process.env.AEGIS_TEST_CONTAINMENT_MODE = priorMode;
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('packet write authority permits only exact atomic temp replacement leaves', () => {
+  const capability = CONTAINMENT.sandboxCapability();
+  if (!capability.available) return;
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-atomic-write-'));
+  const worktree = path.join(tmp, 'worktree');
+  fs.mkdirSync(worktree);
+  const allowed = path.join(worktree, 'allowed.txt');
+  const unrelated = path.join(worktree, 'unrelated.txt');
+  fs.writeFileSync(allowed, 'before\n');
+  fs.writeFileSync(unrelated, 'unrelated\n');
+  const profile = CONTAINMENT.buildMacSandboxProfile({
+    root: worktree,
+    executable: '/bin/sh',
+    readPaths: [allowed],
+    writePaths: [allowed],
+    allowNetwork: false,
+  });
+  const invoke = (script, ...args) => spawnSync(profile.bin,
+    [...CONTAINMENT.sandboxedCommand(profile).argv, '-c', script, 'aegis-atomic-test', ...args],
+    { encoding: 'utf8' });
+  const atomicTemp = `${allowed}.tmp.${process.pid}.aB_09-safe`;
+  const replace = invoke('printf "after\\n" > "$1" && /bin/mv "$1" "$2"', atomicTemp, allowed);
+  assert.strictEqual(replace.status, 0,
+    `authorized atomic replacement failed: ${replace.stderr || replace.signal || replace.status}`);
+  assert.strictEqual(fs.readFileSync(allowed, 'utf8'), 'after\n');
+  assert.strictEqual(fs.existsSync(atomicTemp), false);
+
+  const directSibling = invoke('printf "denied\\n" > "$1"', unrelated);
+  assert.notStrictEqual(directSibling.status, 0, 'unrelated sibling write must be denied');
+  assert.strictEqual(fs.readFileSync(unrelated, 'utf8'), 'unrelated\n');
+  const unrelatedTemp = `${unrelated}.tmp.${process.pid}.aB_09-safe`;
+  const tempSibling = invoke('printf "denied\\n" > "$1"', unrelatedTemp);
+  assert.notStrictEqual(tempSibling.status, 0, 'unrelated atomic-temp sibling must be denied');
+  assert.strictEqual(fs.existsSync(unrelatedTemp), false);
+  const malformedTemp = `${allowed}.tmp.not-a-pid.aB_09-safe`;
+  const malformed = invoke('printf "denied\\n" > "$1"', malformedTemp);
+  assert.notStrictEqual(malformed.status, 0, 'noncanonical temp leaf must be denied');
+  assert.strictEqual(fs.existsSync(malformedTemp), false);
+  assert.ok(!profile.profile.includes(`(allow file-write* (subpath "${worktree}"))`));
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 test('packet new-leaf authority rejects a symlinked parent escape', () => {
@@ -980,6 +1041,7 @@ test('option-like prompt stays out of argv and arrives verbatim over stdin', () 
     '--permission-mode', 'acceptEdits',
     '--settings', JSON.stringify(WORKER.CLAUDE_SETTINGS),
     '--tools', WORKER.CLAUDE_FILE_TOOLS.join(','),
+    '--allowedTools', WORKER.CLAUDE_FILE_TOOLS.join(','),
     '--disallowedTools', WORKER.CLAUDE_DISALLOWED_TOOLS.join(','),
     '--safe-mode', '--strict-mcp-config', '--no-session-persistence',
   ]);
@@ -1080,6 +1142,7 @@ test('Claude launch boundary uses exact contained argv and rejects caller proces
       '--print', '--model', 'opus', '--permission-mode', 'acceptEdits',
       '--settings', JSON.stringify(WORKER.CLAUDE_SETTINGS),
       '--tools', WORKER.CLAUDE_FILE_TOOLS.join(','),
+      '--allowedTools', WORKER.CLAUDE_FILE_TOOLS.join(','),
       '--disallowedTools', WORKER.CLAUDE_DISALLOWED_TOOLS.join(','), '--safe-mode',
       '--strict-mcp-config', '--no-session-persistence',
     ]);
@@ -1471,7 +1534,15 @@ test('pinned Claude bootstraps auth status through the production containment bo
   // prompt or model call. Keep the payload private and assert only its bounded
   // shape, so credentials, email, org IDs, and subscription details never
   // enter test output or evidence.
-  const result = await WORKER.runContainedClaudeAuthStatus(run, childEnv);
+  let result;
+  try {
+    result = await WORKER.runContainedClaudeAuthStatus(run, childEnv);
+  } catch (error) {
+    assert.strictEqual(error.code, 'CLAUDE_SUBSCRIPTION_REAUTH_REQUIRED');
+    assert.match(error.message, /preflight blocked before model launch/);
+    assert.match(error.operatorAction, /auth login --claudeai interactively/);
+    return;
+  }
   assert.strictEqual(result.status, 0,
     `contained Claude auth bootstrap failed with exit ${result.status}`);
   assert.strictEqual(result.loggedIn, true,
@@ -1479,6 +1550,42 @@ test('pinned Claude bootstraps auth status through the production containment bo
   assert.strictEqual(result.authMethod, 'oauth_token');
   assert.strictEqual(typeof result.apiProvider, 'string');
   assert.deepStrictEqual(Object.keys(result).sort(), ['apiProvider', 'authMethod', 'loggedIn', 'status']);
+});
+
+test('Claude OAuth preflight rejects expired or unverifiable credentials before launch without exposing tokens', () => {
+  const now = 2_000_000;
+  const fresh = WORKER.assertClaudeOAuthFreshness({
+    expiresAt: now + WORKER.CLAUDE_OAUTH_EXPIRY_SKEW_MS + 1,
+    hasRefreshToken: true,
+    accessToken: 'must-never-be-returned',
+    refreshToken: 'must-never-be-returned',
+  }, now);
+  assert.deepStrictEqual(fresh, {
+    expiresAt: now + WORKER.CLAUDE_OAUTH_EXPIRY_SKEW_MS + 1,
+    hasRefreshToken: true,
+  });
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(fresh, 'accessToken'), false);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(fresh, 'refreshToken'), false);
+  for (const metadata of [
+    { expiresAt: now, hasRefreshToken: true },
+    { expiresAt: now + WORKER.CLAUDE_OAUTH_EXPIRY_SKEW_MS, hasRefreshToken: false },
+    { expiresAt: null, hasRefreshToken: true },
+  ]) {
+    assert.throws(() => WORKER.assertClaudeOAuthFreshness(metadata, now), (error) => {
+      assert.strictEqual(error.code, 'CLAUDE_SUBSCRIPTION_REAUTH_REQUIRED');
+      assert.match(error.message, /Operator action: .*auth login --claudeai interactively/);
+      assert.doesNotMatch(error.message, /must-never-be-returned/);
+      return true;
+    });
+  }
+  assert.throws(() => WORKER.assertClaudeOAuthFreshness({ expiresAt: now + 120000 }, NaN),
+    /finite clock/);
+
+  const source = fs.readFileSync(path.join(ROOT, 'builder-control', 'aegis-worker.cjs'), 'utf8');
+  const launch = source.slice(source.indexOf('function launchClaudeProcess'),
+    source.indexOf('function grokArgv'));
+  assert.ok(launch.indexOf('readClaudeOAuthToken()') < launch.indexOf('spawnImpl('),
+    'Claude credential freshness must be checked before the model process is spawned');
 });
 
 test('Claude builder has only file tools and callers cannot restore Bash authority', () => {
@@ -1500,6 +1607,148 @@ test('Claude tool policy denies model-issued reads of subscription config and se
     'Read(~/.ssh/**)', 'Read(~/.aws/**)', 'Read(~/.config/gcloud/**)',
     'Read(~/Library/Keychains/**)', 'Bash(security *)', 'Bash(/usr/bin/security *)',
   ]) assert.strictEqual(deny.includes(rule), true, rule);
+});
+
+test('Claude expired OAuth is classified as MODEL_AUTH_FAILURE only on a terminal non-zero exit', () => {
+  const text = 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.';
+  const failure = WORKER.classifyBuilderFailure('claude-subscription', 1, text, '');
+  assert.deepStrictEqual(failure, {
+    code: 'MODEL_AUTH_FAILURE',
+    provider: 'claude-subscription',
+    summary: 'Claude authentication expired. AEGIS marked Claude unavailable for this objective and will use the next eligible builder.',
+    retrySafe: true,
+    failoverEligible: true,
+  });
+  assert.strictEqual(WORKER.classifyBuilderFailure('claude-subscription', 0, text, ''), null);
+  assert.strictEqual(WORKER.classifyBuilderFailure('grok-subscription', 1, text, ''), null);
+});
+
+test('Claude auth failure records the canonical Grok handoff and blocks same-route retry', () => {
+  const f = fixture('Preserve this objective exactly across provider failover.',
+    { FAKE_CLAUDE_MODE: 'auth-fail' });
+  const failed = waitFor(f.read, (run) => run.state === 'BUILD_FAILED');
+  assert.strictEqual(failed.build.failure.code, 'MODEL_AUTH_FAILURE');
+  assert.deepStrictEqual(failed.build.providerSelection, {
+    provider: 'grok-subscription',
+    model: 'grok-4.6',
+    reason: failed.build.providerSelection.reason,
+  });
+  assert.match(failed.build.providerSelection.reason, /next eligible canonical subscription builder/);
+  assert.strictEqual(failed.build.handoff.state, 'READY_FOR_PROVIDER_HANDOFF');
+  assert.strictEqual(failed.build.handoff.sameProviderRetryAllowed, false);
+  assert.strictEqual(failed.build.handoff.unchangedObjective, true);
+  assert.strictEqual(failed.build.recovery.retrySafe, false);
+  assert.strictEqual(failed.build.recovery.providerFailoverRequired, true);
+  assert.strictEqual(failed.build.recovery.selectedProvider, 'grok-subscription');
+  assert.strictEqual(failed.build.authorizedMutationObserved, false);
+  const retry = control(f,
+    `try{R.retryRun(${JSON.stringify(f.runId)});process.exit(9)}catch(e){console.log(e.code)}`);
+  assert.strictEqual(retry.status, 0, retry.stderr);
+  assert.match(retry.stdout, /RECOVERY_UNSAFE/);
+  fs.rmSync(f.tmp, { recursive: true, force: true });
+});
+
+test('unchanged objective never reselects the unavailable Claude provider', () => {
+  const prompt = 'Implement the exact canonical objective; do not drift.';
+  const launch = { provider: 'claude-subscription', model: 'opus', prompt };
+  const failure = WORKER.classifyBuilderFailure('claude-subscription', 1,
+    'API Error: 401 OAuth access token has expired', '');
+  const selected = WORKER.selectFailoverBuilder(launch, failure,
+    { objective: 'Bound AEGIS operator dashboard objective exactly.' });
+  assert.strictEqual(selected.launchSpec.provider, 'grok-subscription');
+  assert.notStrictEqual(selected.launchSpec.provider, launch.provider);
+  assert.strictEqual(selected.launchSpec.prompt, prompt);
+  assert.strictEqual(selected.handoff.sameProviderRetryAllowed, false);
+  assert.strictEqual(selected.handoff.unchangedObjective, true);
+});
+
+test('canonical policy selects Grok 4.6 as the next eligible subscription builder', () => {
+  const policy = WORKER.loadModelRoutingPolicy();
+  assert.deepStrictEqual(policy.fallbacks.orchestrator, ['claude', 'grok-builder']);
+  assert.deepStrictEqual(policy.models['grok-builder'].workerRoute,
+    { provider: 'grok-subscription', model: 'grok-4.6' });
+  const selected = WORKER.selectFailoverBuilder(
+    { provider: 'claude-subscription', model: 'opus', prompt: 'same prompt' },
+    { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription', failoverEligible: true },
+    { objective: 'same objective' }, policy);
+  assert.strictEqual(selected.launchSpec.model, 'grok-4.6');
+  assert.match(selected.selectionReason, /next eligible canonical subscription builder/);
+  assert.match(selected.handoff.objectiveSha256, /^[0-9a-f]{64}$/);
+  assert.match(selected.handoff.promptSha256, /^[0-9a-f]{64}$/);
+});
+
+test('Grok launch descriptor pins exact file-only argv inside the outer deny-default packet boundary', () => {
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-grok-launch-'));
+  const prior = {
+    NODE_ENV: process.env.NODE_ENV,
+    executable: process.env.AEGIS_TEST_GROK_EXECUTABLE,
+    containment: process.env.AEGIS_TEST_CONTAINMENT_MODE,
+  };
+  let grokHome;
+  try {
+    const worktree = path.join(tmp, 'worktree');
+    fs.mkdirSync(worktree);
+    fs.writeFileSync(path.join(worktree, 'allowed.txt'), 'before\n');
+    fs.writeFileSync(path.join(worktree, 'check.cjs'), 'process.exit(0);\n');
+    const packet = path.join(worktree, 'packet.json');
+    fs.writeFileSync(packet, JSON.stringify({
+      packetId: 'PKT-GROK-ARGV',
+      agentId: 'claude-code',
+      sourceOfTruth: ['allowed.txt'],
+      testsRequired: ['node check.cjs'],
+      filesAllowed: ['allowed.txt'],
+    }));
+    const executable = path.join(tmp, 'grok-fixture');
+    fs.writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    grokHome = fs.mkdtempSync('/private/tmp/aegis-grok-');
+    fs.chmodSync(grokHome, 0o700);
+    fs.mkdirSync(path.join(grokHome, '.grok'), { mode: 0o700 });
+    fs.mkdirSync(path.join(grokHome, 'tmp'), { mode: 0o700 });
+    process.env.NODE_ENV = 'test';
+    process.env.AEGIS_TEST_GROK_EXECUTABLE = executable;
+    process.env.AEGIS_TEST_CONTAINMENT_MODE = 'DETERMINISTIC_PROFILE_ONLY';
+
+    const prompt = '--dangerously-skip-permissions; $(touch never)';
+    const prepared = WORKER.prepareGrokLaunch(
+      { objective: 'bound objective', packet, worktree: { path: worktree } },
+      { provider: 'grok-subscription', model: 'grok-4.6', prompt }, grokHome);
+    assert.strictEqual(prepared.command.bin, CONTAINMENT.SANDBOX_EXEC);
+    assert.strictEqual(prepared.contained.profile.profile.startsWith('(version 1)\n(deny default)\n'), true);
+    assert.strictEqual(prepared.contained.allowlists.packetId, 'PKT-GROK-ARGV');
+    assert.deepStrictEqual(prepared.contained.allowlists.writePaths, ['allowed.txt']);
+    assert.deepStrictEqual(prepared.argv, [
+      '--single', prompt, '--model', 'grok-4.6', '--permission-mode', 'acceptEdits',
+      '--output-format', 'plain', '--no-subagents', '--verbatim', '--no-plan',
+      '--disable-web-search', '--tools', 'read_file,search_replace,grep,list_dir',
+      '--disallowed-tools', 'run_terminal_cmd,web_search,web_fetch,task', '--max-turns', '32',
+    ]);
+    assert.strictEqual(prepared.argv.includes('bypassPermissions'), false);
+    assert.strictEqual(prepared.argv.includes('run_terminal_cmd'), false,
+      'the shell tool must appear only inside the disallowed-tools value');
+    assert.strictEqual(prepared.env.HOME, grokHome);
+    assert.strictEqual(prepared.env.GROK_HOME, path.join(grokHome, '.grok'));
+    assert.strictEqual(prepared.env.GROK_MANAGED_MCPS_ENABLED, 'false');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(prepared.env, 'ANTHROPIC_API_KEY'), false);
+  } finally {
+    if (prior.NODE_ENV === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prior.NODE_ENV;
+    if (prior.executable === undefined) delete process.env.AEGIS_TEST_GROK_EXECUTABLE;
+    else process.env.AEGIS_TEST_GROK_EXECUTABLE = prior.executable;
+    if (prior.containment === undefined) delete process.env.AEGIS_TEST_CONTAINMENT_MODE;
+    else process.env.AEGIS_TEST_CONTAINMENT_MODE = prior.containment;
+    if (grokHome) fs.rmSync(grokHome, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Grok builder cannot review or approve its own exact subject', () => {
+  const selected = WORKER.selectFailoverBuilder(
+    { provider: 'claude-subscription', model: 'opus', prompt: 'exact subject prompt' },
+    { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription', failoverEligible: true },
+    { objective: 'exact subject objective' });
+  assert.strictEqual(selected.handoff.builderMayApproveOwnWork, false);
+  assert.deepStrictEqual(selected.handoff.excludedSelfReviewModels, ['grok']);
+  assert.deepStrictEqual(selected.handoff.independentReviewers,
+    [{ roleId: 'implementation-review', model: 'codex', providerFamily: 'codex' }]);
 });
 
 test('production Claude executable is an absolute approved version pin', () => {

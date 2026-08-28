@@ -120,6 +120,11 @@
     box-shadow:0 0 0 3px color-mix(in srgb,var(--active) 24%,transparent)}
   @media (prefers-reduced-motion: reduce){
     *{transition:none!important}
+    /* The handoff strip is the only element that changes appearance when a
+       stage moves, so its one transition is named here as well as covered by
+       the wildcard: under reduced motion the border simply is the new colour,
+       with nothing travelling across the screen. */
+    .handoff{transition:none!important}
   }
 
   /* ── lists ──────────────────────────────────────────────────────── */
@@ -285,6 +290,22 @@
   .command-card{min-height:66px;padding:10px 12px;border-left-width:2px;background:rgba(5,10,16,.55)}
   .command-card.is-now,.command-card.is-next,.command-card.is-blocked,.command-card.is-clear{grid-column:span 2}
   .command-value{font-size:14px;line-height:1.4}.command-label{font-size:11px;color:#829bb2}
+
+  /* ── handoff indicator ──
+     One compact line, rendered only when canonical run state reports that the
+     bound run moved from one workflow stage to another. It carries no motion
+     of its own beyond a border colour change, which reduced motion disables
+     above. When no transition has been reported it is [hidden] and says
+     nothing, because an idle strip that still reads like activity is exactly
+     the fabrication this page exists to avoid. */
+  .handoff{display:flex;flex-wrap:wrap;align-items:baseline;gap:5px 10px;margin:10px 0 0;
+    padding:6px 10px;border:1px solid #2b465b;border-left:2px solid var(--cyan);border-radius:3px;
+    background:#0f1a24;font-size:12px;line-height:1.45;transition:border-color .12s linear}
+  .handoff[hidden]{display:none}
+  .handoff-label{font:650 10px/1.3 var(--mono);letter-spacing:.12em;color:var(--cyan)}
+  .handoff-flow{min-width:0;color:var(--text-0);overflow-wrap:anywhere}
+  .handoff-task{color:var(--text-1)}
+  .handoff-at{color:var(--text-2);font-size:11px}
   .founder-details{margin-top:12px}.founder-details>summary{font-size:12px;color:#9ab2c8}
 
   #topology-overview{min-height:220px;border-color:#24516b;background:#0c1620}
@@ -821,6 +842,112 @@
     lastLaunchedBuilder = { provider: builder.provider || null, model: builder.model || null };
   }
 
+  // ── handoff indicator ─────────────────────────────────────────────
+  // It activates ONLY when two canonical projections of the SAME run, ordered
+  // by the run record's own updatedAt, report different workflow states. That
+  // is a transition the canonical runtime already wrote and the ledger already
+  // recorded; this page reports it and decides nothing. A repaint, a
+  // reconnect, a re-read of the same record, an out-of-order snapshot, or a
+  // state change the canonical transition counter does not corroborate is NOT
+  // a handoff and leaves the strip silent. There is no timer here: it changes
+  // when canonical state changes and at no other moment.
+  var handoffSeen = Object.create(null);   // runId -> { state, at, count }
+  var handoffMoved = null;                 // the last real transition observed
+  var handoffAnnounced = null;
+
+  // Who is named as holding a stage. A routed model is the canonical identity
+  // when the projection carries one; nothing is inferred from the fact that a
+  // build is running, and an unknown state names itself rather than borrowing
+  // an owner.
+  function builderIdentity(run){
+    var route = (run && run.route) || null;
+    if (route && route.model){
+      return route.model + (route.execution ? ' (' + route.execution + ')' : '');
+    }
+    var builder = (run && run.builder) ||
+      (run && lastLaunchedRunId === run.runId ? lastLaunchedBuilder : null);
+    if (builder && (builder.model || builder.provider)){
+      return [builder.model, builder.provider].filter(Boolean).join(' via ');
+    }
+    return 'the governed builder — model identity UNAVAILABLE in current status evidence';
+  }
+
+  function handoffActor(state, run){
+    if (state === 'BUILDING' || state === 'CORRECTING') return builderIdentity(run);
+    var ACTORS = {
+      CREATED: 'AEGIS objective intake',
+      INTAKE_RECORDED: 'AEGIS objective intake',
+      ROUTED: 'AEGIS capability routing',
+      WORKTREE_READY: 'AEGIS worktree preparation',
+      BUILT: 'the deterministic checks',
+      CHECKS_PASSED: 'independent review',
+      REVIEW_BOUND: 'AEGIS checkpoint governance',
+      CHECKPOINTED: 'the recorded checkpoint',
+      BUILD_FAILED: 'the operator',
+      CHECKS_FAILED: 'the operator',
+      ROLLED_BACK: 'the operator',
+      ABANDONED: 'the operator'
+    };
+    return ACTORS[state] || ('the ' + String(state || 'unknown').replace(/_/g,' ').toLowerCase() +
+      ' stage — its owner is UNAVAILABLE in current status evidence');
+  }
+
+  function observeHandoff(run){
+    if (!run || !run.runId || !run.state) return handoffMoved;
+    var at = Date.parse(run.updatedAt || '');
+    var count = typeof run.transitions === 'number' ? run.transitions : null;
+    var seen = handoffSeen[run.runId] || null;
+    var record = { state: run.state, at: at, count: count };
+    // A first sighting is a starting point, never a move.
+    if (!seen){ handoffSeen[run.runId] = record; return handoffMoved; }
+    // Evidence that cannot be ordered, or that is older than what has already
+    // been read, proves nothing about a direction of travel.
+    if (!Number.isFinite(at) || !Number.isFinite(seen.at) || at < seen.at) return handoffMoved;
+    if (run.state === seen.state){ handoffSeen[run.runId] = record; return handoffMoved; }
+    // The canonical transition counter must corroborate a state change when
+    // the projection carries one on both sides. A reading that fails this test
+    // is not merely too weak to CLAIM a handoff — it is not usable as the
+    // baseline for the next one either. Recording it would let evidence this
+    // function has just refused become the "from" half of a later sentence, so
+    // the page would describe a move as starting from a state it declined to
+    // believe, and the real transition out of the last corroborated state would
+    // never be reported at all.
+    if (count != null && seen.count != null && count <= seen.count) return handoffMoved;
+    handoffSeen[run.runId] = record;
+    handoffMoved = { runId: run.runId, from: seen.state, to: run.state, at: run.updatedAt || null };
+    return handoffMoved;
+  }
+
+  function renderHandoff(host, run, task){
+    var moved = observeHandoff(run);
+    var strip = el('div','handoff');
+    var active = !!(moved && run && moved.runId === run.runId && moved.to === run.state);
+    strip.setAttribute('data-handoff-state', active ? 'ACTIVE' : 'INACTIVE');
+    if (!active){
+      // Nothing observed, so nothing claimed. The node stays in the DOM and
+      // hidden rather than rendering a reassuring empty state.
+      strip.hidden = true;
+      host.appendChild(strip);
+      return;
+    }
+    var from = handoffActor(moved.from, run);
+    var to = handoffActor(moved.to, run);
+    strip.appendChild(el('span','handoff-label','HANDOFF'));
+    strip.appendChild(el('span','handoff-flow', from + ' handed off to ' + to + '.'));
+    strip.appendChild(el('span','handoff-task','Now: ' + task));
+    strip.appendChild(el('span','handoff-at mono',
+      'canonical ' + moved.from + ' → ' + moved.to + ', run record written ' + (moved.at || 'UNAVAILABLE')));
+    host.appendChild(strip);
+    // Announced once per transition, not once per repaint: a live region that
+    // re-reads the same sentence on every push is noise, not information.
+    var key = moved.runId + '|' + moved.from + '|' + moved.to + '|' + (moved.at || '');
+    if (handoffAnnounced !== key){
+      handoffAnnounced = key;
+      var live = $('live');
+      if (live) live.textContent = from + ' handed off to ' + to + '. Now: ' + task;
+    }
+  }
+
   function renderFounderSummary(view){
     var host = $('founder-body'); if (!host) return;
     var topologyHost = $('topology-live-body');
@@ -875,6 +1002,7 @@
     mission.appendChild(missionText);
     mission.appendChild(chip(opState.state));
     host.appendChild(mission);
+    renderHandoff(host, boundRun, currentAction);
 
     function commandCard(label, value, cls){
       var card = el('div','command-card ' + (cls || ''));

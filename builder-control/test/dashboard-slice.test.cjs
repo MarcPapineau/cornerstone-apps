@@ -67,6 +67,36 @@ test('reduced motion is honoured for any future transitions', () => {
   assert.ok(/transition\s*:\s*none/.test(block.slice(0, 400)), 'reduced motion must disable transitions');
 });
 
+// ── handoff indicator (PKT-20260825-SWITCHBOARD-FOUNDATION) ────────────────
+test('the handoff indicator is compact, motion-free under reduced motion, and silent when inactive', () => {
+  assert.ok(/\.handoff\s*\{[^}]*display:flex/.test(code), 'the handoff indicator has no compact single-line layout');
+  assert.ok(/\.handoff\[hidden\]\s*\{\s*display:none/.test(code),
+    'an inactive handoff strip must actually disappear — display:flex would override the hidden attribute');
+  const reduced = code.slice(code.indexOf('prefers-reduced-motion'));
+  assert.ok(/\.handoff\s*\{\s*transition:none!important/.test(reduced.slice(0, 600)),
+    'the handoff indicator does not explicitly drop its one transition under reduced motion');
+  const handoffCss = code.slice(code.indexOf('.handoff{display:flex'), code.indexOf('.handoff-at'));
+  assert.ok(handoffCss.length > 0 && handoffCss.length < 900, 'the handoff indicator block was not located');
+  assert.ok(!/\banimation\s*:/.test(handoffCss), 'the handoff indicator must not animate');
+  assert.ok(/transition:border-color/.test(handoffCss),
+    'the indicator has no single named transition for reduced motion to disable');
+});
+
+test('the handoff indicator claims a transition only from canonical run state, never from a repaint', () => {
+  const fn = code.slice(code.indexOf('function observeHandoff'), code.indexOf('function renderHandoff'));
+  assert.ok(fn.length > 0, 'no observeHandoff() boundary found');
+  assert.ok(/if\s*\(!seen\)\s*\{[^}]*return handoffMoved/.test(fn),
+    'the first sighting of a run must not be reported as a transition');
+  assert.ok(/at\s*<\s*seen\.at/.test(fn), 'out-of-order evidence is not refused');
+  assert.ok(/run\.state\s*===\s*seen\.state/.test(fn), 'an unchanged state must not be reported as a handoff');
+  assert.ok(/count\s*<=\s*seen\.count/.test(fn),
+    'a state change is not corroborated against the canonical transition counter');
+  const render = code.slice(code.indexOf('function renderHandoff'), code.indexOf('function renderFounderSummary'));
+  assert.ok(/moved\.to\s*===\s*run\.state/.test(render),
+    'the strip may only stay lit while the run is still in the state it was handed to');
+  assert.ok(/strip\.hidden\s*=\s*true/.test(render), 'an inactive strip must be hidden, not rendered as reassuring text');
+});
+
 // ── one data path, no seeds ─────────────────────────────────────────────────
 test('the slice reads window.AEGIS_STATE and has no fallback seed object', () => {
   assert.ok(/window\.AEGIS_STATE/.test(code), 'must read the projector output');
@@ -667,6 +697,37 @@ test('DOM: a running build shows its mission, current action, elapsed evidence, 
   }
   assert.ok(!/Claude|Opus/.test(body), 'the dashboard inferred a model that current run evidence does not name');
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'running');
+});
+
+// ── handoff indicator: it must stay dark until canonical state moves ───────
+function handoffNode(page) {
+  const nodes = findByAttr(page.document.getElementById('founder-body'), 'data-handoff-state');
+  assert.strictEqual(nodes.length, 1, `expected exactly one handoff indicator, found ${nodes.length}`);
+  return nodes[0];
+}
+
+test('DOM: an idle dashboard renders a hidden, silent handoff indicator', () => {
+  const node = handoffNode(bootPage(fixtureState()));
+  assert.strictEqual(node.attrs['data-handoff-state'], 'INACTIVE',
+    'an idle dashboard reported a handoff it never observed');
+  assert.strictEqual(node.hidden, true, 'the inactive indicator must be hidden, not merely empty');
+  assert.strictEqual(node.textContent, '', 'the inactive indicator must say nothing at all');
+});
+
+test('DOM: the FIRST sighting of a running build is a starting point, not a handoff', () => {
+  const run = {
+    runId: 'RUN-FIRST', state: 'BUILDING', objective: 'First sighting',
+    updatedAt: '2026-08-28T09:00:00.000Z', transitions: 4,
+    route: { model: 'claude-opus-5', execution: 'claude-cli', source: 'tool-router.cjs routeRole' },
+    build: { mode: 'async', status: 'RUNNING', startedAt: '2026-08-28T08:55:00.000Z',
+      activity: { active: true, summary: 'Editing the dashboard.' } },
+  };
+  const page = bootPage(fixtureState({ runs: { state: 'OK', runs: [run],
+    current: { state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, reason: 'bound' } } }));
+  const node = handoffNode(page);
+  assert.strictEqual(node.attrs['data-handoff-state'], 'INACTIVE',
+    'a run that was already BUILDING when the page opened is not evidence of a transition');
+  assert.ok(!/handed off/.test(page.text('founder-body')), 'the page invented a handoff from a single observation');
 });
 
 // ── FINDING #10 RED PROOF: four evidence states, four different sentences ──
@@ -1389,6 +1450,160 @@ async function asyncTests() {
     assert.ok(/Ready to open a pull request/.test(after), 'the pushed verdict did not repaint');
     // The whole point of the binding: the same subject hash governs both.
     assert.ok(!/old000000000/.test(after), 'the old subject hash is still on screen after the repaint');
+  });
+
+  // ── handoff indicator, driven exactly as the server drives it ────────────
+  function handoffStatus() {
+    return {
+      generatedAt: '2026-08-28T10:00:00.000Z',
+      engineering: { state: 'UNAVAILABLE' },
+      integration: { connectors: [] },
+      reviewers: [], events: [],
+      runs: [{ runId: 'RUN-HANDOFF', state: 'BUILDING', objective: 'Add the handoff indicator',
+        updatedAt: '2026-08-28T10:00:00.000Z', transitions: 4,
+        route: { model: 'claude-opus-5', execution: 'claude-cli', source: 'tool-router.cjs routeRole' },
+        build: { mode: 'async', status: 'RUNNING', workerPid: 99, startedAt: '2026-08-28T09:55:00.000Z',
+          activity: { active: true, code: 'RUNNING', phase: 'RUNNING', summary: 'Editing the dashboard.' } } }],
+      runsBinding: { state: 'BOUND', runId: 'RUN-HANDOFF', updatedAt: '2026-08-28T10:00:00.000Z', reason: 'bound' },
+    };
+  }
+
+  function movedToBuilt() {
+    const built = JSON.parse(JSON.stringify(handoffStatus()));
+    built.generatedAt = '2026-08-28T10:04:00.000Z';
+    built.runs[0].state = 'BUILT';
+    built.runs[0].updatedAt = '2026-08-28T10:03:00.000Z';
+    built.runs[0].transitions = 5;
+    built.runs[0].build.status = 'EXITED';
+    built.runs[0].build.activity = { active: false, code: 'EXITED', phase: 'STOPPED', summary: 'Worker exited.' };
+    built.runsBinding.updatedAt = '2026-08-28T10:03:00.000Z';
+    return built;
+  }
+
+  await atest('DOM: a canonical stage change between live pushes activates one plain-English handoff', async () => {
+    const page = bootPage(fixtureState(), { status: handoffStatus() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(handoffNode(page).attrs['data-handoff-state'], 'INACTIVE',
+      'precondition: one observation of a BUILDING run is not a transition');
+
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(movedToBuilt()) }));
+    const node = handoffNode(page);
+    assert.strictEqual(node.attrs['data-handoff-state'], 'ACTIVE',
+      'a real canonical stage change did not activate the indicator');
+    assert.notStrictEqual(node.hidden, true, 'an observed handoff must actually be visible');
+    const text = node.textContent;
+    assert.ok(/claude-opus-5 \(claude-cli\) handed off to the deterministic checks\./.test(text),
+      `the routed model and its destination are not both named: ${text}`);
+    assert.ok(/Now: The build finished and is waiting for deterministic checks\./.test(text),
+      `the current task is not stated in plain English: ${text}`);
+    assert.ok(/canonical BUILDING → BUILT, run record written 2026-08-28T10:03:00\.000Z/.test(text),
+      `the exact canonical states and the record timestamp are not cited: ${text}`);
+    assert.ok(/claude-opus-5 \(claude-cli\) handed off to the deterministic checks\./.test(page.text('live')),
+      'the transition was never announced to assistive technology');
+  });
+
+  await atest('DOM: repeating the same canonical state repaints without inventing a second handoff', async () => {
+    const page = bootPage(fixtureState(), { status: handoffStatus() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(movedToBuilt()) }));
+    const first = handoffNode(page).textContent;
+
+    const repeat = movedToBuilt();
+    repeat.generatedAt = '2026-08-28T10:05:00.000Z';   // a new push, the same run record
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(repeat) }));
+    const node = handoffNode(page);
+    assert.strictEqual(node.attrs['data-handoff-state'], 'ACTIVE',
+      'the observed handoff was dropped by a repaint of the same evidence');
+    assert.strictEqual(node.textContent, first,
+      'a repaint of unchanged state rewrote the handoff — a repaint is not a transition');
+  });
+
+  await atest('DOM: out-of-order and uncorroborated evidence never light the handoff', async () => {
+    for (const c of [
+      { name: 'older evidence contradicting what was already read',
+        mutate: (s) => { s.runs[0].state = 'BUILDING'; s.runs[0].updatedAt = '2026-08-28T09:59:00.000Z';
+          s.runs[0].transitions = 4; } },
+      { name: 'a state change the canonical transition counter does not corroborate',
+        mutate: (s) => { s.runs[0].state = 'CHECKS_PASSED'; s.runs[0].updatedAt = '2026-08-28T10:06:00.000Z';
+          s.runs[0].transitions = 5; } },
+      { name: 'a run with no orderable timestamp',
+        mutate: (s) => { s.runs[0].state = 'CHECKS_PASSED'; s.runs[0].updatedAt = null; s.runs[0].transitions = 9; } },
+    ]) {
+      const page = bootPage(fixtureState(), { status: handoffStatus() });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(movedToBuilt()) }));
+      assert.strictEqual(handoffNode(page).attrs['data-handoff-state'], 'ACTIVE', `${c.name}: precondition failed`);
+
+      const bad = movedToBuilt();
+      bad.generatedAt = '2026-08-28T10:07:00.000Z';
+      c.mutate(bad);
+      bad.runsBinding.updatedAt = bad.runs[0].updatedAt;
+      page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(bad) }));
+      const node = handoffNode(page);
+      assert.strictEqual(node.attrs['data-handoff-state'], 'INACTIVE',
+        `${c.name}: the indicator claimed a handoff the evidence does not support`);
+      assert.strictEqual(node.textContent, '', `${c.name}: an unsupported handoff still rendered text`);
+    }
+  });
+
+  await atest('DOM: a reading the transition counter refuses never becomes the baseline for the next handoff', async () => {
+    // The subtle version of the fabrication this indicator exists to prevent.
+    // Refusing to CLAIM a handoff off uncorroborated evidence is only half the
+    // rule: if that same evidence is still recorded as "what we last saw", the
+    // next real transition is either described as starting from a state the
+    // page already declined to believe, or — as here — silently swallowed,
+    // because the refused reading and the real one name the same state.
+    const page = bootPage(fixtureState(), { status: handoffStatus() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(movedToBuilt()) }));
+    assert.strictEqual(handoffNode(page).attrs['data-handoff-state'], 'ACTIVE',
+      'precondition: BUILDING → BUILT should have been observed');
+
+    // The state moves, but the canonical transition counter does not: refused.
+    const refused = movedToBuilt();
+    refused.generatedAt = '2026-08-28T10:07:00.000Z';
+    refused.runs[0].state = 'CHECKS_PASSED';
+    refused.runs[0].updatedAt = '2026-08-28T10:06:00.000Z';
+    refused.runsBinding.updatedAt = refused.runs[0].updatedAt;
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(refused) }));
+    assert.strictEqual(handoffNode(page).attrs['data-handoff-state'], 'INACTIVE',
+      'precondition: an uncorroborated state change must not light the strip');
+
+    // The corroborated move out of BUILT arrives afterwards, and is real.
+    const real = movedToBuilt();
+    real.generatedAt = '2026-08-28T10:09:00.000Z';
+    real.runs[0].state = 'CHECKS_PASSED';
+    real.runs[0].updatedAt = '2026-08-28T10:08:00.000Z';
+    real.runs[0].transitions = 6;
+    real.runsBinding.updatedAt = real.runs[0].updatedAt;
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(real) }));
+
+    const node = handoffNode(page);
+    assert.strictEqual(node.attrs['data-handoff-state'], 'ACTIVE',
+      'the refused reading was kept as the baseline, so the real canonical transition out of BUILT was never reported');
+    assert.ok(/canonical BUILT → CHECKS_PASSED, run record written 2026-08-28T10:08:00\.000Z/.test(node.textContent),
+      `the reported transition does not start from the last corroborated state: ${node.textContent}`);
+    assert.ok(/the deterministic checks handed off to independent review\./.test(node.textContent),
+      `the plain-English actors do not match the canonical states: ${node.textContent}`);
+  });
+
+  await atest('DOM: a newly bound, previously unseen run inherits no handoff from the run before it', async () => {
+    const page = bootPage(fixtureState(), { status: handoffStatus() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(movedToBuilt()) }));
+    assert.strictEqual(handoffNode(page).attrs['data-handoff-state'], 'ACTIVE', 'precondition failed');
+
+    const other = movedToBuilt();
+    other.generatedAt = '2026-08-28T11:00:00.000Z';
+    other.runs = [{ runId: 'RUN-OTHER', state: 'BUILT', objective: 'A different run',
+      updatedAt: '2026-08-28T11:00:00.000Z', transitions: 5 }];
+    other.runsBinding = { state: 'BOUND', runId: 'RUN-OTHER', updatedAt: '2026-08-28T11:00:00.000Z', reason: 'bound' };
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(other) }));
+    const node = handoffNode(page);
+    assert.strictEqual(node.attrs['data-handoff-state'], 'INACTIVE',
+      'a different run inherited a handoff that was observed for another run');
+    assert.ok(!/handed off/.test(page.text('founder-body')),
+      'the previous run’s handoff sentence survived onto an unrelated run');
   });
 
   await atest('RED: a malformed live push never blanks or half-paints the summary', async () => {

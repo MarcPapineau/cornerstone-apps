@@ -76,6 +76,7 @@
   "models": {
     "claude": {
       "label": "Claude (Claude Code)",
+      "providerFamily": "claude",
       "execution": "SUBSCRIPTION",
       "workerRoute": {
         "provider": "claude-subscription",
@@ -94,6 +95,7 @@
     },
     "codex": {
       "label": "Codex CLI (ChatGPT.app)",
+      "providerFamily": "codex",
       "execution": "SUBSCRIPTION",
       "capabilities": [
         "implementation-review",
@@ -104,8 +106,28 @@
       "availabilityProbe": "review-adapters.cjs --doctor (local executable check) plus a read-only ephemeral zero-tool probe; the probe result is recorded in the Tool Capability Canon under codex-local",
       "costPerRouteUsd": 0
     },
+    "grok-builder": {
+      "label": "Grok Build CLI (subscription failover)",
+      "providerFamily": "grok",
+      "execution": "SUBSCRIPTION",
+      "workerRoute": {
+        "provider": "grok-subscription",
+        "model": "grok-4.6"
+      },
+      "workerRouteNote": "Contained implementation-only failover route. It inherits the canonical run objective and packet binding, disables web and subagents, exposes exact file tools only, and carries no approval authority.",
+      "capabilities": [
+        "implementation",
+        "analysis",
+        "documentation"
+      ],
+      "maxDataClass": "INTERNAL",
+      "availabilityProbe": "Pinned local executable plus authenticated subscription evidence; runtime activation still requires the bounded worker containment gate.",
+      "costPerRouteUsd": 0,
+      "approvalAuthority": "NONE"
+    },
     "grok": {
       "label": "Grok CLI",
+      "providerFamily": "grok",
       "execution": "METERED",
       "capabilities": [
         "adversarial-review",
@@ -142,6 +164,10 @@
   },
   "fallbacks": {
     "note": "A fallback is a DIFFERENT model with the required capability. It is never the same model retried, and never a general model imitating a specialist.",
+    "orchestrator": [
+      "claude",
+      "grok-builder"
+    ],
     "implementation-review": [
       "codex"
     ],

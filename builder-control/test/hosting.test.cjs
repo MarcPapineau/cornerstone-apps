@@ -485,6 +485,10 @@ test('RED: the browser cannot select the governed builder executable, provider, 
   assert.strictEqual(governed.model, 'opus');
   assert.strictEqual(governed.timeoutSec, 900);
   assert.ok(governed.prompt.includes(run.objective), 'the objective must remain prompt data');
+  assert.match(governed.prompt, /Use the authorized Edit or Write tools to apply the smallest correct change/,
+    'the headless builder was not explicitly required to apply its change');
+  assert.match(governed.prompt, /never describe a no-write response as a completed build/,
+    'the headless builder can silently degrade into a patch advisor');
   for (const forbidden of ['command', 'executable', 'permissionMode', 'shell']) {
     assert.ok(!(forbidden in governed), `${forbidden} crossed the server-created launch boundary`);
   }

@@ -97,9 +97,44 @@ const STATES = {
 
 const MAX_CORRECTIONS = 3;
 const WORKER_LAUNCH_GRACE_MS = 5000;
+const CHECK_FAILURE_TAIL_LINES = 80;
+const CHECK_FAILURE_TAIL_BYTES = 16 * 1024;
 
 const nowIso = () => new Date().toISOString();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+/**
+ * Keep failed check diagnostics useful without turning arbitrary process output
+ * into a credential store. This evidence remains in the private run record;
+ * the dashboard control response still returns counts only.
+ */
+function boundedCheckFailureTail(value) {
+  let text = String(value || '')
+    .replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '')
+    .replace(/-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/g, '[REDACTED PEM]')
+    .replace(/((?:set-)?cookie\s*:\s*)[^\r\n]*/ig, '$1[REDACTED]')
+    .replace(/(authorization\s*:\s*(?:bearer|basic)\s+)[^\s]+/ig, '$1[REDACTED]')
+    .replace(/(["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password|passwd)["']?\s*[=:]\s*["']?)[^\s,"'}]+/ig,
+      '$1[REDACTED]')
+    .replace(/([?&#](?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password)=)[^&#\s]*/ig,
+      '$1[REDACTED]')
+    .replace(/(https?:\/\/)[^/@\s]+@/ig, '$1[REDACTED]@')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?\b/g, '[REDACTED JWT]')
+    .replace(/\b(?:sk|gh[opusr]|github_pat|xox[baprs])-?[A-Za-z0-9_-]{12,}\b/ig, '[REDACTED TOKEN]')
+    // Unknown opaque strings are safer treated as secrets. This can redact a
+    // hash, but a digest is less useful than an accidentally persisted token.
+    .replace(/(?<![A-Za-z0-9])[A-Za-z0-9_+\/=.-]{32,}(?![A-Za-z0-9])/g, '[REDACTED OPAQUE]')
+    .replace(/[^\S\r\n]+$/gm, '');
+  const lines = text.split(/\r?\n/);
+  let truncated = lines.length > CHECK_FAILURE_TAIL_LINES;
+  text = lines.slice(-CHECK_FAILURE_TAIL_LINES).join('\n');
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length > CHECK_FAILURE_TAIL_BYTES) {
+    truncated = true;
+    text = bytes.subarray(bytes.length - CHECK_FAILURE_TAIL_BYTES).toString('utf8').replace(/^\uFFFD+/, '');
+  }
+  return { tail: text, truncated };
+}
 
 /**
  * Capture the OS identity of this exact process lifetime. PIDs and process
@@ -1569,7 +1604,19 @@ function runChecksClaimed(run) {
   const results = [];
   for (const cmd of cmds) {
     const r = spawnSync('bash', ['-lc', cmd], { cwd: worktreeReal, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-    results.push({ cmd, exit: r.status === null ? 124 : r.status });
+    const exit = r.status === null ? 124 : r.status;
+    const result = { cmd, exit };
+    if (exit !== 0 || r.error) {
+      const stdout = boundedCheckFailureTail(r.stdout);
+      const stderr = boundedCheckFailureTail(r.error ? `${r.stderr || ''}\n${r.error.message || ''}` : r.stderr);
+      result.failureEvidence = {
+        stdoutTail: stdout.tail,
+        stderrTail: stderr.tail,
+        stdoutTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated,
+      };
+    }
+    results.push(result);
   }
   run.checks = {
     ranAt: nowIso(), total: results.length, passed: results.filter((x) => x.exit === 0).length, results,

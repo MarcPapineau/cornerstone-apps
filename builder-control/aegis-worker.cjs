@@ -12,6 +12,7 @@ const HERE = __dirname;
 const ROOT = path.resolve(HERE, '..');
 const PACKETS_DIR = path.join(HERE, 'packets');
 const RUNTIME = path.join(HERE, 'aegis-run.cjs');
+const MODEL_ROUTING_POLICY = path.join(HERE, 'MODEL-ROUTING-POLICY.json');
 const TAIL_LINES = 24;
 const HEARTBEAT_MS = 1000;
 const TERMINATION_DEADLINE_MS = 2000;
@@ -23,13 +24,21 @@ const CANCEL_CLOSE_GRACE_MS = 1000;
 const MAX_PROMPT_BYTES = 64 * 1024;
 const MAX_TIMEOUT_SEC = 3600;
 const CLAUDE_MODELS = new Set(['opus', 'sonnet', 'haiku']);
+const GROK_MODELS = new Set(['grok-4.6', 'grok-4.5']);
 const CLAUDE_VERSION = '2.1.245';
 const CLAUDE_VERSIONS_DIR = path.join(os.homedir(), '.local', 'share', 'claude', 'versions');
 const CLAUDE_EXECUTABLE = path.join(CLAUDE_VERSIONS_DIR, CLAUDE_VERSION);
+const GROK_EXECUTABLE = path.join(os.homedir(), '.grok', 'bin', 'grok');
+const GROK_PINNED_EXECUTABLE = path.join(os.homedir(), '.grok', 'downloads', 'grok-macos-aarch64');
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CLAUDE_OAUTH_TOKEN_FILE_DESCRIPTOR = CONTAINMENT.CLAUDE_OAUTH_TOKEN_FD;
+const CLAUDE_OAUTH_EXPIRY_SKEW_MS = 60 * 1000;
 const CLAUDE_FILE_TOOLS = Object.freeze(['Read', 'Edit', 'Write', 'Glob', 'Grep']);
 const CLAUDE_DISALLOWED_TOOLS = Object.freeze(['Bash']);
+const GROK_FILE_TOOLS = Object.freeze(['read_file', 'search_replace', 'grep', 'list_dir']);
+const GROK_DISALLOWED_TOOLS = Object.freeze(['run_terminal_cmd', 'web_search', 'web_fetch', 'task']);
+const GROK_MAX_TURNS = 32;
+const GROK_HOME_PREFIX = '/private/tmp/aegis-grok-';
 const FIXED_PATH = [
   '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin',
   path.join(os.homedir(), '.local', 'bin'),
@@ -88,6 +97,25 @@ function nowIso() { return new Date().toISOString(); }
 function sha256(value) { return crypto.createHash('sha256').update(String(value)).digest('hex'); }
 function launchDigest(launchSpec) {
   return sha256(JSON.stringify(normalizeLaunchSpec(launchSpec)));
+}
+
+function authorizedWriteDigest(values, root = null) {
+  if (!Array.isArray(values)) throw new Error('authorized write paths must be an array');
+  const snapshot = values.map((value) => {
+    if (typeof value !== 'string') throw new Error('authorized write path must be a string');
+    const target = path.isAbsolute(value) ? value : path.resolve(root || '', value);
+    if (!path.isAbsolute(target)) throw new Error('authorized write path must resolve to an absolute path');
+    try {
+      const stat = fs.lstatSync(target);
+      if (stat.isSymbolicLink()) return { path: value, type: 'symlink', target: fs.readlinkSync(target) };
+      if (stat.isFile()) return { path: value, type: 'file', sha256: sha256(fs.readFileSync(target)) };
+      return { path: value, type: stat.isDirectory() ? 'directory' : 'other', size: stat.size };
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return { path: value, type: 'missing' };
+      throw error;
+    }
+  });
+  return sha256(JSON.stringify(snapshot));
 }
 
 function controlMac(secret, value) {
@@ -165,8 +193,8 @@ function normalizeLaunchSpec(value) {
   const allowed = new Set(['provider', 'prompt', 'model']);
   const unknown = Object.keys(value).filter((key) => !allowed.has(key));
   if (unknown.length) throw invalidLaunch(`unknown launchSpec field(s): ${unknown.join(', ')}`);
-  if (value.provider !== 'claude-subscription') {
-    throw invalidLaunch('provider must be claude-subscription');
+  if (value.provider !== 'claude-subscription' && value.provider !== 'grok-subscription') {
+    throw invalidLaunch('provider must be claude-subscription or grok-subscription');
   }
   if (typeof value.prompt !== 'string' || !value.prompt.trim()) {
     throw invalidLaunch('prompt must be a non-empty string');
@@ -175,11 +203,13 @@ function normalizeLaunchSpec(value) {
   if (Buffer.byteLength(value.prompt, 'utf8') > MAX_PROMPT_BYTES) {
     throw invalidLaunch(`prompt may not exceed ${MAX_PROMPT_BYTES} bytes`);
   }
-  const model = value.model === undefined ? 'opus' : value.model;
-  if (typeof model !== 'string' || !CLAUDE_MODELS.has(model)) {
-    throw invalidLaunch(`model must be one of ${[...CLAUDE_MODELS].join(', ')}`);
+  const models = value.provider === 'claude-subscription' ? CLAUDE_MODELS : GROK_MODELS;
+  const model = value.model === undefined
+    ? (value.provider === 'claude-subscription' ? 'opus' : 'grok-4.6') : value.model;
+  if (typeof model !== 'string' || !models.has(model)) {
+    throw invalidLaunch(`model must be one of ${[...models].join(', ')}`);
   }
-  return Object.freeze({ provider: 'claude-subscription', prompt: value.prompt, model });
+  return Object.freeze({ provider: value.provider, prompt: value.prompt, model });
 }
 
 function normalizeTimeoutSec(value) {
@@ -207,6 +237,114 @@ function resolveClaudeExecutable() {
   return real;
 }
 
+function resolveGrokExecutable() {
+  if (process.env.NODE_ENV === 'test' && process.env.AEGIS_TEST_GROK_EXECUTABLE) {
+    const real = fs.realpathSync(path.resolve(process.env.AEGIS_TEST_GROK_EXECUTABLE));
+    if (!path.isAbsolute(real) || !fs.statSync(real).isFile()) throw invalidLaunch('test Grok executable must resolve to a file');
+    fs.accessSync(real, fs.constants.X_OK);
+    return real;
+  }
+  const real = fs.realpathSync(GROK_EXECUTABLE);
+  if (real !== fs.realpathSync(GROK_PINNED_EXECUTABLE)) {
+    throw invalidLaunch('Grok executable must resolve to the pinned managed binary');
+  }
+  fs.accessSync(real, fs.constants.X_OK);
+  return real;
+}
+
+function classifyBuilderFailure(provider, exit, stdout, stderr) {
+  const output = `${stdout || ''}\n${stderr || ''}`;
+  if (provider === 'claude-subscription' && exit !== 0 &&
+      /(401[^\n]*(?:oauth|token)|oauth access token has expired|failed to authenticate)/i.test(output)) {
+    return Object.freeze({
+      code: 'MODEL_AUTH_FAILURE', provider,
+      summary: 'Claude authentication expired. AEGIS marked Claude unavailable for this objective and will use the next eligible builder.',
+      retrySafe: true, failoverEligible: true,
+    });
+  }
+  return null;
+}
+
+function loadModelRoutingPolicy() {
+  const parsed = JSON.parse(fs.readFileSync(MODEL_ROUTING_POLICY, 'utf8'));
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw invalidLaunch('model-routing policy root must be an object');
+  }
+  return parsed;
+}
+
+function selectFailoverBuilder(launchSpec, failure, run, policy = loadModelRoutingPolicy()) {
+  const current = normalizeLaunchSpec(launchSpec);
+  if (!failure || failure.code !== 'MODEL_AUTH_FAILURE' || failure.provider !== current.provider ||
+      failure.failoverEligible !== true) return null;
+  if (!run || typeof run.objective !== 'string' || !run.objective.trim()) {
+    throw invalidLaunch('provider failover requires the canonical run objective');
+  }
+  const order = policy.fallbacks && policy.fallbacks.orchestrator;
+  if (!Array.isArray(order) || order.length < 2) {
+    throw invalidLaunch('canonical policy declares no orchestrator provider failover');
+  }
+  const currentModel = Object.entries(policy.models || {}).find(([, declaration]) =>
+    declaration && declaration.workerRoute && declaration.workerRoute.provider === current.provider);
+  if (!currentModel || !order.includes(currentModel[0])) {
+    throw invalidLaunch('current builder route is absent from canonical failover policy');
+  }
+  const unavailableProviders = new Set([current.provider]);
+  let selected = null;
+  let selectedPolicyModel = null;
+  for (const policyModel of order.slice(order.indexOf(currentModel[0]) + 1)) {
+    const declaration = policy.models && policy.models[policyModel];
+    if (!declaration || declaration.execution !== 'SUBSCRIPTION' || !declaration.workerRoute ||
+        unavailableProviders.has(declaration.workerRoute.provider)) continue;
+    try {
+      selected = normalizeLaunchSpec({
+        provider: declaration.workerRoute.provider,
+        model: declaration.workerRoute.model,
+        prompt: current.prompt,
+      });
+      selectedPolicyModel = policyModel;
+      break;
+    } catch { /* an unsupported policy route is ineligible */ }
+  }
+  if (!selected) throw invalidLaunch('canonical builder failover routes are exhausted');
+
+  const selectedFamily = ((policy.models || {})[selectedPolicyModel] || {}).providerFamily || selectedPolicyModel;
+  const reviewers = Object.entries(policy.roles || {})
+    .filter(([roleId, role]) => roleId.endsWith('review') && role && role.mayApproveOwnWork === false)
+    .map(([roleId, role]) => ({
+      roleId,
+      model: role.default,
+      providerFamily: (((policy.models || {})[role.default] || {}).providerFamily || role.default),
+    }));
+  const independentReviewers = reviewers.filter((reviewer) => reviewer.providerFamily !== selectedFamily);
+  if (independentReviewers.length === 0) {
+    throw invalidLaunch('selected failover builder has no independent reviewer');
+  }
+  const objectiveSha256 = sha256(run.objective);
+  const promptSha256 = sha256(current.prompt);
+  return Object.freeze({
+    launchSpec: selected,
+    selectionReason: `${failure.code}: ${currentModel[0]} is unavailable for the unchanged objective; selected ${selectedPolicyModel} as the next eligible canonical subscription builder`,
+    handoff: Object.freeze({
+      state: 'READY_FOR_PROVIDER_HANDOFF',
+      fromProvider: current.provider,
+      toProvider: selected.provider,
+      fromPolicyModel: currentModel[0],
+      toPolicyModel: selectedPolicyModel,
+      failureCode: failure.code,
+      sameProviderRetryAllowed: false,
+      unchangedObjective: true,
+      objectiveSha256,
+      promptSha256,
+      builderMayApproveOwnWork: false,
+      independentReviewers: Object.freeze(independentReviewers),
+      excludedSelfReviewModels: Object.freeze(reviewers
+        .filter((reviewer) => reviewer.providerFamily === selectedFamily)
+        .map((reviewer) => reviewer.model)),
+    }),
+  });
+}
+
 function baseEnvironment(source = process.env) {
   const env = {};
   for (const key of ['HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL']) {
@@ -230,7 +368,8 @@ function workerEnvironment(source = process.env) {
   if (source.NODE_ENV === 'test') {
     env.NODE_ENV = 'test';
     for (const [key, value] of Object.entries(source)) {
-      if ((key === 'AEGIS_TEST_CLAUDE_EXECUTABLE' || key === 'AEGIS_TEST_CONTAINMENT_MODE' ||
+      if ((key === 'AEGIS_TEST_CLAUDE_EXECUTABLE' || key === 'AEGIS_TEST_GROK_EXECUTABLE' ||
+          key === 'AEGIS_TEST_CONTAINMENT_MODE' ||
           key === 'AEGIS_TEST_CANONICAL_ROOT' || key.startsWith('FAKE_')) && typeof value === 'string') env[key] = value;
     }
   }
@@ -251,10 +390,52 @@ function claudeEnvironment(source = process.env) {
   return env;
 }
 
+function grokEnvironment(disposableHome, source = process.env) {
+  if (typeof disposableHome !== 'string' || !disposableHome.startsWith(GROK_HOME_PREFIX)) {
+    throw invalidLaunch('Grok requires an exact disposable HOME');
+  }
+  const env = baseEnvironment(source);
+  delete env.PATH;
+  env.HOME = disposableHome;
+  env.GROK_HOME = path.join(disposableHome, '.grok');
+  env.TMPDIR = path.join(disposableHome, 'tmp');
+  env.GROK_MANAGED_MCPS_ENABLED = 'false';
+  if (source.NODE_ENV === 'test') {
+    env.NODE_ENV = 'test';
+    for (const [key, value] of Object.entries(source)) {
+      if (key.startsWith('FAKE_') && typeof value === 'string') env[key] = value;
+    }
+  }
+  return env;
+}
+
 // The pinned Claude client can consume its subscription token from an
 // inherited descriptor. The control plane is the only caller allowed to read
 // the exact Keychain item; the credential value never enters argv, env,
 // ledger, or worker evidence.
+function claudeReauthRequired(reason) {
+  const operatorAction = `Run ${CLAUDE_EXECUTABLE} auth login --claudeai interactively, then retry the governed build.`;
+  const error = new Error(
+    `Claude subscription preflight blocked before model launch: ${reason}. Operator action: ${operatorAction}`);
+  error.code = 'CLAUDE_SUBSCRIPTION_REAUTH_REQUIRED';
+  error.operatorAction = operatorAction;
+  return error;
+}
+
+function assertClaudeOAuthFreshness(metadata, nowMs = Date.now()) {
+  if (!metadata || !Number.isFinite(metadata.expiresAt)) {
+    throw claudeReauthRequired('the Keychain credential has no valid expiry metadata');
+  }
+  if (!Number.isFinite(nowMs)) throw new Error('Claude OAuth freshness check requires a finite clock');
+  if (metadata.expiresAt <= nowMs + CLAUDE_OAUTH_EXPIRY_SKEW_MS) {
+    throw claudeReauthRequired('the Keychain access token is expired or too close to expiry');
+  }
+  return Object.freeze({
+    expiresAt: metadata.expiresAt,
+    hasRefreshToken: metadata.hasRefreshToken === true,
+  });
+}
+
 function readClaudeOAuthToken() {
   const helper = CONTAINMENT.claudeKeychainHelperPaths().securityHelper;
   const result = spawnSync(helper, [
@@ -278,7 +459,12 @@ function readClaudeOAuthToken() {
     throw new Error('Claude subscription credentials are malformed');
   }
   raw = '';
-  const token = payload && payload.claudeAiOauth && payload.claudeAiOauth.accessToken;
+  const oauth = payload && payload.claudeAiOauth;
+  const token = oauth && oauth.accessToken;
+  assertClaudeOAuthFreshness({
+    expiresAt: oauth && oauth.expiresAt,
+    hasRefreshToken: Boolean(oauth && typeof oauth.refreshToken === 'string' && oauth.refreshToken.trim()),
+  });
   payload = null;
   if (typeof token !== 'string' || !token.trim()) {
     throw new Error('Claude subscription access token is unavailable');
@@ -646,9 +832,11 @@ function prepareRunContainment(run, executable, env) {
     });
     prepared = { command: CONTAINMENT.sandboxedCommand(profile), env: CONTAINMENT.strictEnvironment(env), profile };
   } else {
-    const subscriptionConfigs = CONTAINMENT.claudeSubscriptionConfigPaths();
-    const disposableRuntimeDir = CONTAINMENT.claudeDisposableRuntimeDir();
-    const productionClaude = executable === resolveClaudeExecutable();
+    const productionGrok = typeof env.GROK_HOME === 'string' && typeof env.HOME === 'string' &&
+      env.GROK_HOME === path.join(env.HOME, '.grok') && executable === resolveGrokExecutable();
+    const productionClaude = !productionGrok && executable === resolveClaudeExecutable();
+    const subscriptionConfigs = productionClaude ? CONTAINMENT.claudeSubscriptionConfigPaths() : [];
+    const disposableRuntimeDir = productionClaude ? CONTAINMENT.claudeDisposableRuntimeDir() : null;
     const claudeNativeRuntime = productionClaude
       ? CONTAINMENT.claudeNativeRuntimePaths(run.worktree.path) : null;
     const claudeKeychainHelper = productionClaude ? CONTAINMENT.claudeKeychainHelperPaths() : null;
@@ -662,6 +850,7 @@ function prepareRunContainment(run, executable, env) {
       claudeNativeRuntime,
       claudeKeychainHelper,
       claudeOAuthTokenFileDescriptor: oauthTokenFileDescriptor,
+      grokDisposableHome: productionGrok ? env.HOME : null,
       env,
     });
   }
@@ -735,6 +924,7 @@ function launchClaudeProcess(run, launchSpec, childEnv, testInternals) {
     '--permission-mode', 'acceptEdits',
     '--settings', JSON.stringify(CLAUDE_SETTINGS),
     '--tools', CLAUDE_FILE_TOOLS.join(','),
+    '--allowedTools', CLAUDE_FILE_TOOLS.join(','),
     '--disallowedTools', CLAUDE_DISALLOWED_TOOLS.join(','),
     '--safe-mode',
     '--strict-mcp-config',
@@ -743,6 +933,7 @@ function launchClaudeProcess(run, launchSpec, childEnv, testInternals) {
   let oauthToken = productionClaude ? readClaudeOAuthToken() : null;
   let contained;
   let command;
+  let authorizedWriteBaselineSha256;
   // The deterministic mode exists only for lifecycle tests executing inside
   // an already-sandboxed CI host. Instrumented tests can retain the real
   // containment command without executing it.
@@ -751,6 +942,7 @@ function launchClaudeProcess(run, launchSpec, childEnv, testInternals) {
     contained = prepareRunContainment(run, claudeExecutable, productionClaude
       ? { ...childEnv, CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: CLAUDE_OAUTH_TOKEN_FILE_DESCRIPTOR }
       : childEnv);
+    authorizedWriteBaselineSha256 = authorizedWriteDigest(contained.allowlists.writePaths, run.worktree.path);
     command = contained.command;
     if (isDeterministicTestFixture(run, claudeExecutable) && !forceContainedCommand) {
       command = { bin: claudeExecutable, argv: [] };
@@ -776,6 +968,54 @@ function launchClaudeProcess(run, launchSpec, childEnv, testInternals) {
   return Object.freeze({
     child, contained, claudeExecutable, command: Object.freeze({ bin: command.bin, argv: Object.freeze([...command.argv]) }),
     claudeArgv: Object.freeze(claudeArgv),
+    authorizedWriteBaselineSha256,
+    enforceMutationProof: productionClaude,
+  });
+}
+
+function grokArgv(launchSpec) {
+  const normalized = normalizeLaunchSpec(launchSpec);
+  if (normalized.provider !== 'grok-subscription') {
+    throw invalidLaunch('Grok argv requires the grok-subscription provider');
+  }
+  return Object.freeze([
+    '--single', normalized.prompt,
+    '--model', normalized.model,
+    '--permission-mode', 'acceptEdits',
+    '--output-format', 'plain',
+    '--no-subagents',
+    '--verbatim',
+    '--no-plan',
+    '--disable-web-search',
+    '--tools', GROK_FILE_TOOLS.join(','),
+    '--disallowed-tools', GROK_DISALLOWED_TOOLS.join(','),
+    '--max-turns', String(GROK_MAX_TURNS),
+  ]);
+}
+
+function prepareGrokLaunch(run, launchSpec, disposableHome) {
+  const normalized = normalizeLaunchSpec(launchSpec);
+  if (normalized.provider !== 'grok-subscription') {
+    throw invalidLaunch('Grok launch preparation requires the grok-subscription provider');
+  }
+  const executable = resolveGrokExecutable();
+  const env = grokEnvironment(disposableHome);
+  const contained = prepareRunContainment(run, executable, env);
+  const argv = grokArgv(normalized);
+  const command = Object.freeze({
+    bin: contained.command.bin,
+    argv: Object.freeze([...contained.command.argv, ...argv]),
+  });
+  return Object.freeze({
+    provider: normalized.provider,
+    model: normalized.model,
+    executable,
+    argv,
+    command,
+    env: contained.env,
+    contained,
+    authorizedWriteBaselineSha256: authorizedWriteDigest(
+      contained.allowlists.writePaths, run.worktree.path),
   });
 }
 
@@ -1018,6 +1258,8 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   let claudeExecutable;
   let contained;
   let command;
+  let authorizedWriteBaselineSha256;
+  let enforceMutationProof = false;
   let childOutcome;
   let childIdentity;
   try {
@@ -1028,7 +1270,11 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     }
   }
   launchSpec = boundLaunchSpec;
-  ({ child, contained, claudeExecutable, command } = launchClaudeProcess(run, launchSpec, childEnv));
+  if (launchSpec.provider !== 'claude-subscription') {
+    throw invalidLaunch('Grok provider handoff is prepared but network execution is not activated in this deterministic slice');
+  }
+  ({ child, contained, claudeExecutable, command, authorizedWriteBaselineSha256, enforceMutationProof } =
+    launchClaudeProcess(run, launchSpec, childEnv));
   // Establish the close observer before any identity or ledger update work.
   // Every later failure must retain enough ownership evidence to drain the
   // exact worker process group or fail closed as TERMINATION_UNVERIFIED.
@@ -1138,6 +1384,21 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   clearInterval(heartbeat);
   clearTimeout(timeout);
 
+  const authorizedMutationObserved = authorizedWriteDigest(contained.allowlists.writePaths, run.worktree.path) !==
+    authorizedWriteBaselineSha256;
+  if (result.exit === 0 && enforceMutationProof && !authorizedMutationObserved) {
+    result = {
+      exit: 3,
+      signal: null,
+      error: new Error('builder exited 0 without applying an authorized file change'),
+    };
+  }
+
+  const failure = classifyBuilderFailure(launchSpec.provider, result.exit, stdout,
+    result.error ? `${stderr}\n${result.error.message}` : stderr);
+  const failover = failure && !authorizedMutationObserved
+    ? selectFailoverBuilder(launchSpec, failure, run) : null;
+
   let fresh = updateBuild(R, run.runId, payload.attemptId, {
     workerState: result.exit === 0 ? 'EXITED' : 'FAILED',
     endedAt: nowIso(),
@@ -1145,7 +1406,26 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     exit: result.exit,
     signal: result.signal || null,
     timedOut,
+    authorizedMutationObserved,
     timeoutTerminationEvidence,
+    failure,
+    providerSelection: failover ? {
+      provider: failover.launchSpec.provider,
+      model: failover.launchSpec.model,
+      reason: failover.selectionReason,
+    } : null,
+    handoff: failover ? failover.handoff : null,
+    recovery: failover ? {
+      reason: failure.code,
+      observedAt: nowIso(),
+      terminationVerified: true,
+      retrySafe: false,
+      sameProviderRetryAllowed: false,
+      providerFailoverRequired: true,
+      selectedProvider: failover.launchSpec.provider,
+      selectedModel: failover.launchSpec.model,
+      attemptId: payload.attemptId,
+    } : null,
     stdoutTail: boundedTail(stdout),
     stderrTail: boundedTail(result.error ? `${stderr}\n${result.error.message}` : stderr),
   });
@@ -1183,14 +1463,19 @@ if (require.main === module) {
 module.exports = {
   launchWorker,
   processAlive, processGroupAlive, boundedTail,
-  normalizeLaunchSpec, normalizeTimeoutSec, resolveClaudeExecutable,
-  launchClaudeProcess,
+  normalizeLaunchSpec, normalizeTimeoutSec, resolveClaudeExecutable, resolveGrokExecutable,
+  launchClaudeProcess, grokArgv, prepareGrokLaunch,
   runContainedClaudeAuthStatus,
+  assertClaudeOAuthFreshness,
   resolveApprovedPacket, derivePacketAllowlists, prepareRunContainment,
   declaredCheckEntrypoint, literalLocalImports, collectLocalDependencies, assertLaunchBinding, launchDigest,
-  baseEnvironment, workerEnvironment, claudeEnvironment,
+  authorizedWriteDigest,
+  baseEnvironment, workerEnvironment, claudeEnvironment, grokEnvironment,
   assertClaudeModelSandboxPolicy,
+  classifyBuilderFailure, selectFailoverBuilder, loadModelRoutingPolicy,
   MAX_PROMPT_BYTES, MAX_TIMEOUT_SEC, CLAUDE_SETTINGS, CLAUDE_FILE_TOOLS,
   CLAUDE_DISALLOWED_TOOLS, CLAUDE_VERSION, CLAUDE_EXECUTABLE,
-  CLAUDE_KEYCHAIN_SERVICE, CLAUDE_OAUTH_TOKEN_FILE_DESCRIPTOR,
+  GROK_EXECUTABLE, GROK_PINNED_EXECUTABLE, GROK_FILE_TOOLS, GROK_DISALLOWED_TOOLS,
+  GROK_MAX_TURNS, GROK_HOME_PREFIX, MODEL_ROUTING_POLICY,
+  CLAUDE_KEYCHAIN_SERVICE, CLAUDE_OAUTH_TOKEN_FILE_DESCRIPTOR, CLAUDE_OAUTH_EXPIRY_SKEW_MS,
 };

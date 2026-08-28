@@ -12,6 +12,7 @@ const CLAUDE_DISPOSABLE_RUNTIME_POLICY = 'CLAUDE_DISPOSABLE_RUNTIME_DIR_V1';
 const CLAUDE_NATIVE_RUNTIME_POLICY = 'CLAUDE_NATIVE_RUNTIME_V1';
 const CLAUDE_KEYCHAIN_HELPER_POLICY = 'CLAUDE_KEYCHAIN_HELPER_READ_V2';
 const CLAUDE_OAUTH_TOKEN_FD = '3';
+const GROK_DISPOSABLE_HOME_POLICY = 'GROK_DISPOSABLE_HOME_V1';
 const MAX_CLAUDE_CONFIG_BYTES = 1024 * 1024;
 const CONTAINED_ENVIRONMENT_OVERRIDE_KEYS = new Set([
   'HOME',
@@ -24,6 +25,7 @@ const CONTAINED_ENVIRONMENT_OVERRIDE_KEYS = new Set([
   'TERM',
   'CODEX_HOME',
   'GROK_MANAGED_MCPS_ENABLED',
+  'GROK_HOME',
   'GIT_OPTIONAL_LOCKS',
   'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
 ]);
@@ -70,6 +72,13 @@ function assertSandboxOperational() {
 
 function quoteSbpl(value) {
   return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function quoteSbplRegex(value) {
+  // SBPL regex literals consume regex escapes directly. Reusing quoteSbpl()
+  // would double every backslash and turn `\.` into a literal backslash plus
+  // wildcard instead of an escaped dot.
+  return `#"${String(value).replace(/"/g, '\\"')}"`;
 }
 
 function realExisting(value, label) {
@@ -202,6 +211,21 @@ function validateOwnedRuntimePath(value, label, {
   return real;
 }
 
+function validateGrokDisposableHome(value, {
+  ownerUid = typeof process.getuid === 'function' ? process.getuid() : null,
+} = {}) {
+  const prefix = '/private/tmp/aegis-grok-';
+  if (typeof value !== 'string' || !value.startsWith(prefix) || path.dirname(value) !== '/private/tmp') {
+    throw new Error(`Grok disposable home must match ${GROK_DISPOSABLE_HOME_POLICY}`);
+  }
+  const stat = fs.lstatSync(value);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || (stat.mode & 0o777) !== 0o700 ||
+      (ownerUid !== null && stat.uid !== ownerUid) || fs.realpathSync(value) !== value) {
+    throw new Error('Grok disposable home must be a real owner-controlled 0700 directory');
+  }
+  return value;
+}
+
 function claudeNativeRuntimePaths(root, home = require('os').homedir(),
   ownerUid = typeof process.getuid === 'function' ? process.getuid() : null) {
   const rootReal = realExisting(root, 'Claude runtime worktree');
@@ -317,6 +341,14 @@ function resolveWriteAuthorities(values, root, label) {
     a.path.localeCompare(b.path) || a.matcher.localeCompare(b.matcher)));
 }
 
+function atomicWriteTemporaryRegex(value) {
+  if (typeof value !== 'string' || !path.isAbsolute(value)) {
+    throw new Error('atomic write target must be an absolute path');
+  }
+  const escaped = value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+  return `^${escaped}\\.tmp\\.[0-9]+\\.[^/]+$`;
+}
+
 function strictEnvironment(overrides = {}, source = process.env) {
   if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
     throw new Error('contained environment overrides must be an object');
@@ -356,6 +388,7 @@ function buildMacSandboxProfile({
   claudeNativeRuntime = null,
   claudeKeychainHelper = null,
   claudeOAuthTokenFileDescriptor = null,
+  grokDisposableHome = null,
   allowNetwork = true,
   reviewerRuntime = false,
 }) {
@@ -381,6 +414,7 @@ function buildMacSandboxProfile({
   const keychainHelper = claudeKeychainHelper
     ? validateClaudeKeychainHelper(claudeKeychainHelper)
     : null;
+  const grokHome = grokDisposableHome ? validateGrokDisposableHome(grokDisposableHome) : null;
   if (claudeOAuthTokenFileDescriptor !== null && claudeOAuthTokenFileDescriptor !== CLAUDE_OAUTH_TOKEN_FD) {
     throw new Error(`Claude OAuth token descriptor must be ${CLAUDE_OAUTH_TOKEN_FD}`);
   }
@@ -413,6 +447,14 @@ function buildMacSandboxProfile({
   for (const value of reads) lines.push(`(allow file-read* (subpath ${quoteSbpl(value)}))`);
   for (const authority of writeAuthorities) {
     lines.push(`(allow file-write* (${authority.matcher} ${quoteSbpl(authority.path)}))`);
+    if (authority.matcher === 'literal') {
+      // Claude's Edit/Write tools replace files atomically through an
+      // unpredictable same-directory leaf.  Permit only the tool's exact
+      // <authorized-file>.tmp.<pid>.<suffix> form; never the parent directory
+      // or an unrelated sibling.  The final replacement remains independently
+      // constrained by the exact literal authority above.
+      lines.push(`(allow file-write* (regex ${quoteSbplRegex(atomicWriteTemporaryRegex(authority.path))}))`);
+    }
   }
   for (const value of [...credentialReads, ...subscriptionConfigReads]) {
     lines.push(`(allow file-read* (require-all (literal ${quoteSbpl(value)}) (process-path ${quoteSbpl(executableReal)})))`);
@@ -438,6 +480,10 @@ function buildMacSandboxProfile({
   if (claudeOAuthTokenFileDescriptor === CLAUDE_OAUTH_TOKEN_FD) {
     lines.push(`(allow file-read-data (literal "/dev/fd/${CLAUDE_OAUTH_TOKEN_FD}"))`);
   }
+  if (grokHome) {
+    lines.push(`(allow file-read* (subpath ${quoteSbpl(grokHome)}))`);
+    lines.push(`(allow file-write* (subpath ${quoteSbpl(grokHome)}))`);
+  }
   if (allowNetwork) lines.push('(allow network-outbound)');
   return Object.freeze({
     bin: SANDBOX_EXEC,
@@ -455,6 +501,8 @@ function buildMacSandboxProfile({
     claudeNativeRuntimePolicy: nativeRuntime ? CLAUDE_NATIVE_RUNTIME_POLICY : null,
     claudeKeychainHelperPolicy: keychainHelper ? CLAUDE_KEYCHAIN_HELPER_POLICY : null,
     claudeOAuthTokenFileDescriptor,
+    grokDisposableHome: grokHome,
+    grokDisposableHomePolicy: grokHome ? GROK_DISPOSABLE_HOME_POLICY : null,
   });
 }
 
@@ -481,6 +529,7 @@ function prepareWorkerContainment({
   claudeSubscriptionConfigReadPaths = [], claudeDisposableRuntimeDirReadPath = null,
   claudeNativeRuntime = null, claudeKeychainHelper = null, env = {},
   claudeOAuthTokenFileDescriptor = null,
+  grokDisposableHome = null,
 }) {
   const toWorktreePath = (value) => {
     if (typeof value !== 'string' || !value || value.includes('\0') || value.includes('\\')) {
@@ -499,6 +548,7 @@ function prepareWorkerContainment({
     claudeNativeRuntime,
     claudeKeychainHelper,
     claudeOAuthTokenFileDescriptor,
+    grokDisposableHome,
     allowNetwork: true,
   });
   assertSandboxOperational();
@@ -516,6 +566,7 @@ module.exports = {
   assertSandboxOperational,
   assertInside,
   resolveWriteAuthorities,
+  atomicWriteTemporaryRegex,
   strictEnvironment,
   buildMacSandboxProfile,
   sandboxedCommand,
@@ -533,4 +584,6 @@ module.exports = {
   validateClaudeKeychainHelper,
   CLAUDE_KEYCHAIN_HELPER_POLICY,
   CLAUDE_OAUTH_TOKEN_FD,
+  validateGrokDisposableHome,
+  GROK_DISPOSABLE_HOME_POLICY,
 };

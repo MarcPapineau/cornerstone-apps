@@ -1359,6 +1359,64 @@ test('runChecks: exported claim-safe authority runs only packet-declared checks 
   }
 });
 
+test('runChecks: failed declared checks persist only bounded redacted private evidence and return no raw output', () => {
+  const bearer = 'AEGIS_BEARER_SENTINEL_1234567890abcdef';
+  const password = 'AEGIS_PASSWORD_SENTINEL';
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZWdpcy1zZW50aW5lbCJ9.signatureSentinel123';
+  const diagnostic = 'AEGIS_CHECK_FAILURE_DIAGNOSTIC';
+  const checkBody = [
+    `for (let i = 0; i < 120; i++) console.log('padding-line-' + i);`,
+    `console.log(${JSON.stringify(diagnostic)});`,
+    `console.error('Authorization: Bearer ' + ${JSON.stringify(bearer)});`,
+    `console.error('password=' + ${JSON.stringify(password)});`,
+    `console.error(${JSON.stringify(jwt)});`,
+    'process.exit(7);',
+  ].join(' ');
+  const failed = `node -e ${JSON.stringify(checkBody)}`;
+  const packet = writeCanonicalCheckPacket([failed, 'node -e "process.exit(0)"']);
+  const { r, runsDir, runId, TMP } = withSeededRun('BUILT',
+    { ...REVIEW_RUN, packet: packet.relative }, `
+      const out = R.runChecks(runId);
+      console.log(JSON.stringify(out));
+    `);
+  try {
+    assert.strictEqual(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.deepStrictEqual(Object.keys(out).sort(), ['action', 'checks', 'nextAction', 'runId', 'state']);
+    assert.deepStrictEqual(out.checks, { passed: 1, total: 2 });
+    const publicText = JSON.stringify(out);
+    for (const forbidden of [diagnostic, bearer, password, jwt, 'failureEvidence', 'stdoutTail', 'stderrTail']) {
+      assert.ok(!publicText.includes(forbidden), `public checks response leaked ${forbidden}`);
+    }
+
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    const failedResult = saved.checks.results[0];
+    assert.strictEqual(failedResult.exit, 7);
+    assert.ok(failedResult.failureEvidence.stdoutTail.includes(diagnostic),
+      'private evidence lost the useful failure diagnostic');
+    assert.ok(failedResult.failureEvidence.stderrTail.includes('[REDACTED]') ||
+      failedResult.failureEvidence.stderrTail.includes('[REDACTED JWT]') ||
+      failedResult.failureEvidence.stderrTail.includes('[REDACTED OPAQUE]'),
+    'private evidence did not record that sensitive values were redacted');
+    for (const secret of [bearer, password, jwt]) {
+      assert.ok(!JSON.stringify(failedResult.failureEvidence).includes(secret), `private evidence retained ${secret}`);
+    }
+    for (const tail of [failedResult.failureEvidence.stdoutTail, failedResult.failureEvidence.stderrTail]) {
+      assert.ok(Buffer.byteLength(tail, 'utf8') <= 16 * 1024, 'failure evidence exceeded its byte bound');
+      assert.ok(tail.split('\n').length <= 80, 'failure evidence exceeded its line bound');
+    }
+    assert.strictEqual(failedResult.failureEvidence.stdoutTruncated, true,
+      'the line-bounded stdout tail must disclose that diagnostic context was truncated');
+    assert.strictEqual(failedResult.failureEvidence.stderrTruncated, false,
+      'redaction alone must not be mislabeled as diagnostic truncation');
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(saved.checks.results[1], 'failureEvidence'), false,
+      'passing checks must not retain output evidence');
+  } finally {
+    fs.rmSync(TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
 test('runChecks: executes every declared non-recursive check including aegis-run paths', () => {
   const declared = [
     'node -e "process.exit(0)" builder-control/test/aegis-run.test.cjs',

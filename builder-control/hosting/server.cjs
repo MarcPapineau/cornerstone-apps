@@ -890,6 +890,8 @@ function buildGovernedLaunchSpec(run, policy) {
     `Objective: ${run.objective}`,
     `Canonical packet: ${run.packet || SWITCHBOARD_PACKET}`,
     'Work only inside the current isolated worktree and obey the packet file allowlist.',
+    'Use the authorized Edit or Write tools to apply the smallest correct change in the worktree. Do not return a proposed patch instead of editing files.',
+    'If an authorized write fails, report the exact tool error and stop; never describe a no-write response as a completed build.',
     'Do not commit, push, merge, deploy, publish, release, purchase credits, or touch Vitalis.',
     'Keep n8n excluded. Run focused deterministic checks and report exact evidence.',
   ].join('\n');
