@@ -1,0 +1,79 @@
+{
+  "packetId": "PKT-20260826-ASYNC-WORKER-OPERATOR-BETA",
+  "agentId": "claude-code",
+  "objective": "Connect the local AEGIS operator dashboard to one governed asynchronous Claude subscription worker, stream truthful lifecycle evidence, harden independent review transport, and replace the diagnostic-first surface with a founder-readable command deck.",
+  "constraints": [
+    "AEGIS dashboard and build-engine only; do not touch the Vitalis peptide protocol engine or unrelated projects",
+    "n8n is excluded",
+    "Browser input cannot select an executable, command, provider, model, permission mode, environment variable, or filesystem path",
+    "The Claude subscription worker uses a fixed executable and validated argv without a shell",
+    "All lifecycle changes remain owned by aegis-run transition authority and the canonical ledger",
+    "Authentication is never presented as connector usage",
+    "Pause remains unavailable until tested suspend and resume semantics exist",
+    "No deploy, release, merge, publication, purchase, or protected-branch mutation"
+  ],
+  "sourceOfTruth": [
+    "builder-control/aegis-run.cjs",
+    "builder-control/aegis-state.cjs",
+    "builder-control/hosting/server.cjs",
+    "builder-control/MODEL-ROUTING-POLICY.json",
+    "builder-control/TOOL-CAPABILITY-CANON.json"
+  ],
+  "filesAllowed": [
+    "builder-control/aegis-worker.cjs",
+    "builder-control/aegis-run.cjs",
+    "builder-control/hosting/server.cjs",
+    "builder-control/MODEL-ROUTING-POLICY.json",
+    "builder-control/dashboard/index.html",
+    "builder-control/connector-registry.json",
+    "builder-control/review-adapters.cjs",
+    "builder-control/sandbox-containment.cjs",
+    "builder-control/test/aegis-worker.test.cjs",
+    "builder-control/test/aegis-run.test.cjs",
+    "builder-control/test/hosting.test.cjs",
+    "builder-control/test/model-routing.test.cjs",
+    "builder-control/test/dashboard-slice.test.cjs",
+    "builder-control/test/review-adapters.test.cjs",
+    "builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json"
+  ],
+  "testsRequired": [
+    "node builder-control/test/aegis-worker.test.cjs",
+    "node builder-control/test/aegis-run.test.cjs",
+    "node builder-control/test/hosting.test.cjs",
+    "node builder-control/test/model-routing.test.cjs",
+    "node builder-control/test/dashboard-slice.test.cjs",
+    "node builder-control/test/review-adapters.test.cjs",
+    "node --check builder-control/aegis-worker.cjs",
+    "node --check builder-control/aegis-run.cjs",
+    "node --check builder-control/hosting/server.cjs",
+    "git diff --check"
+  ],
+  "stopConditions": [
+    "A browser-controlled value can reach shell execution or provider selection",
+    "A second lifecycle, ledger, verdict, permission, or routing authority appears",
+    "An active AEGIS builder or reviewer already owns the packet",
+    "Independent review rejects the exact subject",
+    "Marc changes scope or issues STOP"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau - explicit 2026-08-26 approval for autonomous AEGIS dashboard/build-engine implementation and narrow checkpoint pushes",
+    "allowsProtectedPaths": [
+      "builder-control/aegis-worker.cjs",
+      "builder-control/aegis-run.cjs",
+      "builder-control/hosting/server.cjs",
+      "builder-control/MODEL-ROUTING-POLICY.json",
+      "builder-control/dashboard/index.html",
+      "builder-control/connector-registry.json",
+      "builder-control/review-adapters.cjs",
+      "builder-control/sandbox-containment.cjs",
+      "builder-control/test/aegis-worker.test.cjs",
+      "builder-control/test/aegis-run.test.cjs",
+      "builder-control/test/hosting.test.cjs",
+      "builder-control/test/model-routing.test.cjs",
+      "builder-control/test/dashboard-slice.test.cjs",
+      "builder-control/test/review-adapters.test.cjs"
+    ],
+    "allowsPublicPush": true,
+    "allowsRelease": false
+  }
+}
