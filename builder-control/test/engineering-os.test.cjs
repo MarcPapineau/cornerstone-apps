@@ -41,7 +41,7 @@ process.on('exit', () => { try { fs.rmSync(TMP, { recursive: true, force: true }
 // door open for it.
 //
 // `run()` is the fixture runner. Most cases here feed the classifier paths that
-// exist in no working tree (`src/auth/session.ts`, `a.md`…), which is exactly
+// exist in no working tree (`builder-control/test-fixtures/auth/session.ts`, `a.md`…), which is exactly
 // what the test-only boundary is for. It opens that boundary — both halves of
 // it — ONLY for invocations that actually carry synthetic input, so a case that
 // passes neither --changed nor --diff-lines is still exercising the production
@@ -116,18 +116,28 @@ const FIXTURE_PACKET = path.join(TMP, 'fixture-packet.json');
   // A DISTINCT packetId, so resolvePacketForRecord() cannot accidentally match
   // the real packet in packets/ and compare the wrong authorization digest.
   base.packetId = 'PKT-20260824-ENGOS-TEST-FIXTURE';
-  const fixturePaths = ['src/**', 'docs/**', 'db/**', 'server/**', 'a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'f.md', '.github/**', 'builder-control/**', 'packages/**'];
+  // Keep the fixture inside the builder's canonical registry scope. Synthetic
+  // source paths used to be authorized with globs in allowsProtectedPaths;
+  // the production validator now correctly permits only exact, canonically
+  // protected overrides, so that old fixture shape was no longer executable.
+  const fixturePaths = ['builder-control/**', 'research/**'];
   base.filesAllowed = fixturePaths;
   // filesAllowed outside the agent's allowedPathGlobs must be covered by
   // authorization.allowsProtectedPaths, or packet-tools rejects the packet —
   // which is the registry check doing its job on a synthetic fixture.
-  base.authorization = { ...base.authorization, allowsProtectedPaths: fixturePaths };
+  base.authorization = { ...base.authorization };
   fs.writeFileSync(FIXTURE_PACKET, JSON.stringify(base, null, 2));
 })();
-function writeJSON(name, obj) {
+const WRONG_PACKET = path.join(TMP, 'wrong-packet.json');
+(function makeWrongPacket() {
+  const packet = JSON.parse(fs.readFileSync(FIXTURE_PACKET, 'utf8'));
+  packet.packetId = 'PKT-SOMETHING-ELSE';
+  fs.writeFileSync(WRONG_PACKET, JSON.stringify(packet, null, 2));
+})();
+function writeJSON(name, obj, packetPath = FIXTURE_PACKET) {
   const p = path.join(TMP, name);
   const isReview = obj && obj.reviewId && obj.reviewOf && obj.disposition;
-  const body = isReview ? SIGNER.sign(obj, { packetPath: FIXTURE_PACKET }) : obj;
+  const body = isReview ? SIGNER.sign(obj, { packetPath }) : obj;
   fs.writeFileSync(p, JSON.stringify(body, null, 2));
   return p;
 }
@@ -140,6 +150,54 @@ function writeUnsigned(name, obj) {
   return p;
 }
 
+function canonical(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value === undefined ? null : value);
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+  return '{' + Object.keys(value).sort()
+    .map((key) => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}';
+}
+
+function writeLegacyV1(name, rec, packetPath = FIXTURE_PACKET) {
+  // V1 is verification-only in production. This fixture reconstructs its
+  // historical bytes to prove the audit remains readable while the gate refuses
+  // to consume fields that V1 never authenticated.
+  SIGNER.sign(rec, { packetPath }); // ensure the local fixture key exists
+  const key = process.env.AEGIS_ATTESTATION_KEY
+    || fs.readFileSync(path.join(ROOT, 'builder-control', '.attestation-key'), 'utf8').trim();
+  const packetDigest = SIGNER.packetDigest(packetPath, 'aegis-attest-v1');
+  const payload = canonical({
+    v: 'aegis-attest-v1', reviewId: rec.reviewId, supersedes: rec.supersedes || null,
+    aggregate: rec.aggregate ? {
+      groupCount: rec.aggregate.groupCount,
+      plannedGroupCount: rec.aggregate.plannedGroupCount,
+      coverage: rec.aggregate.coverage,
+      groups: (rec.aggregate.groups || []).map((group) => ({
+        groupId: group.groupId, groupDigest: group.groupDigest,
+        pathCount: group.pathCount, disposition: group.disposition,
+        reviewId: group.reviewId, attestationDigest: group.attestationDigest,
+      })),
+    } : null,
+    ts: rec.ts, unavailableReason: rec.unavailableReason || null,
+    group: rec.group ? { groupId: rec.group.groupId, groupDigest: rec.group.groupDigest || null } : null,
+    subjectSha256: rec.reviewOf && rec.reviewOf.diffSha256,
+    changedPaths: (rec.reviewOf && rec.reviewOf.changedPaths) || [],
+    packetId: rec.packetId, packetDigest, reviewer: rec.reviewer,
+    reviewerModel: rec.reviewerModel, disposition: rec.disposition,
+    findings: (rec.findings || []).map((finding) => ({
+      severity: finding.severity, file: finding.file, problem: finding.problem,
+      evidence: finding.evidence, status: finding.status,
+    })),
+  });
+  return writeUnsigned(name, {
+    ...rec,
+    attestation: {
+      v: 'aegis-attest-v1', alg: 'HMAC-SHA256', packetDigest,
+      payloadDigest: crypto.createHash('sha256').update(payload).digest('hex'),
+      mac: crypto.createHmac('sha256', key).update(payload).digest('hex'),
+    },
+  });
+}
+
 const realPacket = JSON.parse(fs.readFileSync(REAL_PACKET, 'utf8'));
 const PACKET_ID = 'PKT-20260824-ENGOS-TEST-FIXTURE';
 
@@ -150,7 +208,7 @@ const PACKET_ID = 'PKT-20260824-ENGOS-TEST-FIXTURE';
 // calculator produces instead of a made-up digest.
 const SHA_A = crypto.createHash('sha256').update('').digest('hex');
 const SHA_B = 'b'.repeat(64);
-function reviewOf(changedPath = 'src/app.ts', diffSha256 = SHA_A) {
+function reviewOf(changedPath = 'builder-control/test-fixtures/app.ts', diffSha256 = SHA_A) {
   return {
     diffSha256,
     baseRef: 'main',
@@ -176,12 +234,108 @@ console.log('Engineering OS — rule fixtures\n');
 
 // ── classification ──────────────────────────────────────────────────────────
 console.log('CLASSIFICATION');
+
+(function proveUntrackedSubjectFailsClosed() {
+  const repo = fs.mkdtempSync(path.join(TMP, 'untracked-subject-'));
+  const git = (args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+  git(['init', '--quiet']);
+  git(['config', 'user.email', 'aegis-test@example.invalid']);
+  git(['config', 'user.name', 'AEGIS Test']);
+  fs.writeFileSync(path.join(repo, 'README.md'), 'tracked\n');
+  git(['add', 'README.md']);
+  git(['commit', '--quiet', '-m', 'fixture']);
+  const baseCommit = git(['rev-parse', 'HEAD']).stdout.trim();
+  fs.mkdirSync(path.join(repo, 'src'));
+  fs.writeFileSync(path.join(repo, 'src', 'untracked.cjs'), 'module.exports = 1;\n');
+  const refused = spawnSync(process.execPath, [CLI, '--subject', '--json'], {
+    cwd: repo, encoding: 'utf8', env: {
+      ...process.env, ENGOS_TEST_ONLY_SYNTHETIC: '',
+      GIT_DIR: path.join(repo, '.git'), GIT_WORK_TREE: repo,
+    },
+  });
+  expect_raw('repository-relevant untracked source is refused before subject certification', {
+    exit: refused.status, out: (refused.stdout || '') + (refused.stderr || ''),
+  }, { exit: 3, contains: 'repository-relevant untracked file' });
+
+  const packetDir = path.join(repo, 'builder-control', 'packets');
+  fs.mkdirSync(packetDir, { recursive: true });
+  const packetPath = path.join(packetDir, 'packet.json');
+  fs.writeFileSync(packetPath, JSON.stringify({ filesAllowed: ['src/untracked.cjs'] }));
+  const authorized = spawnSync(process.execPath,
+    [CLI, '--subject', '--packet', packetPath, '--json'], {
+      cwd: repo, encoding: 'utf8', env: {
+        ...process.env, ENGOS_TEST_ONLY_SYNTHETIC: '',
+        GIT_DIR: path.join(repo, '.git'), GIT_WORK_TREE: repo,
+      },
+    });
+  let authorizedSubject = null;
+  try { authorizedSubject = JSON.parse(authorized.stdout); } catch {}
+  expect_raw('packet-authorized exact untracked new leaf enters the canonical subject with its bytes', {
+    exit: authorized.status,
+    out: authorizedSubject && authorizedSubject.subjectPaths.includes('src/untracked.cjs') &&
+      authorizedSubject.diffBytes > 0 ? 'AUTHORIZED_UNTRACKED_BOUND' :
+      (authorized.stdout || '') + (authorized.stderr || ''),
+  }, { exit: 0, contains: 'AUTHORIZED_UNTRACKED_BOUND' });
+
+  const firstHash = authorizedSubject && authorizedSubject.subjectSha256;
+  fs.writeFileSync(path.join(repo, 'src', 'untracked.cjs'), 'module.exports = 2;\n');
+  const moved = spawnSync(process.execPath,
+    [CLI, '--subject', '--packet', packetPath, '--json'], {
+      cwd: repo, encoding: 'utf8', env: {
+        ...process.env, ENGOS_TEST_ONLY_SYNTHETIC: '',
+        GIT_DIR: path.join(repo, '.git'), GIT_WORK_TREE: repo,
+      },
+    });
+  let movedSubject = null;
+  try { movedSubject = JSON.parse(moved.stdout); } catch {}
+  expect_raw('changing an authorized untracked new leaf changes the canonical subject hash', {
+    exit: moved.status,
+    out: movedSubject && movedSubject.subjectSha256 !== firstHash ? 'UNTRACKED_HASH_MOVED' :
+      (moved.stdout || '') + (moved.stderr || ''),
+  }, { exit: 0, contains: 'UNTRACKED_HASH_MOVED' });
+
+  git(['add', 'src/untracked.cjs']);
+  git(['commit', '--quiet', '-m', 'checkpoint new leaf']);
+  const committed = spawnSync(process.execPath,
+    [CLI, '--subject', '--packet', packetPath, '--base', baseCommit, '--head', 'HEAD', '--json'], {
+      cwd: repo, encoding: 'utf8', env: {
+        ...process.env, ENGOS_TEST_ONLY_SYNTHETIC: '',
+        GIT_DIR: path.join(repo, '.git'), GIT_WORK_TREE: repo,
+      },
+    });
+  let committedSubject = null;
+  try { committedSubject = JSON.parse(committed.stdout); } catch {}
+  expect_raw('authorized new-leaf subject encoding is identical before and after commit', {
+    exit: committed.status,
+    out: committedSubject && movedSubject
+      && committedSubject.subjectSha256 === movedSubject.subjectSha256
+      && committedSubject.diffBytes === movedSubject.diffBytes ? 'NEW_LEAF_CHECKPOINT_STABLE'
+      : (committed.stdout || '') + (committed.stderr || ''),
+  }, { exit: 0, contains: 'NEW_LEAF_CHECKPOINT_STABLE' });
+
+  git(['rm', '--quiet', 'src/untracked.cjs']);
+  git(['commit', '--quiet', '-m', 'remove fixture leaf']);
+  const evidenceDir = path.join(repo, 'builder-control', 're' + 'views');
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  const evidenceFile = path.join(evidenceDir, 'evidence.json');
+  fs.writeFileSync(evidenceFile, '{}\n');
+  const evidenceOnly = spawnSync(process.execPath, [CLI, '--subject', '--json'], {
+    cwd: repo, encoding: 'utf8', env: {
+      ...process.env, ENGOS_TEST_ONLY_SYNTHETIC: '',
+      GIT_DIR: path.join(repo, '.git'), GIT_WORK_TREE: repo,
+    },
+  });
+  expect_raw('untracked review evidence remains excluded without hiding source code', {
+    exit: evidenceOnly.status, out: (evidenceOnly.stdout || '') + (evidenceOnly.stderr || ''),
+  }, { exit: 0, contains: '"subjectPaths": []' });
+})();
+
 expect('docs-only small change is LIGHT',
   ['--classify', '--changed', 'docs/guide.md', '--diff-lines', '20'],
   { exit: 0, contains: 'lane      : LIGHT' });
 
 expect('auth path forces FULL + grok',
-  ['--classify', '--changed', 'src/auth/session.ts'],
+  ['--classify', '--changed', 'builder-control/test-fixtures/auth/session.ts'],
   { exit: 0, contains: ['lane      : FULL', 'codex + grok', 'authentication/authorization surface'] });
 
 expect('payment path forces FULL + grok',
@@ -214,7 +368,7 @@ expect('a huge docs change is not a trivial change',
   { exit: 0, contains: ['FULL', '900 changed lines exceeds'] });
 
 expect('code file is not on the light allow-list',
-  ['--classify', '--changed', 'src/utils/format.ts', '--diff-lines', '3'],
+  ['--classify', '--changed', 'research/utils/format.ts', '--diff-lines', '3'],
   { exit: 0, contains: ['FULL', 'not on the light-lane allow-list'] });
 
 // ── spec pin ────────────────────────────────────────────────────────────────
@@ -244,6 +398,60 @@ expect('a well-formed record validates',
   ['--validate-review', '--packet', FIXTURE_PACKET, writeJSON('good.json', review())],
   { exit: 0, contains: 'All 1 record(s) valid' });
 
+expect('a historically valid V1 attestation remains auditable but cannot satisfy the current gate',
+  ['--validate-review', '--packet', FIXTURE_PACKET,
+    writeLegacyV1('legacy-v1.json', review({ reviewId: 'REV-legacy-v1' }))],
+  { exit: 2, contains: ['ATTESTATION-LEGACY-NON-GATEABLE', 'cannot satisfy the current gate'] });
+
+(function aggregateGroupAuthorityIsEndToEnd() {
+  const root = path.join(TMP, 'aggregate-gate-authority');
+  const groupsDir = path.join(root, 'groups');
+  fs.mkdirSync(groupsDir, { recursive: true });
+  const writeSigned = (target, value) => {
+    const signed = SIGNER.sign(value, { packetPath: FIXTURE_PACKET });
+    fs.writeFileSync(target, JSON.stringify(signed, null, 2));
+    return signed;
+  };
+  const groupPath = path.join(groupsDir, 'aggregate-codex-g1-G1.json');
+  const group = writeSigned(groupPath, review({
+    reviewId: 'REV-aggregate-codex-g1',
+    group: { groupId: 'G1', groupDigest: 'digest-g1' },
+  }));
+  const aggregatePath = path.join(root, 'codex-aggregate.json');
+  writeSigned(aggregatePath, review({
+    reviewId: 'REV-aggregate-codex',
+    aggregate: {
+      groupCount: 1, plannedGroupCount: 1, coverage: 'EXACT', problems: [],
+      groups: [{
+        groupId: 'G1', groupDigest: 'digest-g1', pathCount: 1,
+        disposition: 'APPROVE', reviewId: group.reviewId,
+        attestationDigest: group.attestation.payloadDigest,
+      }],
+    },
+  }));
+  const grokPath = path.join(root, 'grok.json');
+  writeSigned(grokPath, review({
+    reviewId: 'REV-aggregate-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+  }));
+  const gateArgs = ['--gate-done', '--packet', FIXTURE_PACKET,
+    '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
+    '--review', aggregatePath, '--review', grokPath];
+
+  expect('a V2 aggregate resolves its active sibling groups directory through the real gate',
+    gateArgs, { exit: 0, contains: 'RESULT: READY_FOR_DETERMINISTIC_VALIDATION' });
+
+  fs.unlinkSync(groupPath);
+  expect('the real gate refuses a V2 aggregate whose active group record is missing',
+    gateArgs, { exit: 3, contains: 'ATTESTATION-AGGREGATE-GROUP-MISSING' });
+
+  writeSigned(groupPath, review({
+    reviewId: group.reviewId, reviewerModel: 'substituted-model',
+    group: { groupId: 'G1', groupDigest: 'digest-g1' },
+  }));
+  expect('the real gate refuses a signed substitute for an aggregate group',
+    gateArgs, { exit: 3, contains: 'ATTESTATION-AGGREGATE-GROUP-MISMATCH' });
+})();
+
 expect('UNAVAILABLE with no reason is refused',
   ['--validate-review', '--packet', FIXTURE_PACKET, writeJSON('unavail-noreason.json', review({ disposition: 'UNAVAILABLE' }))],
   { exit: 2, contains: 'requires unavailableReason' });
@@ -255,6 +463,14 @@ expect('UNAVAILABLE carrying findings is refused',
     findings: [{ severity: 'HIGH', problem: 'x', evidence: 'y', status: 'OPEN' }],
   }))],
   { exit: 2, contains: 'cannot carry findings' });
+
+expect('UNAVAILABLE with a reason may truthfully report zero verified changed paths',
+  ['--validate-review', '--packet', FIXTURE_PACKET, writeJSON('unavail-zero-coverage.json', review({
+    disposition: 'UNAVAILABLE',
+    unavailableReason: 'review transport failed before any path was inspected',
+    reviewOf: { diffSha256: SHA_A, changedPaths: [] },
+  }))],
+  { exit: 0, contains: 'All 1 record(s) valid' });
 
 expect('a finding with no evidence is refused',
   ['--validate-review', '--packet', FIXTURE_PACKET, writeJSON('no-evidence.json', review({
@@ -282,51 +498,105 @@ expect('an unknown reviewer is refused',
 console.log('\nDEFINITION OF DONE');
 expect('FULL lane with no reviews at all is BLOCKED',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A],
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A],
   { exit: 3, contains: ['RESULT: BLOCKED', 'ENGOS-REVIEW-MISSING'] });
 
 expect('codex AND grok approval clears an ordinary (non-high-risk) FULL change',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
-   '--review', writeJSON('ok-codex.json', review()),
-   '--review', writeJSON('ok-grok.json', review({ reviewId: 'REV-test-001-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' }))],
+   '--changed', 'research/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('ok-codex.json', review({ reviewOf: reviewOf('research/app.ts') })),
+   '--review', writeJSON('ok-grok.json', review({ reviewId: 'REV-test-001-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture', reviewOf: reviewOf('research/app.ts') }))],
   { exit: 0, contains: 'RESULT: READY_FOR_DETERMINISTIC_VALIDATION' });
 
 expect('codex approval ALONE does not clear an ordinary FULL change — grok is required too',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
-   '--review', writeJSON('ok-codex-alone.json', review({ reviewId: 'REV-test-001-alone' }))],
+   '--changed', 'research/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('ok-codex-alone.json', review({ reviewId: 'REV-test-001-alone', reviewOf: reviewOf('research/app.ts') }))],
   { exit: 3, contains: ['ENGOS-REVIEW-MISSING', 'grok'], notContains: 'READY_FOR' });
 
 expect('a review of a DIFFERENT diff does not transfer',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
-   '--review', writeJSON('stale.json', review({ reviewOf: reviewOf('src/app.ts', SHA_B) }))],
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('stale.json', review({ reviewOf: reviewOf('builder-control/test-fixtures/app.ts', SHA_B) }))],
   { exit: 3, contains: ['different subject were IGNORED', 'ENGOS-REVIEW-MISSING'] });
 
 expect('high-risk needs grok too — codex alone is not enough',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/auth/login.ts', '--diff-sha', SHA_A,
-   '--review', writeJSON('codex-only.json', review({ reviewOf: reviewOf('src/auth/login.ts') }))],
+   '--changed', 'builder-control/test-fixtures/auth/login.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('codex-only.json', review({ reviewOf: reviewOf('builder-control/test-fixtures/auth/login.ts') }))],
   { exit: 3, contains: ['ENGOS-REVIEW-MISSING', 'grok'] });
+
+expect('FULL-lane start recipe prints Grok named approval and positive telemetry ceiling',
+  ['--start', '--packet', FIXTURE_PACKET,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-lines', '12'],
+  { exit: 0, contains: [
+    '--reviewer grok', '--allow-metered', '--approved-by "Marc Papineau"', '--cap-usd 5',
+  ] });
 
 expect('claude-self approval never satisfies a required slot',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
    '--review', writeJSON('self.json', review({ reviewId: 'REV-self-1', reviewer: 'claude-self' }))],
   { exit: 3, contains: ['ENGOS-REVIEW-MISSING', 'codex'] });
 
 expect('a reviewer that could not run BLOCKS and is reported as UNAVAILABLE',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
    '--review', writeJSON('unavail.json', review({
      disposition: 'UNAVAILABLE', unavailableReason: 'codex CLI not installed on this runner',
    }))],
   { exit: 3, contains: ['ENGOS-REVIEWER-UNAVAILABLE', 'codex CLI not installed'], notContains: 'RESULT: DONE' });
 
+expect('a REJECT label with only MEDIUM findings is recorded but does not override the severity gate',
+  ['--gate-done', '--json', '--packet', FIXTURE_PACKET,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('medium-only-reject.json', review({
+     disposition: 'REJECT',
+     findings: [{
+       severity: 'MEDIUM', file: 'builder-control/test-fixtures/app.ts', location: '12',
+       problem: 'an advisory maintainability concern',
+       evidence: 'builder-control/test-fixtures/app.ts:12 contains the reviewed pattern',
+       status: 'OPEN',
+     }],
+   })),
+   '--review', writeJSON('medium-only-grok.json', review({
+     reviewId: 'REV-medium-only-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+   }))],
+  { exit: 0, contains: ['"allRequiredApproved": false', '"disposition": "REJECT"', 'REJECT label recorded as nonblocking'],
+    notContains: ['ENGOS-REVIEW-REJECTED', 'ENGOS-OPEN-BLOCKING-FINDING'] });
+
+expect('a bare completed REJECT is preserved but has no authority beyond its empty finding set',
+  ['--gate-done', '--json', '--packet', FIXTURE_PACKET,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('bare-reject.json', review({
+     reviewId: 'REV-bare-reject', disposition: 'REJECT', findings: [],
+   })),
+   '--review', writeJSON('bare-reject-grok.json', review({
+     reviewId: 'REV-bare-reject-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+   }))],
+  { exit: 0, contains: ['"allRequiredApproved": false', '"disposition": "REJECT"', 'REJECT label recorded as nonblocking'],
+    notContains: ['ENGOS-REVIEW-REJECTED', 'ENGOS-OPEN-BLOCKING-FINDING'] });
+
+expect('a REJECT label with an OPEN HIGH finding still blocks',
+  ['--gate-done', '--packet', FIXTURE_PACKET,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('high-reject.json', review({
+     disposition: 'REJECT',
+     findings: [{
+       severity: 'HIGH', file: 'builder-control/test-fixtures/app.ts', location: '20',
+       problem: 'the application can bypass authorization',
+       evidence: 'builder-control/test-fixtures/app.ts:20 returns before the authorization check',
+       impact: 'an unauthorized request can reach the protected operation',
+       requiredCorrection: 'perform authorization before returning',
+       verificationMethod: 'run the authorization rejection test',
+       status: 'OPEN',
+     }],
+   }))],
+  { exit: 3, contains: ['ENGOS-REVIEW-REJECTED', 'ENGOS-OPEN-BLOCKING-FINDING'] });
+
 expect('an OPEN HIGH finding from the ADVISORY reviewer still blocks',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
    '--review', writeJSON('codex-ok2.json', review()),
    '--review', writeJSON('copilot-bad.json', review({
      reviewId: 'REV-copilot-1', reviewer: 'copilot', disposition: 'REJECT',
@@ -334,7 +604,7 @@ expect('an OPEN HIGH finding from the ADVISORY reviewer still blocks',
      findings: [{
        severity: 'HIGH',
        problem: 'import of a deleted module',
-       evidence: 'src/app.ts:12 imports ./gone',
+       evidence: 'builder-control/test-fixtures/app.ts:12 imports ./gone',
        impact: 'The application cannot load the deleted dependency.',
        requiredCorrection: 'Restore the dependency or remove the import.',
        verificationMethod: 'Run the application build and import test.',
@@ -343,14 +613,14 @@ expect('an OPEN HIGH finding from the ADVISORY reviewer still blocks',
    }))],
   { exit: 3, contains: ['ENGOS-OPEN-BLOCKING-FINDING', 'import of a deleted module'] });
 
-expect('a FIXED finding no longer blocks',
+expect('an unrelated approval cannot clear a FIXED finding',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
    '--review', writeJSON('fixed.json', review({
      findings: [{
        severity: 'HIGH',
        problem: 'stale import',
-       evidence: 'src/app.ts:12 imported ./gone',
+       evidence: 'builder-control/test-fixtures/app.ts:12 imported ./gone',
        impact: 'The application could not load.',
        requiredCorrection: 'Remove the stale import.',
        verificationMethod: 'Run the import test.',
@@ -364,22 +634,108 @@ expect('a FIXED finding no longer blocks',
      reviewerModel: 'Marc Papineau',
    })),
    '--review', writeJSON('fixed-grok.json', review({ reviewId: 'REV-fixed-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' }))],
+  { exit: 3, contains: 'ENGOS-FIX-VERIFICATION-LINK-MISSING' });
+
+expect('a FIXED finding clears only with signed finding-level re-verification evidence',
+  ['--gate-done', '--packet', FIXTURE_PACKET,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('fixed-linked.json', review({
+     reviewId: 'REV-fixed-source-002',
+     findings: [{
+       severity: 'HIGH',
+       problem: 'stale import',
+       evidence: 'builder-control/test-fixtures/app.ts:12 imported ./gone',
+       impact: 'The application could not load.',
+       requiredCorrection: 'Remove the stale import.',
+       verificationMethod: 'Run the import test.',
+       status: 'FIXED',
+       verifiedByReviewId: 'REV-human-verify-002',
+     }],
+   })),
+   '--review', writeJSON('fixed-linked-verifier.json', review({
+     reviewId: 'REV-human-verify-002',
+     reviewer: 'human',
+     reviewerModel: 'Marc Papineau',
+     reverifiedFindings: [{
+       sourceReviewId: 'REV-fixed-source-002',
+       findingIndex: 0,
+       verificationMethod: 'Run the import test.',
+       evidence: 'Independent import test exited 0 and loaded the corrected module.',
+       outcome: 'PASS',
+     }],
+   })),
+   '--review', writeJSON('fixed-linked-grok.json', review({ reviewId: 'REV-fixed-linked-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' }))],
   { exit: 0, contains: 'RESULT: READY_FOR_DETERMINISTIC_VALIDATION' });
+
+expect('a FIXED finding cannot cite its own review as independent re-verification',
+  ['--gate-done', '--packet', FIXTURE_PACKET,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('fixed-self-linked.json', review({
+     reviewId: 'REV-fixed-self-linked',
+     findings: [{
+       severity: 'HIGH',
+       problem: 'stale import',
+       evidence: 'builder-control/test-fixtures/app.ts:12 imported ./gone',
+       impact: 'The application could not load.',
+       requiredCorrection: 'Remove the stale import.',
+       verificationMethod: 'Run the import test.',
+       status: 'FIXED',
+       verifiedByReviewId: 'REV-fixed-self-linked',
+     }],
+     reverifiedFindings: [{
+       sourceReviewId: 'REV-fixed-self-linked', findingIndex: 0,
+       verificationMethod: 'Run the import test.',
+       evidence: 'The same record claims it checked itself.', outcome: 'PASS',
+     }],
+   })),
+   '--review', writeJSON('fixed-self-linked-grok.json', review({
+     reviewId: 'REV-fixed-self-linked-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+   }))],
+  { exit: 3, contains: 'ENGOS-FIX-SELF-VERIFIED' });
+
+expect('a FIXED finding cannot cite a second record from the same reviewer',
+  ['--gate-done', '--packet', FIXTURE_PACKET,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('fixed-same-reviewer-source.json', review({
+     reviewId: 'REV-fixed-same-reviewer-source',
+     findings: [{
+       severity: 'HIGH',
+       problem: 'stale import',
+       evidence: 'builder-control/test-fixtures/app.ts:12 imported ./gone',
+       impact: 'The application could not load.',
+       requiredCorrection: 'Remove the stale import.',
+       verificationMethod: 'Run the import test.',
+       status: 'FIXED',
+       verifiedByReviewId: 'REV-fixed-same-reviewer-verifier',
+     }],
+   })),
+   '--review', writeJSON('fixed-same-reviewer-verifier.json', review({
+     reviewId: 'REV-fixed-same-reviewer-verifier',
+     reverifiedFindings: [{
+       sourceReviewId: 'REV-fixed-same-reviewer-source', findingIndex: 0,
+       verificationMethod: 'Run the import test.',
+       evidence: 'The same reviewer claims a second pass.', outcome: 'PASS',
+     }],
+   })),
+   '--review', writeJSON('fixed-same-reviewer-grok.json', review({
+     reviewId: 'REV-fixed-same-reviewer-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
+   }))],
+  { exit: 3, contains: 'ENGOS-FIX-SELF-VERIFIED' });
 
 expect('a review bound to another packet is rejected',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
-   '--review', writeJSON('wrongpacket.json', review({ packetId: 'PKT-SOMETHING-ELSE' }))],
-  { exit: 3, contains: 'ENGOS-REVIEW-WRONG-PACKET' });
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
+   '--review', writeJSON('wrongpacket.json', review({ packetId: 'PKT-SOMETHING-ELSE' }), WRONG_PACKET)],
+  { exit: 3, contains: ['ENGOS-REVIEW-MALFORMED', 'ATTESTATION-PACKET-MISMATCH'] });
 
 expect('LIGHT lane needs no AI reviewer at all',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'docs/notes.md', '--diff-lines', '10', '--diff-sha', SHA_A],
+   '--changed', 'research/notes.md', '--diff-lines', '10', '--diff-sha', SHA_A],
   { exit: 0, contains: 'RESULT: READY_FOR_DETERMINISTIC_VALIDATION' });
 
 expect('unverified items are surfaced, not dropped',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/app.ts', '--diff-sha', SHA_A,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,
    '--review', writeJSON('withunver.json', review({ unverified: ['no browser available to test the modal'] })),
    '--review', writeJSON('withunver-grok.json', review({ reviewId: 'REV-withunver-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' }))],
   { exit: 0, contains: ['UNVERIFIED', 'no browser available to test the modal'] });
@@ -388,7 +744,7 @@ expect('unverified items are surfaced, not dropped',
 console.log('\nNO BYPASS');
 expect('--force is not a thing here',
   ['--gate-done', '--packet', FIXTURE_PACKET,
-   '--changed', 'src/auth/x.ts', '--diff-sha', SHA_A, '--force'],
+   '--changed', 'builder-control/test-fixtures/auth/x.ts', '--diff-sha', SHA_A, '--force'],
   { exit: 3, notContains: 'RESULT: DONE' });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -403,15 +759,15 @@ const PKT = FIXTURE_PACKET;
 console.log('\nRED PROOF — SUBJECT BINDING IS MANDATORY');
 
 expect('FULL lane with NO --subject-sha blocks on the binding itself',
-  ['--gate-done', '--packet', PKT, '--changed', 'src/app.ts'],
+  ['--gate-done', '--packet', PKT, '--changed', 'builder-control/test-fixtures/app.ts'],
   { exit: 3, contains: ['ENGOS-NO-SUBJECT-BINDING', 'certifies nothing'], notContains: 'READY_FOR' });
 
 expect('a --subject-sha that is not a digest blocks',
-  ['--gate-done', '--packet', PKT, '--changed', 'src/app.ts', '--subject-sha', 'not-a-hash'],
+  ['--gate-done', '--packet', PKT, '--changed', 'builder-control/test-fixtures/app.ts', '--subject-sha', 'not-a-hash'],
   { exit: 3, contains: 'ENGOS-NO-SUBJECT-BINDING' });
 
 expect('a WRONG --subject-sha blocks even with a valid approval present',
-  ['--gate-done', '--packet', PKT, '--changed', 'src/app.ts',
+  ['--gate-done', '--packet', PKT, '--changed', 'builder-control/test-fixtures/app.ts',
    '--subject-sha', 'f'.repeat(64),
    '--review', writeJSON('rp-wrong-hash.json', review({ reviewId: 'REV-rp-wronghash' }))],
   { exit: 3, contains: ['ENGOS-SUBJECT-MISMATCH'], notContains: 'READY_FOR' });
@@ -433,9 +789,9 @@ console.log('\nRED PROOF — EVIDENCE IS NOT PART OF ITS OWN SUBJECT');
   // The property under test never needed a file. It is that a reviews/ path is
   // classified as EVIDENCE and therefore excluded from the subject, so the hash
   // is computed over the same paths with or without it.
-  const withoutEvidence = run(['--subject', '--changed', 'src/app.ts', '--json']);
+  const withoutEvidence = run(['--subject', '--changed', 'builder-control/test-fixtures/app.ts', '--json']);
   const withEvidence = run([
-    '--subject', '--changed', 'src/app.ts',
+    '--subject', '--changed', 'builder-control/test-fixtures/app.ts',
     '--changed', 'builder-control/reviews/some-record.json',
     '--changed', 'builder-control/review-raw/some-raw.txt',
     '--json',
@@ -448,15 +804,9 @@ console.log('\nRED PROOF — EVIDENCE IS NOT PART OF ITS OWN SUBJECT');
   const excluded = b && b.excludedAsEvidence.length === 2 &&
     !b.subjectPaths.some((p) => /reviews|review-raw/.test(p));
 
-  // Belt and braces: if an earlier interrupted run left a probe behind, remove
-  // it so it cannot block the gate cases below.
-  const strayProbe = path.join(ROOT, 'builder-control', 'reviews', 'rp-stability-probe.json');
-  let removedStray = false;
-  try { if (fs.existsSync(strayProbe)) { fs.unlinkSync(strayProbe); removedStray = true; } } catch {}
-
   if (stable && excluded) {
     pass++;
-    console.log(`  ok   adding a review record does NOT change the subject hash  (stable${removedStray ? '; removed a stray probe from an interrupted run' : ''})`);
+    console.log('  ok   adding a review record does NOT change the subject hash  (stable)');
   } else {
     fail++;
     console.error('  FAIL adding a review record changed the subject hash');
@@ -465,7 +815,7 @@ console.log('\nRED PROOF — EVIDENCE IS NOT PART OF ITS OWN SUBJECT');
 })();
 
 expect('control metadata does NOT escalate an ordinary code change to high-risk',
-  ['--classify', '--changed', 'src/app.ts',
+  ['--classify', '--changed', 'research/app.ts',
    '--changed', 'builder-control/packets/SOME.json',
    '--changed', 'builder-control/reviews/some.json',
    '--changed', 'builder-control/ledger.json'],
@@ -479,31 +829,31 @@ console.log('\nRED PROOF — COVERAGE AND CONTAMINATION');
 
 expect('a review covering only SOME subject paths blocks',
   ['--gate-done', '--packet', PKT,
-   '--changed', 'src/app.ts', '--changed', 'src/other.ts', '--subject-sha', SHA_A,
+   '--changed', 'builder-control/test-fixtures/app.ts', '--changed', 'builder-control/test-fixtures/other.ts', '--subject-sha', SHA_A,
    '--review', writeJSON('rp-subset.json', review({
      reviewId: 'REV-rp-subset',
-     reviewOf: { diffSha256: SHA_A, changedPaths: ['src/app.ts'] },
+     reviewOf: { diffSha256: SHA_A, changedPaths: ['builder-control/test-fixtures/app.ts'] },
    }))],
   { exit: 3, contains: ['ENGOS-REVIEW-COVERAGE-SHORT', 'Partial coverage is not approval'] });
 
 expect('a review claiming paths OUTSIDE the subject blocks',
-  ['--gate-done', '--packet', PKT, '--changed', 'src/app.ts', '--subject-sha', SHA_A,
+  ['--gate-done', '--packet', PKT, '--changed', 'builder-control/test-fixtures/app.ts', '--subject-sha', SHA_A,
    '--review', writeJSON('rp-extra.json', review({
      reviewId: 'REV-rp-extra',
-     reviewOf: { diffSha256: SHA_A, changedPaths: ['src/app.ts', 'src/not-in-subject.ts'] },
+     reviewOf: { diffSha256: SHA_A, changedPaths: ['builder-control/test-fixtures/app.ts', 'builder-control/test-fixtures/not-in-subject.ts'] },
    }))],
   { exit: 3, contains: 'ENGOS-REVIEW-COVERAGE-EXTRA' });
 
 // A CRITICAL finding about a DIFFERENT change must not block this one. Evidence
 // about another subject is evidence about another thing, in both directions.
 expect('a stale CRITICAL finding bound to another subject does NOT contaminate this one',
-  ['--gate-done', '--packet', PKT, '--changed', 'src/app.ts', '--subject-sha', SHA_A,
+  ['--gate-done', '--packet', PKT, '--changed', 'builder-control/test-fixtures/app.ts', '--subject-sha', SHA_A,
    '--review', writeJSON('rp-clean.json', review({ reviewId: 'REV-rp-clean' })),
    '--review', writeJSON('rp-clean-grok.json', review({ reviewId: 'REV-rp-clean-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture' })),
    '--review', writeJSON('rp-stale-critical.json', review({
      reviewId: 'REV-rp-stalecrit',
      reviewer: 'grok',
-     reviewOf: { diffSha256: SHA_B, changedPaths: ['src/app.ts'] },
+     reviewOf: { diffSha256: SHA_B, changedPaths: ['builder-control/test-fixtures/app.ts'] },
      disposition: 'REJECT',
      findings: [{
        severity: 'CRITICAL', file: 'src/old.ts', problem: 'auth bypass in a previous revision',
@@ -515,13 +865,13 @@ expect('a stale CRITICAL finding bound to another subject does NOT contaminate t
   { exit: 0, contains: ['READY_FOR_DETERMINISTIC_VALIDATION', 'IGNORED'], notContains: 'ENGOS-OPEN-BLOCKING-FINDING' });
 
 expect('two conflicting records from the same reviewer for the same subject BLOCK as ambiguous',
-  ['--gate-done', '--packet', PKT, '--changed', 'src/app.ts', '--subject-sha', SHA_A,
+  ['--gate-done', '--packet', PKT, '--changed', 'builder-control/test-fixtures/app.ts', '--subject-sha', SHA_A,
    '--review', writeJSON('rp-dup-a.json', review({ reviewId: 'REV-rp-dup-a', disposition: 'APPROVE' })),
    '--review', writeJSON('rp-dup-b.json', review({ reviewId: 'REV-rp-dup-b', disposition: 'REJECT' }))],
   { exit: 3, contains: ['ENGOS-AMBIGUOUS-REVIEWS', 'Exactly one verdict per reviewer per subject'] });
 
 expect('an explicit supersedes declaration resolves the ambiguity deterministically',
-  ['--gate-done', '--packet', PKT, '--changed', 'src/app.ts', '--subject-sha', SHA_A,
+  ['--gate-done', '--packet', PKT, '--changed', 'builder-control/test-fixtures/app.ts', '--subject-sha', SHA_A,
    '--review', writeJSON('rp-sup-old.json', review({ reviewId: 'REV-rp-sup-old', disposition: 'REJECT' })),
    '--review', writeJSON('rp-sup-new.json', review({
      reviewId: 'REV-rp-sup-new', disposition: 'APPROVE', supersedes: 'REV-rp-sup-old',
@@ -586,18 +936,22 @@ console.log('\nRED PROOF — FAIL CLOSED WHEN POLICY OR INPUT IS UNSAFE');
 // A missing protected-path policy must be a hard block, never an empty
 // allow-list. "No policy found" must never read as "nothing is protected".
 (function missingPolicyFailsClosed() {
-  const live = path.join(ROOT, 'builder-control', 'protected-paths.json');
-  const hidden = live + '.redproof-hidden';
-  if (!fs.existsSync(live)) { fail++; console.error('  FAIL protected-paths.json is missing before the test even ran'); return; }
-  const restore = () => { try { if (fs.existsSync(hidden)) fs.renameSync(hidden, live); } catch {} };
-  process.on('exit', restore);
-  let r;
-  try {
-    fs.renameSync(live, hidden);
-    r = run(['--classify', '--changed', 'src/app.ts']);
-  } finally {
-    restore();
-  }
+  const isolatedRoot = fs.mkdtempSync(path.join(TMP, 'missing-policy-'));
+  const isolatedControl = path.join(isolatedRoot, 'builder-control');
+  fs.mkdirSync(isolatedControl, { recursive: true });
+  const isolatedCli = path.join(isolatedControl, 'engineering-os.cjs');
+  fs.copyFileSync(CLI, isolatedCli);
+  spawnSync('git', ['init', '--quiet'], { cwd: isolatedRoot, encoding: 'utf8' });
+  spawnSync('git', ['-c', 'user.name=AEGIS Fixture', '-c', 'user.email=aegis@example.invalid',
+    'commit', '--allow-empty', '--quiet', '-m', 'fixture base'], { cwd: isolatedRoot, encoding: 'utf8' });
+  const result = spawnSync('node', [isolatedCli, '--classify',
+    '--changed', 'builder-control/test-fixtures/app.ts', '--diff-lines', '1',
+    '--test-only-synthetic-subject'], {
+    cwd: isolatedRoot,
+    encoding: 'utf8',
+    env: { ...process.env, ENGOS_TEST_ONLY_SYNTHETIC: '1' },
+  });
+  const r = { exit: result.status, out: (result.stdout || '') + (result.stderr || '') };
   const ok = r && r.exit === 3 && /ENGOS-POLICY-UNAVAILABLE/.test(r.out) && /an absent policy is not an empty policy/.test(r.out);
   if (ok) {
     pass++; console.log('  ok   a missing protected-path policy HARD-BLOCKS  (exit 3)');
@@ -606,7 +960,6 @@ console.log('\nRED PROOF — FAIL CLOSED WHEN POLICY OR INPUT IS UNSAFE');
     console.error('  FAIL missing protected-path policy did not fail closed');
     console.error(`       exit=${r && r.exit}\n${(r && r.out || '').split('\n').map((l) => '         ' + l).join('\n')}`);
   }
-  if (!fs.existsSync(live)) { fail++; console.error('  FAIL protected-paths.json was NOT restored'); }
 })();
 
 console.log('\nRED PROOF — PORTABILITY AND WORKFLOW BINDING');
@@ -662,19 +1015,42 @@ expect('finding #10: LIGHT is still granted when the size is known and small',
 // ── GROK G9 (inside finding #3's evidence): 0/0 checks read as READY_FOR_PR ─
 console.log('\nRED PROOF — ZERO CHECKS IS NOT EVIDENCE');
 (function zeroChecksIsNotReady() {
-  const empty = { ...realPacket, testsRequired: [] };
+  // Keep this fixture valid under the current packet registry so the proof
+  // reaches the zero-check rule rather than stopping on unrelated historical
+  // paths from ENGINEERING-OS-V1.json.
+  const empty = {
+    ...realPacket,
+    packetId: PACKET_ID,
+    filesAllowed: ['builder-control/test-fixtures/app.ts'],
+    testsRequired: [],
+    authorization: {
+      authorizedBy: 'none',
+      allowsProtectedPaths: [],
+      allowsPublicPush: false,
+      allowsRelease: false,
+    },
+  };
   const p = writeJSON('rp-nochecks.json', empty);
-  const r = run(['--gate-done', '--packet', p, '--changed', 'src/app.ts',
+  const codexReview = writeJSON('rp-nochecks-codex.json', review({
+    reviewId: 'REV-rp-nochk-codex',
+  }));
+  const grokReview = writeJSON('rp-nochecks-grok.json', review({
+    reviewId: 'REV-rp-nochk-grok',
+    reviewer: 'grok',
+    reviewerModel: 'grok-test-fixture',
+  }));
+  const r = run(['--gate-done', '--packet', p, '--changed', 'builder-control/test-fixtures/app.ts',
     '--subject-sha', SHA_A, '--run-checks',
-    '--review', writeJSON('rp-nochecks-rev.json', review({ reviewId: 'REV-rp-nochk' }))]);
-  const claimsReadyForPr = /RESULT: READY_FOR_PR/.test(r.out);
-  const namesTheRule = /ENGOS-NO-DETERMINISTIC-CHECKS/.test(r.out);
-  if (!claimsReadyForPr && namesTheRule) {
-    pass++; console.log('  ok   a packet with zero testsRequired cannot reach READY_FOR_PR  (exit ' + r.exit + ')');
+    '--review', codexReview, '--review', grokReview, '--json']);
+  let result = null;
+  try { result = JSON.parse(r.out); } catch {}
+  const namesTheRule = result && Array.isArray(result.problems) &&
+    result.problems.some((problem) => problem.rule === 'ENGOS-NO-DETERMINISTIC-CHECKS');
+  if (r.exit === 3 && result && result.ok === false && result.state === 'BLOCKED' && namesTheRule) {
+    pass++; console.log('  ok   a gate-complete packet with zero testsRequired exits 3 with ok=false and BLOCKED');
   } else {
-    fail++;
-    console.error('  FAIL zero executed checks still reported READY_FOR_PR');
-    console.error(`       claimsReadyForPr=${claimsReadyForPr} namesTheRule=${namesTheRule}`);
+    fail++; console.error('  FAIL zero executed checks did not independently block a gate-complete fixture');
+    console.error(`       exit=${r.exit} ok=${result && result.ok} state=${result && result.state} namesTheRule=${namesTheRule}`);
   }
 })();
 
@@ -688,6 +1064,8 @@ console.log('\nRED PROOF — ZERO CHECKS IS NOT EVIDENCE');
   const body = src.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
   const offenders = [];
   if (/writeFileSync\([^)]*reviews[\/'"]/.test(body)) offenders.push('writes into builder-control/reviews/');
+  if (/renameSync\(live/.test(body)) offenders.push('renames the canonical protected-path policy');
+  if (/unlinkSync\(strayProbe/.test(body)) offenders.push('deletes canonical review evidence');
   if (/writeFileSync\([^)]*review-raw/.test(body)) offenders.push('writes into builder-control/review-raw/');
   if (/writeFileSync\([^)]*ledger\.json/.test(body)) offenders.push('writes the canonical ledger');
   if (offenders.length === 0) {
@@ -711,30 +1089,30 @@ console.log('\nRED PROOF — ORDINARY FULL REQUIRES BOTH CODEX AND GROK');
 
 expect('an ordinary (no high-risk signal) FULL change with codex approval alone is BLOCKED — codex-only is not enough',
   ['--gate-done', '--packet', PKT,
-   '--changed', 'src/plain-feature.ts', '--diff-sha', SHA_A,
+   '--changed', 'research/plain-feature.ts', '--diff-sha', SHA_A,
    '--review', writeJSON('rp-ordinary-codex-only.json', review({
-     reviewId: 'REV-rp-ordinary-codex', reviewOf: reviewOf('src/plain-feature.ts'),
+     reviewId: 'REV-rp-ordinary-codex', reviewOf: reviewOf('research/plain-feature.ts'),
    }))],
   { exit: 3, contains: ['ENGOS-REVIEW-MISSING', 'grok'], notContains: 'READY_FOR' });
 
 expect('an ordinary (no high-risk signal) FULL change with grok approval alone is BLOCKED — grok-only is not enough',
   ['--gate-done', '--packet', PKT,
-   '--changed', 'src/plain-feature.ts', '--diff-sha', SHA_A,
+   '--changed', 'research/plain-feature.ts', '--diff-sha', SHA_A,
    '--review', writeJSON('rp-ordinary-grok-only.json', review({
      reviewId: 'REV-rp-ordinary-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
-     reviewOf: reviewOf('src/plain-feature.ts'),
+     reviewOf: reviewOf('research/plain-feature.ts'),
    }))],
   { exit: 3, contains: ['ENGOS-REVIEW-MISSING', 'codex'], notContains: 'READY_FOR' });
 
 expect('an ordinary (no high-risk signal) FULL change clears ONLY once both codex and grok approve',
   ['--gate-done', '--packet', PKT,
-   '--changed', 'src/plain-feature.ts', '--diff-sha', SHA_A,
+   '--changed', 'research/plain-feature.ts', '--diff-sha', SHA_A,
    '--review', writeJSON('rp-ordinary-both-codex.json', review({
-     reviewId: 'REV-rp-ordinary-both-codex', reviewOf: reviewOf('src/plain-feature.ts'),
+     reviewId: 'REV-rp-ordinary-both-codex', reviewOf: reviewOf('research/plain-feature.ts'),
    })),
    '--review', writeJSON('rp-ordinary-both-grok.json', review({
      reviewId: 'REV-rp-ordinary-both-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
-     reviewOf: reviewOf('src/plain-feature.ts'),
+     reviewOf: reviewOf('research/plain-feature.ts'),
    }))],
   { exit: 0, contains: 'RESULT: READY_FOR_DETERMINISTIC_VALIDATION' });
 
@@ -764,13 +1142,13 @@ console.log('\nRED PROOF — REVIEWER COMPLETENESS: EXACT-SUBJECT EXECUTION STAT
 // (ambiguous, not evidence). None of the three may ever read as EXECUTED.
 (function reviewerCompletenessExecutedOnlyOnExactSubject() {
   const r = run(['--gate-done', '--packet', PKT,
-    '--changed', 'src/exact-subject.ts', '--subject-sha', SHA_A,
+    '--changed', 'builder-control/test-fixtures/exact-subject.ts', '--subject-sha', SHA_A,
     '--review', writeJSON('rp-exact-codex.json', review({
-      reviewId: 'REV-rp-exact-codex', reviewOf: reviewOf('src/exact-subject.ts'),
+      reviewId: 'REV-rp-exact-codex', reviewOf: reviewOf('builder-control/test-fixtures/exact-subject.ts'),
     })),
     '--review', writeJSON('rp-exact-grok.json', review({
       reviewId: 'REV-rp-exact-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
-      reviewOf: reviewOf('src/exact-subject.ts'),
+      reviewOf: reviewOf('builder-control/test-fixtures/exact-subject.ts'),
     })),
     '--json']);
   let j; try { j = JSON.parse(r.out); } catch { j = null; }
@@ -791,13 +1169,13 @@ console.log('\nRED PROOF — REVIEWER COMPLETENESS: EXACT-SUBJECT EXECUTION STAT
 
 (function reviewerCompletenessStaleNeverReadsExecuted() {
   const r = run(['--gate-done', '--packet', PKT,
-    '--changed', 'src/exact-subject.ts', '--subject-sha', SHA_A,
+    '--changed', 'builder-control/test-fixtures/exact-subject.ts', '--subject-sha', SHA_A,
     '--review', writeJSON('rp-stale-codex.json', review({
-      reviewId: 'REV-rp-stale-codex', reviewOf: reviewOf('src/exact-subject.ts'),
+      reviewId: 'REV-rp-stale-codex', reviewOf: reviewOf('builder-control/test-fixtures/exact-subject.ts'),
     })),
     '--review', writeJSON('rp-stale-grok-otherversion.json', review({
       reviewId: 'REV-rp-stale-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
-      reviewOf: reviewOf('src/exact-subject.ts', SHA_B),
+      reviewOf: reviewOf('builder-control/test-fixtures/exact-subject.ts', SHA_B),
     })),
     '--json']);
   let j; try { j = JSON.parse(r.out); } catch { j = null; }
@@ -816,12 +1194,12 @@ console.log('\nRED PROOF — REVIEWER COMPLETENESS: EXACT-SUBJECT EXECUTION STAT
 })();
 
 (function reviewerCompletenessMalformedNeverReadsExecuted() {
-  const malformedGrok = review({ reviewId: 'REV-rp-malformed-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture', reviewOf: reviewOf('src/exact-subject.ts') });
+  const malformedGrok = review({ reviewId: 'REV-rp-malformed-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture', reviewOf: reviewOf('builder-control/test-fixtures/exact-subject.ts') });
   delete malformedGrok.reviewerModel; // required by schema — this record cannot become evidence
   const r = run(['--gate-done', '--packet', PKT,
-    '--changed', 'src/exact-subject.ts', '--subject-sha', SHA_A,
+    '--changed', 'builder-control/test-fixtures/exact-subject.ts', '--subject-sha', SHA_A,
     '--review', writeJSON('rp-malf-codex.json', review({
-      reviewId: 'REV-rp-malf-codex', reviewOf: reviewOf('src/exact-subject.ts'),
+      reviewId: 'REV-rp-malf-codex', reviewOf: reviewOf('builder-control/test-fixtures/exact-subject.ts'),
     })),
     '--review', writeJSON('rp-malformed-grok.json', malformedGrok),
     '--json']);
@@ -841,16 +1219,16 @@ console.log('\nRED PROOF — REVIEWER COMPLETENESS: EXACT-SUBJECT EXECUTION STAT
 
 (function reviewerCompletenessAmbiguousNeverReadsExecuted() {
   const r = run(['--gate-done', '--packet', PKT,
-    '--changed', 'src/exact-subject.ts', '--subject-sha', SHA_A,
+    '--changed', 'builder-control/test-fixtures/exact-subject.ts', '--subject-sha', SHA_A,
     '--review', writeJSON('rp-ambig-codex-a.json', review({
-      reviewId: 'REV-rp-ambig-codex-a', disposition: 'APPROVE', reviewOf: reviewOf('src/exact-subject.ts'),
+      reviewId: 'REV-rp-ambig-codex-a', disposition: 'APPROVE', reviewOf: reviewOf('builder-control/test-fixtures/exact-subject.ts'),
     })),
     '--review', writeJSON('rp-ambig-codex-b.json', review({
-      reviewId: 'REV-rp-ambig-codex-b', disposition: 'REJECT', reviewOf: reviewOf('src/exact-subject.ts'),
+      reviewId: 'REV-rp-ambig-codex-b', disposition: 'REJECT', reviewOf: reviewOf('builder-control/test-fixtures/exact-subject.ts'),
     })),
     '--review', writeJSON('rp-ambig-grok.json', review({
       reviewId: 'REV-rp-ambig-grok', reviewer: 'grok', reviewerModel: 'grok-test-fixture',
-      reviewOf: reviewOf('src/exact-subject.ts'),
+      reviewOf: reviewOf('builder-control/test-fixtures/exact-subject.ts'),
     })),
     '--json']);
   let j; try { j = JSON.parse(r.out); } catch { j = null; }
@@ -994,11 +1372,11 @@ console.log('\nRED PROOF — FINDING #8: EVERY FULL SUBJECT REQUIRES CODEX AND G
 // one that reached FULL precisely because nothing could confidently call it
 // safe — requires both reviewers.
 expect('an ordinary FULL change requires codex AND grok',
-  ['--classify', '--changed', 'src/plain-feature.ts', '--diff-lines', '10'],
+  ['--classify', '--changed', 'research/plain-feature.ts', '--diff-lines', '10'],
   { exit: 0, contains: ['lane      : FULL', 'codex + grok (required)'] });
 
 expect('a HIGH-RISK change requires codex AND grok',
-  ['--classify', '--changed', 'src/auth/session.ts', '--diff-lines', '10'],
+  ['--classify', '--changed', 'builder-control/test-fixtures/auth/session.ts', '--diff-lines', '10'],
   { exit: 0, contains: ['lane      : FULL', 'high-risk : YES', 'codex + grok (required)'] });
 
 expect('a control-plane charter change requires codex AND grok',
@@ -1008,7 +1386,7 @@ expect('a control-plane charter change requires codex AND grok',
 (function requiredReviewerSetIsStableAcrossRepeatedClassification() {
   const seen = new Set();
   for (let i = 0; i < 3; i++) {
-    const r = run(['--classify', '--changed', 'src/plain-feature.ts', '--diff-lines', '10', '--json']);
+    const r = run(['--classify', '--changed', 'research/plain-feature.ts', '--diff-lines', '10', '--json']);
     let j; try { j = JSON.parse(r.out); } catch { j = null; }
     seen.add(j ? JSON.stringify(j.requiredReviewers) : `parse-error-${i}`);
   }

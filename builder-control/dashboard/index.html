@@ -25,7 +25,7 @@
 <style>
   :root{
     --bg-0:#0b0e13; --bg-1:#131820; --bg-2:#1b2230; --line:#2a3444;
-    --text-0:#e6edf7; --text-1:#9fb0c8; --text-2:#6b7c96;
+    --text-0:#e6edf7; --text-1:#9fb0c8; --text-2:#8192aa;
     --pass:#3fb98a; --active:#4aa3ff; --warn:#e0a33e; --fail:#e5484d;
     /* --unknown was #566073 and measured 2.81:1 against --bg-1, below the 3:1
        this design requires of non-text state indicators. UNVERIFIED and UNKNOWN
@@ -34,7 +34,7 @@
        is lightened to 4.2:1 rather than left as the quietest thing on screen. */
     --blocked:#b45cf0; --stale:#8a94a6; --unknown:#6b7c96; --focus:#4aa3ff;
     --cyan:#39c6ff; --cyan-soft:rgba(57,198,255,.12); --green-soft:rgba(63,185,138,.12);
-    --orange:#f3a536; --orange-soft:rgba(243,165,54,.12); --muted:#6b7c96;
+    --orange:#f3a536; --orange-soft:rgba(243,165,54,.12); --muted:#8192aa;
     --sp:4px; --radius:6px;
     --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -151,6 +151,9 @@
   .fatal{border-left-color:var(--fail)}
 
   .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .sr:focus,.sr:focus-visible{position:fixed;left:12px;top:12px;width:auto;height:auto;overflow:visible;
+    clip:auto;white-space:normal;z-index:100;padding:9px 12px;border:2px solid var(--focus);
+    border-radius:var(--radius);background:#08131d;color:var(--text-0);font-weight:700}
 
   /* ── responsive (§M) ────────────────────────────────────────────── */
   @media (max-width:1279px){ main{grid-template-columns:minmax(0,1fr)} }
@@ -215,6 +218,9 @@
   .mission-kicker{font:600 11px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--active)}
   .mission-title{font-size:clamp(19px,2vw,28px);line-height:1.2;margin-top:calc(var(--sp)*2);max-width:950px}
   .mission-meta{font:11px/1.5 var(--mono);color:var(--text-2);margin-top:calc(var(--sp)*2)}
+  .mission-objective-detail{margin-top:8px;color:var(--text-1);font-size:12px}
+  .mission-objective-detail>summary{cursor:pointer;font-weight:650;color:#9fcdf0}
+  .mission-objective-full{margin:8px 0 0;overflow-wrap:anywhere}
   .command-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(var(--sp)*3);margin-top:calc(var(--sp)*4)}
   .command-card{min-height:112px;padding:calc(var(--sp)*3);background:rgba(11,14,19,.58);
     border:1px solid var(--line);border-radius:var(--radius)}
@@ -403,6 +409,103 @@
     .command-shell section>.body{font-size:15px}
     .ctx{font-size:13px}
   }
+
+  /* ── Strategic Systems HUD / Command View ─────────────────────────
+     This layer changes hierarchy, not authority. Every illuminated node is
+     repainted by renderFounderSummary from the same canonical AEGIS_STATE or
+     /api/status view that powers the existing route, controls and evidence. */
+  :root{--hud-line:#1d4f69;--hud-blue:#33b9ef;--hud-violet:#9b73ef;--hud-panel:#0b1420}
+  .command-header{display:grid;grid-template-columns:minmax(220px,1fr) auto minmax(300px,1fr);gap:18px}
+  .view-nav{display:flex;justify-content:center;gap:6px;padding:4px;border:1px solid #244158;
+    border-radius:5px;background:#08111a}
+  .view-tab{appearance:none;border:0;border-radius:3px;padding:7px 15px;background:transparent;color:var(--text-2);
+    font:650 10px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase;cursor:pointer}
+  .view-tab[aria-pressed="true"]{background:#123149;color:#d8f5ff;box-shadow:inset 0 -2px 0 var(--cyan)}
+  .view-tab:focus-visible,.hud-control:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  .header-state{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
+  .header-state .context-strip{flex:0 1 auto}
+  .hud-control{appearance:none;border:1px solid #29465d;border-radius:4px;padding:7px 9px;background:#0b1722;
+    color:var(--text-1);font:600 10px/1.2 var(--mono);cursor:pointer;white-space:nowrap}
+  .hud-control[aria-pressed="true"]{border-color:var(--cyan);color:#d8f5ff}
+  .command-shell{grid-template-columns:minmax(280px,320px) minmax(660px,1fr) minmax(300px,340px)}
+  .left-rail #founder-summary{order:-2}
+  .left-rail .objective-composer{order:-1}
+  #founder-summary .mission-title{font-size:20px}
+  #founder-summary .command-grid{grid-template-columns:1fr}
+  #founder-summary .command-card,#founder-summary .command-card.is-now,
+  #founder-summary .command-card.is-next,#founder-summary .command-card.is-blocked,
+  #founder-summary .command-card.is-clear{grid-column:auto;min-height:0}
+
+  .strategic-core{min-height:510px;border-color:#23516c!important;background:#07111b!important}
+  .strategic-core>.body{padding:18px}
+  .core-stage{position:relative;min-height:430px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+    grid-template-rows:1fr 1fr 1fr;gap:14px;align-items:center}
+  .core-stage::before,.core-stage::after{content:"";position:absolute;left:50%;top:50%;border:1px solid #22516c;
+    border-radius:50%;transform:translate(-50%,-50%);pointer-events:none}
+  .core-stage::before{width:270px;height:270px;box-shadow:0 0 42px rgba(51,185,239,.08)}
+  .core-stage::after{width:205px;height:205px;border-style:dashed;opacity:.7}
+  .core-node{position:relative;z-index:1;min-height:86px;padding:12px;border:1px solid #29485f;border-radius:5px;
+    background:rgba(8,19,29,.94);box-shadow:0 10px 24px rgba(0,0,0,.28);overflow:hidden}
+  .core-node::before{content:"";position:absolute;left:0;top:0;width:32px;height:1px;background:var(--hud-blue)}
+  .core-node h3{font:650 10px/1.3 var(--mono);letter-spacing:.11em;text-transform:uppercase;color:#8faac0}
+  .core-node .hud-value{margin-top:7px;font-size:13px;line-height:1.4;color:var(--text-0);overflow-wrap:anywhere}
+  .core-node .hud-state{margin-top:7px;font:600 10px/1.4 var(--mono);color:var(--text-2)}
+  .core-node.is-review::before{background:var(--hud-violet)}
+  .core-node.is-gate::before{background:var(--orange)}
+  .core-node.is-evidence::before,.core-node.is-checkpoint::before{background:var(--pass)}
+  .core-node.is-mission{grid-column:1;grid-row:1}.core-node.is-builder{grid-column:3;grid-row:1}
+  .core-node.is-review{grid-column:1;grid-row:2}.core-node.is-gate{grid-column:3;grid-row:2}
+  .core-node.is-evidence{grid-column:1;grid-row:3}.core-node.is-checkpoint{grid-column:3;grid-row:3}
+  .aegis-core{position:relative;z-index:2;grid-column:2;grid-row:2;justify-self:center;width:170px;height:170px;
+    border:1px solid var(--hud-blue);border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;background:#0a1c29;
+    box-shadow:0 0 0 8px rgba(51,185,239,.035),0 0 42px rgba(51,185,239,.18)}
+  .core-mark{font:750 18px/1.05 var(--mono);letter-spacing:.08em;color:#d7f4ff}
+  .core-sub{margin-top:7px;font:600 9px/1.4 var(--mono);letter-spacing:.13em;text-transform:uppercase;color:#7f9cb3}
+  .core-status{margin-top:9px}
+  #operator-shell[data-run-status="active"] .aegis-core,#operator-shell[data-run-status="running"] .aegis-core{
+    border-color:var(--cyan);box-shadow:0 0 0 8px rgba(51,185,239,.05),0 0 48px rgba(51,185,239,.25)}
+  #operator-shell[data-run-status="blocked"] .aegis-core{border-color:var(--blocked);box-shadow:0 0 34px rgba(180,92,240,.18)}
+  #operator-shell[data-run-status="failed"] .aegis-core{border-color:var(--fail);box-shadow:0 0 34px rgba(229,72,77,.18)}
+  .core-legend{display:flex;justify-content:center;gap:16px;flex-wrap:wrap;margin-top:12px;color:var(--text-2);
+    font:10px/1.4 var(--mono)}
+  .core-legend span::before{content:"";display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:currentColor}
+
+  .evidence-deck{grid-template-columns:repeat(5,minmax(0,1fr))}
+  .hud-summary .body{min-height:108px}
+  .hud-summary-value{font-size:14px;line-height:1.4;color:var(--text-0)}
+  .hud-summary-meta{margin-top:8px;color:var(--text-2);font:10px/1.45 var(--mono)}
+  .event-panel{grid-column:span 2}details[aria-labelledby="cost-h"]{grid-column:span 1}
+  #raw-state{grid-column:1/-1}
+  body[data-detail="true"] #raw-state{display:block}
+  body[data-detail="true"] #raw-state>.raw-body{display:grid}
+  body[data-detail="true"] .strategic-core{opacity:.78}
+  body[data-reduced-motion="true"] *{transition:none!important;scroll-behavior:auto!important}
+
+  @media (max-width:1599px){
+    .command-header{grid-template-columns:auto 1fr}.view-nav{justify-self:end}.header-state{grid-column:1/-1}
+    .command-shell{grid-template-columns:300px minmax(600px,1fr);
+      grid-template-areas:"left center" "right right" "evidence evidence"}
+    #founder-summary .mission-head{padding-bottom:8px}
+    #founder-summary .mission-meta{font-size:11px;line-height:1.4}
+    #founder-summary .mission-title{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;
+      overflow:hidden;overflow-wrap:anywhere}
+    #founder-summary .command-grid{gap:5px;margin-top:8px}
+    #founder-summary .command-card{padding:8px 10px}
+    #founder-summary .command-value{line-height:1.3}
+    .evidence-deck{grid-template-columns:repeat(3,minmax(0,1fr))}
+  }
+  @media (max-width:1050px){
+    .command-shell{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"}
+    .core-stage{grid-template-columns:1fr 150px 1fr}.aegis-core{width:145px;height:145px}
+    .evidence-deck{grid-template-columns:repeat(2,minmax(0,1fr))}.event-panel{grid-column:span 2}
+  }
+  @media (max-width:680px){
+    .command-header{display:flex}.view-nav{order:3;width:100%}.header-state{width:100%;flex-wrap:wrap;justify-content:flex-start}
+    .core-stage{display:flex;flex-direction:column;min-height:0}.aegis-core{order:-1;flex:0 0 145px}
+    .core-node{width:100%}.core-stage::before,.core-stage::after{display:none}
+    .evidence-deck{grid-template-columns:1fr}.event-panel{grid-column:auto}
+  }
 </style>
 </head>
 <body>
@@ -415,10 +518,18 @@
       <div class="brand-sub">Engineering Command</div>
     </div>
   </div>
-  <div class="context-strip" aria-label="Current system context">
-    <span class="ctx context-cell" id="ctx-entity">AEGIS Operator</span>
-    <span class="ctx context-cell mono" id="ctx-generated">—</span>
-    <span class="ctx" id="ctx-verdict"></span>
+  <nav class="view-nav" aria-label="Dashboard view">
+    <button type="button" class="view-tab" id="view-command" aria-pressed="true">Command view</button>
+    <button type="button" class="view-tab" id="view-detail" aria-pressed="false">Detail view</button>
+  </nav>
+  <div class="header-state">
+    <div class="context-strip" aria-label="Current system context">
+      <span class="ctx context-cell" id="ctx-entity">AEGIS Operator</span>
+      <span class="ctx context-cell mono" id="ctx-generated">—</span>
+      <span class="ctx" id="ctx-verdict"></span>
+    </div>
+    <button type="button" class="hud-control" id="toggle-motion" aria-pressed="false">Reduced motion</button>
+    <button type="button" class="hud-control" disabled title="2D is the authoritative AEGIS view">Flat 2D</button>
   </div>
 </header>
 
@@ -426,6 +537,11 @@
 
 <main class="command-shell" id="operator-shell" data-run-status="idle">
   <aside class="left-rail" aria-label="Objective and controls">
+    <section aria-labelledby="founder-h" id="founder-summary">
+      <h2 id="founder-h">Mission brief</h2>
+      <div class="body" id="founder-body"><p class="empty">Loading current-run summary…</p></div>
+    </section>
+
     <section class="objective-composer" aria-labelledby="intake-h" id="objective-composer">
       <h2 id="intake-h"><span>Start a governed build</span><span class="rail-note">objective first</span></h2>
       <div class="body">
@@ -477,15 +593,51 @@
     <details class="panel" aria-labelledby="runs-h">
       <summary class="panel-summary" id="runs-h"><span>Run history &amp; controls</span><span class="rail-note">collapsed history</span></summary>
       <div class="body">
-        <div id="runs-list"><p class="empty">No runs yet. Record an objective above.</p></div>
+        <div id="runs-list"><p class="empty">Run history UNAVAILABLE — waiting for authenticated run-ledger evidence.</p></div>
       </div>
     </details>
   </aside>
 
   <div class="center-console">
-    <section aria-labelledby="founder-h" id="founder-summary">
-      <h2 id="founder-h">Mission control</h2>
-      <div class="body" id="founder-body"><p class="empty">Loading current-run summary…</p></div>
+    <section class="strategic-core" aria-labelledby="core-h">
+      <h2 id="core-h">Strategic systems HUD <span class="rail-note">canonical state only</span></h2>
+      <div class="body">
+        <div class="core-stage" aria-label="Live AEGIS control-plane overview">
+          <article class="core-node is-mission">
+            <h3>Mission</h3><div class="hud-value" id="hud-mission">Loading mission…</div>
+            <div class="hud-state" id="hud-mission-state">STATE UNAVAILABLE</div>
+          </article>
+          <article class="core-node is-builder">
+            <h3>Crew &amp; models</h3><div class="hud-value" id="hud-crew">Loading crew evidence…</div>
+            <div class="hud-state" id="hud-crew-state">USAGE UNAVAILABLE</div>
+          </article>
+          <article class="core-node is-review">
+            <h3>Independent review</h3><div class="hud-value" id="hud-review">Loading review evidence…</div>
+            <div class="hud-state" id="hud-review-state">EVIDENCE UNAVAILABLE</div>
+          </article>
+          <div class="aegis-core" id="aegis-core" role="status" aria-live="polite">
+            <div class="core-mark">AEGIS CORE</div>
+            <div class="core-sub">Control plane</div>
+            <div class="core-status" id="hud-core-status">UNAVAILABLE</div>
+          </div>
+          <article class="core-node is-gate">
+            <h3>Gate queue</h3><div class="hud-value" id="hud-gate">Loading next gate…</div>
+            <div class="hud-state" id="hud-gate-state">GATE UNAVAILABLE</div>
+          </article>
+          <article class="core-node is-evidence">
+            <h3>Evidence</h3><div class="hud-value" id="hud-evidence">Loading exact-subject evidence…</div>
+            <div class="hud-state" id="hud-evidence-state">BINDING UNAVAILABLE</div>
+          </article>
+          <article class="core-node is-checkpoint">
+            <h3>Checkpoint</h3><div class="hud-value" id="hud-checkpoint">Loading checkpoint evidence…</div>
+            <div class="hud-state" id="hud-checkpoint-state">CHECKPOINT UNAVAILABLE</div>
+          </article>
+        </div>
+        <div class="core-legend" aria-label="System state legend">
+          <span class="s-ACTIVE">Working</span><span class="s-PASS">Verified</span>
+          <span class="s-WARNING">Needs attention</span><span class="s-BLOCKED">Blocked</span>
+        </div>
+      </div>
     </section>
 
     <section id="topology-overview" aria-labelledby="topology-overview-h">
@@ -526,7 +678,7 @@
 
   <div class="evidence-deck" aria-label="Operational evidence deck">
     <section class="event-panel" aria-labelledby="ev-h">
-      <h2 id="ev-h">Recent gate decisions</h2>
+      <h2 id="ev-h">Event history <span class="rail-note">recent gate decisions</span></h2>
       <div class="body"><ul class="rows" id="events"></ul></div>
     </section>
 
@@ -534,6 +686,24 @@
       <summary class="panel-summary" id="cost-h"><span>Spend &amp; authorization</span><span class="rail-note">recorded evidence</span></summary>
       <div class="body" id="cost"></div>
     </details>
+
+    <section class="hud-summary" aria-labelledby="system-health-h">
+      <h2 id="system-health-h">System health</h2>
+      <div class="body"><div class="hud-summary-value" id="hud-system-health">UNAVAILABLE</div>
+        <div class="hud-summary-meta" id="hud-system-health-meta">Waiting for canonical state.</div></div>
+    </section>
+
+    <section class="hud-summary" aria-labelledby="decisions-h">
+      <h2 id="decisions-h">Decisions required</h2>
+      <div class="body"><div class="hud-summary-value" id="hud-decisions">UNAVAILABLE</div>
+        <div class="hud-summary-meta" id="hud-decisions-meta">Waiting for canonical gate evidence.</div></div>
+    </section>
+
+    <section class="hud-summary" aria-labelledby="safe-checkpoint-h">
+      <h2 id="safe-checkpoint-h">Last safe checkpoint</h2>
+      <div class="body"><div class="hud-summary-value" id="hud-safe-checkpoint">UNAVAILABLE</div>
+        <div class="hud-summary-meta">Recorded checkpoint evidence only.</div></div>
+    </section>
 
     <details id="raw-state">
       <summary class="panel-summary">Deep evidence &amp; machine state <span class="rail-note">for engineers</span></summary>
@@ -617,17 +787,49 @@
     return c;
   }
 
-  // No state at all: say so loudly rather than render an empty, confident page.
-  if (!S) {
-    $('fatal').appendChild((function(){
-      var d = el('div','note fatal');
+  // A missing generated snapshot must fail closed without disabling the live
+  // authenticated control surface.  Build an explicitly unavailable view so
+  // every instrument paints a truthful state immediately, export the renderer
+  // seam below, then let /api/status replace this view if bootstrap succeeds.
+  // This object is not a data seed: every evidence plane is unavailable and it
+  // contains no objective, model, progress, verdict, run, or status claim.
+  var stateSnapshotMissing = !S;
+  var missingStateReason = 'state.js is missing or failed to parse.';
+  function unavailableInitialState(reason){
+    return {
+      generatedAt: null,
+      contract: { absences: ['UNAVAILABLE','STALE','UNVERIFIED'] },
+      engineering: { state: 'UNAVAILABLE', verdict: 'UNAVAILABLE', reason: reason, stages: [] },
+      integration: { connectors: { state: 'UNAVAILABLE', reason: reason, connectors: [] } },
+      knowledge: { state: 'UNAVAILABLE', reason: reason, records: [] },
+      reviewers: { state: 'UNAVAILABLE', reason: reason, reviewers: [] },
+      cost: { state: 'UNAVAILABLE', reason: reason },
+      runs: { state: 'UNAVAILABLE', reason: reason, runs: [], current: {
+        state: 'UNAVAILABLE', runId: null, evidenceState: 'UNAVAILABLE', reason: reason
+      } },
+      events: { state: 'UNAVAILABLE', reason: reason, events: [] }
+    };
+  }
+  function renderStateSource(mode){
+    if (!stateSnapshotMissing) return;
+    var host = $('fatal');
+    if (!host) return;
+    host.textContent = '';
+    var d = el('div', mode === 'LIVE' ? 'note' : 'note fatal');
+    if (mode === 'LIVE') {
+      d.appendChild(el('strong',null,'LIVE STATUS ACTIVE — generated state.js is unavailable.'));
+      d.appendChild(el('div',null,
+        'The instruments are now rendered from the authenticated live /api/status projection. Regenerate state.js to restore the initial offline snapshot.'));
+    } else {
       d.appendChild(el('strong',null,'UNAVAILABLE — no AEGIS state is loaded.'));
       d.appendChild(el('div',null,
-        'state.js is missing or failed to parse. Nothing on this page is being rendered from real state, so nothing on it should be believed. Regenerate with: node builder-control/aegis-state.cjs --out builder-control/dashboard/state.js'));
-      return d;
-    })());
-    $('ctx-verdict').appendChild(chip('UNAVAILABLE'));
-    return;
+        'state.js is missing or failed to parse. Instruments remain unavailable unless authenticated live /api/status evidence arrives. Regenerate with: node builder-control/aegis-state.cjs --out builder-control/dashboard/state.js'));
+    }
+    host.appendChild(d);
+  }
+  if (stateSnapshotMissing) {
+    S = unavailableInitialState(missingStateReason);
+    renderStateSource('MISSING');
   }
 
   var eng = S.engineering || {};
@@ -648,19 +850,133 @@
     var build = run.build || {};
     var activity = build.activity || {};
     if (run.state === 'BUILDING') {
+      if (Number.isInteger(build.exit)) {
+        return { state: 'BLOCKED', plain: 'The run still says building, but the builder has already recorded terminal exit ' + build.exit + '.' };
+      }
       if (activity.active === true && (build.status === 'STARTING' || build.status === 'RUNNING')) {
         return { state: 'RUNNING', plain: activity.summary || 'The builder is running.' };
       }
       return { state: 'UNVERIFIED', plain: 'A build is recorded, but active worker evidence is unavailable.' };
     }
     if (run.state === 'CHECKPOINTED') return { state: 'COMPLETE', plain: 'This run reached a recorded checkpoint.' };
+    if (run.state === 'BUILD_FAILED' && run.build && run.build.activity &&
+        (run.build.activity.code === 'TERMINATION_UNVERIFIED' ||
+         run.build.activity.code === 'ORPHANED')) {
+      return { state: 'BLOCKED', plain: run.build.activity.summary ||
+        'Builder termination is unverified; retry is blocked.' };
+    }
+    if (run.state === 'BUILD_FAILED' && run.build && run.build.failure &&
+        run.build.failure.code === 'MODEL_AUTH_FAILURE') {
+      return { state: 'BLOCKED', plain: run.build.failover && run.build.failover.state === 'NOT_EXECUTABLE'
+        ? 'Claude authentication failed. Grok is the next eligible builder, but automatic failover is not enabled for this beta.'
+        : 'Claude authentication failed. No executable failover is available.' };
+    }
     if (run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED') {
       return { state: 'BLOCKED', plain: 'The current run stopped on a failed build or check.' };
     }
+    if (run.state === 'REVIEW_FAILED') {
+      var reviewReason = run.reviewFailure && run.reviewFailure.summary;
+      return { state: 'BLOCKED', plain: reviewReason ||
+        'The run records REVIEW_FAILED, but corroborating exact-subject gate evidence is unavailable. Retry remains governed and fail-closed.' };
+    }
     if (run.state === 'BUILT') return { state: 'WAITING', plain: 'The build finished and is waiting for deterministic checks.' };
-    if (run.state === 'CHECKS_PASSED') return { state: 'WAITING', plain: 'Checks passed and the run is waiting for independent review evidence.' };
+    if (run.state === 'CHECKS_PASSED') {
+      if (run.checks && run.checks.outcome === 'SNAPSHOT_PASS_HOST_PENDING') {
+        return { state: 'WAITING', plain: run.checks.hostContainmentReason ||
+          'Snapshot checks passed. Mandatory host containment is pending until exact-subject review completes.' };
+      }
+      if (!run.checks || run.checks.outcome !== 'PASS') {
+        return { state: 'UNVERIFIED', plain: 'Check totals are recorded, but canonical receipt and lifecycle evidence have not verified a passing outcome.' };
+      }
+      return { state: 'WAITING', plain: 'Deterministic checks passed with final required evidence; the run is waiting for independent review evidence.' };
+    }
     if (run.state === 'REVIEW_BOUND') return { state: 'WAITING', plain: 'Review evidence is bound and the run is waiting for a checkpoint.' };
     return { state: 'WAITING', plain: 'The run is waiting at ' + String(run.state || 'an unavailable stage').replace(/_/g, ' ').toLowerCase() + '.' };
+  }
+
+  // An empty array is not proof that the run ledger was read successfully.
+  // The generated snapshot carries the projector envelope state; a minimized
+  // live status must carry an equally affirmative runsState before an empty
+  // list may become a clean IDLE signal. Missing evidence fails closed.
+  function availableEmptyRuns(view){
+    var source = view && view.runs;
+    var binding = view && (view.binding || view.runsBinding ||
+      (source && !Array.isArray(source) ? source.current : null));
+    if (Array.isArray(source)) {
+      // The minimized live contract carries the projector's evidence state on
+      // runsBinding rather than as a second top-level runsState field. Only
+      // that affirmative marker can turn an empty public array into clean
+      // idle; a missing, damaged or unreadable run store stays unavailable.
+      return source.length === 0 && !!(view && (view.runsState === 'OK' ||
+        (binding && binding.evidenceState === 'OK')));
+    }
+    return !!(source && source.state === 'OK' && Array.isArray(source.runs) &&
+      source.runs.length === 0);
+  }
+
+  // A positively empty run ledger is only a clean idle signal when the
+  // canonical binding also positively says that no run is active. A named,
+  // bound, mismatched or otherwise contradictory binding fails closed even if
+  // its run record is absent from an otherwise available ledger.
+  function cleanIdleEvidence(binding, emptyRunsAvailable){
+    return !!(emptyRunsAvailable === true && binding &&
+      binding.state === 'UNAVAILABLE' && !binding.runId &&
+      binding.subjectState !== 'BOUND' && binding.subjectState !== 'MISMATCHED');
+  }
+
+  // A checkpoint is historical lifecycle evidence, not proof that the current
+  // control-plane subject is clear. Preserve the checkpoint receipt while the
+  // current gate/binding overrides a misleading COMPLETE headline.
+  function controlPlaneState(engineering, binding, run, emptyRunsAvailable){
+    var lifecycle = operationalState(run);
+    if (!run) {
+      return cleanIdleEvidence(binding, emptyRunsAvailable)
+        ? lifecycle
+        : { state: 'UNAVAILABLE', plain: 'Current run status is unavailable because the run and binding evidence do not establish a clean idle state.' };
+    }
+    // Once deterministic checks have passed, the founder-facing controls are
+    // gate-dependent. A missing or blocking gate must override a reassuring
+    // WAITING/COMPLETE lifecycle label; pre-check build activity remains a
+    // lifecycle fact and is not hidden behind review work that is not due yet.
+    var gateDependent = ['CHECKS_PASSED','REVIEW_BOUND','CHECKPOINTED'].indexOf(run.state) !== -1;
+    if (gateDependent && (!engineering || engineering.state !== 'OK')) {
+      return { state: 'UNAVAILABLE',
+        plain: 'Current control-plane status is unavailable — the exact-subject gate has not positively reported available evidence for this run.' };
+    }
+    var gateBlocked = !!(engineering && engineering.state === 'OK' &&
+      (engineering.verdict === 'BLOCKED' ||
+       (Array.isArray(engineering.problems) && engineering.problems.length > 0)));
+    if (gateDependent && run.state !== 'CHECKPOINTED' && gateBlocked) {
+      return { state: 'BLOCKED',
+        plain: 'Blocked — the current exact-subject gate has unresolved requirements for this run.' };
+    }
+    if (run.state !== 'CHECKPOINTED') return lifecycle;
+    var validSubject = function(value){
+      return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
+    };
+    var gateSubject = engineering && engineering.subjectSha256;
+    var currentSubjectBound = !!(binding && binding.state === 'BOUND' &&
+      binding.runId === run.runId && binding.subjectState === 'BOUND' &&
+      validSubject(gateSubject) && validSubject(binding.subjectSha256) &&
+      validSubject(binding.runSubjectSha256) && validSubject(binding.gateSubjectSha256) &&
+      binding.subjectSha256 === gateSubject && binding.runSubjectSha256 === gateSubject &&
+      binding.gateSubjectSha256 === gateSubject);
+    var gateAvailableAndClear = !!(engineering && engineering.state === 'OK' &&
+      Array.isArray(engineering.problems) &&
+      engineering.problems.length === 0);
+    if (currentSubjectBound && gateAvailableAndClear) return lifecycle;
+    var subjectMismatch = !!(binding && binding.state === 'BOUND' &&
+      binding.subjectState === 'MISMATCHED');
+    if (subjectMismatch){
+      return { state: 'BLOCKED',
+        plain: 'Blocked — this run reached a checkpoint for an older code version than the current gate subject.' };
+    }
+    if (gateBlocked){
+      return { state: 'BLOCKED',
+        plain: 'Blocked — this checkpointed run has unresolved requirements for the current gate subject.' };
+    }
+    return { state: 'UNAVAILABLE',
+      plain: 'Current completion is unavailable — the checkpoint is recorded, but this run is not positively bound to available, nonblocking evidence for the current gate subject.' };
   }
 
   function renderContext(view){
@@ -672,7 +988,11 @@
       : 'subject UNAVAILABLE';
     var verdict = $('ctx-verdict');
     verdict.textContent = '';
-    verdict.appendChild(chip(operationalState(runFromView(currentView)).state));
+    var currentRun = runFromView(currentView);
+    var currentBinding = currentView.runsBinding ||
+      (currentView.runs && !Array.isArray(currentView.runs) ? currentView.runs.current : null);
+    verdict.appendChild(chip(controlPlaneState(currentEng, currentBinding, currentRun,
+      availableEmptyRuns(currentView)).state));
   }
   // CONFIRMED FINDING #9: this used to render ANY non-BLOCKED verdict as
   // "PASS", so READY_FOR_DETERMINISTIC_VALIDATION — which explicitly means the
@@ -725,13 +1045,15 @@
   // One reviewer row, in a sentence a founder can act on: who, what they were
   // for, whether they were required, whether they read THIS version, what they
   // decided, and how much of the change they actually covered.
-  function reviewerLine(row){
+  function reviewerLine(row, gateProblems){
     var required = row.required === 'REQUIRED' ? 'required' :
       (row.required === 'ADVISORY' ? 'advisory only — cannot unblock anything' : 'not required for this tier');
     var ran;
     if (row.executed === 'EXECUTED') {
       ran = 'reviewed this exact version and ' + (
-        row.disposition === 'REJECT' ? 'rejected it' :
+        row.disposition === 'REJECT' && Array.isArray(gateProblems) && gateProblems.length === 0
+          ? 'recorded an advisory rejection with no blocking finding' :
+        row.disposition === 'REJECT' ? 'rejected it with a blocking finding' :
         row.disposition === 'APPROVE_WITH_NOTES' ? 'approved it with notes' :
         row.disposition === 'APPROVE' ? 'approved it' :
         ('returned ' + (row.disposition || 'no disposition')));
@@ -779,6 +1101,16 @@
   var currentOperatorContext = null;
   function crewIdentity(run){
     if (!run) return 'No worker is assigned.';
+    var route = run.route || null;
+    // The minimized run route is canonical only when it names the router as
+    // its source and carries both fields the control plane validates. Prefer
+    // that assignment over launch-memory or builder fallbacks so the pilot
+    // sees who AEGIS actually selected, not merely who most recently started.
+    if (route && route.source === 'tool-router.cjs routeRole' &&
+        typeof route.model === 'string' && route.model &&
+        typeof route.execution === 'string' && route.execution) {
+      return route.model + ' via ' + route.execution + ' · router-selected';
+    }
     var builder = run.builder || (lastLaunchedRunId === run.runId ? lastLaunchedBuilder : null);
     if (builder && (builder.provider || builder.model)) {
       return [builder.model, builder.provider].filter(Boolean).join(' via ');
@@ -810,11 +1142,28 @@
     if (!run) return 'No run is active.';
     var checkpoint = run.checkpoint;
     if (!checkpoint) return 'No safe checkpoint is recorded for this run.';
-    if (typeof checkpoint === 'string') return checkpoint;
-    if (checkpoint.commit) return 'Commit ' + checkpoint.commit;
-    if (checkpoint.sha) return 'Commit ' + checkpoint.sha;
-    if (checkpoint.state) return String(checkpoint.state).replace(/_/g, ' ').toLowerCase();
-    return 'A checkpoint exists, but its display value is UNAVAILABLE.';
+    // Public /api/status exposes the checkpoint id as a string and the safe
+    // restore commit separately as rollbackPoint. A fixture-only
+    // checkpoint.commit object can never arrive through the governed endpoint.
+    if (typeof checkpoint !== 'string') {
+      return 'A checkpoint exists, but its public checkpoint id is UNAVAILABLE.';
+    }
+    if (typeof run.rollbackPoint === 'string' && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(run.rollbackPoint)) {
+      return 'Checkpoint ' + checkpoint + ' · rollback commit ' + run.rollbackPoint;
+    }
+    return 'Checkpoint ' + checkpoint + ' is recorded; rollback commit UNAVAILABLE.';
+  }
+
+  function missionHeadline(objective){
+    var exact = typeof objective === 'string' ? objective.trim().replace(/\s+/g, ' ') : '';
+    if (!exact) return 'No current mission is recorded.';
+    if (exact.length <= 140) return exact;
+    var sentence = exact.match(/^(.{1,140}?[.!?])(?:\s|$)/);
+    if (sentence) return sentence[1];
+    var excerpt = exact.slice(0, 137);
+    var boundary = excerpt.lastIndexOf(' ');
+    if (boundary >= 80) excerpt = excerpt.slice(0, boundary);
+    return excerpt.replace(/[,:;\u2014-]\s*$/, '') + '\u2026';
   }
 
   function plainStageLabel(stage){
@@ -881,6 +1230,7 @@
       WORKTREE_READY: 'AEGIS worktree preparation',
       BUILT: 'the deterministic checks',
       CHECKS_PASSED: 'independent review',
+      REVIEW_FAILED: 'the governed correction route',
       REVIEW_BOUND: 'AEGIS checkpoint governance',
       CHECKPOINTED: 'the recorded checkpoint',
       BUILD_FAILED: 'the operator',
@@ -948,6 +1298,86 @@
     }
   }
 
+  function reviewerEvidenceReady(engineering, binding, run){
+    var e = engineering || {};
+    var completeness = e.reviewerCompleteness;
+    var gateSubject = binding && binding.gateSubjectSha256;
+    var subject = typeof e.subjectSha256 === 'string' ? e.subjectSha256 : null;
+    var completenessSubject = completeness && completeness.subjectSha256;
+    var subjectPaths = Array.isArray(e.subjectPaths) ? e.subjectPaths : null;
+    var coverage = completeness && completeness.pathCoverage;
+    var required = completeness && Array.isArray(completeness.required)
+      ? completeness.required : null;
+    var requiredRows = completeness && Array.isArray(completeness.rows)
+      ? completeness.rows.filter(function(row){ return row.required === 'REQUIRED'; }) : [];
+    // The canonical gate treats severity-qualified advisory REJECT as a
+    // completed review when it recorded no blocking finding. `problems` is the
+    // blocking authority; do not rewrite that completed review as unavailable
+    // or claim that every reviewer approved.
+    var allowedDisposition = { APPROVE: true, APPROVE_WITH_NOTES: true, REJECT: true };
+    var validSubject = function(value){ return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value); };
+    var exactPaths = function(paths){
+      return Array.isArray(paths) && subjectPaths && paths.length === subjectPaths.length &&
+        new Set(paths).size === paths.length &&
+        subjectPaths.every(function(path){ return paths.indexOf(path) !== -1; });
+    };
+    // LIGHT lanes may validly require zero independent reviewers. The empty
+    // set is exact only when there are also zero REQUIRED rows; completeness,
+    // subject binding and path coverage still have to pass below.
+    var requiredNamesAreExact = !!(required &&
+      required.every(function(name){ return typeof name === 'string' && name.length > 0; }) &&
+      new Set(required).size === required.length &&
+      requiredRows.length === required.length &&
+      required.every(function(name){
+        return requiredRows.filter(function(row){ return row.reviewer === name; }).length === 1;
+      }));
+    var checks = run && run.checks;
+    return !!(binding && binding.state === 'BOUND' && run &&
+      binding.runId === run.runId && run.state === 'CHECKS_PASSED' &&
+      checks && Number.isInteger(checks.total) && checks.total > 0 &&
+      Number.isInteger(checks.passed) && checks.passed === checks.total &&
+      (checks.outcome === 'PASS' || checks.outcome === 'SNAPSHOT_PASS_HOST_PENDING') &&
+      validSubject(subject) && validSubject(completenessSubject) && validSubject(gateSubject) &&
+      subject === completenessSubject && subject === gateSubject &&
+      e.state === 'OK' &&
+      Array.isArray(e.problems) && e.problems.length === 0 &&
+      subjectPaths && subjectPaths.length > 0 && new Set(subjectPaths).size === subjectPaths.length &&
+      completeness && completeness.complete === true && requiredNamesAreExact &&
+      coverage && Number.isInteger(coverage.total) && coverage.total === subjectPaths.length &&
+      coverage.total > 0 && exactPaths(coverage.coveredByEveryRequiredReviewer) &&
+      Array.isArray(coverage.notCoveredByEveryRequiredReviewer) &&
+      coverage.notCoveredByEveryRequiredReviewer.length === 0 &&
+      requiredRows.every(function(row){
+        return row.executed === 'EXECUTED' && allowedDisposition[row.disposition] === true &&
+          exactPaths(row.coveredPaths) &&
+          Array.isArray(row.missingPaths) && row.missingPaths.length === 0 &&
+          Array.isArray(row.stalePaths) && row.stalePaths.length === 0;
+      }));
+  }
+
+  async function requestRunRetry(run, button){
+    if (!run || ['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'].indexOf(run.state) === -1) return;
+    if (run.build && run.build.retrySafe === false) return;
+    if (button){ button.disabled = true; button.textContent = 'Retry requested…'; }
+    var publishActivity = function(text){
+      var dashboard = window.AEGIS_DASHBOARD;
+      if (dashboard && typeof dashboard.appendActivity === 'function') dashboard.appendActivity(text);
+    };
+    try {
+      var dashboard = window.AEGIS_DASHBOARD;
+      if (!dashboard || typeof dashboard.callApi !== 'function') {
+        throw new Error('the canonical dashboard control client is unavailable');
+      }
+      var result = await dashboard.callApi('/api/retry', { runId: run.runId });
+      publishActivity('Retry accepted for ' + run.runId + ': state ' +
+        ((result && result.state) || 'UNAVAILABLE') +
+        ((result && result.action) ? '; action ' + result.action : '') + '.');
+    } catch (e) {
+      if (button){ button.disabled = false; button.textContent = 'Retry'; }
+      publishActivity('Retry failed for ' + run.runId + ': ' + e.message);
+    }
+  }
+
   function renderFounderSummary(view){
     var host = $('founder-body'); if (!host) return;
     var topologyHost = $('topology-live-body');
@@ -963,44 +1393,155 @@
     if (bind && bind.state === 'BOUND'){
       boundRun = runs.filter(function(r){ return r.runId === bind.runId; })[0] || null;
     }
+    var canonicalSubject = typeof e.subjectSha256 === 'string' && e.subjectSha256
+      ? e.subjectSha256 : null;
+    var bindingSubjectState = bind && typeof bind.subjectState === 'string'
+      ? bind.subjectState : 'MISSING';
+    var exactSubjectBound = !!(bind && bind.state === 'BOUND' &&
+      bindingSubjectState === 'BOUND' &&
+      typeof bind.subjectSha256 === 'string' && bind.subjectSha256 &&
+      canonicalSubject && bind.subjectSha256 === canonicalSubject);
+    // runsBinding is the only authority that can name a current run. Array
+    // position and cardinality are presentation facts, not a safe substitute
+    // for a missing or ghost binding.
+    var reviewRun = boundRun;
+    var postBindReadyForPr = !!(boundRun && exactSubjectBound && e.state === 'OK' &&
+      Array.isArray(e.problems) && e.problems.length === 0 &&
+      (boundRun.state === 'REVIEW_BOUND' || boundRun.state === 'CHECKPOINTED'));
     var deckObjective = (boundRun && boundRun.objective) || (bind && bind.objective) || 'No active task';
+    var missionHeadlineText = missionHeadline(deckObjective);
     var blocked = blockingStatus(e, bind, boundRun);
     var deckActions = [];
+    var namedReviewActions = [];
     var deckRc = e.reviewerCompleteness;
-    if (!boundRun) {
+    var validSubjectSha = function(value){
+      return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
+    };
+    var reviewerSubject = deckRc && deckRc.subjectSha256;
+    var gateSubject = bind && bind.gateSubjectSha256;
+    var reviewerSubjectMatchesCurrent = !!(validSubjectSha(canonicalSubject) &&
+      validSubjectSha(reviewerSubject) && validSubjectSha(gateSubject) &&
+      canonicalSubject === reviewerSubject && canonicalSubject === gateSubject);
+    var reviewerSubjectMismatchKnown = !!(validSubjectSha(reviewerSubject) &&
+      ((validSubjectSha(canonicalSubject) && reviewerSubject !== canonicalSubject) ||
+       (validSubjectSha(gateSubject) && reviewerSubject !== gateSubject)));
+    if (!boundRun && !reviewRun) {
       deckActions.push('Enter an objective and start a governed build.');
     } else if (deckRc && deckRc.rows){
       deckRc.rows.forEach(function(row){
         if (row.required === 'REQUIRED' && row.executed !== 'EXECUTED'){
-          deckActions.push('Get ' + row.reviewer + ' to review this exact change.');
+          var missingReviewAction = 'Get ' + row.reviewer + ' to review this exact change.';
+          deckActions.push(missingReviewAction);
+          namedReviewActions.push(missingReviewAction);
         } else if (row.required === 'REQUIRED' && row.executed === 'EXECUTED' && (row.missingPaths || []).length){
-          deckActions.push('Complete ' + row.reviewer + ' coverage of ' + row.missingPaths.length + ' unread file(s).');
+          var missingCoverageAction = 'Complete ' + row.reviewer + ' coverage of ' + row.missingPaths.length + ' uncovered file(s).';
+          deckActions.push(missingCoverageAction);
+          namedReviewActions.push(missingCoverageAction);
         }
       });
     }
-    if (!deckActions.length && e.verdict === 'READY_FOR_DETERMINISTIC_VALIDATION') deckActions.push('Run the deterministic checks.');
-    if (!deckActions.length && e.verdict === 'READY_FOR_PR') deckActions.push('Open the pull request for review.');
+    // CHECKS_PASSED means the next canonical transition is REVIEW_BOUND; it
+    // does not prove whether the required evidence already exists. Preserve any
+    // named reviewer actions projected by the gate, and let the gate's own
+    // completeness result decide whether the operator should obtain missing
+    // coverage or bind evidence that is already present. If the completeness
+    // table is absent, READY_FOR_PR is the only positive evidence that existing
+    // evidence appears eligible for server verification. Only the server can
+    // recompute the subject, run the canonical gate and bind it to the run.
+    // This page never launches or pays for a review.
+    var reviewBindBoundary = 'Independent reviews run outside this dashboard. ' +
+      'It only verifies and binds existing exact-subject review evidence; ' +
+      'it does not launch or pay for reviews.';
+    var reviewEvidenceReady = false;
+    if (boundRun && boundRun.state === 'BUILT'){
+      deckActions = ['Run deterministic checks on this completed build.'];
+    } else if (reviewRun && reviewRun.state === 'CHECKS_PASSED'){
+      reviewEvidenceReady = reviewerEvidenceReady(e, bind, reviewRun);
+      if (reviewEvidenceReady){
+        deckActions.push('Existing exact-subject review evidence appears ready for server verification. ' +
+          'Ask AEGIS to verify it; only the server can approve and bind it. ' +
+          'This dashboard does not launch or pay for reviews.');
+      } else {
+        if (!deckActions.length){
+          deckActions.push('Independent-review evidence is not yet complete or its status is unavailable.');
+        }
+        deckActions.push(reviewBindBoundary);
+      }
+    } else if (boundRun && boundRun.state === 'REVIEW_BOUND') {
+      deckActions = ['Independent review evidence is bound. The next governed stage is a checkpoint; checkpoint control is intentionally outside this functional beta.'];
+    } else if (boundRun && boundRun.state === 'CHECKPOINTED') {
+      deckActions = ['No owner action is required. This run reached its recorded safe checkpoint.'];
+    } else if (boundRun && ['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'].indexOf(boundRun.state) !== -1) {
+      deckActions = [boundRun.state === 'REVIEW_FAILED'
+        ? 'Independent review found a blocking issue on this exact checked version. Retry starts the bounded correction route.'
+        : 'The governed run failed. Retry starts only the bounded recovery route allowed for this failure state.'];
+    } else {
+      if (!deckActions.length && e.verdict === 'READY_FOR_DETERMINISTIC_VALIDATION') deckActions.push('Run the deterministic checks.');
+      if (!deckActions.length && postBindReadyForPr) deckActions.push('Continue from the recorded governed lifecycle state.');
+    }
     if (!deckActions.length) deckActions.push('No next action is recorded yet.');
 
     var opState = operationalState(boundRun);
+    var emptyRunsAvailable = availableEmptyRuns(view);
+    var controlState = controlPlaneState(e, bind, boundRun, emptyRunsAvailable);
     var crew = crewIdentity(boundRun);
     var currentAction = boundRun ? opState.plain : 'Nothing is currently running.';
+    if (reviewRun && reviewRun.state === 'CHECKS_PASSED' && reviewEvidenceReady &&
+        ['UNVERIFIED','BLOCKED','UNAVAILABLE'].indexOf(controlState.state) === -1){
+      currentAction = bindingSubjectState === 'MISMATCHED'
+        ? 'Checks passed. Existing review evidence appears ready for server verification, but this run records an older code version. AEGIS will recompute the subject and refuse if they do not match.'
+        : (exactSubjectBound
+          ? 'Checks passed. Existing review evidence for this exact code version appears ready for server verification.'
+          : 'Checks passed. Existing review evidence for the current gate subject appears ready for server verification. Only AEGIS can approve and bind it to this run.');
+    }
     var elapsed = elapsedEvidence(boundRun, view && view.generatedAt);
-    var cleanIdle = !boundRun && !runs.length && (!bind || bind.state === 'UNAVAILABLE');
-    var operatorBlocker = cleanIdle ? 'No blocker — no run has started.' : blocked.text;
+    var cleanIdle = !boundRun && !runs.length &&
+      cleanIdleEvidence(bind, emptyRunsAvailable);
+    var controlBlocks = controlState.state === 'BLOCKED' || controlState.state === 'UNAVAILABLE';
+    var modelAuthBlocked = !!(boundRun && boundRun.state === 'BUILD_FAILED' && boundRun.build &&
+      boundRun.build.failure && boundRun.build.failure.code === 'MODEL_AUTH_FAILURE');
+    var retryableFailure = !!(boundRun &&
+      ['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'].indexOf(boundRun.state) !== -1 &&
+      !(boundRun.build && boundRun.build.retrySafe === false));
+    if (controlBlocks) {
+      currentAction = controlState.plain;
+      deckActions = modelAuthBlocked
+        ? ['Re-authenticate Claude before continuing. Grok is identified as the next eligible builder, but automatic failover is not enabled for this beta.']
+        : retryableFailure
+        ? [boundRun.state === 'REVIEW_FAILED'
+          ? 'Retry this run through the bounded correction route; the recorded review-failure claim remains unverified until exact-subject gate evidence is available.'
+          : 'Retry this failed run through its bounded recovery route.']
+        : reviewRun && reviewRun.state === 'CHECKS_PASSED' && namedReviewActions.length
+        ? namedReviewActions.concat([reviewBindBoundary])
+        : ['Resolve the recorded control-plane blocker before continuing.'];
+    }
+    // The warning instrument and the headline consume the same control-plane
+    // verdict. A locally empty problem list can never turn the BLOCKER card
+    // green when the exact-subject/current-run authority has already failed
+    // closed as BLOCKED or UNAVAILABLE.
+    var operatorBlocker = cleanIdle ? 'No blocker — no run has started.' :
+      (controlBlocks ? controlState.plain + (blocked.clear ? '' : ' ' + blocked.text) : blocked.text);
+    var blockerClear = cleanIdle || (!controlBlocks && blocked.clear);
     var safeCheckpoint = checkpointEvidence(boundRun);
     var shell = $('operator-shell');
-    if (shell) shell.setAttribute('data-run-status', opState.state.toLowerCase());
+    if (shell) shell.setAttribute('data-run-status', controlState.state.toLowerCase());
 
     // The first screen is a pilot deck: mission, crew, present action, next
     // stage, warning and last safe state. Implementation plumbing stays below.
     var mission = el('div','mission-head');
     var missionText = el('div');
     missionText.appendChild(el('div','mission-kicker','Mission'));
-    missionText.appendChild(el('h3','mission-title',deckObjective));
-    missionText.appendChild(el('div','mission-meta',opState.plain));
+    missionText.appendChild(el('h3','mission-title',missionHeadlineText));
+    if (missionHeadlineText !== deckObjective){
+      var objectiveDetail = el('details','mission-objective-detail');
+      objectiveDetail.appendChild(el('summary',null,'View full objective'));
+      objectiveDetail.appendChild(el('p','mission-objective-full',deckObjective));
+      missionText.appendChild(objectiveDetail);
+    }
+    missionText.appendChild(el('div','mission-meta',controlState.plain +
+      (controlState.state !== opState.state ? ' Run lifecycle: ' + opState.plain : '')));
     mission.appendChild(missionText);
-    mission.appendChild(chip(opState.state));
+    mission.appendChild(chip(controlState.state));
     host.appendChild(mission);
     renderHandoff(host, boundRun, currentAction);
 
@@ -1014,20 +1555,84 @@
     var commandGrid = el('div','command-grid');
     commandGrid.appendChild(commandCard('CREW / MODEL', crew, 'is-crew'));
     commandGrid.appendChild(commandCard('CURRENT ACTION', currentAction, 'is-now'));
-    commandGrid.appendChild(commandCard('ELAPSED', elapsed, 'is-elapsed'));
     commandGrid.appendChild(commandCard('NEXT STEP', deckActions.join(' '), 'is-next'));
     commandGrid.appendChild(commandCard('BLOCKER', operatorBlocker,
-      cleanIdle || blocked.clear ? 'is-clear' : 'is-blocked'));
+      blockerClear ? 'is-clear' : 'is-blocked'));
     commandGrid.appendChild(commandCard('LAST SAFE CHECKPOINT', safeCheckpoint, 'is-checkpoint'));
+    commandGrid.appendChild(commandCard('ELAPSED', elapsed, 'is-elapsed'));
     host.appendChild(commandGrid);
+    if (retryableFailure) {
+      var retryControls = el('div','btn-row command-recovery-controls');
+      var retryControl = el('button','action primary','Retry');
+      retryControl.type = 'button';
+      retryControl.setAttribute('data-command-control','retry');
+      retryControl.addEventListener('click', function(){
+        return window.AEGIS_DASHBOARD.requestRunRetry(boundRun, retryControl);
+      });
+      retryControls.appendChild(retryControl);
+      host.appendChild(retryControls);
+    }
     currentOperatorContext = {
       objective: deckObjective,
-      verdict: opState.state,
+      verdict: controlState.state,
       now: currentAction,
       risk: (plainRisk(e).reasons || []).join(' ') || plainRisk(e).plain,
       next: deckActions.join(' '),
       blocked: operatorBlocker
     };
+
+    // Strategic HUD: an alternate reading order for facts already established
+    // above. It never estimates progress or turns authentication into usage.
+    function hudText(id, value){ var node = $(id); if (node) node.textContent = value; }
+    hudText('hud-mission', missionHeadlineText);
+    hudText('hud-mission-state', controlState.state + ' — ' + controlState.plain +
+      (controlState.state !== opState.state ? ' Run lifecycle: ' + opState.plain : ''));
+    hudText('hud-core-status', controlState.state);
+    hudText('hud-crew', crew);
+    hudText('hud-crew-state', boundRun ? currentAction : 'NO ACTIVE WORKER');
+    var hudReview = 'No exact-subject independent-review evidence is bound.';
+    var hudReviewState = 'EVIDENCE UNAVAILABLE';
+    if (deckRc && deckRc.rows && deckRc.rows.length && !reviewerSubjectMatchesCurrent){
+      hudReview = reviewerSubjectMismatchKnown
+        ? 'Recorded reviewer evidence belongs to a different code subject and is not current coverage.'
+        : 'Reviewer subject identity is UNAVAILABLE, so current-subject coverage cannot be attributed.';
+      hudReviewState = reviewerSubjectMismatchKnown
+        ? 'REVIEW EVIDENCE STALE OR MISMATCHED'
+        : 'EVIDENCE UNAVAILABLE';
+    } else if (deckRc && deckRc.rows && deckRc.rows.length){
+      var requiredReviewRows = deckRc.rows.filter(function(row){ return row.required === 'REQUIRED'; });
+      var executedReviews = requiredReviewRows.filter(function(row){ return row.executed === 'EXECUTED'; }).length;
+      hudReview = executedReviews + ' of ' + requiredReviewRows.length +
+        ' required reviewer row(s) executed for the current gate subject.';
+      if (deckRc.complete && exactSubjectBound){
+        hudReviewState = 'REVIEW COVERAGE COMPLETE';
+      } else if (reviewEvidenceReady && reviewRun && reviewRun.state === 'CHECKS_PASSED'){
+        hudReviewState = bindingSubjectState === 'MISMATCHED'
+          ? 'SERVER VERIFICATION CANDIDATE — RUN VERSION DIFFERS'
+          : 'EVIDENCE APPEARS READY FOR SERVER VERIFICATION';
+      } else {
+        hudReviewState = deckRc.complete
+          ? 'REVIEW EVIDENCE NOT YET SERVER-VERIFIED'
+          : 'REVIEW COVERAGE INCOMPLETE';
+      }
+    }
+    hudText('hud-review', hudReview);
+    hudText('hud-review-state', hudReviewState);
+    hudText('hud-gate', deckActions[0] || 'No next gate is recorded.');
+    hudText('hud-gate-state', e.verdict || 'GATE UNAVAILABLE');
+    hudText('hud-evidence', exactSubjectBound
+      ? 'The current run is bound to this exact code version.'
+      : 'AEGIS cannot confirm an exact code-version binding for the current run.');
+    hudText('hud-evidence-state', exactSubjectBound ? 'EXACT SUBJECT BOUND' : 'BINDING UNAVAILABLE');
+    hudText('hud-checkpoint', safeCheckpoint);
+    hudText('hud-checkpoint-state', boundRun && boundRun.checkpoint ? 'RECORDED' : 'NOT RECORDED');
+    hudText('hud-system-health', cleanIdle ? 'READY FOR AN OBJECTIVE' : controlState.state);
+    hudText('hud-system-health-meta', cleanIdle ? 'No active run and no recorded blocker.' : operatorBlocker);
+    hudText('hud-decisions', cleanIdle ? 'None right now' : deckActions[0]);
+    hudText('hud-decisions-meta', cleanIdle
+      ? 'AEGIS will surface a required owner decision here.'
+      : 'This is the next recorded governed action; open the route or evidence detail for its reason.');
+    hudText('hud-safe-checkpoint', safeCheckpoint);
 
     var routeHead = el('div','deck-heading');
     routeHead.appendChild(el('h3',null,'Build sequence'));
@@ -1121,7 +1726,10 @@
 
     var happening = el('p');
     happening.appendChild(el('strong', null, 'What is happening now: '));
-    happening.appendChild(document.createTextNode(plainVerdict(e.verdict)));
+    happening.appendChild(document.createTextNode(
+      boundRun && (boundRun.state === 'BUILT' || boundRun.state === 'CHECKS_PASSED')
+        ? currentAction
+        : (e.verdict === 'READY_FOR_PR' && !postBindReadyForPr ? currentAction : plainVerdict(e.verdict))));
     host.appendChild(happening);
 
     // ── risk tier, explained ──────────────────────────────────────────
@@ -1156,18 +1764,25 @@
         if (row.required === 'REQUIRED' && row.executed !== 'EXECUTED'){
           actions.push('Get ' + row.reviewer + ' to review this exact change (' + row.job + ').');
         } else if (row.required === 'REQUIRED' && row.executed === 'EXECUTED' && (row.missingPaths || []).length){
-          actions.push('Get ' + row.reviewer + ' to read the ' + row.missingPaths.length +
-            ' changed file(s) it has not read yet.');
+          actions.push('Get ' + row.reviewer + ' review evidence for the ' + row.missingPaths.length +
+            ' changed file(s) missing from its coverage.');
         }
       });
+    }
+    if (boundRun && boundRun.state === 'BUILT'){
+      actions = ['Run deterministic checks on this completed build.'];
+    } else if (!actions.length && reviewRun && reviewRun.state === 'CHECKS_PASSED'){
+      actions.push(reviewEvidenceReady
+        ? deckActions[0]
+        : deckActions.join(' '));
     }
     if (!actions.length && e.verdict === 'READY_FOR_DETERMINISTIC_VALIDATION'){
       actions.push('Run the deterministic checks, or re-run the gate with --run-checks.');
     }
-    if (!actions.length && e.verdict === 'READY_FOR_PR'){
+    if (!actions.length && postBindReadyForPr){
       actions.push('Open the pull request. This is not a claim the software is correct — that is a separate, unfinished step.');
     }
-    if (!actions.length && (!e.problems || !e.problems.length) && e.verdict !== 'READY_FOR_PR'){
+    if (!actions.length && (!e.problems || !e.problems.length) && !postBindReadyForPr){
       actions.push('No action is available from this page — see Raw machine state below.');
     }
     next.appendChild(document.createTextNode(actions.length ? actions.join(' ') : 'No action is currently identified.'));
@@ -1175,15 +1790,21 @@
 
     // ── who reviewed what, against THIS code version ───────────────────
     var revP = el('p');
-    revP.appendChild(el('strong', null, 'Who has reviewed this exact version: '));
+    revP.appendChild(el('strong', null, 'Reviewer coverage for the current code version: '));
     if (!rc || !rc.rows || !rc.rows.length){
       revP.appendChild(chip('UNAVAILABLE'));
       revP.appendChild(el('div','meta','No reviewer table was produced for this change, so reviewer coverage is unknown — not zero, and certainly not complete.'));
       host.appendChild(revP);
+    } else if (!reviewerSubjectMatchesCurrent){
+      revP.appendChild(chip(reviewerSubjectMismatchKnown ? 'STALE' : 'UNAVAILABLE'));
+      revP.appendChild(el('div','meta', reviewerSubjectMismatchKnown
+        ? 'The recorded reviewer rows belong to a different code subject. They are preserved as evidence but are not attributed to the current change.'
+        : 'The reviewer subject, engineering subject, and current gate subject cannot all be proven equal, so current-change coverage is UNAVAILABLE.'));
+      host.appendChild(revP);
     } else {
       revP.appendChild(document.createTextNode(
-        rc.complete ? 'Every required reviewer read every changed file of this version.'
-                    : 'Not every required reviewer has read every changed file of this version.'));
+        rc.complete ? 'Every required review has bound evidence for every changed file of this version.'
+                    : 'Not every required review has bound evidence for every changed file of this version.'));
       // FINDING #2 — the headline above is a yes/no. The gate also states WHICH
       // reviewer fell short, in what way, and what to re-run; without that
       // sentence on screen a founder reading "not every reviewer" has to open
@@ -1202,7 +1823,7 @@
         var li = el('li','row');
         var left = el('div');
         left.appendChild(el('div','name', row.reviewer));
-        left.appendChild(el('div','meta', reviewerLine(row)));
+        left.appendChild(el('div','meta', reviewerLine(row, e.problems)));
         var right = el('div','badges');
         right.appendChild(chip(row.executed || 'UNKNOWN'));
         li.appendChild(left); li.appendChild(right);
@@ -1213,14 +1834,14 @@
       // File-by-file coverage is real evidence and also the densest thing on
       // the page, so it is available and collapsed rather than absent.
       var det = el('details');
-      det.appendChild(el('summary', null, 'Which files each reviewer read (covered, not read, and no longer part of this change)'));
+      det.appendChild(el('summary', null, 'Which files each review covers (covered, not covered, and no longer part of this change)'));
       var dul = el('ul','rows');
       rc.rows.forEach(function(row){
         var li = el('li','row');
         var left = el('div');
         left.appendChild(el('div','name', row.reviewer));
-        left.appendChild(el('div','meta','Read: ' + ((row.coveredPaths || []).join(', ') || 'none')));
-        left.appendChild(el('div','meta','Not read: ' + ((row.missingPaths || []).join(', ') || 'none')));
+        left.appendChild(el('div','meta','Covered by bound evidence: ' + ((row.coveredPaths || []).join(', ') || 'none')));
+        left.appendChild(el('div','meta','Not covered: ' + ((row.missingPaths || []).join(', ') || 'none')));
         left.appendChild(el('div','meta','Claimed files that are not part of this change: ' + ((row.stalePaths || []).join(', ') || 'none')));
         li.appendChild(left);
         dul.appendChild(li);
@@ -1278,6 +1899,7 @@
     return {
       engineering: eng,
       runs: (S.runs && S.runs.state === 'OK') ? (S.runs.runs || []) : [],
+      runsState: S.runs && S.runs.state ? S.runs.state : 'UNAVAILABLE',
       binding: (S.runs && S.runs.current) || null,
       cost: S.cost || null,
       integration: S.integration || null,
@@ -1691,7 +2313,12 @@
     usageMessage: usageMessage,
     viewFromState: viewFromState,
     operatorAnswer: operatorAnswer,
-    noteLaunchedBuilder: noteLaunchedBuilder
+    noteLaunchedBuilder: noteLaunchedBuilder,
+    reviewerEvidenceReady: reviewerEvidenceReady,
+    checkpointEvidence: checkpointEvidence,
+    requestRunRetry: requestRunRetry,
+    availableEmptyRuns: availableEmptyRuns,
+    renderStateSource: renderStateSource
   };
 })();
 </script>
@@ -1765,23 +2392,32 @@
 
   var intakeRunId = null;
 
-  function bindRunActions(startBtn){
+  async function requestRunStart(runId, startBtn, report){
+    startBtn.disabled = true;
+    try {
+      var result = await callApi('/api/start', { runId: runId });
+      var dashboard = window.AEGIS_DASHBOARD;
+      if (dashboard && dashboard.noteLaunchedBuilder) dashboard.noteLaunchedBuilder(result.runId, result.builder);
+      report(true, 'Worker launch accepted: ' + (result.state || 'UNKNOWN') +
+        '. Governed ' + ((result.builder && result.builder.provider) || 'builder') +
+        ' process ' + (Number.isInteger(result.workerPid) ? ('PID ' + result.workerPid) : 'ownership UNAVAILABLE') +
+        ' has entered the asynchronous launch lifecycle. Live evidence will show when it reaches RUNNING or stops.');
+    } catch (e) {
+      report(false, 'Start failed (' + e.code + '): ' + e.message);
+    } finally {
+      startBtn.disabled = false;
+    }
+  }
+
+  function bindRunActions(startBtn, runId, report){
+    var launchPending = false;
     if (startBtn) startBtn.addEventListener('click', async function(){
-      var host = $('intake-result');
-      if (!intakeRunId) return;
-      startBtn.disabled = true;
+      if (!runId || launchPending) return;
+      launchPending = true;
       try {
-        var result = await callApi('/api/start', { runId: intakeRunId });
-        var dashboard = window.AEGIS_DASHBOARD;
-        if (dashboard && dashboard.noteLaunchedBuilder) dashboard.noteLaunchedBuilder(result.runId, result.builder);
-        showApiMessage(host, true, 'Worker launched: ' + (result.state || 'UNKNOWN') +
-          '. Governed ' + ((result.builder && result.builder.provider) || 'builder') +
-          ' process ' + (Number.isInteger(result.workerPid) ? ('PID ' + result.workerPid) : 'ownership UNAVAILABLE') +
-          ' is running asynchronously. Live status and output evidence will repaint below.');
-      } catch (e) {
-        showApiMessage(host, false, 'Start failed (' + e.code + '): ' + e.message);
+        await requestRunStart(runId, startBtn, report);
       } finally {
-        startBtn.disabled = false;
+        launchPending = false;
       }
     });
   }
@@ -1821,7 +2457,9 @@
       startBtn.id = 'btn-start-run';
       startRow.appendChild(startBtn);
       resultHost.appendChild(startRow);
-      bindRunActions(startBtn);
+      bindRunActions(startBtn, intakeRunId, function(ok, text){
+        showApiMessage(resultHost, ok, text);
+      });
     } catch (e) {
       showApiMessage(resultHost, false, 'Objective rejected (' + e.code + '): ' + e.message);
     } finally {
@@ -1831,13 +2469,12 @@
 
   // ── run cards, driven only by /api/status's minimized `runs` array ────────
   var STATE_GLYPH = { INTAKE_RECORDED:'●', ROUTED:'◐', WORKTREE_READY:'◐', BUILDING:'◐',
-    BUILT:'●', CHECKS_PASSED:'●', CHECKS_FAILED:'✕', BUILD_FAILED:'✕', CORRECTING:'▲',
+    BUILT:'●', CHECKS_PASSED:'●', CHECKS_FAILED:'✕', BUILD_FAILED:'✕', REVIEW_FAILED:'✕', CORRECTING:'▲',
     CHECKPOINTED:'◆', ROLLED_BACK:'■', ABANDONED:'■' };
 
-  function hasVerifiedAsyncOwnership(run){
-    return !!(run && run.state === 'BUILDING' && run.build && run.build.mode === 'async' &&
-      Number.isInteger(run.build.workerPid) && run.build.workerPid > 0 &&
-      (run.build.status === 'STARTING' || run.build.status === 'RUNNING'));
+  function hasCancellationCapability(run){
+    return !!(run && run.state === 'BUILDING' && run.build &&
+      run.build.cancelAvailable === true);
   }
 
   function buildEvidence(build){
@@ -1855,11 +2492,24 @@
       ' · Ended: ' + (build.endedAt || 'not ended')));
     host.appendChild(el('div', 'meta', 'Exit: ' + (Number.isInteger(build.exit) ? build.exit : 'not recorded') +
       ' · Timed out: ' + (build.timedOut === true ? 'YES' : 'NO')));
+    if (build.failure && build.failure.code === 'MODEL_AUTH_FAILURE') {
+      host.appendChild(el('div', 'meta', 'Failure: MODEL_AUTH_FAILURE — Claude authentication failed.'));
+      host.appendChild(el('div', 'meta', build.failover && build.failover.state === 'NOT_EXECUTABLE'
+        ? build.failover.reason
+        : 'No executable model failover is available.'));
+    }
     return host;
   }
 
-  function runActionRow(run){
+  function runActionRow(run, isBoundCurrent){
     var row = el('div', 'btn-row');
+
+    if (run.state === 'INTAKE_RECORDED') {
+      var startBtn = el('button', 'action primary', 'Start governed builder');
+      startBtn.type = 'button';
+      bindRunActions(startBtn, run.runId, function(_ok, text){ appendActivity(text); });
+      row.appendChild(startBtn);
+    }
 
     // Pause is unavailable for EVERY run today — asynchronous execution exists,
     // but no tested PAUSED/resume lifecycle exists. Disabled
@@ -1890,7 +2540,13 @@
       row.appendChild(checksBtn);
     }
 
-    if (run.state === 'CHECKS_PASSED') {
+    // The browser does not authorize review binding. Its general engineering
+    // projection may describe the parent checkout while the canonical binding
+    // authority evaluates this run's isolated worktree. Keep the action
+    // available for the one canonically bound CHECKS_PASSED run and let the
+    // server recompute the run-scoped subject and fail closed when evidence is
+    // stale, incomplete, rejected or otherwise ineligible.
+    if (run.state === 'CHECKS_PASSED' && isBoundCurrent) {
       row.appendChild(el('div', 'meta',
         'Independent reviews run outside this functional-beta dashboard. This action only verifies and binds existing exact-subject review evidence; it does not launch or pay for a review.'));
       var reviewBtn = el('button', 'action primary', 'Verify independent review');
@@ -1900,8 +2556,11 @@
         reviewBtn.textContent = 'Verifying review evidence…';
         try {
           var result = await callApi('/api/review-bind', { runId: run.runId });
-          appendActivity('Review evidence verified for ' + run.runId + ': ' + result.state +
-            '; waiting for live lifecycle evidence. No review was launched by this dashboard.');
+          appendActivity(result.state === 'REVIEW_FAILED'
+            ? 'Independent review refused this exact checked version for ' + run.runId +
+              '; Retry can start a bounded correction. No review was launched by this dashboard.'
+            : 'Review evidence verified for ' + run.runId + ': ' + result.state +
+              '; waiting for live lifecycle evidence. No review was launched by this dashboard.');
         } catch (e) {
           reviewBtn.disabled = false;
           reviewBtn.textContent = 'Verify independent review';
@@ -1916,8 +2575,8 @@
         'Independent review evidence is bound. A governed checkpoint is the next stage; checkpoint control is not exposed in this functional beta.'));
     }
 
-    var CANCELABLE = ['CREATED','INTAKE_RECORDED','ROUTED','WORKTREE_READY','BUILT','CHECKS_PASSED','REVIEW_BOUND','CORRECTING','BUILD_FAILED','CHECKS_FAILED'];
-    if (CANCELABLE.indexOf(run.state) !== -1 || hasVerifiedAsyncOwnership(run)) {
+    var CANCELABLE = ['CREATED','INTAKE_RECORDED','ROUTED','WORKTREE_READY','BUILT','CHECKS_PASSED','REVIEW_BOUND','REVIEW_FAILED','CORRECTING','BUILD_FAILED','CHECKS_FAILED'];
+    if (CANCELABLE.indexOf(run.state) !== -1 || hasCancellationCapability(run)) {
       var cancelBtn = el('button', 'action warn', 'Cancel');
       cancelBtn.type = 'button';
       cancelBtn.addEventListener('click', async function(){
@@ -1935,12 +2594,12 @@
       row.appendChild(cancelBtn);
     }
 
-    if (run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED') {
+    if ((run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED' || run.state === 'REVIEW_FAILED') &&
+        !(run.build && run.build.retrySafe === false)) {
       var retryBtn = el('button', 'action', 'Retry');
       retryBtn.type = 'button';
-      retryBtn.addEventListener('click', async function(){
-        try { await callApi('/api/retry', { runId: run.runId }); appendActivity('Retry queued for ' + run.runId); }
-        catch (e) { appendActivity('Retry failed for ' + run.runId + ': ' + e.message); }
+      retryBtn.addEventListener('click', function(){
+        return window.AEGIS_DASHBOARD.requestRunRetry(run, retryBtn);
       });
       row.appendChild(retryBtn);
     }
@@ -1948,12 +2607,19 @@
     return row;
   }
 
-  function renderRuns(runs){
+  function renderRuns(runs, binding, runsState){
+    var D = window.AEGIS_DASHBOARD;
     var host = $('runs-list');
     if (!host) return;
     host.textContent = '';
     if (!runs || !runs.length) {
-      host.appendChild(el('p', 'empty', 'No runs yet. Record an objective above.'));
+      var emptyIsProven = !!(D && D.availableEmptyRuns &&
+        D.availableEmptyRuns({ runs: Array.isArray(runs) ? runs : null,
+          runsState: runsState || 'UNAVAILABLE', binding: binding || null }));
+      host.appendChild(el('p', 'empty', emptyIsProven
+        ? 'No runs yet. Record an objective above.'
+        : 'Run history UNAVAILABLE — ' + ((binding && binding.reason) ||
+          'authenticated run-ledger evidence has not loaded.')));
       return;
     }
     runs.forEach(function(run){
@@ -1961,9 +2627,24 @@
       card.appendChild(el('h3', null, run.runId + '  ' + (STATE_GLYPH[run.state] || '?') + ' ' + run.state));
       card.appendChild(el('div', 'meta', run.objective || '(no objective)'));
       if (run.build) card.appendChild(buildEvidence(run.build));
-      if (run.checks) card.appendChild(el('div', 'meta', 'checks: ' + run.checks.passed + '/' + run.checks.total));
-      if (run.checkpoint) card.appendChild(el('div', 'meta', 'checkpoint: ' + run.checkpoint));
-      card.appendChild(runActionRow(run));
+      if (run.checks) {
+        card.appendChild(el('div', 'meta', 'checks: ' + run.checks.passed + '/' + run.checks.total +
+          ' · ' + (run.checks.outcome || 'UNVERIFIED')));
+        if (run.checks.hostContainmentState === 'PENDING') {
+          card.appendChild(el('div', 'api-msg', run.checks.hostContainmentReason ||
+            'Snapshot checks passed; mandatory host containment is pending until exact-subject review completes.'));
+        }
+      }
+      if (run.state === 'REVIEW_FAILED') {
+        var reviewFailure = run.reviewFailure || {};
+        card.appendChild(el('div', 'api-msg bad', reviewFailure.summary ||
+          'The run records REVIEW_FAILED, but corroborating exact-subject gate evidence is unavailable. Retry remains governed and fail-closed.'));
+      }
+      if (run.checkpoint && D && D.checkpointEvidence) {
+        card.appendChild(el('div', 'meta', D.checkpointEvidence(run)));
+      }
+      var isBoundCurrent = !!(binding && binding.state === 'BOUND' && binding.runId === run.runId);
+      card.appendChild(runActionRow(run, isBoundCurrent));
       host.appendChild(card);
     });
   }
@@ -1978,6 +2659,35 @@
     host.insertBefore(li, host.firstChild);
     while (host.children.length > 30) host.removeChild(host.lastChild);
   }
+  // One activity renderer owns the live feed. The primary Command View may
+  // request a write through this seam, but it never creates a second log.
+  if (window.AEGIS_DASHBOARD) {
+    window.AEGIS_DASHBOARD.callApi = callApi;
+    window.AEGIS_DASHBOARD.appendActivity = appendActivity;
+  }
+
+  // View controls change disclosure and motion preference only. They do not
+  // alter a run, gate, reviewer, connector or evidence record.
+  var commandView = $('view-command');
+  var detailView = $('view-detail');
+  var rawState = $('raw-state');
+  function setDetailView(enabled){
+    document.body.setAttribute('data-detail', enabled ? 'true' : 'false');
+    if (commandView) commandView.setAttribute('aria-pressed', enabled ? 'false' : 'true');
+    if (detailView) detailView.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    if (rawState) rawState.open = enabled;
+    if (enabled && rawState) rawState.scrollIntoView({ block: 'start' });
+    if (!enabled) document.getElementById('operator-shell').scrollIntoView({ block: 'start' });
+  }
+  if (commandView) commandView.addEventListener('click', function(){ setDetailView(false); });
+  if (detailView) detailView.addEventListener('click', function(){ setDetailView(true); });
+  var motionToggle = $('toggle-motion');
+  if (motionToggle) motionToggle.addEventListener('click', function(){
+    var enabled = document.body.getAttribute('data-reduced-motion') !== 'true';
+    document.body.setAttribute('data-reduced-motion', enabled ? 'true' : 'false');
+    motionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    motionToggle.textContent = enabled ? 'Reduced motion on' : 'Reduced motion';
+  });
 
   // CONFIRMED FINDING #7: this used to refresh run cards and the activity list
   // and nothing else, so the founder summary and the spend figure kept showing
@@ -1986,13 +2696,22 @@
   // founder panel and the spend panel through the SAME renderers the generated
   // snapshot uses, from the SAME binding the projector computed.
   function applyStatus(status){
-    renderRuns(status && status.runs);
     var D = window.AEGIS_DASHBOARD;
+    var boundRun = status && status.runsBinding && status.runsBinding.state === 'BOUND' &&
+      Array.isArray(status.runs)
+      ? status.runs.filter(function(run){ return run.runId === status.runsBinding.runId; })[0] || null
+      : null;
+    var reviewEvidenceReady = !!(D && D.reviewerEvidenceReady &&
+      D.reviewerEvidenceReady(status && status.engineering, status && status.runsBinding, boundRun));
+    renderRuns(status && status.runs, status && status.runsBinding,
+      status && status.runsState);
     if (D && status) {
+      if (D.renderStateSource) D.renderStateSource('LIVE');
       if (D.renderContext) D.renderContext(status);
       D.renderFounderSummary({
         engineering: status.engineering || {},
         runs: status.runs || [],
+        runsState: status.runsState || 'UNAVAILABLE',
         binding: status.runsBinding || null,
         integration: status.integration || null,
         generatedAt: status.generatedAt || null,
@@ -2008,6 +2727,16 @@
     appendActivity('status: engineering=' + ((status.engineering && status.engineering.state) || 'UNKNOWN') +
       ' runs=' + ((status.runs && status.runs.length) || 0) +
       ' current=' + ((status.runsBinding && status.runsBinding.runId) || 'UNAVAILABLE'));
+  }
+
+  // Keep live repaint on the same explicit renderer seam as the generated
+  // snapshot. Tests and future control surfaces may exercise this interface,
+  // but the canonical checkpoint interpretation remains owned above.
+  if (window.AEGIS_DASHBOARD) {
+    window.AEGIS_DASHBOARD.renderRuns = renderRuns;
+    window.AEGIS_DASHBOARD.applyStatus = applyStatus;
+    var initialRunView = window.AEGIS_DASHBOARD.viewFromState();
+    renderRuns(initialRunView.runs, initialRunView.binding, initialRunView.runsState);
   }
 
   // Bootstrap: an authenticated GET/api/status confirms the session cookie is

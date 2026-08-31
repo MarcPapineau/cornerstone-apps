@@ -24,6 +24,7 @@ const CONTAINED_ENVIRONMENT_OVERRIDE_KEYS = new Set([
   'LC_CTYPE',
   'TERM',
   'CODEX_HOME',
+  'GROK_DISABLE_AUTOUPDATER',
   'GROK_MANAGED_MCPS_ENABLED',
   'GROK_HOME',
   'GIT_OPTIONAL_LOCKS',
@@ -243,9 +244,19 @@ function claudeNativeRuntimePaths(root, home = require('os').homedir(),
   }
   const gitCommonDir = validateOwnedRuntimePath(gitDir.slice(0, segmentAt),
     'common Git metadata', { ownerUid, directory: true });
+  const gitReadFiles = [
+    path.join(gitDir, 'HEAD'),
+    path.join(gitDir, 'index'),
+    path.join(gitDir, 'commondir'),
+    path.join(gitDir, 'gitdir'),
+  ].filter((candidate) => {
+    try { return fs.lstatSync(candidate).isFile(); } catch { return false; }
+  }).map((candidate) => validateOwnedRuntimePath(candidate,
+    'exact Claude Git runtime file', { ownerUid }));
   const claudeLocksDir = validateOwnedRuntimePath(path.join(home, '.local', 'state', 'claude', 'locks'),
     'Claude runtime locks', { ownerUid, directory: true });
-  return Object.freeze({ rootGitFile: gitFile, gitDir, gitCommonDir, claudeLocksDir });
+  return Object.freeze({ rootGitFile: gitFile, gitDir, gitCommonDir,
+    gitReadFiles: Object.freeze(gitReadFiles), claudeLocksDir });
 }
 
 function validateClaudeNativeRuntime(value, {
@@ -257,9 +268,12 @@ function validateClaudeNativeRuntime(value, {
     throw new Error('Claude native runtime boundary must be an object');
   }
   const expected = claudeNativeRuntimePaths(root, home, ownerUid);
-  const keys = ['rootGitFile', 'gitDir', 'gitCommonDir', 'claudeLocksDir'];
+  const keys = ['rootGitFile', 'gitDir', 'gitCommonDir', 'gitReadFiles', 'claudeLocksDir'];
   if (Object.keys(value).length !== keys.length ||
-      keys.some((key) => value[key] !== expected[key])) {
+      keys.some((key) => key === 'gitReadFiles'
+        ? !Array.isArray(value[key]) || value[key].length !== expected[key].length ||
+          value[key].some((item, index) => item !== expected[key][index])
+        : value[key] !== expected[key])) {
     throw new Error(`Claude native runtime must match ${CLAUDE_NATIVE_RUNTIME_POLICY} exact literals`);
   }
   return expected;
@@ -314,12 +328,27 @@ function resolveWriteAuthorities(values, root, label) {
     }
     let authority;
     try {
-      const stat = fs.lstatSync(value);
+      const initial = fs.lstatSync(value);
+      if (initial.isSymbolicLink()) {
+        throw new Error(`${label} must not be a symbolic link: ${value}`);
+      }
       const real = assertInside(rootReal, value, label);
+      const stat = fs.lstatSync(real);
+      if (stat.dev !== initial.dev || stat.ino !== initial.ino) {
+        throw new Error(`${label} changed while containment authority was resolved: ${value}`);
+      }
+      if (!stat.isDirectory() && !stat.isFile()) {
+        throw new Error(`${label} must resolve to a regular file or directory: ${value}`);
+      }
+      if (stat.isFile() && stat.nlink !== 1) {
+        throw new Error(`${label} regular file must have exactly one hard link: ${value}`);
+      }
       authority = Object.freeze({
         path: real,
         matcher: stat.isDirectory() ? 'subpath' : 'literal',
         newLeaf: false,
+        device: stat.dev,
+        inode: stat.ino,
       });
     } catch (error) {
       if (!error || error.code !== 'ENOENT') throw error;
@@ -333,12 +362,49 @@ function resolveWriteAuthorities(values, root, label) {
         path: path.join(parentReal, leaf),
         matcher: 'literal',
         newLeaf: true,
+        device: null,
+        inode: null,
       });
     }
     byAuthority.set(`${authority.matcher}\0${authority.path}`, authority);
   }
   return Object.freeze([...byAuthority.values()].sort((a, b) =>
     a.path.localeCompare(b.path) || a.matcher.localeCompare(b.matcher)));
+}
+
+function revalidateWriteAuthorities(authorities, root) {
+  const rootReal = realExisting(root, 'containment root');
+  for (const authority of authorities) {
+    if (!authority || typeof authority.path !== 'string') {
+      throw new Error('write authority is malformed');
+    }
+    if (authority.newLeaf) {
+      const parentReal = assertInside(rootReal, path.dirname(authority.path), 'write authority parent');
+      if (!fs.statSync(parentReal).isDirectory()) {
+        throw new Error(`write authority parent must remain a directory: ${authority.path}`);
+      }
+      try {
+        fs.lstatSync(authority.path);
+        throw new Error(`new write leaf appeared before contained launch: ${authority.path}`);
+      } catch (error) {
+        if (!error || error.code !== 'ENOENT') throw error;
+      }
+      continue;
+    }
+
+    const stat = fs.lstatSync(authority.path);
+    if (stat.isSymbolicLink() || stat.dev !== authority.device || stat.ino !== authority.inode) {
+      throw new Error(`write authority identity changed before contained launch: ${authority.path}`);
+    }
+    if (authority.matcher === 'literal') {
+      if (!stat.isFile() || stat.nlink !== 1) {
+        throw new Error(`write authority regular file must retain exactly one hard link: ${authority.path}`);
+      }
+    } else if (authority.matcher === 'subpath' && !stat.isDirectory()) {
+      throw new Error(`write authority directory changed before contained launch: ${authority.path}`);
+    }
+  }
+  return true;
 }
 
 function atomicWriteTemporaryRegex(value) {
@@ -383,6 +449,7 @@ function buildMacSandboxProfile({
   readPaths = [],
   writePaths = [],
   processOnlyReadPaths = [],
+  processOnlyReadDirectoryPaths = [],
   claudeSubscriptionConfigReadPaths = [],
   claudeDisposableRuntimeDirReadPath = null,
   claudeNativeRuntime = null,
@@ -402,6 +469,16 @@ function buildMacSandboxProfile({
   const writeAuthorities = resolveWriteAuthorities(writePaths, rootReal, 'write path');
   const writes = writeAuthorities.map((authority) => authority.path);
   const credentialReads = uniqueRealPaths(processOnlyReadPaths, rootReal, 'process-only read path');
+  const processDirectoryReads = uniqueRealPaths(
+    processOnlyReadDirectoryPaths,
+    rootReal,
+    'process-only read directory path',
+  );
+  for (const value of processDirectoryReads) {
+    if (!fs.statSync(value).isDirectory()) {
+      throw new Error(`process-only read directory path must resolve to a directory: ${value}`);
+    }
+  }
   const subscriptionConfigReads = claudeSubscriptionConfigReadPaths.length
     ? validateClaudeSubscriptionConfigPaths(claudeSubscriptionConfigReadPaths)
     : [];
@@ -459,15 +536,23 @@ function buildMacSandboxProfile({
   for (const value of [...credentialReads, ...subscriptionConfigReads]) {
     lines.push(`(allow file-read* (require-all (literal ${quoteSbpl(value)}) (process-path ${quoteSbpl(executableReal)})))`);
   }
+  for (const value of processDirectoryReads) {
+    // Reviewer CLIs need to inspect the disposable cache/config trees that
+    // they create during startup. Bind that authority to the pinned client
+    // executable so model-issued child processes cannot read credentials or
+    // other disposable HOME contents.
+    lines.push(`(allow file-read* (require-all (subpath ${quoteSbpl(value)}) (process-path ${quoteSbpl(executableReal)})))`);
+  }
   if (disposableRuntimeDirRead) {
     lines.push(`(allow file-read-data (require-all (literal ${quoteSbpl(disposableRuntimeDirRead)}) (process-path ${quoteSbpl(executableReal)})))`);
   }
   if (nativeRuntime) {
     lines.push('(allow user-preference-read)');
     lines.push('(allow system-socket)');
-    lines.push('(allow file-read* (subpath "/usr/bin") (subpath "/usr/share/icu") (subpath "/private/var/db/timezone") (subpath "/Library/Developer/CommandLineTools/usr/lib") (literal "/dev/dtracehelper") (literal "/dev/autofs_nowait") (literal "/private/etc/ssl/cert.pem"))');
+    lines.push('(allow file-read* (literal "/usr/bin/git") (subpath "/usr/share/icu") (subpath "/private/var/db/timezone") (subpath "/Library/Developer/CommandLineTools/usr/lib") (literal "/dev/dtracehelper") (literal "/dev/autofs_nowait") (literal "/private/etc/ssl/cert.pem"))');
     lines.push('(allow file-write-data (literal "/dev/null"))');
-    lines.push(`(allow file-read* (literal ${quoteSbpl(nativeRuntime.rootGitFile)}) (subpath ${quoteSbpl(nativeRuntime.gitCommonDir)}))`);
+    lines.push(`(allow file-read* (literal ${quoteSbpl(nativeRuntime.rootGitFile)})${nativeRuntime.gitReadFiles.map((value) => ` (literal ${quoteSbpl(value)})`).join('')})`);
+    lines.push(`(allow file-read-data (literal ${quoteSbpl(nativeRuntime.gitDir)}) (literal ${quoteSbpl(nativeRuntime.gitCommonDir)}))`);
     lines.push(`(allow file-read* (subpath ${quoteSbpl(nativeRuntime.claudeLocksDir)}))`);
     lines.push(`(allow file-write* (subpath ${quoteSbpl(nativeRuntime.claudeLocksDir)}))`);
   }
@@ -478,7 +563,7 @@ function buildMacSandboxProfile({
     lines.push(`(allow file-read* (require-all (literal ${quoteSbpl(keychainHelper.securityMessages)}) (process-path ${helper})))`);
   }
   if (claudeOAuthTokenFileDescriptor === CLAUDE_OAUTH_TOKEN_FD) {
-    lines.push(`(allow file-read-data (literal "/dev/fd/${CLAUDE_OAUTH_TOKEN_FD}"))`);
+    lines.push(`(allow file-read-data (require-all (literal "/dev/fd/${CLAUDE_OAUTH_TOKEN_FD}") (process-path ${quoteSbpl(executableReal)})))`);
   }
   if (grokHome) {
     lines.push(`(allow file-read* (subpath ${quoteSbpl(grokHome)}))`);
@@ -494,6 +579,7 @@ function buildMacSandboxProfile({
     writePaths: writes,
     writeAuthorities,
     processOnlyReadPaths: credentialReads,
+    processOnlyReadDirectoryPaths: processDirectoryReads,
     claudeSubscriptionConfigReadPaths: subscriptionConfigReads,
     claudeSubscriptionConfigPolicy: subscriptionConfigReads.length ? CLAUDE_SUBSCRIPTION_CONFIG_POLICY : null,
     claudeDisposableRuntimeDirReadPath: disposableRuntimeDirRead,
@@ -513,6 +599,7 @@ function sandboxedCommand(profile, argv = []) {
   if (!Array.isArray(argv) || argv.some((value) => typeof value !== 'string')) {
     throw new Error('contained argv must be a string array');
   }
+  revalidateWriteAuthorities(profile.writeAuthorities, profile.root);
   return Object.freeze({
     bin: profile.bin,
     argv: ['-p', profile.profile, profile.executable, ...argv],
@@ -566,6 +653,7 @@ module.exports = {
   assertSandboxOperational,
   assertInside,
   resolveWriteAuthorities,
+  revalidateWriteAuthorities,
   atomicWriteTemporaryRegex,
   strictEnvironment,
   buildMacSandboxProfile,

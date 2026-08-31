@@ -11,6 +11,7 @@
 'use strict';
 
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -21,6 +22,7 @@ const CLI = path.join(ROOT, 'builder-control', 'aegis-state.cjs');
 const REGISTRY = path.join(ROOT, 'builder-control', 'connector-registry.json');
 const LEDGER = path.join(ROOT, 'builder-control', 'ledger.json');
 const M = require('../aegis-state.cjs');
+const R = require('../aegis-run.cjs');
 
 // The canonical bytes, read ONCE at load. Nothing in this suite may change
 // them; the last test in the file proves it.
@@ -307,7 +309,8 @@ test('finding #8 (still holds): build is NOT PASS without a real builder exit', 
 
 test('finding #8 (still holds): a builder exit of 0 is required for PASS', () => {
   const ok = M.deriveStages({ ok: false, problems: [], observed: [] },
-    [{ updatedAt: '2026-08-25T10:00:00Z', objective: 'x', build: { exit: 0 } }]);
+    [{ updatedAt: '2026-08-25T10:00:00Z', objective: 'x', build: { exit: 0 },
+      watchdog: { corroboratedStages: ['BUILT'] } }]);
   assert.strictEqual(ok.find((s) => s.id === 'build').state, 'PASS');
   const bad = M.deriveStages({ ok: false, problems: [], observed: [] },
     [{ updatedAt: '2026-08-25T10:00:00Z', objective: 'x', build: { exit: 2 } }]);
@@ -333,13 +336,78 @@ test('finding #8: a required reviewer does NOT default to PASS on an unrecognise
 });
 
 test('finding #8: a reviewer reaches PASS only on a positively observed approval', () => {
+  const subjectSha256 = '7'.repeat(64);
   const stages = M.deriveStages({
     ok: true, state: 'READY_FOR_DETERMINISTIC_VALIDATION',
     classification: { lane: 'FULL', highRisk: false, requiredReviewers: ['codex'] },
-    subject: { subjectPaths: ['src/a.ts'] },
+    subject: { subjectSha256, subjectPaths: ['src/a.ts'] },
     problems: [], observed: ['codex: APPROVE'],
-  });
+  }, [{ runId: 'RUN-20260829-70000001', updatedAt: '2026-08-29T10:00:00.000Z',
+    subjectSha256 }]);
   assert.strictEqual(stages.find((s) => s.id === 'review').state, 'PASS');
+});
+
+test('review stage binds approvals to the canonical selected-run subject and fails closed on drift', () => {
+  const gateSubject = '8'.repeat(64);
+  const approvedGate = {
+    ok: true, state: 'READY_FOR_PR',
+    classification: { lane: 'FULL', highRisk: false, requiredReviewers: ['codex'] },
+    subject: { subjectSha256: gateSubject, subjectPaths: ['src/a.ts'] },
+    problems: [], observed: ['codex: APPROVE'],
+  };
+  const current = (subjectSha256) => ({
+    runId: 'RUN-20260829-80000001', updatedAt: '2026-08-29T11:00:00.000Z', subjectSha256,
+  });
+
+  const matching = M.deriveStages(approvedGate, [current(gateSubject)])
+    .find((stage) => stage.id === 'review');
+  assert.strictEqual(matching.state, 'PASS', 'equal canonical gate/run subjects lost review PASS');
+
+  const mismatched = M.deriveStages(approvedGate, [current('9'.repeat(64))])
+    .find((stage) => stage.id === 'review');
+  assert.notStrictEqual(mismatched.state, 'PASS', 'approval for another subject passed the current run');
+  assert.match(mismatched.reason, /review subject mismatch.*does not cover the current run subject/);
+
+  const unlinked = M.deriveStages(approvedGate, [current(null)])
+    .find((stage) => stage.id === 'review');
+  assert.notStrictEqual(unlinked.state, 'PASS', 'an unlinked current run borrowed gate approval');
+  assert.match(unlinked.reason, /current run is not linked to a canonical subject/);
+
+  const noRun = M.deriveStages(approvedGate, []).find((stage) => stage.id === 'review');
+  assert.notStrictEqual(noRun.state, 'PASS', 'page-level approval passed with no current run');
+  assert.match(noRun.reason, /no current run is available/);
+});
+
+test('review stage never lets approval labels or coverage override a blocked gate', () => {
+  const subjectSha256 = '6'.repeat(64);
+  const run = [{ runId: 'RUN-20260829-60000001', subjectSha256,
+    updatedAt: '2026-08-29T11:30:00.000Z' }];
+  const complete = {
+    complete: true,
+    rows: [{ reviewer: 'codex', required: 'REQUIRED', executed: 'EXECUTED', disposition: 'APPROVE' }],
+  };
+  for (const rule of [
+    'ENGOS-OPEN-BLOCKING-FINDING',
+    'ENGOS-REVIEW-COVERAGE-SHORT',
+    'ENGOS-REVIEW-COVERAGE-EXTRA',
+    'ENGOS-REVIEW-MALFORMED',
+    'ENGOS-AMBIGUOUS-REVIEWS',
+    'ENGOS-REVIEW-WRONG-PACKET',
+  ]) {
+    const stage = M.deriveStages({
+      ok: false, state: 'BLOCKED', subject: { subjectSha256 },
+      problems: [{ rule, detail: 'synthetic blocking gate evidence for projection proof' }],
+      observed: ['codex: APPROVE'], reviewerCompleteness: complete,
+    }, run).find((item) => item.id === 'review');
+    assert.strictEqual(stage.state, 'FAILED', `${rule} was overridden by approval/coverage`);
+    assert.match(stage.reason, /gate is blocked|parsed engineering gate is blocked/);
+  }
+  const blockedWithoutNamedProblem = M.deriveStages({
+    ok: false, state: 'BLOCKED', subject: { subjectSha256 }, problems: [],
+    observed: ['codex: APPROVE'], reviewerCompleteness: complete,
+  }, run).find((item) => item.id === 'review');
+  assert.strictEqual(blockedWithoutNamedProblem.state, 'FAILED');
+  assert.match(blockedWithoutNamedProblem.reason, /parsed engineering gate is blocked/);
 });
 
 // ── VISUAL INTEGRATION: the ELEVEN canonical steps ────────────────────────
@@ -383,19 +451,70 @@ test('RED: a FAILED build never renders as PASS', () => {
   assert.ok(/exited 1/.test(build.reason));
 });
 
+test('active asynchronous BUILDING states remain RUNNING until a terminal exit exists', () => {
+  for (const workerState of ['LAUNCH_CLAIMED', 'STARTING', 'RUNNING']) {
+    const stages = M.deriveStages({ problems: [], observed: [] }, [{
+      runId: 'RUN-20260829-a11ce001', state: 'BUILDING',
+      createdAt: '2026-08-28T10:00:00.000Z', updatedAt: '2026-08-28T10:01:00.000Z',
+      objective: 'active build', build: { mode: 'async', workerState, exit: null },
+      watchdog: { corroboratedStages: ['BUILDING'] },
+    }]);
+    const build = stages.find((stage) => stage.id === 'build');
+    assert.strictEqual(build.state, 'RUNNING', `${workerState} was not projected as in progress`);
+    assert.match(build.reason, new RegExp(workerState));
+    assert.doesNotMatch(build.reason, /exited null/);
+  }
+});
+
+test('only terminal numeric builder exits produce PASS or exit-derived FAILED', () => {
+  for (const [exit, expected] of [[0, 'PASS'], [1, 'FAILED'], [124, 'FAILED']]) {
+    const stages = M.deriveStages({ problems: [], observed: [] }, [{
+      runId: 'RUN-20260829-a11ce002', state: exit === 0 ? 'BUILT' : 'BUILD_FAILED',
+      createdAt: '2026-08-28T10:00:00.000Z', updatedAt: '2026-08-28T10:01:00.000Z',
+      objective: 'terminal build', build: { mode: 'async', workerState: 'EXITED', exit },
+      watchdog: { corroboratedStages: exit === 0 ? ['BUILT'] : [] },
+    }]);
+    assert.strictEqual(stages.find((stage) => stage.id === 'build').state, expected,
+      `exit ${exit} did not produce ${expected}`);
+  }
+  const unknown = M.deriveStages({ problems: [], observed: [] }, [{
+    runId: 'RUN-20260829-a11ce003', state: 'BUILT',
+    createdAt: '2026-08-28T10:00:00.000Z', updatedAt: '2026-08-28T10:01:00.000Z',
+    objective: 'missing terminal evidence', build: { mode: 'async', workerState: 'EXITED', exit: null },
+  }]).find((stage) => stage.id === 'build');
+  assert.strictEqual(unknown.state, 'UNVERIFIED');
+});
+
+test('contradictory builder state and terminal exit fail closed', () => {
+  const project = (state, exit) => M.deriveStages({ problems: [], observed: [] }, [{
+    runId: `RUN-20260829-${state.toLowerCase()}1`, state,
+    createdAt: '2026-08-28T10:00:00.000Z', updatedAt: '2026-08-28T10:01:00.000Z',
+    objective: 'contradictory build evidence',
+    build: { mode: 'async', workerState: 'EXITED', exit },
+  }]).find((stage) => stage.id === 'build');
+
+  const failedWithZero = project('BUILD_FAILED', 0);
+  assert.strictEqual(failedWithZero.state, 'FAILED');
+  assert.match(failedWithZero.reason, /BUILD_FAILED.*exit is 0/);
+
+  const buildingWithExit = project('BUILDING', 0);
+  assert.strictEqual(buildingWithExit.state, 'FAILED');
+  assert.match(buildingWithExit.reason, /still says BUILDING.*terminal builder exit 0/);
+});
+
 test('RED: a checkpoint with no rollback point is FAILED, not PASS', () => {
   const stages = M.deriveStages({ ok: false, problems: [], observed: [] },
     [{ updatedAt: '2026-08-25T10:00:00Z', objective: 'x', checkpoint: { checkpointId: 'CP-1' } }]);
   assert.strictEqual(stages.find((s) => s.id === 'checkpoint').state, 'FAILED');
 });
 
-test('RED: watchdog drift renders FAILED and names the rule', () => {
+test('a future watchdog stage missing without a corroborated prefix stays UNVERIFIED', () => {
   const stages = M.deriveStages({ ok: false, problems: [], observed: [] },
     [{ updatedAt: '2026-08-25T10:00:00Z', objective: 'x',
        watchdog: { ok: false, problems: [{ rule: 'WATCHDOG-STAGE-MISSING' }] } }]);
   const w = stages.find((s) => s.id === 'watchdog');
-  assert.strictEqual(w.state, 'FAILED');
-  assert.ok(/WATCHDOG-STAGE-MISSING/.test(w.reason));
+  assert.strictEqual(w.state, 'UNVERIFIED');
+  assert.match(w.reason, /no correctly ordered canonical lifecycle prefix/i);
 });
 
 // ── COST SEMANTICS ────────────────────────────────────────────────────────
@@ -488,8 +607,15 @@ test('N8N REMOVAL: the connector registry defines no n8n connector, id, or provi
 // connector facts; this projector defined the functions for them and then
 // never called them. These proofs hold the wiring, not just the math.
 
-test('engineering surfaces reviewerCompleteness with PLANNED/REQUIRED/EXECUTED rows and a score or UNAVAILABLE', () => {
+test('engineering surfaces reviewerCompleteness when the attributed gate is available and fails closed otherwise', () => {
   const snap = M.snapshot({});
+  if (snap.engineering.state === 'UNAVAILABLE') {
+    assert.ok(!snap.engineering.reviewerCompleteness,
+      'an unavailable attributed gate fabricated reviewer completeness');
+    assert.match(snap.engineering.reason,
+      /current run worktree|gate verdict|digest-bound canonical check receipt/);
+    return;
+  }
   assert.ok(snap.engineering.reviewerCompleteness, 'the gate\'s reviewerCompleteness table is not reaching the dashboard projection');
   const rc = snap.engineering.reviewerCompleteness;
   assert.ok(Array.isArray(rc.rows) && rc.rows.length > 0, 'reviewerCompleteness has no rows');
@@ -1915,17 +2041,1009 @@ let runsDirNo = 0;
 function fixtureRunsDir(records) {
   const d = path.join(RUNS_TMP, `runs-${++runsDirNo}`);
   fs.mkdirSync(d, { recursive: true });
-  records.forEach((r, i) => fs.writeFileSync(
-    path.join(d, `${String(i).padStart(3, '0')}-${r.runId}.json`), JSON.stringify(r, null, 2)));
+  records.forEach((r) => fs.writeFileSync(
+    path.join(d, `${r.runId}.json`), JSON.stringify(r, null, 2)));
   return d;
 }
+
+const WATCHDOG_TRANSITIONS = [
+  ['CREATED', 'INTAKE_RECORDED'],
+  ['INTAKE_RECORDED', 'ROUTED'],
+  ['ROUTED', 'WORKTREE_READY'],
+  ['WORKTREE_READY', 'BUILDING'],
+  ['BUILDING', 'BUILT'],
+  ['BUILT', 'CHECKS_PASSED'],
+];
+
+function watchdogRun(runId, transitions = WATCHDOG_TRANSITIONS) {
+  return runRecord(runId, {
+    state: 'CHECKS_PASSED',
+    transitions: transitions.map(([from, to], index) => ({
+      from, to, ts: `2026-08-29T10:00:0${index}.000Z`, ledgerEntryId: `LED-${index + 1}`,
+    })),
+  });
+}
+
+function withWatchdogLedger(run, recordedTransitions, fn) {
+  const ledgerFile = path.join(RUNS_TMP, `watchdog-ledger-${++runsDirNo}.json`);
+  const entries = recordedTransitions.map(([from, to], index) => {
+    const transition = (run.transitions || [])[index] || {};
+    return ({
+      entryId: transition.ledgerEntryId || `LED-WATCH-${index + 1}`,
+      ts: `2026-08-29T10:00:0${index}.000Z`,
+      agentId: 'claude-code',
+      gate: 'aegis-run',
+      status: 'PASS',
+      plane: 'CONTROL',
+      correlationId: run.runId,
+      operationId: transition.operationId || `${run.runId}:${from}->${to}`,
+      attempt: 1,
+      result: `${from} -> ${to}`,
+      notes: `run ${run.runId}: ${from} -> ${to}`,
+    });
+  });
+  for (const entry of entries) {
+    assert.deepStrictEqual(LW.validateEntry(entry), [],
+      `watchdog fixture is not a canonical ledger entry: ${entry.operationId}`);
+  }
+  fs.writeFileSync(ledgerFile, JSON.stringify(entries, null, 2));
+  const before = process.env.AEGIS_LEDGER_FILE;
+  process.env.AEGIS_LEDGER_FILE = ledgerFile;
+  try { return fn(); }
+  finally {
+    if (before === undefined) delete process.env.AEGIS_LEDGER_FILE;
+    else process.env.AEGIS_LEDGER_FILE = before;
+  }
+}
+
+const RUN_CASE_ID = 'RUN-20260826-00000001';
+const RUN_CITED_ID = 'RUN-20260826-00000002';
+const RUN_LIFECYCLE_ID = 'RUN-20260826-00000003';
+const RUN_ROUTE_ID = 'RUN-20260826-00000004';
+
+test('malformed run evidence degrades the projection and the surface instead of becoming clean empty state', () => {
+  const dir = fixtureRunsDir([]);
+  fs.writeFileSync(path.join(dir, '000-malformed.json'), '{"runId":', 'utf8');
+
+  const projected = M.projectRuns({ subjectSha256: RUN_SUBJECT, runsDir: dir });
+  assert.strictEqual(projected.state, 'UNAVAILABLE');
+  assert.strictEqual(projected.invalidRecords, 1);
+  assert.strictEqual(projected.runs.length, 0,
+    'unreadable bytes must not be published as a run');
+  assert.strictEqual(projected.current.state, 'UNAVAILABLE');
+  assert.strictEqual(projected.current.evidenceState, 'UNAVAILABLE');
+  assert.match(projected.current.reason, /could not be read or validated/);
+
+  const snap = M.snapshot({}, { runsDir: dir });
+  assert.notStrictEqual(snap.runs.state, 'OK',
+    'a snapshot promoted an unreadable run directory to available evidence');
+  assert.strictEqual(snap.engineering.state, 'UNAVAILABLE');
+  assert.match(snap.engineering.reason, /no unique validated current run worktree/,
+    'malformed run evidence must not let the gate fall back to the control checkout');
+});
+
+test('parseable non-run JSON is invalid evidence, while a genuinely empty directory is affirmatively empty', () => {
+  const malformedDir = fixtureRunsDir([]);
+  fs.writeFileSync(path.join(malformedDir, '000-not-a-run.json'), '[]', 'utf8');
+  const malformed = M.projectRuns({ runsDir: malformedDir });
+  assert.strictEqual(malformed.state, 'UNAVAILABLE');
+  assert.strictEqual(malformed.current.evidenceState, 'UNAVAILABLE');
+
+  const empty = M.projectRuns({ runsDir: fixtureRunsDir([]) });
+  assert.strictEqual(empty.state, 'OK');
+  assert.deepStrictEqual(empty.runs, []);
+  assert.strictEqual(empty.current.state, 'UNAVAILABLE');
+  assert.strictEqual(empty.current.evidenceState, 'OK',
+    'the live surface needs positive evidence that an empty directory was actually read');
+  assert.match(empty.current.reason, /no run records exist yet/);
+});
+
+test('run identity is canonical, matches its filename, and stays in parity with the runtime authority', () => {
+  for (const runId of [
+    'RUN-20260829-deadbeef',
+    'RUN-20260829-DEADBEEF',
+    'RUN-20260829-deadbee',
+    'RUN-2026-08-29-deadbeef',
+    'RUN-CASE',
+  ]) {
+    let runtimeAccepts = true;
+    try { R.runPath(runId); } catch { runtimeAccepts = false; }
+    assert.strictEqual(M.RUN_ID_RE.test(runId), runtimeAccepts,
+      `${runId}: projector identity diverged from aegis-run.cjs`);
+  }
+
+  const canonical = runRecord('RUN-20260829-deadbeef');
+  const aliasDir = fixtureRunsDir([]);
+  fs.writeFileSync(path.join(aliasDir, 'friendly-name.json'), JSON.stringify(canonical));
+  const alias = M.projectRuns({ runsDir: aliasDir, now: '2026-08-29T23:59:59.000Z' });
+  assert.strictEqual(alias.state, 'UNAVAILABLE');
+  assert.match(alias.reason, /alias; canonical filename is RUN-20260829-deadbeef\.json/);
+
+  const noncanonicalDir = fixtureRunsDir([]);
+  fs.writeFileSync(path.join(noncanonicalDir, 'RUN-CASE.json'), JSON.stringify(runRecord('RUN-CASE')));
+  const noncanonical = M.projectRuns({ runsDir: noncanonicalDir, now: '2026-08-29T23:59:59.000Z' });
+  assert.strictEqual(noncanonical.state, 'UNAVAILABLE');
+  assert.match(noncanonical.reason, /canonical RUN-YYYYMMDD-8hex runId/);
+});
+
+test('duplicate runIds are refused even when one copy uses an alias filename', () => {
+  const run = runRecord('RUN-20260829-abcd1234');
+  const dir = fixtureRunsDir([run]);
+  fs.writeFileSync(path.join(dir, 'duplicate.json'), JSON.stringify(run));
+  const out = M.projectRuns({ runsDir: dir, now: '2026-08-29T23:59:59.000Z' });
+  assert.strictEqual(out.state, 'UNAVAILABLE');
+  assert.strictEqual(out.invalidRecords, 1);
+  assert.match(out.reason, /appears in more than one run file/);
+  assert.strictEqual(out.current.evidenceState, 'UNAVAILABLE');
+});
+
+test('mixed valid and malformed run evidence fails every runtime-derived lifecycle stage closed', () => {
+  const valid = runRecord('RUN-20260829-abcdef12', {
+    createdAt: '2026-08-29T10:00:00.000Z', updatedAt: '2026-08-29T10:01:00.000Z',
+    objective: 'must not become a green stage beside malformed evidence',
+    risk: { lane: 'FULL', highRisk: false },
+    route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+    worktree: { path: '/tmp/aegis', branch: 'aegis/test' }, build: { exit: 0 },
+    checks: { passed: 1, total: 1 },
+  });
+  const dir = fixtureRunsDir([valid]);
+  fs.writeFileSync(path.join(dir, 'malformed.json'), '{', 'utf8');
+  const projected = M.projectRuns({ runsDir: dir, now: '2026-08-29T23:59:59.000Z' });
+  assert.strictEqual(projected.state, 'UNAVAILABLE');
+  assert.strictEqual(projected.runs.length, 1, 'the valid record may remain visible for audit');
+
+  const stages = M.deriveStages({ problems: [], observed: [] }, projected.runs, {
+    runs: projected, events: { state: 'OK' }, cost: { state: 'OK' }, reviewers: { state: 'OK' },
+  });
+  const runtimeStageIds = new Set(['objective', 'acceptance', 'routing', 'worktree', 'build', 'correction', 'watchdog', 'checkpoint']);
+  const runtimeStages = stages.filter((stage) => runtimeStageIds.has(stage.id));
+  assert.ok(runtimeStages.length > 0);
+  assert.ok(runtimeStages.every((stage) => stage.state !== 'PASS'),
+    `runtime evidence leaked PASS beside an invalid record: ${JSON.stringify(runtimeStages)}`);
+  assert.match(stages.find((stage) => stage.id === 'surface').reason, /run evidence unavailable/);
+});
+
+test('worktree stage passes only a bounded canonical run worktree receipt and never publishes its path', () => {
+  const runId = 'RUN-20260829-c0ffee01';
+  const baseCommit = '1'.repeat(40);
+  const worktreeTransitions = WATCHDOG_TRANSITIONS.slice(0, 3);
+  const valid = runRecord(runId, {
+    state: 'WORKTREE_READY', baseCommit,
+    worktree: {
+      path: `/tmp/aegis-wt-${runId}`,
+      branch: `aegis/${runId}`,
+      createdAt: '2026-08-29T10:00:00.000Z',
+      baseCommit,
+    },
+    transitions: worktreeTransitions.map(([from, to], index) => ({
+      from, to, ts: `2026-08-29T10:00:0${index}.000Z`, ledgerEntryId: `LED-WORKTREE-${index + 1}`,
+    })),
+  });
+  const projected = withWatchdogLedger(valid, worktreeTransitions,
+    () => M.projectRuns({ runsDir: fixtureRunsDir([valid]), now: '2026-08-29T23:59:59.000Z' }));
+  assert.deepStrictEqual(projected.runs[0].worktree, {
+    state: 'VALIDATED', isolated: true, branch: `aegis/${runId}`,
+  });
+  assert.ok(!JSON.stringify(projected.runs[0]).includes(`/tmp/aegis-wt-${runId}`),
+    'the private absolute worktree path crossed the dashboard projection');
+  const stage = M.deriveStages({ problems: [], observed: [] }, projected.runs)
+    .find((item) => item.id === 'worktree');
+  assert.deepStrictEqual(stage, {
+    id: 'worktree', step: 4, label: 'Isolated worktree', evidence: 'aegis-run run.worktree',
+    state: 'PASS', reason: `isolated worktree on validated branch aegis/${runId}`,
+  });
+
+  for (const [label, worktree, expected] of [
+    ['truthy string', '/tmp/looks-real', /not an object/],
+    ['foreign branch', { ...valid.worktree, branch: 'main' }, /branch is not aegis\//],
+    ['unbounded path', { ...valid.worktree, path: '/tmp/another-place' }, /bounded aegis-wt-/],
+    ['mismatched base', { ...valid.worktree, baseCommit: '2'.repeat(40) }, /matching canonical base commit/],
+  ]) {
+    const record = runRecord(runId, {
+      state: 'WORKTREE_READY', baseCommit, worktree,
+      transitions: valid.transitions,
+    });
+    const out = withWatchdogLedger(record, worktreeTransitions,
+      () => M.projectRuns({ runsDir: fixtureRunsDir([record]), now: '2026-08-29T23:59:59.000Z' }));
+    assert.strictEqual(out.runs[0].worktree.state, 'INVALID', `${label}: malformed worktree passed projection`);
+    const failed = M.deriveStages({ problems: [], observed: [] }, out.runs)
+      .find((item) => item.id === 'worktree');
+    assert.strictEqual(failed.state, 'FAILED', `${label}: malformed worktree passed the lifecycle stage`);
+    assert.match(failed.reason, expected, `${label}: exact validation diagnosis was lost`);
+  }
+});
+
+test('checkpoint projection publishes only one digest-authenticated, run-bound, reviewed transition receipt', () => {
+  const stable = (value) => Array.isArray(value) ? value.map(stable) :
+    (value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]))
+      : value);
+  const sign = (body) => ({ ...body,
+    digest: crypto.createHash('sha256').update(JSON.stringify(stable(body))).digest('hex') });
+  const runId = 'RUN-20260829-c0ffee02';
+  const objective = 'Bind the exact reviewed dashboard subject to one safe checkpoint.';
+  const subjectSha256 = 'a'.repeat(64);
+  const checkReceiptSha256 = 'b'.repeat(64);
+  const packet = { path: 'builder-control/packets/PKT-CHECKPOINT.json', sha256: 'c'.repeat(64) };
+  const rollbackPoint = 'd'.repeat(40);
+  const reviewedBase = '2'.repeat(40);
+  const transitionPairs = [
+    ['CREATED', 'INTAKE_RECORDED'], ['INTAKE_RECORDED', 'ROUTED'],
+    ['ROUTED', 'WORKTREE_READY'], ['WORKTREE_READY', 'BUILDING'],
+    ['BUILDING', 'BUILT'], ['BUILT', 'CHECKS_PASSED'],
+    ['CHECKS_PASSED', 'REVIEW_BOUND'], ['REVIEW_BOUND', 'CHECKPOINTED'],
+  ];
+  const checkpointBody = {
+    checkpointId: 'CP-20260829010101-c0ffee02', runId,
+    createdAt: '2026-08-29T10:00:07.000Z', rollbackPoint,
+    baseCommit: '1'.repeat(40), tree: '3'.repeat(40), reviewedBase,
+    packet,
+    subject: { subjectSha256, subjectPaths: ['builder-control/dashboard/index.html'],
+      diffBytes: 123, reviewedRange: 'HEAD', committedRange: `${reviewedBase}..${rollbackPoint}` },
+    checkReceiptSha256, checks: { passed: 1, total: 1 }, objective,
+  };
+  const makeRun = (checkpoint = sign(checkpointBody), transitions = transitionPairs) => runRecord(runId, {
+    state: 'CHECKPOINTED', objective, baseCommit: checkpointBody.baseCommit,
+    subject: { subjectSha256, pathCount: 1, diffBytes: 123, range: 'HEAD' },
+    reviewGate: { subjectSha256, checkReceiptSha256, packet, headCommit: checkpointBody.reviewedBase },
+    checks: { passed: 1, total: 1 }, checkpoint,
+    transitions: transitions.map(([from, to], index) => ({
+      from, to, ts: `2026-08-29T10:00:0${index + 1}.000Z`,
+      ledgerEntryId: `LED-RUN-checkpoint-${index + 1}`,
+      notes: from === 'REVIEW_BOUND'
+        ? `checkpoint ${checkpoint.checkpointId} at ${checkpoint.rollbackPoint.slice(0, 12)}`
+        : `${from} -> ${to}`,
+    })),
+  });
+  const valid = makeRun();
+  const projected = withWatchdogLedger(valid, transitionPairs,
+    () => M.projectRuns({ runsDir: fixtureRunsDir([valid]), now: '2026-08-29T23:59:59.000Z' }));
+  assert.strictEqual(projected.runs[0].checkpoint, checkpointBody.checkpointId);
+  assert.strictEqual(projected.runs[0].rollbackPoint, rollbackPoint);
+  assert.strictEqual(projected.runs[0].checkpointState, 'VALIDATED');
+  assert.deepStrictEqual(M.deriveStages({ problems: [], observed: [] }, projected.runs)
+    .find((item) => item.id === 'checkpoint'), {
+      id: 'checkpoint', step: 10, label: 'Checkpoint + rollback',
+      evidence: 'aegis-run run.checkpoint.rollbackPoint', state: 'PASS',
+      reason: `checkpoint ${checkpointBody.checkpointId} at dddddddddddd`,
+    });
+
+  const invalidCases = [
+    ['digest', { ...sign(checkpointBody), digest: '0'.repeat(64) }, transitionPairs,
+      /digest does not authenticate/],
+    ['run binding', sign({ ...checkpointBody, runId: 'RUN-20260829-deadbeef' }), transitionPairs,
+      /not bound to this run/],
+    ['review subject binding', sign({ ...checkpointBody, subject: {
+      ...checkpointBody.subject, subjectSha256: 'e'.repeat(64) } }), transitionPairs,
+      /does not bind one reviewed subject/],
+    ['check receipt binding', sign({ ...checkpointBody, checkReceiptSha256: 'f'.repeat(64) }), transitionPairs,
+      /does not bind one reviewed subject/],
+    ['committed range binding', sign({ ...checkpointBody, subject: {
+      ...checkpointBody.subject, committedRange: 'HEAD' } }), transitionPairs,
+      /committed range does not bind/],
+    ['rollback commit shape', sign({ ...checkpointBody, rollbackPoint: 'abc1234' }), transitionPairs,
+      /canonical rollback/],
+    ['checkpoint transition', sign(checkpointBody), transitionPairs.slice(0, -1),
+      /canonical CHECKPOINTED transition/],
+  ];
+  for (const [label, receipt, transitions, reason] of invalidCases) {
+    const invalidRun = makeRun(receipt, transitions);
+    const refused = withWatchdogLedger(invalidRun, transitions,
+      () => M.projectRuns({ runsDir: fixtureRunsDir([invalidRun]), now: '2026-08-29T23:59:59.000Z' }));
+    assert.strictEqual(refused.runs[0].checkpointState, 'INVALID', `${label}: receipt passed projection`);
+    assert.strictEqual(refused.runs[0].checkpoint, null, `${label}: checkpoint id escaped fail-closed projection`);
+    assert.strictEqual(refused.runs[0].rollbackPoint, null, `${label}: rollback point escaped fail-closed projection`);
+    const failed = M.deriveStages({ problems: [], observed: [] }, refused.runs)
+      .find((item) => item.id === 'checkpoint');
+    assert.strictEqual(failed.state, 'FAILED', `${label}: invalid receipt passed stage 10`);
+    assert.match(failed.reason, reason, `${label}: exact refusal diagnosis was lost`);
+  }
+});
+
+test('future-dated run evidence is unavailable and cannot win current-run selection', () => {
+  const now = '2026-08-29T12:00:00.000Z';
+  const current = runRecord('RUN-20260829-11111111', {
+    createdAt: '2026-08-29T10:00:00.000Z', updatedAt: '2026-08-29T10:01:00.000Z',
+  });
+  const future = runRecord('RUN-20990101-22222222', {
+    createdAt: '2099-01-01T10:00:00.000Z', updatedAt: '2099-01-01T10:01:00.000Z',
+  });
+  assert.strictEqual(M.selectCurrentRun([current, future], Date.parse(now)).runId, current.runId,
+    'future evidence won the pure current-run selector');
+
+  const projected = M.projectRuns({ runsDir: fixtureRunsDir([current, future]), now });
+  assert.strictEqual(projected.state, 'UNAVAILABLE');
+  assert.strictEqual(projected.current.state, 'UNAVAILABLE');
+  assert.strictEqual(projected.current.evidenceState, 'UNAVAILABLE');
+  assert.match(projected.reason, /future timestamp/);
+  assert.match(projected.reason, /current run status and lifecycle evidence are unavailable/);
+});
+
+test('an unavailable pre-review engineering gate keeps independent review UNVERIFIED', () => {
+  const run = runRecord('RUN-20260830-10101010', {
+    state: 'CHECKS_PASSED', updatedAt: '2026-08-30T10:00:00.000Z',
+    checks: { passed: 1, total: 1 },
+  });
+  const snap = M.snapshot({}, {
+    runsDir: fixtureRunsDir([run]), now: '2026-08-30T10:01:00.000Z',
+  });
+  assert.strictEqual(snap.engineering.state, 'UNAVAILABLE');
+  const review = snap.engineering.stages.find((stage) => stage.id === 'review');
+  assert.strictEqual(review.state, 'UNVERIFIED');
+  assert.match(review.reason, /engineering gate unavailable/i);
+  assert.doesNotMatch(review.reason, /rejected|blocked|failed/i,
+    'missing gate evidence was presented as a review verdict');
+});
 // A schema-shaped run record. `extra` decides where — if anywhere — a subject
 // hash is written.
-const runRecord = (runId, extra) => Object.assign({
-  runId, state: 'BUILT', objective: 'o-' + runId,
-  createdAt: '2026-08-26T10:00:00.000Z', updatedAt: '2026-08-26T10:00:00.000Z',
-  packet: 'PKT-TEST', risk: 'FULL',
-}, extra || {});
+function runRecord(runId, extra) {
+  return Object.assign({
+    runId, state: 'BUILT', objective: 'o-' + runId,
+    createdAt: '2026-08-26T10:00:00.000Z', updatedAt: '2026-08-26T10:00:00.000Z',
+    packet: 'PKT-TEST', risk: 'FULL',
+  }, extra || {});
+}
+
+test('mutable REVIEW_FAILED evidence remains an uncorroborated claim in the public projection', () => {
+  const valid = runRecord('RUN-20260829-a1b2c3d4', {
+    state: 'REVIEW_FAILED',
+    reviewFailure: {
+      schemaVersion: 1, status: 'REFUSED', reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+      subjectSha256: 'a'.repeat(64), checkReceiptSha256: 'b'.repeat(64),
+      packet: { path: 'builder-control/packets/PKT-TEST.json', sha256: 'c'.repeat(64) },
+      refusedAt: '2026-08-29T10:00:00.000Z', authority: 'engineering-os.cjs --gate-done',
+      rejectedReviewers: [{ reviewer: 'codex', reviewId: 'REV-codex-current' }],
+      blockingFindingCount: 2, refusalRuleCount: 3,
+      summary: '/private/host/secret must never be copied',
+      rawGate: { detail: 'credential-shaped untrusted prose' },
+    },
+  });
+  const projected = M.projectRuns({ runsDir: fixtureRunsDir([valid]), now: '2026-08-29T23:59:59.000Z' });
+  assert.strictEqual(projected.state, 'OK');
+  const failure = projected.runs[0].reviewFailure;
+  assert.deepStrictEqual(failure, {
+    status: 'UNVERIFIED', reasonCode: 'REVIEW_FAILURE_UNCORROBORATED',
+    summary: 'The run records a review-failure claim, but attested exact-subject gate evidence is unavailable in this projection.',
+  });
+  assert.ok(!JSON.stringify(failure).includes('codex') &&
+    !JSON.stringify(failure).includes('2 blocking') &&
+    !JSON.stringify(failure).includes('a'.repeat(64)),
+  'mutable reviewer identity, counts, or hashes escaped as a blocking verdict');
+  assert.ok(!JSON.stringify(failure).includes('secret'));
+
+  const hostile = runRecord('RUN-20260829-b1c2d3e4', {
+    state: 'REVIEW_FAILED',
+    reviewFailure: { ...valid.reviewFailure,
+      rejectedReviewers: [{ reviewer: '<script>', reviewId: 'REV-codex-current' }] },
+  });
+  const refused = M.projectRuns({ runsDir: fixtureRunsDir([hostile]), now: '2026-08-29T23:59:59.000Z' });
+  assert.strictEqual(refused.runs[0].reviewFailure, null,
+    'malformed reviewer identity reached the public run projection');
+});
+
+test('only one exact canonical gate, packet and receipt can corroborate a review refusal', () => {
+  const subject = {
+    subjectSha256: 'a'.repeat(64), subjectPaths: ['builder-control/aegis-state.cjs'],
+    diffBytes: 10, range: 'HEAD',
+  };
+  const packet = { path: 'builder-control/packets/PKT-TEST.json', sha256: 'b'.repeat(64) };
+  const receipt = { receiptSha256: 'c'.repeat(64) };
+  const claim = {
+    schemaVersion: 1, status: 'REFUSED', reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+    subjectSha256: subject.subjectSha256, checkReceiptSha256: receipt.receiptSha256,
+    packet, refusedAt: '2026-08-30T12:01:00.000Z', authority: 'engineering-os.cjs --gate-done',
+    rejectedReviewers: [{ reviewer: 'codex', reviewId: 'REV-codex-current' }],
+    blockingFindingCount: 1, refusalRuleCount: 2,
+    summary: 'Independent review found 1 blocking issue(s) on this exact checked version.',
+  };
+  const gate = {
+    ok: false, state: 'BLOCKED', subject,
+    problems: [
+      { rule: 'ENGOS-REVIEW-REJECTED', detail: 'bounded' },
+      { rule: 'ENGOS-OPEN-BLOCKING-FINDING',
+        detail: 'HIGH from codex in builder-control/aegis-state.cjs: bounded' },
+    ],
+    reviewerCompleteness: {
+      complete: true, subjectSha256: subject.subjectSha256,
+      pathCoverage: { notCoveredByEveryRequiredReviewer: [] },
+      rows: [{ reviewer: 'codex', reviewId: 'REV-codex-current', required: 'REQUIRED',
+        executed: 'EXECUTED', disposition: 'REJECT', missingPaths: [], stalePaths: [] }],
+    },
+  };
+  assert.deepStrictEqual(M.canonicalReviewRefusal(gate, claim, subject, packet, receipt), claim);
+  for (const [label, nextClaim, nextSubject, nextPacket, nextReceipt] of [
+    ['subject', { ...claim, subjectSha256: 'd'.repeat(64) }, subject, packet, receipt],
+    ['gate subject', claim, { ...subject, subjectSha256: 'd'.repeat(64) }, packet, receipt],
+    ['packet', claim, subject, { ...packet, sha256: 'd'.repeat(64) }, receipt],
+    ['receipt', claim, subject, packet, { receiptSha256: 'd'.repeat(64) }],
+  ]) {
+    assert.strictEqual(M.canonicalReviewRefusal(gate, nextClaim, nextSubject, nextPacket, nextReceipt), null,
+      `${label} mismatch promoted a mutable refusal claim`);
+  }
+});
+
+test('review refusals correlate open blockers only to the reviewer named by canonical gate evidence', () => {
+  const subject = {
+    subjectSha256: 'a'.repeat(64), subjectPaths: ['builder-control/aegis-state.cjs'],
+    diffBytes: 10, range: 'HEAD',
+  };
+  const packet = { path: 'builder-control/packets/PKT-TEST.json', sha256: 'b'.repeat(64) };
+  const receipt = { receiptSha256: 'c'.repeat(64) };
+  const claim = {
+    schemaVersion: 1, status: 'REFUSED', reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+    subjectSha256: subject.subjectSha256, checkReceiptSha256: receipt.receiptSha256,
+    packet, refusedAt: '2026-08-30T12:01:00.000Z', authority: 'engineering-os.cjs --gate-done',
+    rejectedReviewers: [{ reviewer: 'grok', reviewId: 'REV-grok-current' }],
+    blockingFindingCount: 1, refusalRuleCount: 1,
+    summary: 'Independent review found 1 blocking issue(s) on this exact checked version.',
+  };
+  const rows = [
+    { reviewer: 'codex', reviewId: 'REV-codex-current', required: 'REQUIRED',
+      executed: 'EXECUTED', disposition: 'APPROVE', missingPaths: [], stalePaths: [] },
+    { reviewer: 'grok', reviewId: 'REV-grok-current', required: 'REQUIRED',
+      executed: 'EXECUTED', disposition: 'APPROVE_WITH_NOTES', missingPaths: [], stalePaths: [] },
+  ];
+  const gate = {
+    ok: false, state: 'BLOCKED', subject,
+    problems: [{ rule: 'ENGOS-OPEN-BLOCKING-FINDING',
+      detail: 'HIGH from grok in builder-control/aegis-state.cjs: bounded' }],
+    reviewerCompleteness: { complete: true, subjectSha256: subject.subjectSha256,
+      pathCoverage: { notCoveredByEveryRequiredReviewer: [] }, rows },
+  };
+  assert.deepStrictEqual(M.canonicalReviewRefusal(gate, claim, subject, packet, receipt), claim,
+    'the named reviewer blocker was not correlated to that reviewer');
+  assert.strictEqual(M.canonicalReviewRefusal(gate,
+    { ...claim, rejectedReviewers: [
+      { reviewer: 'codex', reviewId: 'REV-codex-current' },
+      { reviewer: 'grok', reviewId: 'REV-grok-current' },
+    ] }, subject, packet, receipt), null,
+  'one reviewer blocker contaminated an approving reviewer');
+  assert.strictEqual(M.canonicalReviewRefusal({ ...gate, problems: [
+    { rule: 'ENGOS-OPEN-BLOCKING-FINDING', detail: 'bounded without a reviewer identity' },
+  ] }, claim, subject, packet, receipt), null,
+  'malformed gate evidence was guessed into reviewer ownership');
+});
+
+test('run projection distinguishes MODEL_AUTH_FAILURE and a non-executable Grok failover without raw output', () => {
+  const run = runRecord('RUN-20260829-c1d2e3f4', {
+    state: 'BUILD_FAILED',
+    build: {
+      mode: 'async', workerState: 'FAILED', exit: 1,
+      failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
+        summary: 'raw provider output must not cross', retrySafe: true, failoverEligible: true },
+      providerSelection: { provider: 'grok-subscription', model: 'grok-4.6',
+        reason: 'raw policy explanation must not cross' },
+      handoff: { state: 'UNAVAILABLE', executable: false,
+        reason: 'raw handoff text must not cross', fromProvider: 'claude-subscription',
+        toProvider: 'grok-subscription', failureCode: 'MODEL_AUTH_FAILURE',
+        sameProviderRetryAllowed: false, unchangedObjective: true },
+      recovery: { reason: 'MODEL_AUTH_FAILURE', retrySafe: false, providerFailoverRequired: true,
+        selectedProvider: 'grok-subscription', selectedModel: 'grok-4.6' },
+      stdoutTail: 'credential-shaped raw output', stderrTail: 'secret raw output',
+    },
+  });
+  const projected = M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-29T23:59:59.000Z' });
+  const build = projected.runs[0].build;
+  assert.deepStrictEqual(build.failure, {
+    code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription', summary: 'Claude authentication failed.',
+  });
+  assert.deepStrictEqual(build.failover, {
+    state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: 'grok-4.6',
+    reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.',
+  });
+  assert.ok(!JSON.stringify(build).includes('raw output') && !JSON.stringify(build).includes('secret'));
+  const stage = M.deriveStages({ ok: false, problems: [], observed: [] }, projected.runs)
+    .find((item) => item.id === 'build');
+  assert.strictEqual(stage.state, 'FAILED');
+  assert.match(stage.reason, /Claude authentication failed.*Grok.*not enabled/i);
+});
+
+test('run projection preserves the bounded unverified-termination signal for hosting', () => {
+  const run = runRecord('RUN-20260829-c1d2e3f5', {
+    state: 'BUILD_FAILED',
+    build: {
+      mode: 'async', workerState: 'FAILED', exit: 124, timedOut: true,
+      recovery: { reason: 'TERMINATION_UNVERIFIED', retrySafe: false,
+        terminationVerified: false, secret: 'must not cross' },
+    },
+  });
+  const projected = M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-29T23:59:59.000Z' });
+  assert.deepStrictEqual(projected.runs[0].build.recovery, {
+    reason: 'TERMINATION_UNVERIFIED', retrySafe: false, terminationVerified: false,
+  });
+  assert.ok(!JSON.stringify(projected.runs[0].build).includes('must not cross'));
+});
+
+function lifecycleEvidenceRun(runId) {
+  const baseCommit = 'a'.repeat(40);
+  return Object.assign(watchdogRun(runId), {
+    objective: 'Prove founder-visible lifecycle truth',
+    acceptanceCriteria: ['Only canonical evidence can light a stage'],
+    risk: { state: 'CLASSIFIED', lane: 'FULL', highRisk: true },
+    route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+    baseCommit,
+    worktree: {
+      path: path.join(os.tmpdir(), `aegis-wt-${runId}`),
+      branch: `aegis/${runId}`,
+      baseCommit,
+      createdAt: '2026-08-29T10:00:02.000Z',
+    },
+    build: { exit: 0 },
+    checks: { passed: 1, total: 1 },
+  });
+}
+
+function attachCanonicalPassingCheckReceipt(run) {
+  const body = {
+    schemaVersion: 1,
+    authority: 'aegis-run.cjs runChecks',
+    runId: run.runId,
+    packet: { path: 'builder-control/packets/PKT-TEST.json', sha256: 'b'.repeat(64) },
+    subject: {
+      subjectSha256: 'c'.repeat(64),
+      subjectPaths: ['builder-control/aegis-state.cjs'],
+      diffBytes: 1,
+      range: null,
+    },
+    startedAt: '2026-08-29T10:00:06.000Z',
+    completedAt: '2026-08-29T10:00:07.000Z',
+    complete: true,
+    outcome: 'PASS',
+    total: 1,
+    passed: 1,
+    results: [{
+      cmd: 'node builder-control/test/aegis-state.test.cjs',
+      status: 'EXECUTED',
+      exit: 0,
+      ranAt: '2026-08-29T10:00:06.500Z',
+    }],
+  };
+  const receipt = { ...body, receiptSha256: R.checkReceiptDigest(body) };
+  run.checks = {
+    passed: 1,
+    total: 1,
+    receiptRef: R.persistCanonicalCheckReceipt(run, receipt),
+  };
+}
+
+function attachCanonicalPreHostCheckReceipt(run) {
+  const body = {
+    schemaVersion: 1,
+    receiptType: 'AEGIS_PRE_HOST_CHECK_RECEIPT_V1',
+    authority: 'aegis-run.cjs runChecks',
+    runId: run.runId,
+    packet: { path: 'builder-control/packets/PKT-TEST.json', sha256: 'b'.repeat(64) },
+    subject: {
+      subjectSha256: 'c'.repeat(64),
+      subjectPaths: ['builder-control/aegis-state.cjs'],
+      diffBytes: 1,
+      range: null,
+    },
+    snapshot: {
+      policy: 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1',
+      captureSha256: 'd'.repeat(64),
+    },
+    startedAt: '2026-08-29T10:00:06.000Z',
+    completedAt: '2026-08-29T10:00:07.000Z',
+    complete: true,
+    outcome: 'PASS',
+    total: 1,
+    passed: 1,
+    results: [{
+      cmd: 'node builder-control/test/aegis-state.test.cjs',
+      status: 'EXECUTED', exit: 0, ranAt: '2026-08-29T10:00:06.500Z',
+    }],
+    hostContainment: {
+      state: 'PENDING',
+      commands: ['node builder-control/test/host-containment.test.cjs'],
+    },
+  };
+  const receipt = { ...body, receiptSha256: R.checkReceiptDigest(body) };
+  run.checks = {
+    passed: 1,
+    total: 1,
+    hostContainment: { state: 'PENDING' },
+    preHostReceiptRef: R.persistCanonicalPreHostCheckReceipt(run, receipt),
+  };
+}
+
+test('mutable run claims cannot light lifecycle stages without exact canonical ledger evidence', () => {
+  const run = lifecycleEvidenceRun('RUN-20260829-aaaab010');
+  const projected = withWatchdogLedger(run, [],
+    () => M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-29T23:59:59.000Z' }));
+  const stages = M.deriveStages({ problems: [], observed: [] }, projected.runs);
+  for (const id of ['objective', 'acceptance', 'routing', 'worktree', 'build', 'deterministic']) {
+    const stage = stages.find((item) => item.id === id);
+    assert.ok(!['PASS', 'RUNNING'].includes(stage.state),
+      `${id} was lit by mutable run JSON without canonical ledger evidence: ${JSON.stringify(stage)}`);
+  }
+  assert.deepStrictEqual(projected.runs[0].watchdog.corroboratedStages, []);
+  assert.strictEqual(projected.runs[0].watchdog.checkReceiptValid, false);
+});
+
+test('ordered ledger transitions plus a digest-bound canonical check receipt light the proven lifecycle stages', () => {
+  const run = lifecycleEvidenceRun('RUN-20260829-aaaab011');
+  const projected = withWatchdogLedger(run, WATCHDOG_TRANSITIONS, () => {
+    attachCanonicalPassingCheckReceipt(run);
+    return M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-29T23:59:59.000Z' });
+  });
+  assert.deepStrictEqual(projected.runs[0].watchdog.corroboratedStages,
+    ['INTAKE_RECORDED', 'ROUTED', 'WORKTREE_READY', 'BUILDING', 'BUILT', 'CHECKS_PASSED']);
+  assert.strictEqual(projected.runs[0].watchdog.checkReceiptValid, true);
+  const stages = M.deriveStages({ problems: [], observed: [] }, projected.runs);
+  for (const id of ['objective', 'acceptance', 'routing', 'worktree', 'build', 'deterministic']) {
+    const stage = stages.find((item) => item.id === id);
+    assert.strictEqual(stage.state, 'PASS', `${id} did not light from exact evidence: ${JSON.stringify(stage)}`);
+  }
+});
+
+test('a valid final deterministic receipt remains PASS after review binding and checkpointing', () => {
+  const cases = [
+    ['REVIEW_BOUND', [['CHECKS_PASSED', 'REVIEW_BOUND']]],
+    ['CHECKPOINTED', [['CHECKS_PASSED', 'REVIEW_BOUND'], ['REVIEW_BOUND', 'CHECKPOINTED']]],
+  ];
+  for (const [state, suffix] of cases) {
+    const transitions = [...WATCHDOG_TRANSITIONS, ...suffix];
+    const run = Object.assign(lifecycleEvidenceRun(
+      state === 'REVIEW_BOUND' ? 'RUN-20260830-abcde006' : 'RUN-20260830-abcde007'), {
+      state,
+      transitions: transitions.map(([from, to], index) => ({
+        from, to, ts: `2026-08-29T10:00:${String(index).padStart(2, '0')}.000Z`,
+        ledgerEntryId: `LED-${state}-${index + 1}`,
+      })),
+    });
+    const projected = withWatchdogLedger(run, transitions, () => {
+      attachCanonicalPassingCheckReceipt(run);
+      return M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-30T12:00:00.000Z' });
+    });
+    assert.strictEqual(projected.runs[0].checks.outcome, 'PASS',
+      `${state} erased its valid final deterministic receipt`);
+    assert.strictEqual(projected.runs[0].checks.snapshotOutcome, 'PASS');
+    const stage = M.deriveStages({ problems: [], observed: [] }, projected.runs)
+      .find((item) => item.id === 'deterministic');
+    assert.strictEqual(stage.state, 'PASS', `${state} downgraded deterministic evidence`);
+  }
+});
+
+test('projected watchdog PASS comes from the canonical runtime watchdog over complete ledger-corroborated transitions', () => {
+  const run = watchdogRun('RUN-20260829-aaaab001');
+  const projected = withWatchdogLedger(run, WATCHDOG_TRANSITIONS,
+    () => M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-29T23:59:59.000Z' }));
+  assert.strictEqual(projected.runs[0].watchdog.ok, true);
+  const watchdog = M.deriveStages({ problems: [], observed: [] }, projected.runs)
+    .find((stage) => stage.id === 'watchdog');
+  assert.strictEqual(watchdog.state, 'PASS');
+});
+
+test('projected watchdog distinguishes an incomplete prefix from actual sequence drift', () => {
+  const missing = watchdogRun('RUN-20260829-aaaab002', WATCHDOG_TRANSITIONS.slice(0, -1));
+  const missingProjection = withWatchdogLedger(missing, WATCHDOG_TRANSITIONS.slice(0, -1),
+    () => M.projectRuns({ runsDir: fixtureRunsDir([missing]), now: '2026-08-29T23:59:59.000Z' }));
+  assert.ok(missingProjection.runs[0].watchdog.problems.some((p) =>
+    p.rule === 'WATCHDOG-STAGE-MISSING' && /CHECKS_PASSED/.test(p.detail)));
+
+  const reorderedTransitions = [
+    ...WATCHDOG_TRANSITIONS.slice(0, 3),
+    WATCHDOG_TRANSITIONS[4],
+    WATCHDOG_TRANSITIONS[3],
+    WATCHDOG_TRANSITIONS[5],
+  ];
+  const outOfOrder = watchdogRun('RUN-20260829-aaaab003', reorderedTransitions);
+  const outOfOrderProjection = withWatchdogLedger(outOfOrder, reorderedTransitions,
+    () => M.projectRuns({ runsDir: fixtureRunsDir([outOfOrder]), now: '2026-08-29T23:59:59.000Z' }));
+  assert.strictEqual(outOfOrderProjection.runs[0].watchdog.ok, false);
+  const orderProblems = outOfOrderProjection.runs[0].watchdog.problems;
+  assert.deepStrictEqual(orderProblems, [{
+    rule: 'WATCHDOG-OUT-OF-ORDER',
+    detail: 'BUILT occurred before a stage that must precede it',
+  }], 'the exact canonical diagnosis for the misordered BUILDING/BUILT sequence changed');
+
+  const unrecorded = watchdogRun('RUN-20260829-aaaab004');
+  const unrecordedProjection = withWatchdogLedger(unrecorded, WATCHDOG_TRANSITIONS.slice(0, -1),
+    () => M.projectRuns({ runsDir: fixtureRunsDir([unrecorded]), now: '2026-08-29T23:59:59.000Z' }));
+  assert.ok(unrecordedProjection.runs[0].watchdog.problems.some((p) =>
+    p.rule === 'WATCHDOG-UNRECORDED-TRANSITION' && /BUILT -> CHECKS_PASSED/.test(p.detail)));
+
+  const missingStage = M.deriveStages({ problems: [], observed: [] }, missingProjection.runs)
+    .find((item) => item.id === 'watchdog');
+  assert.strictEqual(missingStage.state, 'UNVERIFIED');
+  assert.match(missingStage.reason, /corroborated through BUILT/);
+
+  for (const projection of [outOfOrderProjection, unrecordedProjection]) {
+    const stage = M.deriveStages({ problems: [], observed: [] }, projection.runs)
+      .find((item) => item.id === 'watchdog');
+    assert.strictEqual(stage.state, 'FAILED');
+  }
+});
+
+test('an active canonical lifecycle prefix reports RUNNING while later watchdog stages have not occurred', () => {
+  const prefix = WATCHDOG_TRANSITIONS.slice(0, 4);
+  const run = runRecord('RUN-20260829-aaaab005', {
+    state: 'BUILDING',
+    build: { mode: 'async', workerState: 'RUNNING', workerPid: 4321 },
+    transitions: prefix.map(([from, to], index) => ({
+      from, to, ts: `2026-08-29T10:00:0${index}.000Z`, ledgerEntryId: `LED-PREFIX-${index + 1}`,
+    })),
+  });
+  const projected = withWatchdogLedger(run, prefix,
+    () => M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-29T23:59:59.000Z' }));
+  const stage = M.deriveStages({ problems: [], observed: [] }, projected.runs)
+    .find((item) => item.id === 'watchdog');
+  assert.strictEqual(stage.state, 'RUNNING');
+  assert.match(stage.reason, /corroborated through BUILDING/);
+});
+
+test('run projection carries bounded acceptance, correction cap and failed check truth', () => {
+  const run = runRecord('RUN-20260829-aaaab006', {
+    state: 'CHECKS_FAILED',
+    acceptanceCriteria: ['one', 'two'],
+    corrections: 2,
+    maxCorrections: 3,
+    checks: {
+      passed: 4, total: 4,
+      integrity: { state: 'FAILED', gaps: ['subject mismatch'] },
+      hostContainment: { state: 'PASSED' },
+      executionBoundary: { state: 'FAILED' },
+      precondition: { state: 'FAILED', code: 'CHECK_SOURCE_MISMATCH' },
+    },
+  });
+  const projected = M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-29T23:59:59.000Z' });
+  const publicRun = projected.runs[0];
+  assert.strictEqual(publicRun.acceptanceCriteriaCount, 2);
+  assert.strictEqual(publicRun.corrections, 2);
+  assert.strictEqual(publicRun.maxCorrections, 3);
+  assert.deepStrictEqual(publicRun.checks, {
+    passed: 4, total: 4, outcome: 'FAIL', snapshotOutcome: 'FAIL',
+    integrityState: 'FAILED', integrityGapCount: 1,
+    hostContainmentState: 'PASSED', executionBoundaryState: 'FAILED',
+    hostContainmentReason: null,
+    preconditionState: 'FAILED', preconditionCode: 'CHECK_SOURCE_MISMATCH',
+  });
+  const deterministic = M.deriveStages({ problems: [], observed: [] }, projected.runs)
+    .find((item) => item.id === 'deterministic');
+  assert.strictEqual(deterministic.state, 'FAILED');
+  assert.match(deterministic.reason, /integrity failed.*execution boundary failed.*precondition failed/i);
+});
+
+test('mutable pre-host pass counters remain UNVERIFIED without canonical receipt and lifecycle evidence', () => {
+  const run = runRecord('RUN-20260830-abcde001', {
+    state: 'CHECKS_PASSED',
+    checks: {
+      passed: 12, total: 12,
+      hostContainment: { state: 'PENDING',
+        reason: 'awaiting exact-subject independent review before host execution' },
+    },
+  });
+  const projected = M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-30T12:00:00.000Z' });
+  assert.deepStrictEqual(projected.runs[0].checks, {
+    passed: 12, total: 12, outcome: 'UNVERIFIED', snapshotOutcome: 'UNVERIFIED',
+    integrityState: null, integrityGapCount: null, hostContainmentState: 'PENDING',
+    hostContainmentReason: null,
+    executionBoundaryState: null, preconditionState: null, preconditionCode: null,
+  });
+  const stage = M.deriveStages({ problems: [], observed: [] }, projected.runs)
+    .find((item) => item.id === 'deterministic');
+  assert.strictEqual(stage.state, 'UNVERIFIED');
+  assert.doesNotMatch(stage.reason, /Snapshot checks passed/i);
+});
+
+test('canonical pre-host receipt plus corroborated lifecycle projects snapshot PASS and host PENDING', () => {
+  const run = Object.assign(watchdogRun('RUN-20260830-abcde003'), {
+    checks: { passed: 1, total: 1, hostContainment: { state: 'PENDING' } },
+  });
+  const projected = withWatchdogLedger(run, WATCHDOG_TRANSITIONS, () => {
+    attachCanonicalPreHostCheckReceipt(run);
+    return M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-30T12:00:00.000Z' });
+  });
+  assert.strictEqual(projected.runs[0].watchdog.checkReceiptValid, true);
+  assert.strictEqual(projected.runs[0].watchdog.checkReceiptStage, 'PRE_HOST');
+  assert.deepStrictEqual(projected.runs[0].checks, {
+    passed: 1, total: 1, outcome: 'SNAPSHOT_PASS_HOST_PENDING', snapshotOutcome: 'PASS',
+    integrityState: null, integrityGapCount: null, hostContainmentState: 'PENDING',
+    hostContainmentReason: 'Snapshot checks passed; mandatory host containment is pending until exact-subject review completes.',
+    executionBoundaryState: null, preconditionState: null, preconditionCode: null,
+  });
+  const stage = M.deriveStages({ problems: [], observed: [] }, projected.runs)
+    .find((item) => item.id === 'deterministic');
+  assert.strictEqual(stage.state, 'UNVERIFIED');
+  assert.match(stage.reason, /Snapshot checks passed.*host containment is pending/i);
+});
+
+test('REVIEW_FAILED preserves a valid pre-host snapshot PASS while host containment remains pending', () => {
+  const transitions = [...WATCHDOG_TRANSITIONS, ['CHECKS_PASSED', 'REVIEW_FAILED']];
+  const run = Object.assign(lifecycleEvidenceRun('RUN-20260830-abcde008'), {
+    state: 'REVIEW_FAILED',
+    transitions: transitions.map(([from, to], index) => ({
+      from, to, ts: `2026-08-29T10:00:${String(index).padStart(2, '0')}.000Z`,
+      ledgerEntryId: `LED-REVIEW-FAILED-${index + 1}`,
+    })),
+  });
+  const projected = withWatchdogLedger(run, transitions, () => {
+    attachCanonicalPreHostCheckReceipt(run);
+    return M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-30T12:00:00.000Z' });
+  });
+  assert.strictEqual(projected.runs[0].checks.outcome, 'SNAPSHOT_PASS_HOST_PENDING');
+  assert.strictEqual(projected.runs[0].checks.snapshotOutcome, 'PASS');
+  assert.match(projected.runs[0].checks.hostContainmentReason, /review did not pass/i);
+  const stage = M.deriveStages({ problems: [], observed: [] }, projected.runs)
+    .find((item) => item.id === 'deterministic');
+  assert.strictEqual(stage.state, 'UNVERIFIED');
+  assert.match(stage.reason, /host containment remains pending/i);
+});
+
+test('a retry build cannot inherit deterministic PASS from the prior checked generation', () => {
+  const transitions = [
+    ...WATCHDOG_TRANSITIONS,
+    ['CHECKS_PASSED', 'REVIEW_FAILED'],
+    ['REVIEW_FAILED', 'CORRECTING'],
+    ['CORRECTING', 'BUILDING'],
+  ];
+  const run = Object.assign(lifecycleEvidenceRun('RUN-20260830-abcde004'), {
+    state: 'BUILDING', corrections: 1,
+    transitions: transitions.map(([from, to], index) => ({
+      from, to, ts: `2026-08-29T10:00:${String(index).padStart(2, '0')}.000Z`,
+      ledgerEntryId: `LED-RETRY-${index + 1}`,
+    })),
+  });
+  const projected = withWatchdogLedger(run, transitions, () => {
+    attachCanonicalPassingCheckReceipt(run);
+    return M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-30T12:00:00.000Z' });
+  });
+  assert.strictEqual(projected.runs[0].watchdog.checkReceiptValid, true,
+    'the test did not preserve the old authenticated receipt it is meant to challenge');
+  assert.strictEqual(projected.runs[0].checks.outcome, 'UNVERIFIED');
+  const stages = M.deriveStages({ problems: [], observed: [] }, projected.runs);
+  const deterministic = stages.find((item) => item.id === 'deterministic');
+  assert.strictEqual(deterministic.state, 'RUNNING');
+  assert.match(deterministic.reason, /prior check receipt does not verify this new build generation/i);
+  const correction = stages.find((item) => item.id === 'correction');
+  assert.strictEqual(correction.state, 'PASS',
+    'the exact ledger-backed CORRECTING transition was not recognized');
+});
+
+test('a mutable correction count cannot light PASS without its canonical CORRECTING transition', () => {
+  const transitions = [
+    ...WATCHDOG_TRANSITIONS,
+    ['CHECKS_PASSED', 'REVIEW_FAILED'],
+    ['REVIEW_FAILED', 'CORRECTING'],
+  ];
+  const run = Object.assign(lifecycleEvidenceRun('RUN-20260830-abcde005'), {
+    state: 'CORRECTING', corrections: 1,
+    transitions: transitions.map(([from, to], index) => ({
+      from, to, ts: `2026-08-29T10:00:${String(index).padStart(2, '0')}.000Z`,
+      ledgerEntryId: `LED-CORRECTION-${index + 1}`,
+    })),
+  });
+  const projected = withWatchdogLedger(run, WATCHDOG_TRANSITIONS, () =>
+    M.projectRuns({ runsDir: fixtureRunsDir([run]), now: '2026-08-30T12:00:00.000Z' }));
+  const correction = M.deriveStages({ problems: [], observed: [] }, projected.runs)
+    .find((item) => item.id === 'correction');
+  assert.strictEqual(correction.state, 'UNVERIFIED');
+  assert.match(correction.reason, /no canonical ledger-corroborated CORRECTING transition/i);
+});
+
+test('an advisory REJECT is review-complete without being rewritten as unanimous approval', () => {
+  const subjectSha256 = 'a'.repeat(64);
+  const stages = M.deriveStages({
+    ok: true,
+    problems: [],
+    observed: ['codex: APPROVE', 'grok: REJECT label recorded as nonblocking'],
+    subject: { subjectSha256 },
+    reviewerCompleteness: {
+      complete: true,
+      rows: [
+        { reviewer: 'codex', required: 'REQUIRED', executed: 'EXECUTED', disposition: 'APPROVE' },
+        { reviewer: 'grok', required: 'REQUIRED', executed: 'EXECUTED', disposition: 'REJECT' },
+      ],
+    },
+  }, [{ runId: 'RUN-20260830-abcde002', subjectSha256,
+    updatedAt: '2026-08-29T12:01:00.000Z' }]);
+  const review = stages.find((item) => item.id === 'review');
+  assert.strictEqual(review.state, 'PASS');
+  assert.match(review.reason, /review is complete.*no blocking findings.*one reviewer did not approve/i);
+  assert.doesNotMatch(review.reason, /every required reviewer approved/i);
+});
+
+test('a snapshot derives stages, run list and current binding from one immutable run capture', () => {
+  const intakeTransition = WATCHDOG_TRANSITIONS.slice(0, 1);
+  const first = runRecord('RUN-20260828-01010101', {
+    createdAt: '2026-08-28T01:00:00.000Z',
+    updatedAt: '2026-08-28T01:01:00.000Z',
+    objective: 'objective from the immutable capture',
+    risk: { state: 'CLASSIFIED', lane: 'FULL', highRisk: false },
+    route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+    worktree: { path: '/tmp/aegis-first', branch: 'aegis/first' },
+    build: { exit: 0 },
+    transitions: intakeTransition.map(([from, to], index) => ({
+      from, to, ts: `2026-08-28T01:00:0${index}.000Z`, ledgerEntryId: `LED-SNAPSHOT-${index + 1}`,
+    })),
+  });
+  const later = runRecord('RUN-20260828-02020202', {
+    createdAt: '2026-08-28T02:00:00.000Z',
+    updatedAt: '2026-08-28T02:01:00.000Z',
+    objective: 'objective written after the capture',
+    risk: { state: 'CLASSIFIED', lane: 'FULL', highRisk: false },
+    route: { model: 'grok', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+    worktree: { path: '/tmp/aegis-later', branch: 'aegis/later' },
+    build: { exit: 0 },
+  });
+  const dir = fixtureRunsDir([first]);
+  let seamCalls = 0;
+
+  const snap = withWatchdogLedger(first, intakeTransition, () => M.snapshot({}, {
+      runsDir: dir,
+      afterRunCapture(capture) {
+        seamCalls++;
+        assert.ok(Object.isFrozen(capture), 'the run projection was not frozen before downstream use');
+        assert.ok(Object.isFrozen(capture.runs), 'the captured run list was not frozen');
+        assert.ok(Object.isFrozen(capture.runs[0]), 'a captured run record was still mutable');
+        // Advance the canonical-looking fixture after the snapshot's only read.
+        // The old implementation reopened the directory after the gate and mixed
+        // this later record into `snapshot.runs` while stages still described
+        // `first`.
+        fs.writeFileSync(path.join(dir, `${later.runId}.json`), JSON.stringify(later, null, 2));
+      },
+    }));
+
+  assert.strictEqual(seamCalls, 1, 'the deterministic post-capture seam did not run exactly once');
+  assert.deepStrictEqual(snap.runs.runs.map((run) => run.runId), [first.runId],
+    'the public run list was reread after the immutable capture');
+  assert.strictEqual(snap.runs.current.runId, first.runId,
+    'the current binding came from a later directory read');
+  assert.strictEqual(snap.engineering.state, 'UNAVAILABLE',
+    'a fixture run with no validated governed worktree must not fall back to the control checkout gate');
+  assert.match(snap.engineering.reason, /worktree|current run/i);
+
+  // Control: the mutation was real and a fresh, separate projection sees it.
+  // Its absence from `snap` therefore proves one-capture behavior rather than
+  // a seam that failed to mutate the fixture.
+  const after = M.projectRuns({ runsDir: dir, now: '2026-08-29T00:00:00.000Z' });
+  assert.deepStrictEqual(after.runs.map((run) => run.runId), [first.runId, later.runId]);
+  assert.strictEqual(after.current.runId, later.runId);
+});
+
+test('live engineering projection is evaluated against the selected governed run worktree', () => {
+  const snap = M.snapshot({});
+  if (!snap.runs || snap.runs.state !== 'OK' || !snap.runs.current || !snap.runs.current.runId) {
+    assert.strictEqual(snap.engineering.state, 'UNAVAILABLE');
+    return;
+  }
+  const runtime = require('../aegis-run.cjs');
+  const raw = runtime.loadRun(snap.runs.current.runId);
+  if (!snap.runs.current.packetId) {
+    assert.strictEqual(snap.engineering.state, 'UNAVAILABLE');
+    assert.match(snap.engineering.reason, /packet/i);
+    return;
+  }
+  let env;
+  try { env = runtime.canonicalGitEnvironment(raw); }
+  catch {
+    assert.strictEqual(snap.engineering.state, 'UNAVAILABLE',
+      'an invalid current worktree must fail closed instead of gating the control checkout');
+    return;
+  }
+  const subjectRead = spawnSync(process.execPath,
+    [path.join(__dirname, '..', 'engineering-os.cjs'), '--subject', '--json',
+      '--packet', snap.runs.current.packetId],
+    { cwd: ROOT, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const directSubject = JSON.parse(subjectRead.stdout);
+  const direct = spawnSync(process.execPath,
+    [path.join(__dirname, '..', 'engineering-os.cjs'), '--gate-done', '--json',
+      '--packet', snap.runs.current.packetId, '--subject-sha', directSubject.subjectSha256],
+    { cwd: ROOT, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const gate = JSON.parse(direct.stdout);
+  if (snap.engineering.state === 'UNAVAILABLE') {
+    assert.match(snap.engineering.reason, /digest-bound canonical check receipt/,
+      'a validated live worktree was suppressed for a reason other than missing run-bound check evidence');
+    assert.ok(['CHECKS_PASSED', 'REVIEW_FAILED', 'REVIEW_BOUND', 'CHECKPOINTED', 'ROLLED_BACK'].includes(raw.state),
+      'a pre-check run was incorrectly required to carry a final check receipt');
+    return;
+  }
+  assert.strictEqual(snap.engineering.state, 'OK');
+  assert.strictEqual(snap.engineering.subjectSha256, gate.subject.subjectSha256,
+    'dashboard engineering subject does not match the selected run worktree gate');
+  assert.deepStrictEqual(snap.engineering.subjectPaths, gate.subject.subjectPaths);
+});
 
 // gate: the subject hash the PAGE's gate verdict is about (the argument).
 // expectRunSubject: what the run must publish as its own recorded subject.
@@ -2022,7 +3140,7 @@ test('G1 #5: a run\'s subject is read from run.subject.subjectSha256 and nowhere
     'the table must actually cover the alternates it claims to reject');
   let accepted = 0;
   for (const c of SUBJECT_LOCATION_CASES) {
-    const dir = fixtureRunsDir([runRecord('RUN-CASE', c.record)]);
+    const dir = fixtureRunsDir([runRecord(RUN_CASE_ID, c.record)]);
     const out = M.projectRuns({ subjectSha256: c.gate, runsDir: dir });
 
     assert.strictEqual(out.state, 'OK', `${c.name}: the injected runs directory did not project`);
@@ -2035,7 +3153,7 @@ test('G1 #5: a run\'s subject is read from run.subject.subjectSha256 and nowhere
     // HALF TWO — what the current-run binding does with it.
     const cur = out.current;
     assert.strictEqual(cur.state, 'BOUND', `${c.name}: a dated run must still bind as current`);
-    assert.strictEqual(cur.runId, 'RUN-CASE');
+    assert.strictEqual(cur.runId, RUN_CASE_ID);
     assert.strictEqual(cur.subjectState, c.expectState, `${c.name}: wrong subjectState`);
     assert.strictEqual(cur.runSubjectSha256, c.expectRunSubject,
       `${c.name}: the binding published a run subject the run did not record`);
@@ -2068,7 +3186,7 @@ test('G1 #5: the run-subject table is not vacuous — the canonical case fails i
   const topLevel = (r) => (typeof r.subjectSha256 === 'string' && /^[0-9a-f]{64}$/.test(r.subjectSha256))
     ? r.subjectSha256 : null;
   const disagreements = SUBJECT_LOCATION_CASES
-    .map((c) => runRecord('RUN-CASE', c.record))
+    .map((c) => runRecord(RUN_CASE_ID, c.record))
     .filter((r) => canonical(r) !== topLevel(r));
   assert.ok(disagreements.length >= 5,
     `the table must contain records where the two readers disagree; found ${disagreements.length}`);
@@ -2081,7 +3199,7 @@ test('G1 #5: the run-subject table is not vacuous — the canonical case fails i
 });
 
 test('G1 #5: an injected runs directory is cited as itself, and the default still reads builder-control/runs', () => {
-  const dir = fixtureRunsDir([runRecord('RUN-CITED', { subject: { subjectSha256: RUN_SUBJECT } })]);
+  const dir = fixtureRunsDir([runRecord(RUN_CITED_ID, { subject: { subjectSha256: RUN_SUBJECT } })]);
   const out = M.projectRuns({ subjectSha256: RUN_SUBJECT, runsDir: dir });
   assert.strictEqual(out.source, path.relative(ROOT, dir), 'the projection did not cite the directory it read');
   // The production default is unchanged: it resolves to the canonical runs
@@ -2100,7 +3218,7 @@ test('G1 #5: an injected runs directory is cited as itself, and the default stil
 
 test('dashboard projection preserves bounded worker lifecycle and canonical route identity only', () => {
   const hostile = 'PRIVATE_WORKER_OUTPUT_SHOULD_NEVER_REACH_THE_DASHBOARD';
-  const record = runRecord('RUN-LIFECYCLE', {
+  const record = runRecord(RUN_LIFECYCLE_ID, {
     state: 'BUILDING',
     route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
     build: {
@@ -2108,6 +3226,9 @@ test('dashboard projection preserves bounded worker lifecycle and canonical rout
       startedAt: '2026-08-27T20:00:00.000Z', heartbeatAt: '2026-08-27T20:00:01.000Z',
       endedAt: null, exit: null, timedOut: false,
       stdoutTail: hostile, stderrTail: hostile, modelOutput: hostile, transcript: hostile,
+      control: { dir: '/private/control', secret: hostile, secretSha256: 'digest' },
+      childProcessIdentity: { pid: 4321, processGroupId: 4321, startMarker: 'fixture',
+        executable: '/fixture/claude', source: 'fixture' },
       recovery: { reason: 'TERMINATION_UNVERIFIED', retrySafe: false, raw: hostile },
     },
   });
@@ -2118,6 +3239,9 @@ test('dashboard projection preserves bounded worker lifecycle and canonical rout
     startedAt: '2026-08-27T20:00:00.000Z', heartbeatAt: '2026-08-27T20:00:01.000Z',
     endedAt: null, exit: null, timedOut: false,
     recovery: { reason: 'TERMINATION_UNVERIFIED', retrySafe: false },
+    failure: null,
+    failover: null,
+    cancelAvailable: true,
   });
   assert.deepStrictEqual(projected.route,
     { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' });
@@ -2129,11 +3253,36 @@ test('dashboard projection rejects unvalidated route identity', () => {
     { model: 'claude', execution: 'SUBSCRIPTION', source: 'caller' },
     { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole', provider: 'caller' },
     { model: '', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+    { state: 'REFUSED', code: 'bad code', reason: 'bounded refusal' },
+    { state: 'REFUSED', code: 'SPECIALIST_REQUIRED', reason: ' leading whitespace' },
+    { state: 'REFUSED', code: 'SPECIALIST_REQUIRED', reason: 'line\nbreak' },
+    { state: 'REFUSED', code: 'SPECIALIST_REQUIRED', reason: 'bounded refusal', model: 'caller' },
   ]) {
-    const record = runRecord('RUN-ROUTE-CASE', { route });
+    const record = runRecord(RUN_ROUTE_ID, { route });
     const out = M.projectRuns({ runsDir: fixtureRunsDir([record]) });
     assert.strictEqual(out.runs[0].route, null, `unvalidated route crossed the boundary: ${JSON.stringify(route)}`);
   }
+});
+
+test('dashboard projects a bounded canonical route refusal as FAILED without claiming ROUTED', () => {
+  const refusal = {
+    state: 'REFUSED',
+    code: 'SPECIALIST_REQUIRED',
+    reason: 'No eligible builder satisfies the packet policy.',
+  };
+  const record = runRecord(RUN_ROUTE_ID, { state: 'INTAKE_RECORDED', route: refusal });
+  const out = M.projectRuns({ runsDir: fixtureRunsDir([record]) });
+  assert.deepStrictEqual(out.runs[0].route, refusal,
+    'the bounded refusal was erased from the public run projection');
+  assert.ok(!out.runs[0].watchdog.corroboratedStages.includes('ROUTED'),
+    'the fixture unexpectedly claims a successful route transition');
+
+  const routing = M.deriveStages({ problems: [], observed: [] }, out.runs)
+    .find((stage) => stage.id === 'routing');
+  assert.strictEqual(routing.state, 'FAILED',
+    'a canonical refusal stayed unverified merely because ROUTED never occurred');
+  assert.strictEqual(routing.reason,
+    'SPECIALIST_REQUIRED: No eligible builder satisfies the packet policy.');
 });
 
 test('a run with no parseable timestamp is NEVER selected as current', () => {
@@ -2249,6 +3398,17 @@ test('the injected FX path is a real read: a well-formed fixture projects OK and
   assert.strictEqual(fx.state, 'OK', `a well-formed fixture did not project OK: ${fx.reason || ''}`);
   assert.strictEqual(fx.rate, 1.25);
   assert.strictEqual(M.toCad(100, fx), 125);
+});
+
+test('RED: future-dated FX evidence is UNAVAILABLE and never converts', () => {
+  const p = fxFixture('future.json', {
+    base: 'USD', quote: 'CAD', rate: 9.99, asOf: '2026-08-24T00:00:00Z', source: 'future fixture',
+  });
+  const fx = M.projectFx(NOW, p);
+  assert.strictEqual(fx.state, 'UNAVAILABLE');
+  assert.match(fx.reason, /future-dated/);
+  assert.ok(!('rate' in fx), 'future evidence leaked a usable rate');
+  assert.strictEqual(M.toCad(100, fx), null, 'future evidence produced a CAD conversion');
 });
 
 // The whole point of the injection. If any FX proof ever reaches for the live
@@ -2457,6 +3617,95 @@ test('G1 #3 / finding #6: this suite left NO attributable entry in the canonical
     assert.notStrictEqual(JSON.stringify(tampered[0]), JSON.stringify(before[0]),
       'the append-only comparison cannot distinguish a rewritten entry from the original');
   }
+});
+
+test('current-run selection is identical for mission binding and stages when timestamps tie', () => {
+  const timestamp = '2026-08-28T12:00:00.000Z';
+  const runs = [
+    { runId: 'RUN-20260828-00000001', updatedAt: timestamp, createdAt: timestamp, objective: 'older tie', risk: { lane: 'FULL' },
+      watchdog: { corroboratedStages: ['INTAKE_RECORDED'] } },
+    { runId: 'RUN-20260828-ffffffff', updatedAt: timestamp, createdAt: timestamp, objective: 'selected tie', risk: { lane: 'FULL' },
+      watchdog: { corroboratedStages: ['INTAKE_RECORDED'] } },
+  ];
+  assert.strictEqual(M.selectCurrentRun(runs).runId, 'RUN-20260828-ffffffff');
+  const binding = M.bindCurrentRun(M.orderRuns(runs.map((r) => ({ ...r, updatedAtMs: Date.parse(timestamp), createdAtMs: Date.parse(timestamp) }))), null);
+  assert.strictEqual(binding.runId, 'RUN-20260828-ffffffff');
+  const stages = M.deriveStages({ problems: [], observed: [] }, runs, {
+    runs: { state: 'OK', current: { state: 'BOUND' } }, events: { state: 'OK' },
+    cost: { state: 'OK' }, reviewers: { state: 'OK' },
+  });
+  assert.match(stages.find((stage) => stage.id === 'objective').reason, /selected tie/);
+});
+
+test('Evidence + cost stays UNVERIFIED when an evidence plane is unavailable', () => {
+  const stages = M.deriveStages({ problems: [], observed: [] }, [], {
+    runs: { state: 'OK', current: { state: 'BOUND' } }, events: { state: 'OK' },
+    cost: { state: 'UNAVAILABLE' }, reviewers: { state: 'OK' },
+  });
+  const surface = stages.find((stage) => stage.id === 'surface');
+  assert.strictEqual(surface.state, 'UNVERIFIED');
+  assert.match(surface.reason, /cost evidence unavailable/);
+});
+
+test('Evidence surface never passes when current-run binding is unavailable', () => {
+  const stages = M.deriveStages({ problems: [], observed: [] }, [], {
+    runs: { state: 'OK', current: { state: 'UNAVAILABLE', evidenceState: 'OK' } },
+    events: { state: 'OK' }, cost: { state: 'OK' }, reviewers: { state: 'OK' },
+  });
+  const surface = stages.find((stage) => stage.id === 'surface');
+  assert.strictEqual(surface.state, 'UNVERIFIED');
+  assert.match(surface.reason, /current run binding unavailable/);
+});
+
+test('cost telemetry accepts only one successful final terminal stdout event', () => {
+  const good = [
+    JSON.stringify({ type: 'usage', total_cost_usd: 99 }),
+    JSON.stringify({ type: 'end', stopReason: 'end_turn', total_cost_usd: 1.25, num_turns: 2 }),
+  ].join('\n');
+  assert.strictEqual(M.successfulTerminalCostEnvelope(good).total_cost_usd, 1.25);
+  assert.strictEqual(M.successfulTerminalCostEnvelope(JSON.stringify({ type: 'end', stopReason: 'max_turns', total_cost_usd: 1.25 })), null);
+  assert.strictEqual(M.successfulTerminalCostEnvelope([
+    JSON.stringify({ type: 'end', stopReason: 'end_turn', total_cost_usd: 1 }),
+    JSON.stringify({ type: 'end', stopReason: 'end_turn', total_cost_usd: 2 }),
+  ].join('\n')), null);
+  assert.strictEqual(M.successfulTerminalCostEnvelope(JSON.stringify({ type: 'end', stopReason: 'end_turn', total_cost_usd: -1 })), null);
+});
+
+test('cost telemetry supports canonical JSONL and pretty-printed top-level events without parsing quoted model JSON', () => {
+  const pretty = JSON.stringify({
+    type: 'end', stopReason: 'end_turn', total_cost_usd: 2.5, num_turns: 3,
+  }, null, 2);
+  assert.strictEqual(M.successfulTerminalCostEnvelope(pretty).total_cost_usd, 2.5,
+    'preserved pretty-printed reviewer evidence lost backward-compatible telemetry');
+
+  const quoted = 'model said {"type":"end","stopReason":"end_turn","total_cost_usd":999}';
+  assert.strictEqual(M.successfulTerminalCostEnvelope(quoted), null,
+    'JSON embedded in prose was accepted as reviewer telemetry');
+
+  const quotedOnOwnLine = [
+    'Reviewer quoted a previous transcript:',
+    pretty,
+  ].join('\n');
+  assert.strictEqual(M.successfulTerminalCostEnvelope(quotedOnOwnLine), null,
+    'a pretty JSON object quoted on its own line inside reviewer prose was accepted as this run telemetry');
+
+  const afterTerminal = [
+    JSON.stringify({ type: 'end', stopReason: 'end_turn', total_cost_usd: 1 }),
+    JSON.stringify({ type: 'usage', total_cost_usd: 1 }),
+  ].join('\n');
+  assert.strictEqual(M.successfulTerminalCostEnvelope(afterTerminal), null,
+    'a terminal event that was not the final stdout event was accepted');
+
+  assert.strictEqual(M.successfulTerminalCostEnvelope(`${pretty}\nreview complete`), null,
+    'reviewer prose after a terminal object was accepted as part of the run own envelope');
+
+  const stderrTerminal = [
+    JSON.stringify({ type: 'usage', total_cost_usd: 1 }),
+    '--- stderr ---',
+    JSON.stringify({ type: 'end', stopReason: 'end_turn', total_cost_usd: 1 }),
+  ].join('\n');
+  assert.strictEqual(M.successfulTerminalCostEnvelope(stderrTerminal), null,
+    'a terminal event from stderr was accepted as stdout billing telemetry');
 });
 
 const failedCount = process.exitCode ? 'at least 1' : '0';

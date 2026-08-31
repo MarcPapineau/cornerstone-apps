@@ -15,16 +15,41 @@
 'use strict';
 
 const assert = require('assert');
+const { spawnSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const AegisState = require('../aegis-state.cjs');
+const Hosting = require('../hosting/server.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const DIR = path.join(ROOT, 'builder-control', 'dashboard');
 const HTML_PATH = path.join(DIR, 'index.html');
-const STATE_PATH = path.join(DIR, 'state.js');
 // Read fresh each time: a cached copy would let a proof pass against a page
 // that no longer exists on disk.
 const htmlSrc = () => fs.readFileSync(HTML_PATH, 'utf8');
+
+function generatedDashboardState() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-dashboard-state-test-'));
+  const generatedStatePath = path.join(tempDir, 'state.js');
+  let source;
+  try {
+    const generated = spawnSync(process.execPath,
+      [path.join(ROOT, 'builder-control', 'aegis-state.cjs'), '--out', generatedStatePath],
+      { cwd: ROOT, encoding: 'utf8' });
+    assert.strictEqual(generated.status, 0,
+      `state.js generator failed: ${(generated.stderr || generated.stdout || '').trim()}`);
+    assert.ok(fs.existsSync(generatedStatePath), 'state.js generator produced no isolated test artifact');
+    source = fs.readFileSync(generatedStatePath, 'utf8');
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+  assert.ok(!fs.existsSync(tempDir), 'isolated state.js test directory was not cleaned up');
+  return {
+    source,
+    state: JSON.parse(source.slice(source.indexOf('{'), source.lastIndexOf('}') + 1)),
+  };
+}
 
 let passed = 0;
 function test(name, fn) {
@@ -67,6 +92,86 @@ test('reduced motion is honoured for any future transitions', () => {
   assert.ok(/transition\s*:\s*none/.test(block.slice(0, 400)), 'reduced motion must disable transitions');
 });
 
+test('the keyboard skip link becomes visibly usable when focused', () => {
+  assert.ok(/\.sr:focus,\.sr:focus-visible\s*\{[^}]*position:fixed[^}]*width:auto[^}]*height:auto[^}]*clip:auto[^}]*z-index:100/s.test(code),
+    'the first keyboard focus target is still clipped or visually hidden');
+  assert.ok(/\.sr:focus,\.sr:focus-visible\s*\{[^}]*border:2px solid var\(--focus\)[^}]*background:#08131d[^}]*color:var\(--text-0\)/s.test(code),
+    'the visible skip link lost its high-contrast focus treatment');
+});
+
+test('normal-size operational HUD text clears the 4.5:1 contrast floor', () => {
+  const cssVariables = {};
+  const rootRule = /:root\s*\{([^}]*)\}/.exec(code);
+  assert.ok(rootRule, 'the shipped :root token rule is missing');
+  for (const match of rootRule[1].matchAll(/(--[\w-]+)\s*:\s*(#[0-9a-f]{6})/gi)) {
+    cssVariables[match[1]] = match[2].toLowerCase();
+  }
+  function cssValue(selector, property) {
+    let value = null;
+    for (const rule of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const selectors = rule[1].split(',').map((item) => item.trim());
+      if (!selectors.includes(selector)) continue;
+      const declaration = new RegExp('(?:^|;)\\s*' + property + '\\s*:\\s*([^;]+)', 'i').exec(rule[2]);
+      if (declaration) value = declaration[1].replace(/!important/gi, '').trim();
+    }
+    assert.ok(value, `the shipped ${selector} ${property} declaration is missing`);
+    return value;
+  }
+  function parseColor(value) {
+    const token = /^var\((--[\w-]+)\)$/.exec(value);
+    if (token) value = cssVariables[token[1]];
+    const hex = /^(#[0-9a-f]{6})$/i.exec(value || '');
+    if (hex) return { rgb: hex[1].slice(1).match(/../g).map((part) => parseInt(part, 16)), alpha: 1 };
+    const rgba = /^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(0|1|0?\.\d+)\s*\)$/i.exec(value || '');
+    assert.ok(rgba, `unsupported shipped CSS colour: ${value}`);
+    return { rgb: rgba.slice(1, 4).map(Number), alpha: Number(rgba[4]) };
+  }
+  function composite(foreground, background) {
+    const fg = parseColor(foreground);
+    const bg = parseColor(background);
+    assert.strictEqual(bg.alpha, 1, 'the effective background base must be opaque');
+    return { rgb: fg.rgb.map((part, index) => Math.round(part * fg.alpha + bg.rgb[index] * (1 - fg.alpha))), alpha: 1 };
+  }
+  function luminance(hex) {
+    const rgb = (typeof hex === 'string' ? parseColor(hex) : hex).rgb.map((part) => part / 255)
+      .map((part) => part <= 0.04045 ? part / 12.92 : Math.pow((part + 0.055) / 1.055, 2.4));
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+  }
+  function contrast(foreground, background) {
+    const a = luminance(foreground);
+    const b = luminance(background);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  }
+  const foreground = cssValue('.mission-meta', 'color');
+  const founderBackground = cssValue('#founder-summary', 'background');
+  const coreBackground = composite(cssValue('.core-node', 'background'),
+    cssValue('.strategic-core', 'background'));
+  const panelBackground = cssValue('.command-shell section', 'background');
+  const topologyBackground = cssValue('#topology-overview', 'background');
+  const effectiveBackgrounds = [
+    ['.mission-meta', founderBackground],
+    ['.hud-state', coreBackground],
+    ['.hud-summary-meta', panelBackground],
+    ['.muted in Mission Brief', founderBackground],
+    ['.muted in Build Sequence', topologyBackground],
+    ['.muted in command panels', panelBackground],
+  ];
+  assert.strictEqual(foreground, cssValue('.core-node .hud-state', 'color'),
+    'HUD state text no longer shares the tested operational foreground token');
+  assert.strictEqual(foreground, cssValue('.hud-summary-meta', 'color'),
+    'HUD summary text no longer shares the tested operational foreground token');
+  assert.strictEqual(foreground, cssValue('.muted', 'color'),
+    'muted operational text no longer shares the tested foreground token');
+  for (const [selector, background] of effectiveBackgrounds) {
+    assert.ok(contrast(foreground, background) >= 4.5,
+      `${selector} secondary text is below 4.5:1 against its shipped effective background`);
+  }
+  for (const selector of ['mission-meta', 'hud-state', 'hud-summary-meta', 'muted']) {
+    assert.ok(new RegExp('\\.' + selector + '\\s*\\{[^}]*color:var\\(--text-2\\)', 's').test(code),
+      `${selector} no longer uses the tested operational text token`);
+  }
+});
+
 // ── handoff indicator (PKT-20260825-SWITCHBOARD-FOUNDATION) ────────────────
 test('the handoff indicator is compact, motion-free under reduced motion, and silent when inactive', () => {
   assert.ok(/\.handoff\s*\{[^}]*display:flex/.test(code), 'the handoff indicator has no compact single-line layout');
@@ -106,12 +211,11 @@ test('the slice reads window.AEGIS_STATE and has no fallback seed object', () =>
 });
 
 test('state.js is generated, never hand-authored', () => {
-  assert.ok(fs.existsSync(STATE_PATH), 'state.js missing — regenerate with aegis-state.cjs --out');
-  const s = fs.readFileSync(STATE_PATH, 'utf8');
-  assert.ok(/Generated by builder-control\/aegis-state\.cjs/.test(s), 'state.js lacks its generator header');
-  assert.ok(/do not edit by hand/i.test(s));
-  const json = JSON.parse(s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1));
-  assert.deepStrictEqual(json.contract.absences, ['UNAVAILABLE', 'STALE', 'UNVERIFIED']);
+  const generated = generatedDashboardState();
+  assert.ok(/Generated by builder-control\/aegis-state\.cjs/.test(generated.source),
+    'state.js lacks its generator header');
+  assert.ok(/do not edit by hand/i.test(generated.source));
+  assert.deepStrictEqual(generated.state.contract.absences, ['UNAVAILABLE', 'STALE', 'UNVERIFIED']);
 });
 
 test('state.js loads BEFORE the renderer, or the renderer would always see nothing', () => {
@@ -222,8 +326,7 @@ test('every state colour token clears 3:1 on the panel background', () => {
 
 // ── VISUAL INTEGRATION RED PROOFS ─────────────────────────────────────────
 test('RED: the page renders ELEVEN steps and numbers them', () => {
-  const state = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')
-    .replace(/^[\s\S]*?window\.AEGIS_STATE = /, '').replace(/;\s*$/, ''));
+  const state = generatedDashboardState().state;
   assert.strictEqual(state.engineering.stages.length, 11,
     'the projection the page reads must carry exactly 11 steps');
   assert.ok(/st\.step/.test(htmlSrc()), 'the page must render the contract step number');
@@ -263,8 +366,7 @@ test('RED: responsive rules cover narrow and large widths', () => {
 });
 
 test('RED: every rendered stage carries provenance and a reason', () => {
-  const state = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')
-    .replace(/^[\s\S]*?window\.AEGIS_STATE = /, '').replace(/;\s*$/, ''));
+  const state = generatedDashboardState().state;
   for (const st of state.engineering.stages) {
     assert.ok(st.evidence, `step ${st.step} has no evidence source`);
     assert.ok(st.reason, `step ${st.step} has no reason`);
@@ -304,6 +406,14 @@ test('the founder-readable two-column layout starts at 1599px so 1440px route la
     'the two-column command layout does not cover ordinary 1440px desktops');
   assert.ok(!/@media\s*\(max-width:1399px\)/.test(code),
     'the obsolete 1399px breakpoint leaves the center route too narrow at 1440px');
+  const breakpoint = code.slice(code.lastIndexOf('@media (max-width:1599px)'),
+    code.indexOf('@media (max-width:1050px)'));
+  assert.ok(/\.command-shell\s*\{[^}]*grid-template-columns:\s*300px\s+minmax\(600px,1fr\)[^}]*grid-template-areas:\s*"left center"\s*"right right"\s*"evidence evidence"[^}]*\}/s.test(breakpoint),
+    'the 1599px Command View must pair its two explicit columns with two-cell area rows; a third area cell creates an implicit column');
+  const compact = code.slice(code.indexOf('@media (max-width:1050px)'),
+    code.indexOf('@media (max-width:680px)'));
+  assert.ok(/\.command-shell\s*\{[^}]*grid-template-columns:\s*1fr[^}]*grid-template-areas:\s*"left"\s*"center"\s*"right"\s*"evidence"[^}]*\}/s.test(compact),
+    'the 1050px founder-first single-column stack must remain left, center, right, evidence');
 });
 
 test('the objective composer is visible on first paint while run history stays collapsed', () => {
@@ -396,13 +506,36 @@ test('the primary pilot deck exposes mission, crew, action, elapsed, next step, 
   for (const label of ['CREW / MODEL', 'CURRENT ACTION', 'ELAPSED', 'NEXT STEP', 'BLOCKER', 'LAST SAFE CHECKPOINT']) {
     assert.ok(new RegExp("commandCard\\('" + label).test(code), `operator deck is missing ${label}`);
   }
-  assert.ok(/missionText\.appendChild\(el\('h3','mission-title',deckObjective\)\)/.test(code),
-    'the current mission is not the primary operator title');
+  assert.ok(/missionText\.appendChild\(el\('h3','mission-title',missionHeadlineText\)\)/.test(code),
+    'the current mission is not presented through the bounded pilot headline');
   assert.ok(/Build sequence/.test(code), 'no founder-facing build sequence exists');
   assert.ok(/routeCrew\.appendChild\(el\('span','command-label','Crew \/ model'\)\)/.test(code),
     'the visual route does not identify its selected crew or model');
   assert.ok(/Evidence, reviewer coverage & run history/.test(code),
     'dense evidence is not available behind a founder-readable disclosure');
+});
+
+test('ordinary laptop Command View keeps pilot instruments ahead of elapsed detail and exposes the full objective', () => {
+  const breakpoint = code.slice(code.lastIndexOf('@media (max-width:1599px)'),
+    code.indexOf('@media (max-width:1050px)'));
+  assert.ok(/#founder-summary\s+\.mission-title\s*\{[^}]*-webkit-line-clamp:2[^}]*overflow:hidden/s.test(breakpoint),
+    'the exact objective can still consume the entire 1280px first viewport');
+  assert.ok(/#founder-summary\s+\.mission-head\s*\{[^}]*padding-bottom:8px/s.test(breakpoint) &&
+    /#founder-summary\s+\.mission-meta\s*\{[^}]*font-size:11px[^}]*line-height:1\.4/s.test(breakpoint) &&
+    /#founder-summary\s+\.command-grid\s*\{[^}]*gap:5px[^}]*margin-top:8px/s.test(breakpoint),
+    'the ordinary-laptop rail no longer reserves enough vertical room for the checkpoint value');
+  assert.ok(/objectiveDetail\.appendChild\(el\('summary',null,'View full objective'\)\)/.test(code) &&
+    /objectiveDetail\.appendChild\(el\('p','mission-objective-full',deckObjective\)\)/.test(code),
+    'the compact mission title does not retain an accessible exact full objective');
+  const gridStart = code.indexOf("commandGrid.appendChild(commandCard('CREW / MODEL'");
+  const gridEnd = code.indexOf('host.appendChild(commandGrid)', gridStart);
+  const grid = code.slice(gridStart, gridEnd);
+  const next = grid.indexOf("commandCard('NEXT STEP'");
+  const blocker = grid.indexOf("commandCard('BLOCKER'");
+  const checkpoint = grid.indexOf("commandCard('LAST SAFE CHECKPOINT'");
+  const elapsed = grid.indexOf("commandCard('ELAPSED'");
+  assert.ok(next !== -1 && blocker > next && checkpoint > blocker && elapsed > checkpoint,
+    'elapsed detail again displaced next, blocker or checkpoint from the pilot-first reading order');
 });
 
 test('the primary BLOCKER card summarizes gate count instead of dumping raw governance transcripts', () => {
@@ -521,6 +654,7 @@ function makeNode(tag) {
     addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
     querySelectorAll() { return []; },
     focus() {},
+    scrollIntoView() {},
     _listeners: {},
     classList: {
       contains(c) { return String(node.className).split(/\s+/).includes(c); },
@@ -604,6 +738,13 @@ function bootPage(state, opts = {}) {
   return { sandbox, document, byId, sse, text: (id) => document.getElementById(id).textContent };
 }
 
+// Feed the public /api/status shape through the actual live switchboard seam.
+// The fixture remains a minimized flat API payload, never the projector
+// envelope, and any bootstrap/SSE mapping regression is therefore observable.
+function renderMinimizedStatus(page, status) {
+  page.sandbox.AEGIS_DASHBOARD.applyStatus(status);
+}
+
 // Fixture builders — deliberately explicit, so what each proof assumes is
 // visible in the proof rather than buried in a shared blob.
 function fixtureState(over) {
@@ -624,7 +765,8 @@ function fixtureState(over) {
     knowledge: { state: 'OK', records: [] },
     reviewers: { state: 'OK', reviewers: [] },
     cost: { state: 'UNAVAILABLE', reason: 'no transcripts' },
-    runs: { state: 'OK', runs: [], current: { state: 'UNAVAILABLE', reason: 'no run records exist yet, so no run is current.' } },
+    runs: { state: 'OK', runs: [], current: { state: 'UNAVAILABLE', runId: null,
+      evidenceState: 'OK', reason: 'no run records exist yet, so no run is current.' } },
     events: { state: 'OK', events: [] },
   };
   return Object.assign(base, over || {});
@@ -637,6 +779,52 @@ function connectorFixture(lastUsedByRun) {
     staleness: { state: 'FRESH' }, capabilities: [], declaredNotSupported: [],
     failureCount: 0, riskLevel: 'LOW', legacy: false, source: 'builder-control/connector-registry.json',
     lastUsedByRun,
+  };
+}
+
+test('DOM: Command and Detail controls execute the real disclosure switch', () => {
+  const page = bootPage(fixtureState());
+  const command = page.document.getElementById('view-command');
+  const detail = page.document.getElementById('view-detail');
+  const raw = page.document.getElementById('raw-state');
+  assert.strictEqual((detail._listeners.click || []).length, 1,
+    'Detail view has no executable click handler');
+  assert.strictEqual((command._listeners.click || []).length, 1,
+    'Command view has no executable click handler');
+
+  detail._listeners.click[0]();
+  assert.strictEqual(page.document.body.getAttribute('data-detail'), 'true',
+    'Detail view did not switch the real page disclosure state');
+  assert.strictEqual(detail.getAttribute('aria-pressed'), 'true',
+    'Detail view did not expose its selected state');
+  assert.strictEqual(command.getAttribute('aria-pressed'), 'false',
+    'Command view remained selected after Detail view activation');
+  assert.strictEqual(raw.open, true, 'Detail view did not open the real evidence disclosure');
+
+  command._listeners.click[0]();
+  assert.strictEqual(page.document.body.getAttribute('data-detail'), 'false',
+    'Command view did not restore the command-first disclosure state');
+  assert.strictEqual(command.getAttribute('aria-pressed'), 'true',
+    'Command view did not expose its selected state');
+  assert.strictEqual(detail.getAttribute('aria-pressed'), 'false',
+    'Detail view remained selected after Command view activation');
+  assert.strictEqual(raw.open, false, 'Command view did not close the deep evidence disclosure');
+});
+
+function passingReviewCompleteness(subject = 'a'.repeat(64), paths = ['builder-control/dashboard/index.html']) {
+  return {
+    subjectSha256: subject,
+    required: ['codex'],
+    complete: true,
+    pathCoverage: {
+      total: paths.length,
+      coveredByEveryRequiredReviewer: paths.slice(),
+      notCoveredByEveryRequiredReviewer: [],
+    },
+    rows: [{
+      reviewer: 'codex', required: 'REQUIRED', executed: 'EXECUTED', disposition: 'APPROVE',
+      coveredPaths: paths.slice(), missingPaths: [], stalePaths: [],
+    }],
   };
 }
 
@@ -657,6 +845,92 @@ test('DOM: an unbound dashboard leads with a truthful idle mission and a dominan
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'idle',
     'the shell must expose truthful idle state so the objective composer becomes the dominant action');
   assert.ok(/IDLE/.test(page.text('ctx-verdict')), 'the header must say IDLE rather than inherit a stale gate verdict');
+});
+
+test('DOM: minimized empty live status with unavailable run evidence never renders clean idle', () => {
+  const page = bootPage(fixtureState());
+  const status = {
+    generatedAt: '2026-08-29T00:05:00.000Z',
+    engineering: { state: 'UNAVAILABLE', reason: 'the engineering snapshot is unavailable' },
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [],
+    runsBinding: { state: 'UNAVAILABLE', runId: null, updatedAt: null,
+      reason: 'the engineering snapshot is unavailable, so no run could be bound' },
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  };
+  renderMinimizedStatus(page, status);
+  const body = page.text('founder-body');
+  assert.ok(/UNAVAILABLE/.test(page.text('ctx-verdict')) && !/IDLE/.test(page.text('ctx-verdict')),
+    `an unavailable empty live projection rendered a healthy idle header: ${page.text('ctx-verdict')}`);
+  assert.strictEqual(page.text('hud-core-status'), 'UNAVAILABLE',
+    'AEGIS Core rendered healthy idle without positive run-ledger evidence');
+  assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'unavailable',
+    'the shell rendered clean idle without positive run-ledger evidence');
+  assert.ok(/Blocking status unavailable/.test(body),
+    'the pilot deck omitted the unavailable run/binding warning');
+  assert.ok(!/No blocker — no run has started\./.test(body),
+    'an empty array was treated as proof that no run exists');
+  assert.match(page.text('runs-list'), /Run history UNAVAILABLE/i);
+  assert.doesNotMatch(page.text('runs-list'), /No runs yet/i,
+    'unavailable ledger evidence rendered the affirmative empty-history message');
+});
+
+test('DOM: a genuinely empty minimized live status stays truthful without a top-level runsState field', () => {
+  const page = bootPage(fixtureState());
+  const status = {
+    generatedAt: '2026-08-29T00:06:00.000Z',
+    engineering: fixtureState().engineering,
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [],
+    runsBinding: { state: 'UNAVAILABLE', runId: null, updatedAt: null,
+      evidenceState: 'OK', reason: 'no run records exist yet, so no run is current.' },
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  };
+  assert.ok(!Object.prototype.hasOwnProperty.call(status, 'runsState'),
+    'the fixture must exercise the pinned minimized contract, which has no runsState field');
+  renderMinimizedStatus(page, status);
+  const body = page.text('founder-body');
+  assert.ok(/IDLE/.test(page.text('ctx-verdict')),
+    `affirmatively empty live evidence did not remain idle: ${page.text('ctx-verdict')}`);
+  assert.strictEqual(page.text('hud-core-status'), 'IDLE');
+  assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'idle');
+  assert.ok(/No blocker — no run has started\./.test(body));
+  assert.ok(/READY FOR AN OBJECTIVE/.test(page.text('hud-system-health')));
+  assert.match(page.text('runs-list'), /No runs yet\. Record an objective above\./,
+    'affirmative clean-empty evidence did not render the empty-history message');
+});
+
+test('DOM: malformed run evidence is unavailable and never lights the clean-idle instruments', () => {
+  const page = bootPage(fixtureState());
+  const status = {
+    generatedAt: '2026-08-29T00:07:00.000Z',
+    engineering: Object.assign({}, fixtureState().engineering, {
+      stages: [{ id: 'surface', step: 11, label: 'Evidence', state: 'UNVERIFIED',
+        reason: 'surface gaps: run evidence unavailable' }],
+    }),
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [],
+    runsBinding: { state: 'UNAVAILABLE', runId: null, updatedAt: null,
+      evidenceState: 'UNAVAILABLE',
+      reason: '1 run record(s) could not be read or validated, so current run status is unavailable.' },
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  };
+  renderMinimizedStatus(page, status);
+  const body = page.text('founder-body');
+  assert.ok(/UNAVAILABLE/.test(page.text('ctx-verdict')) && !/IDLE/.test(page.text('ctx-verdict')),
+    `malformed evidence rendered clean idle: ${page.text('ctx-verdict')}`);
+  assert.strictEqual(page.text('hud-core-status'), 'UNAVAILABLE');
+  assert.notStrictEqual(page.text('hud-system-health'), 'READY FOR AN OBJECTIVE');
+  assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'unavailable');
+  assert.ok(/could not be read or validated/.test(body),
+    `the founder cannot see why run status is unavailable: ${body}`);
+  assert.ok(!/No blocker — no run has started\./.test(body));
+  assert.match(page.text('runs-list'), /Run history UNAVAILABLE/i);
+  assert.doesNotMatch(page.text('runs-list'), /No runs yet/i,
+    'malformed run evidence rendered the affirmative empty-history message');
 });
 
 test('DOM: a running build shows its mission, current action, elapsed evidence, next step and blocker without inventing a model', () => {
@@ -697,6 +971,253 @@ test('DOM: a running build shows its mission, current action, elapsed evidence, 
   }
   assert.ok(!/Claude|Opus/.test(body), 'the dashboard inferred a model that current run evidence does not name');
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'running');
+});
+
+test('DOM: routed Command View renders canonical pilot cards and accessible plain-English workflow state', () => {
+  const run = {
+    runId: 'RUN-COMMAND-DOM', state: 'BUILDING', objective: 'Render the governed Command View',
+    updatedAt: '2026-08-27T14:10:00.000Z', transitions: 4,
+    route: { model: 'claude-opus-5', execution: 'claude-cli', source: 'tool-router.cjs routeRole' },
+    build: { mode: 'async', status: 'RUNNING', workerPid: 4242,
+      startedAt: '2026-08-27T14:00:00.000Z', endedAt: null,
+      activity: { active: true, summary: 'Building the operator controls.' } },
+  };
+  const state = fixtureState({
+    generatedAt: '2026-08-27T14:10:00.000Z',
+    engineering: Object.assign({}, fixtureState().engineering, { stages: [
+      { id: 'build', step: 5, label: 'Builder execution', state: 'ACTIVE',
+        reason: 'the governed worker is still running' },
+    ] }),
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, reason: 'canonical current run',
+    } },
+  });
+  const page = bootPage(state);
+  const founder = page.document.getElementById('founder-body');
+  const fields = Object.fromEntries(findByAttr(founder, 'data-operator-field')
+    .map((node) => [node.attrs['data-operator-field'], node.textContent]));
+  assert.match(page.text('founder-body'), /Render the governed Command View/,
+    'the rendered Mission card lost the canonical objective');
+  assert.match(fields['crew-/-model'], /claude-opus-5 via claude-cli · router-selected/,
+    'the rendered Crew / Model card did not use canonical routing evidence');
+  assert.match(fields['current-action'], /Building the operator controls/,
+    'the rendered Current Action card lost live worker evidence');
+  assert.ok(fields['next-step'] && fields.blocker && fields['last-safe-checkpoint'],
+    `the rendered pilot cards are incomplete: ${Object.keys(fields).join(', ')}`);
+
+  const stages = allNodes(page.document.getElementById('topology-live-body'))
+    .filter((node) => node.tagName === 'BUTTON' && /route-node/.test(node.className));
+  assert.strictEqual(stages.length, 1, `expected one rendered route stage, got ${stages.length}`);
+  assert.strictEqual(stages[0].attrs['aria-label'],
+    'Build: ACTIVE — the governed worker is still running');
+  assert.match(stages[0].textContent, /05 · Build◐ Working/,
+    'the rendered workflow stage lacks its icon plus plain-English state');
+});
+
+test('DOM: a checkpoint receipt cannot make a blocked mismatched current subject look COMPLETE', () => {
+  const gateSubject = 'a'.repeat(64);
+  const runSubject = 'b'.repeat(64);
+  const run = {
+    runId: 'RUN-OLDER-CHECKPOINT', state: 'CHECKPOINTED', objective: 'Preserve the checkpoint without hiding the current gate.',
+    updatedAt: '2026-08-28T21:42:07.000Z',
+    subject: { subjectSha256: runSubject },
+    checkpoint: 'CP-OLDER', rollbackPoint: 'a'.repeat(40),
+  };
+  // This is the real minimized /api/status shape: runs is an array and the
+  // projector's current-run authority travels separately as runsBinding.
+  const status = {
+    generatedAt: '2026-08-28T21:42:07.000Z',
+    engineering: Object.assign({}, fixtureState().engineering, {
+      state: 'OK', verdict: 'BLOCKED', subjectSha256: gateSubject,
+      problems: [
+        { rule: 'ENGOS-SUBJECT', detail: 'No exact subject was supplied.' },
+        { rule: 'ENGOS-REVIEW-MISSING', detail: 'Required review is missing.' },
+      ],
+    }),
+    runs: [run],
+    runsBinding: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      subjectState: 'MISMATCHED', subjectSha256: null,
+      gateSubjectSha256: gateSubject, runSubjectSha256: runSubject,
+      reason: 'the run checkpoint covers an older subject',
+    },
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null }, events: [],
+    knowledge: { state: 'UNKNOWN', conflicts: null },
+  };
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, status);
+  assert.ok(/BLOCKED/.test(page.text('ctx-verdict')) && !/COMPLETE/.test(page.text('ctx-verdict')),
+    `the header hides a blocked mismatched subject behind COMPLETE: ${page.text('ctx-verdict')}`);
+  assert.strictEqual(page.text('hud-core-status'), 'BLOCKED',
+    'AEGIS Core hides the current blocked subject behind the historical checkpoint state');
+  assert.strictEqual(page.text('hud-system-health'), 'BLOCKED',
+    'System Health hides the current blocked subject behind the historical checkpoint state');
+  assert.ok(/older code version than the current gate subject/.test(page.text('founder-body')),
+    'the primary pilot deck does not explain why the checkpoint is not current completion');
+  assert.ok(/This run reached a recorded checkpoint/.test(page.text('founder-body')) &&
+    /Checkpoint CP-OLDER · rollback commit a{40}/.test(page.text('founder-body')),
+    'the correction erased the truthful historical checkpoint lifecycle/receipt');
+  assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'blocked',
+    'the visual shell still illuminates as complete instead of blocked');
+});
+
+test('DOM: BLOCKED or UNAVAILABLE control truth can never render a green-clear BLOCKER card', () => {
+  const gateSubject = '1'.repeat(64);
+  const runSubject = '2'.repeat(64);
+  const run = {
+    runId: 'RUN-BLOCKER-TRUTH', state: 'CHECKPOINTED', objective: 'Keep the warning instrument truthful',
+    updatedAt: '2026-08-29T00:11:00.000Z', checkpoint: 'CP-BLOCKER', rollbackPoint: '3'.repeat(40),
+  };
+  const clearProblemsButMismatched = fixtureState({
+    engineering: Object.assign({}, fixtureState().engineering, {
+      state: 'OK', verdict: 'BLOCKED', subjectSha256: gateSubject, problems: [],
+    }),
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      subjectState: 'MISMATCHED', subjectSha256: null,
+      runSubjectSha256: runSubject, gateSubjectSha256: gateSubject,
+      reason: 'the run and gate subjects differ',
+    } },
+  });
+  const blocked = bootPage(clearProblemsButMismatched);
+  const blockedCard = findByAttr(blocked.document.getElementById('founder-body'), 'data-operator-field')
+    .find((node) => node.attrs['data-operator-field'] === 'blocker');
+  assert.ok(blockedCard, 'the BLOCKER card is missing');
+  assert.match(blockedCard.className, /\bis-blocked\b/);
+  assert.doesNotMatch(blockedCard.className, /\bis-clear\b/);
+  assert.match(blockedCard.textContent, /older code version than the current gate subject/);
+
+  const unavailable = bootPage(fixtureState({
+    engineering: { state: 'UNAVAILABLE', reason: 'the exact-subject gate is unavailable', problems: [] },
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      subjectState: 'UNAVAILABLE', subjectSha256: null, reason: 'subject binding unavailable',
+    } },
+  }));
+  const unavailableCard = findByAttr(unavailable.document.getElementById('founder-body'), 'data-operator-field')
+    .find((node) => node.attrs['data-operator-field'] === 'blocker');
+  assert.match(unavailableCard.className, /\bis-blocked\b/);
+  assert.doesNotMatch(unavailableCard.className, /\bis-clear\b/);
+  assert.match(unavailableCard.textContent, /Current control-plane status is unavailable/);
+});
+
+test('DOM: CHECKPOINTED is COMPLETE only for positively bound current-subject clear evidence', () => {
+  const subject = 'c'.repeat(64);
+  const run = {
+    runId: 'RUN-CURRENT-CHECKPOINT', state: 'CHECKPOINTED', objective: 'Prove current checkpoint completion',
+    updatedAt: '2026-08-29T00:10:00.000Z', checkpoint: 'CP-CURRENT', rollbackPoint: '4'.repeat(40),
+  };
+  const clearEngineering = Object.assign({}, fixtureState().engineering, {
+    state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: subject, problems: [],
+  });
+  const bound = {
+    state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+    subjectState: 'BOUND', subjectSha256: subject,
+    runSubjectSha256: subject, gateSubjectSha256: subject,
+    reason: 'the run and gate subjects match',
+  };
+  const cases = [
+    { label: 'positive current subject', binding: bound, engineering: clearEngineering,
+      expected: 'COMPLETE' },
+    { label: 'binding unavailable', binding: { state: 'UNAVAILABLE', runId: null,
+      reason: 'no current run could be established' }, engineering: clearEngineering,
+      expected: 'UNAVAILABLE' },
+    { label: 'subject unlinked', binding: Object.assign({}, bound, {
+      subjectState: 'UNLINKED', subjectSha256: null, runSubjectSha256: null,
+      reason: 'the run records no subject' }), engineering: clearEngineering,
+      expected: 'UNAVAILABLE' },
+    { label: 'engineering unavailable', binding: bound,
+      engineering: { state: 'UNAVAILABLE', reason: 'gate projection missing' },
+      expected: 'UNAVAILABLE' },
+    { label: 'nonblocking evidence not affirmative', binding: bound,
+      engineering: Object.assign({}, clearEngineering, { verdict: 'READY_FOR_DETERMINISTIC_VALIDATION' }),
+      expected: 'COMPLETE' },
+  ];
+
+  for (const scenario of cases) {
+    const page = bootPage(fixtureState({
+      engineering: scenario.engineering,
+      runs: { state: 'OK', runs: [run], current: scenario.binding },
+    }));
+    const header = page.text('ctx-verdict');
+    assert.ok(new RegExp(scenario.expected).test(header),
+      `${scenario.label}: expected ${scenario.expected}, got ${header}`);
+    if (scenario.expected !== 'COMPLETE') {
+      assert.ok(!/COMPLETE/.test(header),
+        `${scenario.label}: historical checkpoint falsely became current completion`);
+      assert.notStrictEqual(page.text('hud-core-status'), 'COMPLETE',
+        `${scenario.label}: AEGIS Core falsely reported current completion`);
+    } else {
+      assert.strictEqual(page.text('hud-core-status'), 'COMPLETE',
+        'positive current-subject checkpoint lost its completion signal');
+      assert.ok(/Checkpoint CP-CURRENT · rollback commit 4{40}/.test(page.text('founder-body')),
+        'positive completion lost its checkpoint receipt');
+      assert.strictEqual(page.text('hud-safe-checkpoint'),
+        'Checkpoint CP-CURRENT · rollback commit ' + '4'.repeat(40),
+        'the strategic HUD did not consume the real public checkpoint/rollbackPoint shape');
+    }
+  }
+});
+
+test('DOM: the public checkpoint id and rollbackPoint render together in the run card and pilot instruments', () => {
+  const subject = 'e'.repeat(64);
+  const run = {
+    runId: 'RUN-PUBLIC-CHECKPOINT', state: 'CHECKPOINTED', objective: 'Show the real safe state',
+    updatedAt: '2026-08-29T00:12:00.000Z', checkpoint: 'CHK-20260829-001',
+    rollbackPoint: '0123456789abcdef0123456789abcdef01234567',
+  };
+  const state = fixtureState({
+    engineering: Object.assign({}, fixtureState().engineering, {
+      state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: subject, problems: [],
+    }),
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, evidenceState: 'OK',
+      subjectState: 'BOUND', subjectSha256: subject,
+      runSubjectSha256: subject, gateSubjectSha256: subject,
+      reason: 'the run and gate subjects match',
+    } },
+  });
+  const page = bootPage(state);
+  const expected = 'Checkpoint CHK-20260829-001 · rollback commit 0123456789abcdef0123456789abcdef01234567';
+  assert.ok(page.text('founder-body').includes(expected),
+    'the pilot deck did not render the checkpoint receipt from the public contract');
+  assert.strictEqual(page.text('hud-checkpoint'), expected);
+  assert.strictEqual(page.text('hud-safe-checkpoint'), expected);
+  assert.ok(!/\[object Object\]/.test(page.text('founder-body')),
+    'a fixture-only checkpoint object leaked into visible text');
+});
+
+test('DOM: a long mission renders one visible pilot headline while preserving exact truth in a collapsed disclosure', () => {
+  const objective = 'Improve only the AEGIS operator dashboard by making every pilot instrument plain English. ' +
+    'Preserve exact-subject truth, canonical controls, reduced motion, evidence, checkpoint state, and connector-use truth. ' +
+    'Do not invent activity, model use, progress, authorization, reviewer execution, or completion.';
+  const run = {
+    runId: 'RUN-LONG-MISSION', state: 'BUILT', objective,
+    updatedAt: '2026-08-28T21:42:07.000Z', build: {},
+  };
+  const state = fixtureState({ runs: { state: 'OK', runs: [run], current: {
+    state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+    subjectState: 'UNLINKED', gateSubjectSha256: 'a'.repeat(64),
+  } } });
+  const page = bootPage(state);
+  const founderNodes = allNodes(page.document.getElementById('founder-body'));
+  const headline = founderNodes
+    .find((node) => node.tagName === 'H3' && node.className === 'mission-title');
+  const details = founderNodes
+    .find((node) => node.tagName === 'DETAILS' && node.className === 'mission-objective-detail');
+  assert.ok(headline, 'the pilot-readable mission headline is missing from the visible Command View');
+  assert.strictEqual(headline.hidden, undefined, 'the primary mission headline is hidden');
+  assert.ok(headline.textContent.length <= 140 && headline.textContent !== objective,
+    `the primary instrument still dumps the full ${objective.length}-character objective`);
+  assert.match(headline.textContent, /[.!?\u2026]$/,
+    'the compact mission headline ends mid-thought without a readable boundary');
+  assert.strictEqual(page.text('hud-mission'), headline.textContent,
+    'the strategic HUD duplicated a different or full-length mission instead of the same pilot headline');
+  assert.ok(details, 'the long mission has no full-objective disclosure');
+  assert.ok(/View full objective/.test(details.textContent) && details.textContent.includes(objective),
+    'the compact mission presentation dropped or altered the exact objective');
+  assert.notStrictEqual(details.attrs.open, '', 'the full objective must remain collapsed until requested');
 });
 
 // ── handoff indicator: it must stay dark until canonical state moves ───────
@@ -857,10 +1378,19 @@ test('DOM: mismatched or ghost binding fails closed and preserves recorded probl
       engineering: Object.assign({}, fixtureState().engineering, { state: 'OK', problems: c.problems }),
       runs: { state: 'OK', runs: [], current: c.binding },
     });
-    const body = bootPage(state).text('founder-body');
+    const page = bootPage(state);
+    const body = page.text('founder-body');
     assert.ok(/Blocking status unavailable/.test(body), `${c.name}: blocking status was presented as known`);
     assert.ok(c.reason.test(body), `${c.name}: the binding failure reason is missing: ${body}`);
     assert.ok(!/Nothing is blocking this run\./.test(body), `${c.name}: rendered a false clear signal`);
+    assert.ok(/UNAVAILABLE/.test(page.text('ctx-verdict')) && !/IDLE/.test(page.text('ctx-verdict')),
+      `${c.name}: the primary header rendered false IDLE: ${page.text('ctx-verdict')}`);
+    assert.strictEqual(page.text('hud-core-status'), 'UNAVAILABLE',
+      `${c.name}: AEGIS Core rendered false healthy idle`);
+    assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'unavailable',
+      `${c.name}: the shell rendered false idle`);
+    assert.ok(!/No blocker — no run has started\./.test(body),
+      `${c.name}: contradictory binding evidence rendered the clean-idle blocker`);
     if (c.problems.length) {
       assert.ok(/1 unresolved gate requirement/.test(body), `${c.name}: recorded problem count was hidden`);
     }
@@ -882,14 +1412,20 @@ test('DOM: unavailable engineering evidence fails closed even when the run bindi
 });
 
 test('RED: the founder summary states the risk tier, its reasons, and reviewer coverage in plain English', () => {
+  const subject = 'a'.repeat(64);
+  const run = { runId: 'RUN-REVIEW-DETAIL', state: 'BUILT', objective: 'Review detail',
+    updatedAt: '2026-08-27T13:10:00.000Z' };
   const state = fixtureState({ engineering: Object.assign(fixtureState().engineering, {
-    reviewerCompleteness: { complete: false, rows: [
+    subjectSha256: subject,
+    reviewerCompleteness: { subjectSha256: subject, complete: false, rows: [
       { reviewer: 'codex', job: 'correctness reviewer', required: 'REQUIRED', executed: 'EXECUTED',
         disposition: 'REJECT', score: '1/2 subject path(s) covered',
         coveredPaths: ['a.cjs'], missingPaths: ['b.cjs'], stalePaths: ['gone.cjs'], reason: 'r' },
       { reviewer: 'grok', job: 'adversarial reviewer', required: 'REQUIRED', executed: 'MISSING',
         disposition: null, score: 'UNAVAILABLE', coveredPaths: [], missingPaths: ['a.cjs', 'b.cjs'], stalePaths: [], reason: 'r' },
-    ] } }) });
+    ] } }), runs: { state: 'OK', runs: [run], current: { state: 'BOUND', runId: run.runId,
+      updatedAt: run.updatedAt, subjectState: 'UNLINKED', gateSubjectSha256: subject,
+      reason: 'current gate subject' } } });
   const body = bootPage(state).text('founder-body');
   assert.ok(/Risk tier: FULL \(high-risk\)/.test(body), 'the risk tier and high-risk flag are not stated');
   assert.ok(/a high-risk signal is present/.test(body), 'the classifier reason for the tier is not shown');
@@ -899,16 +1435,50 @@ test('RED: the founder summary states the risk tier, its reasons, and reviewer c
   assert.ok(/1\/2 subject path\(s\) covered/.test(body), 'the reviewer score is not shown');
   assert.ok(/has not reviewed this change/.test(body), 'a missing required review is not stated plainly');
   // covered / not read / no-longer-part-of-this-change, all three
-  assert.ok(/Read: a\.cjs/.test(body), 'covered paths missing');
-  assert.ok(/Not read: b\.cjs/.test(body), 'missing paths missing');
+  assert.ok(/Covered by bound evidence: a\.cjs/.test(body), 'covered paths missing');
+  assert.ok(/Not covered: b\.cjs/.test(body), 'missing paths missing');
   assert.ok(/gone\.cjs/.test(body), 'stale paths missing');
+});
+
+test('DOM: Strategic HUD reviewer totals count only REQUIRED rows while detail preserves advisory context', () => {
+  const subject = 'a'.repeat(64);
+  const run = { runId: 'RUN-MIXED-REVIEWERS', state: 'BUILT', objective: 'Mixed reviewers',
+    updatedAt: '2026-08-27T13:11:00.000Z' };
+  const rows = [
+    { reviewer: 'codex', job: 'correctness reviewer', required: 'REQUIRED', executed: 'EXECUTED',
+      disposition: 'APPROVE', score: '1/1 subject path(s) covered', coveredPaths: ['a.cjs'],
+      missingPaths: [], stalePaths: [] },
+    { reviewer: 'grok', job: 'adversarial reviewer', required: 'REQUIRED', executed: 'MISSING',
+      disposition: null, score: 'UNAVAILABLE', coveredPaths: [], missingPaths: ['a.cjs'], stalePaths: [] },
+    { reviewer: 'copilot', job: 'repository guardian', required: 'ADVISORY', executed: 'EXECUTED',
+      disposition: 'APPROVE_WITH_NOTES', score: '1/1 subject path(s) covered', coveredPaths: ['a.cjs'],
+      missingPaths: [], stalePaths: [] },
+    { reviewer: 'visual-qa', job: 'visual observer', required: 'NOT_REQUIRED', executed: 'EXECUTED',
+      disposition: 'APPROVE', score: '1/1 subject path(s) covered', coveredPaths: ['a.cjs'],
+      missingPaths: [], stalePaths: [] },
+  ];
+  const state = fixtureState({ engineering: Object.assign({}, fixtureState().engineering, {
+    subjectSha256: subject,
+    reviewerCompleteness: { subjectSha256: subject, complete: false, rows },
+  }), runs: { state: 'OK', runs: [run], current: { state: 'BOUND', runId: run.runId,
+    updatedAt: run.updatedAt, subjectState: 'UNLINKED', gateSubjectSha256: subject,
+    reason: 'current gate subject' } } });
+  const page = bootPage(state);
+  assert.strictEqual(page.text('hud-review'),
+    '1 of 2 required reviewer row(s) executed for the current gate subject.',
+    'advisory or not-required execution inflated the Strategic HUD numerator or denominator');
+  const detail = page.text('founder-body');
+  assert.ok(/copilot \(repository guardian, advisory only — cannot unblock anything\)/.test(detail),
+    'the detailed reviewerLine lost advisory-role context while the HUD count was narrowed');
+  assert.ok(/visual-qa \(visual observer, not required for this tier\)/.test(detail),
+    'the detailed reviewerLine lost not-required context while the HUD count was narrowed');
 });
 
 test('RED: an absent reviewer table renders UNAVAILABLE, never "complete"', () => {
   const eng = Object.assign(fixtureState().engineering, { reviewerCompleteness: null });
   const body = bootPage(fixtureState({ engineering: eng })).text('founder-body');
   assert.ok(/reviewer coverage is unknown/.test(body), 'a missing reviewer table must read as unknown coverage');
-  assert.ok(!/Every required reviewer read every changed file/.test(body), 'unknown coverage rendered as complete');
+  assert.ok(!/Every required review has bound evidence for every changed file/.test(body), 'unknown coverage rendered as complete');
 });
 
 // ── FINDING #2: the exact coverage sentence has to reach the screen ────────
@@ -917,8 +1487,13 @@ test('RED: an absent reviewer table renders UNAVAILABLE, never "complete"', () =
 // engineering.reviewerCompleteness.completeReason. These proofs hold that the
 // panel BINDS that field rather than paraphrasing it, and that it stays text.
 function rcFixture(completeReason, over) {
+  const subject = 'a'.repeat(64);
+  const run = { runId: 'RUN-RC-FIXTURE', state: 'BUILT', objective: 'Reviewer coverage fixture',
+    updatedAt: '2026-08-27T13:12:00.000Z' };
   return fixtureState({ engineering: Object.assign(fixtureState().engineering, {
+    subjectSha256: subject,
     reviewerCompleteness: Object.assign({
+      subjectSha256: subject,
       complete: false,
       completeReason,
       rows: [
@@ -926,7 +1501,10 @@ function rcFixture(completeReason, over) {
           disposition: 'APPROVE', score: '1/2 subject path(s) covered',
           coveredPaths: ['a.cjs'], missingPaths: ['b.cjs'], stalePaths: [], reason: 'r' },
       ],
-    }, over || {}) }) });
+    }, over || {}) }), runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      subjectState: 'UNLINKED', gateSubjectSha256: subject, reason: 'current gate subject',
+    } } });
 }
 
 // Every element the page built, so a proof can ask what was CREATED rather
@@ -941,7 +1519,7 @@ test('RED: incomplete coverage renders the gate\'s exact completeness sentence, 
   const reason = 'Review coverage is INCOMPLETE: codex read only part of the change. ' +
     'Re-run the reviewer(s) named above against this exact change.';
   const body = bootPage(rcFixture(reason)).text('founder-body');
-  assert.ok(/Not every required reviewer has read every changed file/.test(body),
+  assert.ok(/Not every required review has bound evidence for every changed file/.test(body),
     'the coverage headline is gone');
   assert.ok(body.includes(reason),
     'engineering.reviewerCompleteness.completeReason is not bound to the panel — the founder is told THAT coverage is short but never which reviewer, how, or what to re-run');
@@ -959,7 +1537,7 @@ test('RED: a completeness sentence the gate never recorded reads as UNAVAILABLE,
   assert.ok(/no explanation for this coverage verdict/.test(body),
     'an absent completeReason silently vanishes — absence must be stated, not rendered as nothing');
   assert.ok(/UNAVAILABLE/.test(body), 'the absence is not labelled with a contract absence word');
-  assert.ok(!/Every required reviewer read every changed file/.test(body),
+  assert.ok(!/Every required review has bound evidence for every changed file/.test(body),
     'a missing reason rendered as complete coverage');
 });
 
@@ -1016,6 +1594,299 @@ test('no FX rate is hardcoded anywhere in the page — a rate may only arrive as
 // presented as current. This drives the page exactly as the server does: an
 // authenticated /api/status bootstrap, then a pushed `status` SSE event.
 async function asyncTests() {
+  await atest('DOM: missing state.js paints UNAVAILABLE immediately and authenticated live status repopulates the pilot deck', async () => {
+    const subject = '9'.repeat(64);
+    const run = {
+      runId: 'RUN-LIVE-NO-SNAPSHOT', state: 'BUILDING',
+      objective: 'Render the authenticated live mission without a generated snapshot',
+      updatedAt: '2026-08-30T16:40:00.000Z',
+      route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+      build: {
+        mode: 'async', status: 'RUNNING', workerState: 'RUNNING', workerPid: 4210,
+        startedAt: '2026-08-30T16:39:00.000Z', heartbeatAt: '2026-08-30T16:39:59.000Z',
+        endedAt: null, exit: null, timedOut: false, cancelAvailable: true,
+        activity: { active: true, phase: 'BUILDING', code: 'RUNNING', summary: 'Claude is implementing the live dashboard repair.' },
+      },
+    };
+    const status = {
+      generatedAt: run.updatedAt, runsState: 'OK',
+      engineering: {
+        state: 'OK', verdict: 'BLOCKED', subjectSha256: subject,
+        problems: [{ rule: 'ENGOS-REVIEW-MISSING', detail: 'Independent review is still required.' }],
+        reviewerCompleteness: { complete: false, rows: [] }, stages: [],
+      },
+      runs: [run],
+      runsBinding: {
+        state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, evidenceState: 'OK',
+        subjectState: 'UNLINKED', subjectSha256: null, gateSubjectSha256: subject,
+        reason: 'the authenticated live status selected this current run',
+      },
+      integration: { connectors: { state: 'OK', connectors: [] } },
+      reviewers: [], events: [], cost: { state: 'UNAVAILABLE', reason: 'no cost receipt' },
+    };
+    let resolveBootstrap;
+    const page = bootPage(null, { fetch: () => new Promise((resolve) => { resolveBootstrap = resolve; }) });
+
+    assert.ok(page.sandbox.AEGIS_DASHBOARD,
+      'the renderer seam was not exported when the generated state was absent');
+    assert.strictEqual(typeof page.sandbox.AEGIS_DASHBOARD.applyStatus, 'function',
+      'the authenticated live repaint seam was not installed');
+    assert.match(page.text('fatal'), /UNAVAILABLE — no AEGIS state is loaded/);
+    for (const id of ['founder-body','hud-mission','hud-crew','hud-review','hud-gate','hud-evidence','hud-checkpoint']) {
+      assert.doesNotMatch(page.text(id), /Loading/i, `${id} retained a loading placeholder without state.js`);
+    }
+    assert.match(page.text('founder-body'), /UNAVAILABLE/i,
+      'the immediate founder view did not fail closed');
+
+    resolveBootstrap({ ok: true, json: async () => status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.match(page.text('founder-body'), /Render the authenticated live mission/i,
+      'authenticated /api/status did not repopulate the founder mission');
+    assert.strictEqual(page.text('hud-core-status'), 'RUNNING');
+    assert.match(page.text('hud-crew'), /claude/i,
+      'authenticated route evidence did not repopulate the crew instrument');
+    assert.match(page.text('fatal'), /LIVE STATUS ACTIVE — generated state\.js is unavailable/,
+      'the stale no-evidence warning remained after authenticated live state arrived');
+    assert.doesNotMatch(page.text('founder-body'), /Loading/i);
+  });
+
+  await atest('DOM: missing state.js and unavailable live API leave every primary instrument fail-closed, never loading', async () => {
+    const page = bootPage(null, { fetch: async () => { throw new Error('live status unavailable'); } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.ok(page.sandbox.AEGIS_DASHBOARD,
+      'the renderer seam disappeared when both state sources were unavailable');
+    assert.match(page.text('fatal'), /UNAVAILABLE — no AEGIS state is loaded/);
+    assert.match(page.text('live-conn-state'), /UNAVAILABLE — could not bootstrap \/api\/status/);
+    assert.match(page.text('founder-body'), /UNAVAILABLE/i);
+    assert.strictEqual(page.text('hud-core-status'), 'UNAVAILABLE');
+    assert.match(page.text('runs-list'), /Run history UNAVAILABLE/i);
+    assert.doesNotMatch(page.text('runs-list'), /No runs yet/i,
+      'two unavailable state sources fabricated a clean empty run ledger');
+    for (const id of ['founder-body','hud-mission','hud-crew','hud-review','hud-gate','hud-evidence','hud-checkpoint']) {
+      assert.doesNotMatch(page.text(id), /Loading/i, `${id} retained a loading placeholder after both sources failed`);
+    }
+  });
+
+  await atest('DOM: run history uses generated state while live status is unavailable and never invents an empty ledger', async () => {
+    const run = {
+      runId: 'RUN-GENERATED-ONLY', state: 'BUILDING',
+      objective: 'Keep generated run evidence visible during live API failure',
+      updatedAt: '2026-08-30T16:50:00.000Z',
+      build: { mode: 'async', status: 'RUNNING', exit: null, retrySafe: null,
+        activity: { code: 'RUNNING', phase: 'RUNNING', active: true,
+          summary: 'Builder is running from generated evidence' } },
+    };
+    const state = fixtureState({
+      runs: { state: 'OK', runs: [run], current: {
+        state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, evidenceState: 'OK',
+        reason: 'generated state selected the current run',
+      } },
+    });
+    const page = bootPage(state, { fetch: async () => { throw new Error('live status unavailable'); } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.match(page.text('runs-list'), /RUN-GENERATED-ONLY/,
+      'the generated run was erased before authenticated live evidence arrived');
+    assert.match(page.text('runs-list'), /Keep generated run evidence visible/);
+    assert.doesNotMatch(page.text('runs-list'), /No runs yet|Run history UNAVAILABLE/i,
+      'available generated run evidence was replaced with a false empty/unavailable ledger');
+  });
+
+  await atest('DOM: pre-host CHECKS_PASSED is visibly snapshot-pass plus mandatory-host PENDING', async () => {
+    const subject = 'd'.repeat(64);
+    const hostReason = 'Snapshot checks passed. Mandatory host containment is pending until exact-subject review completes.';
+    const run = {
+      runId: 'RUN-HOST-PENDING', state: 'CHECKS_PASSED', objective: 'Prove host containment truth',
+      updatedAt: '2026-08-30T12:30:00.000Z',
+      checks: {
+        passed: 4, total: 4, outcome: 'SNAPSHOT_PASS_HOST_PENDING', snapshotOutcome: 'PASS',
+        hostContainmentState: 'PENDING', hostContainmentReason: hostReason,
+      },
+    };
+    const status = {
+      generatedAt: run.updatedAt,
+      runsState: 'OK',
+      engineering: {
+        state: 'OK', verdict: 'READY_FOR_DETERMINISTIC_VALIDATION', lane: 'FULL', highRisk: true,
+        subjectSha256: subject, problems: [], reviewerCompleteness: { complete: false, rows: [] },
+        stages: [{ id: 6, step: 'deterministic-checks', label: 'Deterministic checks',
+          state: 'UNVERIFIED', reason: 'Snapshot checks passed; mandatory host containment is pending.' }],
+      },
+      runs: [run],
+      runsBinding: {
+        state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+        subjectState: 'UNLINKED', subjectSha256: null, runSubjectSha256: null,
+        gateSubjectSha256: subject, reason: 'bound to current run',
+      },
+      cost: { state: 'UNAVAILABLE', reason: 'cost not recorded' },
+      integration: { connectors: { state: 'OK', connectors: [] } },
+      reviewers: [], events: [],
+    };
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const fields = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field');
+    const current = fields.find((node) => node.attrs['data-operator-field'] === 'current-action');
+    assert.match(current.textContent, new RegExp(hostReason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      'CURRENT ACTION collapsed the two-part check state into an unqualified pass');
+    assert.match(page.text('runs-list'), /SNAPSHOT_PASS_HOST_PENDING/);
+    assert.match(page.text('runs-list'), /Mandatory host containment is pending/);
+    assert.doesNotMatch(page.text('founder-body'), /final required evidence/i,
+      'the primary pilot deck called pre-host checks final');
+    assert.strictEqual(page.text('hud-core-status'), 'WAITING');
+  });
+
+  await atest('DOM: unverified check counters never render snapshot PASS prose', async () => {
+    const subject = 'e'.repeat(64);
+    const run = {
+      runId: 'RUN-HOST-UNVERIFIED', state: 'CHECKS_PASSED', objective: 'Reject mutable pass counters',
+      updatedAt: '2026-08-30T12:31:00.000Z',
+      checks: {
+        passed: 4, total: 4, outcome: 'UNVERIFIED', snapshotOutcome: 'UNVERIFIED',
+        hostContainmentState: 'PENDING', hostContainmentReason: null,
+      },
+    };
+    const status = {
+      generatedAt: run.updatedAt, runsState: 'OK',
+      engineering: {
+        state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: subject,
+        subjectPaths: ['builder-control/dashboard/index.html'], problems: [], stages: [],
+        reviewerCompleteness: {
+          complete: true, subjectSha256: subject, required: ['codex'],
+          pathCoverage: { total: 1,
+            coveredByEveryRequiredReviewer: ['builder-control/dashboard/index.html'],
+            notCoveredByEveryRequiredReviewer: [] },
+          rows: [{ reviewer: 'codex', required: 'REQUIRED', executed: 'EXECUTED',
+            disposition: 'APPROVE', coveredPaths: ['builder-control/dashboard/index.html'],
+            missingPaths: [], stalePaths: [] }],
+        },
+      },
+      runs: [run],
+      runsBinding: { state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+        subjectState: 'UNLINKED', gateSubjectSha256: subject, reason: 'bound to current run' },
+      cost: { state: 'UNAVAILABLE', reason: 'cost not recorded' },
+      integration: { connectors: { state: 'OK', connectors: [] } }, reviewers: [], events: [],
+    };
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const founder = page.text('founder-body');
+    assert.match(founder, /canonical receipt and lifecycle evidence have not verified a passing outcome/i);
+    assert.doesNotMatch(founder, /Snapshot checks passed|final required evidence/i);
+    assert.doesNotMatch(founder, /appears ready for server verification/i,
+      'equal mutable counters overrode the UNVERIFIED receipt outcome');
+    assert.match(page.text('runs-list'), /UNVERIFIED/);
+  });
+
+  await atest('DOM: snapshot through live minimization preserves a fail-closed REVIEW_FAILED explanation', async () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-review-failure-compose-'));
+    try {
+      const runId = 'RUN-20260830-feed0001';
+      const raw = {
+        runId, state: 'REVIEW_FAILED', objective: 'Correct exact review findings',
+        createdAt: '2026-08-30T12:00:00.000Z', updatedAt: '2026-08-30T12:01:00.000Z',
+        packet: 'builder-control/packets/PKT-TEST.json', corrections: 0,
+        reviewFailure: {
+          schemaVersion: 1, status: 'REFUSED', reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+          subjectSha256: 'a'.repeat(64), checkReceiptSha256: 'b'.repeat(64),
+          packet: { path: 'builder-control/packets/PKT-TEST.json', sha256: 'c'.repeat(64) },
+          refusedAt: '2026-08-30T12:01:00.000Z', authority: 'engineering-os.cjs --gate-done',
+          rejectedReviewers: [{ reviewer: 'codex', reviewId: 'REV-codex-current' }],
+          blockingFindingCount: 1, refusalRuleCount: 2,
+        },
+      };
+      fs.writeFileSync(path.join(temp, `${runId}.json`), JSON.stringify(raw));
+      const snapshot = AegisState.snapshot({}, { runsDir: temp });
+      const status = Hosting.minimizeApiStatus(snapshot);
+      assert.deepStrictEqual(status.runs[0].reviewFailure, {
+        status: 'UNVERIFIED', reasonCode: 'REVIEW_FAILURE_UNCORROBORATED',
+        summary: 'The run records a review-failure claim, but attested exact-subject gate evidence is unavailable in this projection.',
+      });
+      const page = bootPage(fixtureState(), { status });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      assert.match(page.text('runs-list'), /REVIEW_FAILED/);
+      assert.match(page.text('founder-body'), /attested exact-subject gate evidence is unavailable/i);
+      assert.ok(findByAttr(page.document.getElementById('founder-body'), 'data-command-control')
+        .some((node) => node.attrs['data-command-control'] === 'retry'),
+      'the composed fail-closed status lost bounded Retry');
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  await atest('DOM: CHECKS_PASSED preserves named required-reviewer actions while the gate is blocked', async () => {
+    const subject = 'f'.repeat(64);
+    const run = { runId: 'RUN-NAMED-REVIEW', state: 'CHECKS_PASSED',
+      objective: 'Obtain exact reviewer evidence', updatedAt: '2026-08-30T12:32:00.000Z',
+      checks: { passed: 4, total: 4, outcome: 'PASS', snapshotOutcome: 'PASS' } };
+    const status = {
+      generatedAt: run.updatedAt, runsState: 'OK',
+      engineering: { state: 'OK', verdict: 'BLOCKED', subjectSha256: subject,
+        problems: [{ rule: 'ENGOS-REVIEW-MISSING', detail: 'required reviews are missing' }],
+        reviewerCompleteness: { subjectSha256: subject, complete: false, rows: [
+          { reviewer: 'codex', required: 'REQUIRED', executed: 'MISSING', missingPaths: [] },
+          { reviewer: 'grok', required: 'REQUIRED', executed: 'MISSING', missingPaths: [] },
+        ] }, stages: [] },
+      runs: [run],
+      runsBinding: { state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+        subjectState: 'UNLINKED', gateSubjectSha256: subject, reason: 'bound to current run' },
+      integration: { connectors: { state: 'OK', connectors: [] } }, reviewers: [], events: [],
+    };
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const next = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+      .find((node) => node.attrs['data-operator-field'] === 'next-step').textContent;
+    assert.match(next, /Get codex to review this exact change/);
+    assert.match(next, /Get grok to review this exact change/);
+    assert.doesNotMatch(next, /^Resolve the recorded control-plane blocker before continuing\.$/);
+  });
+
+  await atest('DOM: authenticated checkpoint status and a later SSE checkpoint repaint share one safe formatter', async () => {
+    const subject = 'c'.repeat(64);
+    const statusFor = (runId, checkpoint, rollbackPoint, generatedAt) => ({
+      generatedAt,
+      runsState: 'OK',
+      engineering: {
+        state: 'OK', verdict: 'READY_FOR_PR', lane: 'FULL', highRisk: true,
+        subjectSha256: subject, problems: [], reviewerCompleteness: null, stages: [],
+      },
+      runs: [{
+        runId, state: 'CHECKPOINTED', objective: 'Preserve the safe checkpoint',
+        checkpoint, rollbackPoint, updatedAt: generatedAt,
+      }],
+      runsBinding: {
+        state: 'BOUND', runId, updatedAt: generatedAt, evidenceState: 'OK',
+        subjectState: 'BOUND', subjectSha256: subject,
+        runSubjectSha256: subject, gateSubjectSha256: subject,
+        reason: 'the run and gate subjects match',
+      },
+      cost: { state: 'UNAVAILABLE', reason: 'cost not recorded' },
+      integration: { connectors: { state: 'OK', connectors: [] } },
+      reviewers: [], events: [],
+    });
+
+    const rollbackA = 'a'.repeat(40);
+    const rollbackB = 'b'.repeat(40);
+    const bootstrap = statusFor('RUN-CP-A', 'CHK-A', rollbackA, '2026-08-29T01:00:00.000Z');
+    const page = bootPage(fixtureState(), { status: bootstrap });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    assert.ok(page.sse.opened && page.sse.listeners.status && page.sse.listeners.status.length,
+      'authenticated checkpoint bootstrap threw before the SSE subscription opened');
+    assert.doesNotThrow(() => page.sandbox.AEGIS_DASHBOARD.renderRuns(
+      bootstrap.runs, bootstrap.runsBinding, false),
+    'renderRuns threw while interpreting the public checkpoint and rollbackPoint');
+    assert.doesNotThrow(() => page.sandbox.AEGIS_DASHBOARD.applyStatus(bootstrap),
+      'applyStatus threw while repainting the authenticated checkpoint payload');
+    assert.ok(page.text('runs-list').includes('Checkpoint CHK-A · rollback commit ' + rollbackA),
+      'the live run card did not render the public checkpoint receipt');
+
+    const pushed = statusFor('RUN-CP-B', 'CHK-B', rollbackB, '2026-08-29T01:01:00.000Z');
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(pushed) }));
+    assert.ok(/RUN-CP-B/.test(page.text('runs-list')) &&
+      page.text('runs-list').includes('Checkpoint CHK-B · rollback commit ' + rollbackB),
+    'the subsequent SSE checkpoint repaint did not continue through the shared formatter');
+    assert.ok(page.text('founder-body').includes('Checkpoint CHK-B · rollback commit ' + rollbackB),
+      'the pilot instruments and run card diverged after the SSE repaint');
+  });
+
   await atest('RED: the complete page script survives bootstrap and an SSE push repaints connectors, summary, runs and cost', async () => {
     const oldConnector = connectorFixture({ state: 'UNAVAILABLE' });
     const bootstrapStatus = {
@@ -1133,7 +2004,7 @@ async function asyncTests() {
     assert.ok(!/undefined|UNKNOWN/.test(body), `inspector exposed a missing-value placeholder despite available evidence: ${body}`);
   });
 
-  await atest('DOM: Start reports the governed worker was launched, not merely prepared', async () => {
+  await atest('DOM: Start reports accepted launch truth without claiming RUNNING early', async () => {
     const status = { generatedAt: '2026-08-26T12:00:00.000Z', engineering: { state: 'UNAVAILABLE' },
       runs: [], runsBinding: { state: 'UNAVAILABLE', reason: 'none' }, integration: { connectors: [] } };
     const calls = [];
@@ -1160,18 +2031,139 @@ async function asyncTests() {
     assert.ok(start, 'objective intake did not render the governed Start control');
     await start._listeners.click[0]();
     const message = page.text('intake-result');
-    assert.ok(/Worker launched: BUILDING/.test(message), `Start did not state that the worker launched: ${message}`);
+    assert.ok(/Worker launch accepted: BUILDING/.test(message), `Start did not report accepted launch: ${message}`);
     assert.ok(/PID 4321/.test(message), 'Start did not render returned worker ownership evidence');
+    assert.ok(/Live evidence will show when it reaches RUNNING/.test(message),
+      'Start did not distinguish accepted launch from observed RUNNING evidence');
+    assert.ok(!/Worker launched:|is running/.test(message),
+      'Start claimed an active worker before canonical lifecycle evidence observed it');
     assert.ok(!/has NOT been launched|Worktree prepared at/.test(message),
       'retired synchronous Start messaging is still rendered');
     assert.strictEqual(calls.filter((c) => c.path === '/api/start').length, 1,
       'Start must issue exactly one launch request');
   });
 
+  await atest('DOM: a restored INTAKE_RECORDED run starts once by canonical runId without recreating its objective', async () => {
+    const restored = {
+      generatedAt: '2026-08-30T18:00:00.000Z',
+      engineering: { state: 'UNAVAILABLE' },
+      runsBinding: { state: 'BOUND', runId: 'RUN-RESTORED-INTAKE', reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [{
+        runId: 'RUN-RESTORED-INTAKE',
+        state: 'INTAKE_RECORDED',
+        objective: 'Use the already-recorded objective exactly once',
+        updatedAt: '2026-08-30T17:59:00.000Z',
+      }],
+    };
+    const calls = [];
+    let resolveStart;
+    const startResponse = new Promise((resolve) => { resolveStart = resolve; });
+    const page = bootPage(fixtureState(), { fetch: async (path, options) => {
+      calls.push({ path, options });
+      if (path === '/api/status') return { ok: true, json: async () => restored };
+      if (path === '/api/start') {
+        await startResponse;
+        return { ok: true, json: async () => ({
+          runId: 'RUN-RESTORED-INTAKE', state: 'BUILDING', workerPid: 9876,
+          builder: { provider: 'claude-subscription', model: 'opus' },
+        }) };
+      }
+      throw new Error('unexpected request ' + path);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const start = allNodes(page.document.getElementById('runs-list'))
+      .find((node) => node.tagName === 'BUTTON' && /Start governed builder/.test(node.textContent));
+    assert.ok(start, 'restored INTAKE_RECORDED run did not render Start');
+    const firstClick = start._listeners.click[0]();
+    const duplicateClick = start._listeners.click[0]();
+    resolveStart();
+    await Promise.all([firstClick, duplicateClick]);
+    const startCalls = calls.filter((call) => call.path === '/api/start');
+    assert.strictEqual(startCalls.length, 1, 'restored Start issued duplicate launch requests');
+    assert.deepStrictEqual(JSON.parse(startCalls[0].options.body), { runId: 'RUN-RESTORED-INTAKE' },
+      'restored Start did not use the canonical runId directly');
+    assert.strictEqual(calls.filter((call) => call.path === '/api/objective').length, 0,
+      'restored Start recreated or duplicated the recorded objective');
+    assert.ok(/Worker launch accepted: BUILDING/.test(page.text('live-activity')),
+      'restored Start did not report the accepted asynchronous launch');
+  });
+
+  await atest('DOM: BUILT makes deterministic checks the only founder next step and keeps its control visible', async () => {
+    const subject = 'a'.repeat(64);
+    const built = {
+      generatedAt: '2026-08-28T13:00:00.000Z',
+      engineering: { state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: subject,
+        subjectPaths: ['builder-control/dashboard/index.html'], problems: [],
+        reviewerCompleteness: { subjectSha256: subject, complete: false, rows: [{
+          reviewer: 'grok', job: 'adversarial reviewer', required: 'REQUIRED',
+          executed: 'MISSING', disposition: null, coveredPaths: [],
+          missingPaths: ['builder-control/dashboard/index.html'], stalePaths: [],
+        }] } },
+      runsBinding: { state: 'BOUND', runId: 'RUN-BUILT-NEXT', subjectState: 'UNLINKED',
+        gateSubjectSha256: subject, updatedAt: '2026-08-28T13:00:00.000Z', reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [{ runId: 'RUN-BUILT-NEXT', state: 'BUILT', objective: 'Finish dashboard checks',
+        updatedAt: '2026-08-28T13:00:00.000Z' }],
+    };
+    const page = bootPage(fixtureState(), { fetch: async (path) => {
+      if (path === '/api/status') return { ok: true, json: async () => built };
+      throw new Error('unexpected request ' + path);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const founder = page.text('founder-body');
+    assert.ok((founder.match(/Run deterministic checks on this completed build\./g) || []).length >= 2,
+      `primary and expanded founder views do not agree on the BUILT action: ${founder}`);
+    assert.ok(/The build finished and is waiting for deterministic checks/.test(founder),
+      `BUILT current action is missing from the whole founder view: ${founder}`);
+    assert.ok(!/Open the pull request|server verification|Get grok to review this exact change/.test(founder),
+      `BUILT founder guidance leaked a later PR/review stage: ${founder}`);
+    assert.ok(allNodes(page.document.getElementById('runs-list')).some((node) =>
+      node.tagName === 'BUTTON' && node.textContent === 'Run deterministic checks' && node.disabled !== true),
+    'BUILT did not retain the enabled deterministic-check control');
+  });
+
+  await atest('DOM: stale reviewer subject is never attributed as current-subject HUD or founder coverage', async () => {
+    const currentSubject = 'a'.repeat(64);
+    const staleSubject = 'b'.repeat(64);
+    const status = {
+      generatedAt: '2026-08-28T13:05:00.000Z',
+      engineering: { state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: currentSubject,
+        subjectPaths: ['builder-control/dashboard/index.html'], problems: [],
+        reviewerCompleteness: Object.assign({}, passingReviewCompleteness(staleSubject), {
+          completeReason: 'Every required review has bound evidence for every changed file of the stale subject.',
+        }) },
+      runsBinding: { state: 'BOUND', runId: 'RUN-STALE-REVIEW', subjectState: 'BOUND',
+        subjectSha256: currentSubject, runSubjectSha256: currentSubject,
+        gateSubjectSha256: currentSubject, updatedAt: '2026-08-28T13:05:00.000Z', reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [{ runId: 'RUN-STALE-REVIEW', state: 'REVIEW_BOUND', objective: 'Reject stale review attribution',
+        subject: { subjectSha256: currentSubject }, updatedAt: '2026-08-28T13:05:00.000Z' }],
+    };
+    const page = bootPage(fixtureState(), { fetch: async (path) => {
+      if (path === '/api/status') return { ok: true, json: async () => status };
+      throw new Error('unexpected request ' + path);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(page.text('hud-review-state'), 'REVIEW EVIDENCE STALE OR MISMATCHED');
+    assert.ok(/different code subject.*not current coverage/.test(page.text('hud-review')),
+      `HUD attributed stale reviewer rows to the current subject: ${page.text('hud-review')}`);
+    const founder = page.text('founder-body');
+    assert.ok(/recorded reviewer rows belong to a different code subject/i.test(founder),
+      `expanded founder evidence does not explain the stale subject: ${founder}`);
+    assert.ok(!/Every required review has bound evidence for every changed file|reviewed this exact version and approved/.test(founder),
+      `expanded founder evidence attributed stale coverage to the current change: ${founder}`);
+    assert.ok(!/1 of 1 required reviewer row\(s\) executed for the current gate subject/.test(
+      page.text('operator-shell')),
+    'whole operator view labels stale reviewer execution as current gate coverage');
+  });
+
   await atest('DOM: deterministic checks are BUILT-only and repaint to CHECKS_PASSED only from SSE', async () => {
     const built = {
       generatedAt: '2026-08-27T16:00:00.000Z',
-      engineering: { state: 'UNAVAILABLE' },
+      engineering: { state: 'OK', verdict: 'READY_FOR_PR',
+        reviewerCompleteness: { complete: true, rows: [{ reviewer: 'codex', required: 'REQUIRED',
+          executed: 'EXECUTED', disposition: 'APPROVE', missingPaths: [] }] } },
       runsBinding: { state: 'BOUND', runId: 'RUN-CHECKS', updatedAt: '2026-08-27T16:00:00.000Z', reason: 'bound' },
       integration: { connectors: [] },
       runs: [{ runId: 'RUN-CHECKS', state: 'BUILT', objective: 'Dashboard checks',
@@ -1217,8 +2209,11 @@ async function asyncTests() {
   await atest('DOM: review verification is CHECKS_PASSED-only, bind-only, and repaints REVIEW_BOUND from SSE', async () => {
     const checked = {
       generatedAt: '2026-08-27T16:05:00.000Z',
-      engineering: { state: 'UNAVAILABLE' },
-      runsBinding: { state: 'BOUND', runId: 'RUN-REVIEW', updatedAt: '2026-08-27T16:05:00.000Z', reason: 'bound' },
+      engineering: { state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: 'a'.repeat(64),
+        subjectPaths: ['builder-control/dashboard/index.html'], problems: [],
+        reviewerCompleteness: passingReviewCompleteness() },
+      runsBinding: { state: 'BOUND', runId: 'RUN-REVIEW', updatedAt: '2026-08-27T16:05:00.000Z',
+        subjectState: 'UNLINKED', gateSubjectSha256: 'a'.repeat(64), reason: 'bound' },
       integration: { connectors: [] },
       runs: [{ runId: 'RUN-REVIEW', state: 'CHECKS_PASSED', objective: 'Bind existing review evidence',
         checks: { passed: 1, total: 1 }, updatedAt: '2026-08-27T16:05:00.000Z' }],
@@ -1270,10 +2265,17 @@ async function asyncTests() {
       'checkpoint control was exposed outside this packet');
   });
 
-  await atest('DOM: canonical review refusal is shown without claiming a review ran', async () => {
+  await atest('DOM: ROOT-subject mismatch cannot hide run-scoped review verification and canonical refusal stays truthful', async () => {
     const checked = {
-      generatedAt: '2026-08-27T16:06:00.000Z', engineering: { state: 'UNAVAILABLE' },
-      runsBinding: { state: 'BOUND', runId: 'RUN-REFUSED', updatedAt: '2026-08-27T16:06:00.000Z', reason: 'bound' },
+      generatedAt: '2026-08-27T16:06:00.000Z',
+      // Deliberately describe a different ROOT subject than the bound run's
+      // gate subject. The browser may qualify its summary, but it must not use
+      // this parent-checkout projection to suppress the run-worktree action.
+      engineering: { state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: 'b'.repeat(64),
+        subjectPaths: ['builder-control/dashboard/index.html'], problems: [],
+        reviewerCompleteness: passingReviewCompleteness('b'.repeat(64)) },
+      runsBinding: { state: 'BOUND', runId: 'RUN-REFUSED', updatedAt: '2026-08-27T16:06:00.000Z',
+        subjectState: 'UNLINKED', gateSubjectSha256: 'a'.repeat(64), reason: 'bound' },
       integration: { connectors: [] },
       runs: [{ runId: 'RUN-REFUSED', state: 'CHECKS_PASSED', objective: 'Refused review binding',
         checks: { passed: 1, total: 1 }, updatedAt: '2026-08-27T16:06:00.000Z' }],
@@ -1288,6 +2290,8 @@ async function asyncTests() {
     for (let i = 0; i < 10; i++) await Promise.resolve();
     const review = allNodes(page.document.getElementById('runs-list'))
       .find((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review');
+    assert.ok(review && review.disabled !== true,
+      'a mismatched ROOT engineering subject hid the bound run-worktree verification action');
     await review._listeners.click[0]();
     assert.strictEqual(review.disabled, false, 'refused verification did not re-enable the action');
     assert.strictEqual(review.textContent, 'Verify independent review');
@@ -1301,6 +2305,180 @@ async function asyncTests() {
     assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')), 'refusal advanced the run state');
   });
 
+  await atest('DOM: REVIEW_FAILED keeps an uncorroborated claim fail-closed and exposes bounded Retry', async () => {
+    const checked = {
+      generatedAt: '2026-08-29T10:00:00.000Z', engineering: { state: 'OK', verdict: 'BLOCKED',
+        problems: [{ rule: 'ENGOS-REVIEW-REJECTED', detail: 'codex returned REJECT' }] },
+      runsBinding: { state: 'BOUND', runId: 'RUN-REVIEW-FAILED',
+        updatedAt: '2026-08-29T10:00:00.000Z', reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [{ runId: 'RUN-REVIEW-FAILED', state: 'CHECKS_PASSED', objective: 'Correct exact review findings',
+        checks: { passed: 11, total: 11 }, updatedAt: '2026-08-29T10:00:00.000Z' }],
+    };
+    const calls = [];
+    const page = bootPage(fixtureState(), { fetch: async (path, options) => {
+      calls.push({ path, options });
+      if (path === '/api/status') return { ok: true, json: async () => checked };
+      if (path === '/api/review-bind') return { ok: true, json: async () => ({
+        runId: 'RUN-REVIEW-FAILED', state: 'REVIEW_FAILED', action: 'bind-independent-review',
+        outcome: 'REFUSED', reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED', nextAction: 'retry',
+      }) };
+      if (path === '/api/retry') return { ok: true, json: async () => ({
+        runId: 'RUN-REVIEW-FAILED', state: 'CORRECTING', action: 'retry', correction: 2,
+      }) };
+      throw new Error('unexpected request ' + path);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    let nodes = allNodes(page.document.getElementById('runs-list'));
+    const verify = nodes.find((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review');
+    assert.ok(verify, 'CHECKS_PASSED did not expose server verification');
+    await verify._listeners.click[0]();
+    assert.ok(/Independent review refused this exact checked version/.test(page.text('live-activity')),
+      'the canonical refusal response was not explained in plain English');
+    assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')),
+      'the POST response optimistically repainted REVIEW_FAILED before SSE evidence');
+
+    const pushed = JSON.parse(JSON.stringify(checked));
+    pushed.generatedAt = '2026-08-29T10:00:01.000Z';
+    pushed.runs[0].state = 'REVIEW_FAILED';
+    pushed.runs[0].updatedAt = '2026-08-29T10:00:01.000Z';
+    pushed.runs[0].reviewFailure = {
+      status: 'UNVERIFIED', reasonCode: 'REVIEW_FAILURE_UNCORROBORATED',
+      summary: 'The run records a review-failure claim, but attested exact-subject gate evidence is unavailable in this projection.',
+    };
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(pushed) }));
+    nodes = allNodes(page.document.getElementById('runs-list'));
+    assert.ok(/REVIEW_FAILED/.test(page.text('runs-list')));
+    assert.ok(/review-failure claim.*attested exact-subject gate evidence is unavailable/i.test(page.text('runs-list')),
+      'REVIEW_FAILED card promoted or hid the uncorroborated claim');
+    assert.doesNotMatch(page.text('runs-list'), /found 2 blocking issue|codex returned REJECT/i,
+      'mutable run JSON became a blocking reviewer verdict');
+    const retry = nodes.find((n) => n.tagName === 'BUTTON' && n.textContent === 'Retry');
+    assert.ok(retry && retry.disabled !== true, 'REVIEW_FAILED did not expose Retry');
+    const commandRetry = findByAttr(page.document.getElementById('founder-body'), 'data-command-control')
+      .find((n) => n.attrs['data-command-control'] === 'retry');
+    assert.ok(commandRetry && commandRetry.tagName === 'BUTTON' && commandRetry.disabled !== true,
+      'REVIEW_FAILED did not expose Retry in the primary command deck');
+    const commandFields = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field');
+    assert.match(commandFields.find((n) => n.attrs['data-operator-field'] === 'current-action').textContent,
+      /review-failure claim.*attested exact-subject gate evidence is unavailable/i,
+      'CURRENT ACTION hid the fail-closed review evidence');
+    assert.match(commandFields.find((n) => n.attrs['data-operator-field'] === 'next-step').textContent,
+      /bounded correction route/,
+      'NEXT STEP hid the safe bounded recovery action');
+    assert.ok(!nodes.some((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review'),
+      'review verification survived after the canonical refusal transition');
+    await commandRetry._listeners.click[0]();
+    const retryCall = calls.find((call) => call.path === '/api/retry');
+    assert.deepStrictEqual(JSON.parse(retryCall.options.body), { runId: 'RUN-REVIEW-FAILED' },
+      'Retry sent browser verdict or finding authority');
+    const retryActivity = page.text('live-activity');
+    assert.match(retryActivity, /Retry accepted for RUN-REVIEW-FAILED: state CORRECTING; action retry\./,
+      'Retry did not report the canonical API state and action');
+    assert.doesNotMatch(retryActivity, /Retry queued/,
+      'Retry used the old hardcoded queued claim instead of the API result');
+  });
+
+  await atest('DOM: every retryable failure uses the exported helper and POSTs the canonical runId', async () => {
+    for (const state of ['BUILD_FAILED', 'CHECKS_FAILED', 'REVIEW_FAILED']) {
+      const runId = 'RUN-RETRY-' + state;
+      const status = {
+        generatedAt: '2026-08-30T13:00:00.000Z', runsState: 'OK',
+        engineering: { state: 'OK', verdict: 'BLOCKED', problems: [], stages: [] },
+        runsBinding: { state: 'BOUND', runId, updatedAt: '2026-08-30T13:00:00.000Z', reason: 'bound' },
+        integration: { connectors: [] },
+        runs: [{ runId, state, objective: 'Exercise bounded Retry',
+          updatedAt: '2026-08-30T13:00:00.000Z' }],
+      };
+      const calls = [];
+      const page = bootPage(fixtureState(), { fetch: async (path, options) => {
+        calls.push({ path, options });
+        if (path === '/api/status') return { ok: true, json: async () => status };
+        if (path === '/api/retry') return { ok: true, json: async () => ({
+          runId, state: 'CORRECTING', action: 'retry', correction: 1,
+        }) };
+        throw new Error('unexpected request ' + path);
+      } });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      assert.strictEqual(typeof page.sandbox.AEGIS_DASHBOARD.requestRunRetry, 'function',
+        `${state} has no exported shared Retry helper`);
+      const retry = allNodes(page.document.getElementById('runs-list'))
+        .find((node) => node.tagName === 'BUTTON' && node.textContent === 'Retry');
+      assert.ok(retry, `${state} has no run-history Retry control`);
+      await retry._listeners.click[0]();
+      const retryCalls = calls.filter((call) => call.path === '/api/retry');
+      assert.strictEqual(retryCalls.length, 1, `${state} did not POST exactly one Retry request`);
+      assert.deepStrictEqual(JSON.parse(retryCalls[0].options.body), { runId },
+        `${state} Retry crossed fields beyond canonical runId`);
+    }
+  });
+
+  await atest('DOM: model authentication failure names the non-executable Grok failover without exposing Retry', async () => {
+    const runId = 'RUN-MODEL-AUTH-FAILURE';
+    const status = {
+      generatedAt: '2026-08-30T13:10:00.000Z', runsState: 'OK',
+      engineering: { state: 'OK', verdict: 'BLOCKED', problems: [], stages: [] },
+      runsBinding: { state: 'BOUND', runId, updatedAt: '2026-08-30T13:10:00.000Z', reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [{ runId, state: 'BUILD_FAILED', objective: 'Continue after provider authentication failure',
+        updatedAt: '2026-08-30T13:10:00.000Z', build: {
+          mode: 'async', status: 'FAILED', exit: 1, retrySafe: false,
+          recoveryCode: 'MODEL_AUTH_FAILURE',
+          activity: { code: 'MODEL_AUTH_FAILURE', phase: 'BLOCKED', active: false,
+            summary: 'Claude authentication failed' },
+          failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
+            summary: 'Claude authentication failed.' },
+          failover: { state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: 'grok-4.6',
+            reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.' },
+        } }],
+    };
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const fields = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field');
+    assert.match(fields.find((node) => node.attrs['data-operator-field'] === 'current-action').textContent,
+      /Claude authentication failed.*Grok.*automatic failover is not enabled/i);
+    assert.match(fields.find((node) => node.attrs['data-operator-field'] === 'next-step').textContent,
+      /Re-authenticate Claude.*Grok.*automatic failover is not enabled/i);
+    assert.match(page.text('runs-list'), /MODEL_AUTH_FAILURE/);
+    assert.match(page.text('runs-list'), /Grok is the next eligible builder.*not enabled/i);
+    assert.ok(!allNodes(page.document.getElementById('runs-list'))
+      .some((node) => node.tagName === 'BUTTON' && node.textContent === 'Retry'),
+    'unsafe same-provider Retry was exposed for MODEL_AUTH_FAILURE');
+    assert.strictEqual(page.text('hud-core-status'), 'BLOCKED');
+  });
+
+  await atest('DOM: unverified worker termination is BLOCKED, never STOPPED, and exposes only administrative abandonment', async () => {
+    const runId = 'RUN-TERMINATION-UNVERIFIED';
+    const status = {
+      generatedAt: '2026-08-30T13:15:00.000Z', runsState: 'OK',
+      engineering: { state: 'OK', verdict: 'BLOCKED', problems: [], stages: [] },
+      runsBinding: { state: 'BOUND', runId, updatedAt: '2026-08-30T13:15:00.000Z',
+        evidenceState: 'OK', reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [{ runId, state: 'BUILD_FAILED', objective: 'Contain an unverified worker descendant',
+        updatedAt: '2026-08-30T13:15:00.000Z', build: {
+          mode: 'async', status: 'FAILED', exit: 124, retrySafe: false,
+          recoveryCode: 'TERMINATION_UNVERIFIED',
+          activity: { code: 'TERMINATION_UNVERIFIED', phase: 'BLOCKED', active: false,
+            summary: 'Termination could not be verified; retry is blocked' },
+        } }],
+    };
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const runText = page.text('runs-list');
+    assert.match(runText, /Activity: TERMINATION_UNVERIFIED · Phase: BLOCKED · Active: NO/);
+    assert.doesNotMatch(runText, /Phase: STOPPED|Builder stopped/i,
+      'the dashboard presented an unverified descendant as stopped');
+    const fields = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field');
+    assert.match(fields.find((node) => node.attrs['data-operator-field'] === 'current-action').textContent,
+      /Termination could not be verified; retry is blocked/i);
+    const buttons = allNodes(page.document.getElementById('runs-list'))
+      .filter((node) => node.tagName === 'BUTTON').map((node) => node.textContent);
+    assert.ok(buttons.includes('Cancel'), 'administrative abandonment was not available');
+    assert.ok(!buttons.includes('Retry'), 'unsafe Retry was exposed while termination remained unverified');
+    assert.strictEqual(page.text('hud-core-status'), 'BLOCKED');
+  });
+
   await atest('DOM: BUILDING Cancel requires verified async ownership, disables pending, then repaints from SSE', async () => {
     const base = {
       generatedAt: '2026-08-26T12:00:00.000Z',
@@ -1309,17 +2487,25 @@ async function asyncTests() {
       integration: { connectors: [] },
     };
     const noOwner = Object.assign({}, base, { runs: [{ runId: 'RUN-BUILD', state: 'BUILDING', objective: 'Dashboard',
-      build: { mode: 'async', status: 'RUNNING', workerPid: null,
+      build: { mode: 'async', status: 'RUNNING', workerPid: null, cancelAvailable: false,
         activity: { code: 'RUNNING', phase: 'RUNNING', active: true, summary: 'Builder is running' },
         heartbeatAt: '2026-08-26T12:00:01.000Z', timedOut: false } }] });
     const unownedPage = bootPage(fixtureState(), { status: noOwner });
     for (let i = 0; i < 10; i++) await Promise.resolve();
     const unownedButtons = allNodes(unownedPage.document.getElementById('runs-list'))
       .filter((n) => n.tagName === 'BUTTON' && /^Cancel/.test(n.textContent));
-    assert.strictEqual(unownedButtons.length, 0, 'BUILDING without a verified worker PID must not expose Cancel');
+    assert.strictEqual(unownedButtons.length, 0,
+      'BUILDING without the canonical cancellation capability must not expose Cancel');
 
     const running = JSON.parse(JSON.stringify(noOwner));
     running.runs[0].build.workerPid = 2468;
+    const pidOnlyPage = bootPage(fixtureState(), { status: running });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.ok(!allNodes(pidOnlyPage.document.getElementById('runs-list'))
+      .some((n) => n.tagName === 'BUTTON' && /^Cancel/.test(n.textContent)),
+    'a worker PID plus RUNNING telemetry must not fabricate cancellation authority');
+
+    running.runs[0].build.cancelAvailable = true;
     running.runs[0].build.startedAt = '2026-08-26T12:00:00.000Z';
     running.runs[0].build.exit = 17;
     running.runs[0].build.stdoutTail = HOSTILE_WORKER_OUTPUT.source + '\n' + HOSTILE_WORKER_OUTPUT.pem;
@@ -1447,7 +2633,10 @@ async function asyncTests() {
     assert.ok(/RUN-NEW/.test(after), 'the newly bound run id is not shown');
     assert.ok(/new999999999/.test(after), 'the summary is not bound to the pushed subject hash');
     assert.ok(/P-NEW\.json/.test(after), 'the pushed packet id is not shown');
-    assert.ok(/Ready to open a pull request/.test(after), 'the pushed verdict did not repaint');
+    assert.ok(/The build finished and is waiting for deterministic checks/.test(after),
+      'the pushed BUILT lifecycle did not remain authoritative over a premature READY_FOR_PR label');
+    assert.ok(!/Ready to open a pull request|Open the pull request/.test(after),
+      'a BUILT run exposed pull-request guidance before canonical review binding');
     // The whole point of the binding: the same subject hash governs both.
     assert.ok(!/old000000000/.test(after), 'the old subject hash is still on screen after the repaint');
   });
@@ -1617,6 +2806,368 @@ async function asyncTests() {
     const after = page.text('founder-body');
     assert.ok(/Current run/.test(after) || /UNAVAILABLE/.test(after),
       'a malformed push must leave the last honest render standing, not an empty panel');
+  });
+
+  // ── functional-beta review boundary ───────────────────────────────────────
+  // The failure this guards against is a quiet one. A CHECKS_PASSED run has
+  // passed everything this machine can decide by itself, so the deck has every
+  // opportunity to look finished; the one thing still owed is a review this
+  // process cannot perform. Saying nothing there reads as "nothing is needed",
+  // and saying it too warmly reads as "handled". Both are the same lie in
+  // different tones, so this proof holds the deck to stating the requirement
+  // AND the boundary, and to never describing a reviewer it did not launch.
+  await atest('DOM: only runsBinding may select a CHECKS_PASSED run for review binding', async () => {
+    const checkedRun = { runId: 'RUN-SOLE-CHECKED', state: 'CHECKS_PASSED',
+      objective: 'A sole checked array item', checks: { passed: 2, total: 2, outcome: 'PASS' },
+      updatedAt: '2026-08-28T09:00:00.000Z' };
+    const base = {
+      generatedAt: '2026-08-28T09:00:00.000Z',
+      engineering: { state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: 'a'.repeat(64),
+        subjectPaths: ['builder-control/dashboard/index.html'], problems: [],
+        reviewerCompleteness: passingReviewCompleteness() },
+      integration: { connectors: [] },
+      runs: [checkedRun],
+    };
+
+    for (const scenario of [
+      { label: 'unavailable binding', binding: { state: 'UNAVAILABLE', reason: 'no authoritative binding' } },
+      { label: 'ghost binding', binding: { state: 'BOUND', runId: 'RUN-NOT-PRESENT', reason: 'bound run absent' } },
+    ]) {
+      const status = Object.assign({}, base, { runsBinding: scenario.binding });
+      const page = bootPage(fixtureState(), { fetch: async (path) => {
+        if (path === '/api/status') return { ok: true, json: async () => status };
+        throw new Error('unexpected request ' + path);
+      } });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const founder = page.text('founder-body');
+      assert.ok(/No active task/.test(founder) && /Nothing is currently running/.test(founder),
+        `${scenario.label} promoted the sole array item to current: ${founder}`);
+      assert.ok(!/appears ready for server verification/.test(founder),
+        `${scenario.label} exposed a bind action without a present bound run`);
+      assert.ok(!allNodes(page.document.getElementById('runs-list'))
+        .some((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review'),
+      `${scenario.label} exposed a review-bind control on an unbound history row`);
+    }
+
+    const boundStatus = Object.assign({}, base, { runsBinding: {
+      state: 'BOUND', runId: checkedRun.runId, updatedAt: checkedRun.updatedAt,
+      subjectState: 'UNLINKED', subjectSha256: null, runSubjectSha256: null,
+      gateSubjectSha256: 'a'.repeat(64), reason: 'canonical bound run',
+    } });
+    const bound = bootPage(fixtureState(), { fetch: async (path) => {
+      if (path === '/api/status') return { ok: true, json: async () => boundStatus };
+      throw new Error('unexpected request ' + path);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.ok(/appears ready for server verification/.test(bound.text('founder-body')),
+      'a canonically bound CHECKS_PASSED + UNLINKED run lost its server-verification action');
+    assert.ok(allNodes(bound.document.getElementById('runs-list'))
+      .some((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review'),
+    'a canonically bound CHECKS_PASSED run lost its review-bind control');
+  });
+
+  await atest('DOM: a complete LIGHT lane with zero required reviewers keeps the bind control', async () => {
+    const subject = 'a'.repeat(64);
+    const run = { runId: 'RUN-LIGHT-NOREVIEW', state: 'CHECKS_PASSED',
+      objective: 'Verify a low-risk visual adjustment', checks: { passed: 2, total: 2, outcome: 'PASS' },
+      updatedAt: '2026-08-28T09:00:00.000Z' };
+    const status = {
+      generatedAt: '2026-08-28T09:00:00.000Z',
+      engineering: { state: 'OK', verdict: 'READY_FOR_PR', lane: 'LIGHT', highRisk: false,
+        subjectSha256: subject, subjectPaths: ['builder-control/dashboard/index.html'], problems: [],
+        reviewerCompleteness: { subjectSha256: subject, required: [], complete: true,
+          pathCoverage: { total: 1,
+            coveredByEveryRequiredReviewer: ['builder-control/dashboard/index.html'],
+            notCoveredByEveryRequiredReviewer: [] }, rows: [] } },
+      runsBinding: { state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+        subjectState: 'UNLINKED', subjectSha256: null, runSubjectSha256: null,
+        gateSubjectSha256: subject, reason: 'canonical bound run' },
+      integration: { connectors: [] }, reviewers: [], runs: [run],
+    };
+    const page = bootPage(fixtureState(), { fetch: async (requestPath) => {
+      if (requestPath === '/api/status') return { ok: true, json: async () => status };
+      throw new Error('unexpected request ' + requestPath);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.ok(allNodes(page.document.getElementById('runs-list'))
+      .some((node) => node.tagName === 'BUTTON' && node.textContent === 'Verify independent review'),
+    'the valid zero-reviewer LIGHT lane hid the canonical server-verification control');
+  });
+
+  await atest('DOM: a CHECKS_PASSED run distinguishes existing review evidence from missing review work and never claims it launched a reviewer', async () => {
+    const checked = {
+      generatedAt: '2026-08-28T09:00:00.000Z',
+      engineering: { state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: 'a'.repeat(64),
+        subjectPaths: ['builder-control/dashboard/index.html'], problems: [],
+        reviewerCompleteness: passingReviewCompleteness() },
+      runsBinding: { state: 'BOUND', runId: 'RUN-EXTREVIEW', updatedAt: '2026-08-28T09:00:00.000Z',
+        subjectState: 'UNLINKED', subjectSha256: null, runSubjectSha256: null,
+        gateSubjectSha256: 'a'.repeat(64), reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [{ runId: 'RUN-EXTREVIEW', state: 'CHECKS_PASSED', objective: 'Bind existing review evidence',
+        checks: { passed: 2, total: 2, outcome: 'PASS' }, updatedAt: '2026-08-28T09:00:00.000Z' }],
+    };
+    const calls = [];
+    const page = bootPage(fixtureState(), { fetch: async (path, options) => {
+      calls.push({ path, options });
+      if (path === '/api/status') return { ok: true, json: async () => checked };
+      if (path === '/api/review-bind') return { ok: true, json: async () => ({
+        runId: 'RUN-EXTREVIEW', state: 'REVIEW_BOUND', action: 'bind-independent-review',
+        subjectSha256: 'a'.repeat(64), nextAction: 'checkpoint',
+      }) };
+      throw new Error('unexpected request ' + path);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    // (1) The real post-checks projection is UNLINKED because the bind action
+    // is what records run.subject. Complete gate-subject evidence must still
+    // produce one truthful bind action instead of inventing a prerequisite.
+    // not a request to commission another review or open a PR prematurely.
+    const nextStep = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+      .find((n) => n.attrs['data-operator-field'] === 'next-step');
+    assert.ok(nextStep, 'the pilot deck exposes no NEXT STEP field');
+    assert.ok(/appears ready for server verification/.test(nextStep.textContent),
+      `complete review evidence did not produce the server-verification action: ${nextStep.textContent}`);
+    assert.ok(/only the server can approve and bind it/.test(nextStep.textContent),
+      `pre-bind browser copy claims authority the server owns: ${nextStep.textContent}`);
+    assert.ok(!/External independent review is required/.test(nextStep.textContent),
+      `complete review evidence was presented as review work still owed: ${nextStep.textContent}`);
+    assert.ok(!/No next action is recorded yet/.test(nextStep.textContent),
+      'a CHECKS_PASSED run still falls through to the silent next-step fallback');
+    assert.ok(/does not launch or pay for reviews/.test(nextStep.textContent),
+      `the bind action drops the no-launch boundary: ${nextStep.textContent}`);
+    assert.ok(!/Open the pull request for review/.test(nextStep.textContent),
+      `CHECKS_PASSED preserved a contradictory PR action: ${nextStep.textContent}`);
+    assert.ok(!/Ready to open a pull request|Open the pull request/.test(page.text('founder-body')),
+      `pre-bind CHECKS_PASSED founder evidence contains contradictory PR guidance: ${page.text('founder-body')}`);
+    const currentAction = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+      .find((n) => n.attrs['data-operator-field'] === 'current-action');
+    assert.ok(currentAction && /current gate subject appears ready for server verification.*Only AEGIS can approve and bind it to this run/.test(currentAction.textContent),
+      `CURRENT ACTION overstates or hides the server-verification candidate: ${currentAction && currentAction.textContent}`);
+    assert.ok(!/waiting for independent review evidence/.test(currentAction.textContent),
+      `CURRENT ACTION contradicts the completed review evidence: ${currentAction.textContent}`);
+    assert.strictEqual(page.text('hud-review-state'), 'EVIDENCE APPEARS READY FOR SERVER VERIFICATION',
+      'the HUD falsely reports proven bind readiness before server verification');
+    assert.ok(/appears ready for server verification/.test(page.text('hud-decisions')),
+      `the HUD hides the remaining server-verification action: ${page.text('hud-decisions')}`);
+    assert.ok(!/None right now/.test(page.text('hud-decisions')),
+      'the HUD reports no action while review evidence still needs binding');
+
+    for (const scenario of [
+      { label: 'validation fallback', engineering: { state: 'OK', verdict: 'READY_FOR_DETERMINISTIC_VALIDATION',
+        subjectSha256: 'a'.repeat(64) },
+        expected: /Independent-review evidence is not yet complete or its status is unavailable/,
+        forbidden: /Run the deterministic checks/, reviewBoundary: true },
+      { label: 'unavailable engineering', engineering: { state: 'UNAVAILABLE' },
+        expected: /Resolve the recorded control-plane blocker before continuing/,
+        forbidden: /No next action is recorded yet/, reviewBoundary: false },
+    ]) {
+      const status = Object.assign({}, checked, { engineering: scenario.engineering });
+      const alternate = bootPage(fixtureState(), { fetch: async (path) => {
+        if (path === '/api/status') return { ok: true, json: async () => status };
+        throw new Error('unexpected request ' + path);
+      } });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const alternateNext = findByAttr(alternate.document.getElementById('founder-body'), 'data-operator-field')
+        .find((n) => n.attrs['data-operator-field'] === 'next-step');
+      assert.ok(alternateNext && scenario.expected.test(alternateNext.textContent),
+        `${scenario.label} presented unknown review evidence as ready: ${alternateNext && alternateNext.textContent}`);
+      if (scenario.reviewBoundary) {
+        assert.ok(/does not launch or pay for reviews/.test(alternateNext.textContent),
+          `${scenario.label} suppressed the bind-only boundary: ${alternateNext.textContent}`);
+      }
+      assert.ok(!scenario.forbidden.test(alternateNext.textContent),
+        `${scenario.label} leaked a contradictory fallback: ${alternateNext.textContent}`);
+      assert.ok(allNodes(alternate.document.getElementById('runs-list'))
+        .some((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review'),
+      `${scenario.label} hid the canonical server-verification action behind ROOT projection evidence`);
+    }
+
+    const advisoryRejectStatus = Object.assign({}, checked, {
+      engineering: Object.assign({}, checked.engineering, {
+        problems: [],
+        reviewerCompleteness: Object.assign({}, passingReviewCompleteness(), { rows: [Object.assign(
+          {}, passingReviewCompleteness().rows[0], { disposition: 'REJECT' })] }),
+      }),
+    });
+    const advisoryReject = bootPage(fixtureState(), { fetch: async (path) => {
+      if (path === '/api/status') return { ok: true, json: async () => advisoryRejectStatus };
+      throw new Error('unexpected request ' + path);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.ok(/appears ready for server verification/.test(advisoryReject.text('founder-body')),
+      'a canonical complete review with an advisory REJECT was rewritten as incomplete');
+    assert.match(advisoryReject.text('founder-body'),
+      /recorded an advisory rejection with no blocking finding/,
+      'the founder surface did not explain why the REJECT is complete but nonblocking');
+    assert.doesNotMatch(advisoryReject.text('founder-body'), /all reviewers approved|every required reviewer approved/i,
+      'the founder surface rewrote an advisory REJECT as unanimous approval');
+
+    for (const scenario of [
+      { label: 'complete coverage with blocking engineering problem', controlBlocked: true, engineering: Object.assign({}, checked.engineering, {
+        problems: [{ rule: 'ENGOS-GATE-BLOCKED', detail: 'The exact-subject gate still has a blocking problem.' }],
+      }) },
+      { label: 'complete coverage with null required disposition', engineering: Object.assign({}, checked.engineering, {
+        reviewerCompleteness: Object.assign({}, passingReviewCompleteness(), { rows: [Object.assign(
+          {}, passingReviewCompleteness().rows[0], { disposition: null })] }),
+      }) },
+      { label: 'complete coverage with unknown required disposition', engineering: Object.assign({}, checked.engineering, {
+        reviewerCompleteness: Object.assign({}, passingReviewCompleteness(), { rows: [Object.assign(
+          {}, passingReviewCompleteness().rows[0], { disposition: 'UNAVAILABLE' })] }),
+      }) },
+      { label: 'review completeness subject differs from engineering and gate subject', engineering: Object.assign({}, checked.engineering, {
+        reviewerCompleteness: passingReviewCompleteness('b'.repeat(64)),
+      }) },
+      { label: 'aggregate path coverage is incomplete', engineering: Object.assign({}, checked.engineering, {
+        reviewerCompleteness: Object.assign({}, passingReviewCompleteness(), {
+          pathCoverage: {
+            total: 1,
+            coveredByEveryRequiredReviewer: [],
+            notCoveredByEveryRequiredReviewer: ['builder-control/dashboard/index.html'],
+          },
+        }),
+      }) },
+      { label: 'CHECKS_PASSED label has no positive all-passed check record', engineering: checked.engineering,
+        runs: [Object.assign({}, checked.runs[0], { checks: { passed: 0, total: 0 } })] },
+    ]) {
+      const status = Object.assign({}, checked, {
+        engineering: scenario.engineering,
+        runs: scenario.runs || checked.runs,
+      });
+      const guarded = bootPage(fixtureState(), { fetch: async (path) => {
+        if (path === '/api/status') return { ok: true, json: async () => status };
+        throw new Error('unexpected request ' + path);
+      } });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      assert.ok(!/appears ready for server verification/.test(guarded.text('founder-body')),
+        `${scenario.label} was presented as ready to bind`);
+      assert.ok((scenario.controlBlocked
+        ? /Resolve the recorded control-plane blocker before continuing|Get [a-z0-9._-]+ to review this exact change/i
+        : /Independent-review evidence is not yet complete or its status is unavailable/).test(
+          guarded.text('founder-body')),
+      `${scenario.label} did not retain the fail-closed founder explanation`);
+      assert.notStrictEqual(guarded.text('hud-review-state'),
+        'EVIDENCE APPEARS READY FOR SERVER VERIFICATION',
+        `${scenario.label} lit the HUD server-verification readiness signal`);
+      assert.ok(allNodes(guarded.document.getElementById('runs-list'))
+        .some((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review'),
+      `${scenario.label} hid the run-scoped server-verification action`);
+    }
+
+    // UNLINKED is the expected pre-bind state; MISMATCHED may qualify the
+    // projected evidence, but neither may erase the canonical bind action.
+    for (const scenario of [
+      { label: 'UNLINKED', binding: Object.assign({}, checked.runsBinding,
+          { subjectState: 'UNLINKED', subjectSha256: null, runSubjectSha256: null }),
+        current: /current gate subject appears ready for server verification.*Only AEGIS can approve and bind it to this run/,
+        hud: 'EVIDENCE APPEARS READY FOR SERVER VERIFICATION' },
+      { label: 'MISMATCHED', binding: Object.assign({}, checked.runsBinding,
+          { subjectState: 'MISMATCHED', subjectSha256: null, runSubjectSha256: 'b'.repeat(64) }),
+        current: /appears ready for server verification, but this run records an older code version.*AEGIS will recompute the subject and refuse if they do not match/,
+        hud: 'SERVER VERIFICATION CANDIDATE — RUN VERSION DIFFERS' },
+    ]) {
+      const status = Object.assign({}, checked, { runsBinding: scenario.binding });
+      const alternate = bootPage(fixtureState(), { fetch: async (path) => {
+        if (path === '/api/status') return { ok: true, json: async () => status };
+        throw new Error('unexpected request ' + path);
+      } });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const fields = findByAttr(alternate.document.getElementById('founder-body'), 'data-operator-field');
+      const alternateNext = fields.find((n) => n.attrs['data-operator-field'] === 'next-step');
+      const alternateCurrent = fields.find((n) => n.attrs['data-operator-field'] === 'current-action');
+      assert.ok(alternateNext && /appears ready for server verification/.test(alternateNext.textContent),
+        `${scenario.label} erased the server-verification action: ${alternateNext && alternateNext.textContent}`);
+      assert.ok(alternateCurrent && scenario.current.test(alternateCurrent.textContent),
+        `${scenario.label} CURRENT ACTION misstates the gate/run relationship: ${alternateCurrent && alternateCurrent.textContent}`);
+      assert.strictEqual(alternate.text('hud-review-state'), scenario.hud,
+        `${scenario.label} HUD misstates subject binding`);
+      assert.ok(/appears ready for server verification/.test(alternate.text('hud-decisions')),
+        `${scenario.label} HUD hides the remaining governed action`);
+    }
+
+    // REVIEW_BOUND + BOUND is the real post-bind projection. Only here may the
+    // HUD call coverage complete, and the bind CTA must disappear.
+    const boundStatus = Object.assign({}, checked, {
+      runsBinding: Object.assign({}, checked.runsBinding, {
+        subjectState: 'BOUND', subjectSha256: 'a'.repeat(64), runSubjectSha256: 'a'.repeat(64),
+      }),
+      runs: [Object.assign({}, checked.runs[0], {
+        state: 'REVIEW_BOUND', subject: { subjectSha256: 'a'.repeat(64) },
+      })],
+    });
+    const boundPage = bootPage(fixtureState(), { fetch: async (path) => {
+      if (path === '/api/status') return { ok: true, json: async () => boundStatus };
+      throw new Error('unexpected request ' + path);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(boundPage.text('hud-review-state'), 'REVIEW COVERAGE COMPLETE',
+      'the post-bind HUD does not report completed exact-subject review coverage');
+    assert.strictEqual(boundPage.text('hud-review'),
+      '1 of 1 required reviewer row(s) executed for the current gate subject.',
+      'valid exact-subject post-bind reviewer coverage was not attributed to the current gate subject');
+    assert.ok(/Ready to open a pull request/.test(boundPage.text('founder-body')) &&
+      /Open the pull request/.test(boundPage.text('founder-body')),
+    'post-bind REVIEW_BOUND + exact-subject READY_FOR_PR lost its pull-request guidance');
+    assert.ok(!/appears ready for server verification/.test(boundPage.text('founder-body')),
+      'the bind action survives after canonical REVIEW_BOUND evidence');
+    assert.ok(!allNodes(boundPage.document.getElementById('runs-list'))
+      .some((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review'),
+    'the CHECKS_PASSED-only bind control survives after REVIEW_BOUND');
+
+    // (2) When the gate names a missing required reviewer, that authoritative
+    // action survives CHECKS_PASSED and the page adds only its bind-only limit.
+    const missingStatus = Object.assign({}, checked, { engineering: {
+      state: 'OK', verdict: 'BLOCKED', subjectSha256: 'a'.repeat(64),
+      reviewerCompleteness: { complete: false, rows: [{
+        reviewer: 'grok', required: 'REQUIRED', executed: 'MISSING', missingPaths: [],
+      }] },
+    } });
+    const missing = bootPage(fixtureState(), { fetch: async (path) => {
+      if (path === '/api/status') return { ok: true, json: async () => missingStatus };
+      throw new Error('unexpected request ' + path);
+    } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const missingNext = findByAttr(missing.document.getElementById('founder-body'), 'data-operator-field')
+      .find((n) => n.attrs['data-operator-field'] === 'next-step');
+    assert.ok(missingNext && /Get grok to review this exact change/.test(missingNext.textContent),
+      `CHECKS_PASSED erased the gate's named reviewer action: ${missingNext && missingNext.textContent}`);
+    assert.ok(/does not launch or pay for reviews/.test(missingNext.textContent),
+      `CHECKS_PASSED dropped the external-review boundary: ${missingNext && missingNext.textContent}`);
+    assert.ok(!/appears ready for server verification/.test(missingNext.textContent),
+      `missing review evidence was presented as ready to bind: ${missingNext.textContent}`);
+    assert.ok(allNodes(missing.document.getElementById('runs-list'))
+      .some((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review'),
+    'missing ROOT reviewer evidence hid the run-scoped server-verification control');
+
+    // (3) Nowhere on the deck may the page describe a review it did not run.
+    const deck = page.text('founder-body');
+    assert.ok(!/\b(?:launched|ran|performed|completed|obtained)\s+(?:an?\s+)?(?:external\s+)?(?:independent\s+)?review\b/i.test(deck),
+      `the deck claims a review was carried out by this dashboard: ${deck}`);
+
+    // (4) The bind action carries the runId and nothing else. Which subject the
+    // evidence must match is decided by the canonical gate, not by the browser,
+    // so any extra field here would be the dashboard asserting subject authority
+    // it does not have.
+    const review = allNodes(page.document.getElementById('runs-list'))
+      .find((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review');
+    assert.ok(review && review.disabled !== true, 'CHECKS_PASSED did not expose the review verification control');
+    await review._listeners.click[0]();
+    const bind = calls.filter((c) => c.path === '/api/review-bind');
+    assert.strictEqual(bind.length, 1, `expected exactly one bind request, got ${bind.length}`);
+    assert.deepStrictEqual(JSON.parse(bind[0].options.body), { runId: 'RUN-EXTREVIEW' },
+      'the dashboard sent fields beyond the exact runId authority boundary');
+
+    // (5) A successful bind is reported as verification of evidence that already
+    // existed — never as a review this page caused to happen — and the run does
+    // not advance until canonical lifecycle evidence says so.
+    const activity = page.text('live-activity');
+    assert.ok(/No review was launched by this dashboard/.test(activity),
+      `the bind result drops the no-launch boundary: ${activity}`);
+    assert.ok(!/\b(?:launched|started|commissioned)\s+(?:an?\s+)?(?:independent\s+)?review\b/i.test(
+      activity.replace(/No review was launched by this dashboard/g, '')),
+      `the activity feed claims this dashboard launched a review: ${activity}`);
+    assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')) && !/REVIEW_BOUND/.test(page.text('runs-list')),
+      'the bind response optimistically advanced the run before SSE evidence');
   });
 }
 

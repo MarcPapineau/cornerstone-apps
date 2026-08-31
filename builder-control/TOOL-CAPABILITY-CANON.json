@@ -331,7 +331,7 @@
       "selectionPriority": 1,
       "availabilityEvidence": {
         "observedAt": "2026-08-25T00:00:00-04:00",
-        "method": "Grok CLI 1.0.5 at /Users/marcpapineau/.grok/bin/grok; `grok login` completed as marc@cornerstoneregroup.ca, then the read-only `grok models` command run as an authentication check",
+        "method": "Grok CLI 1.0.5 at the operator's user-local install; `grok login` completed as the operator account, then the read-only `grok models` command run as an authentication check",
         "result": "Exit code 0. Reported logged in with grok.com, default model grok-4.6, available models grok-4.6 and grok-4.5.",
         "note": "This corrects the prior BLOCKED record, which observed an unauthenticated state on the same CLI. No review has run under this authenticated state yet, and no review verdict is claimed here — this is an availability record, not a review record."
       },

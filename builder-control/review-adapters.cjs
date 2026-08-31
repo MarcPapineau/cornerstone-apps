@@ -23,7 +23,8 @@
  *
  *   node builder-control/review-adapters.cjs --doctor [--json]
  *   node builder-control/review-adapters.cjs --run --reviewer codex|grok|copilot \
- *        --subject-sha <sha> --packet <packet.json> [--base <ref>] [--head <ref>] \
+ *        --subject-sha <sha> --packet <packet.json> [--run-id <RUN-...>] \
+ *        [--base <ref>] [--head <ref>] \
  *        [--timeout <seconds>] [--dry-run]
  *
  * Exit: 0 record written (any disposition) · 2 usage · 3 could not produce a record
@@ -34,7 +35,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const {
   strictEnvironment,
   buildMacSandboxProfile,
@@ -50,12 +51,29 @@ const ENGOS = path.join(HERE, 'engineering-os.cjs');
 const REVIEW_SANDBOX_PREFIX = path.join(os.tmpdir(), 'aegis-bounded-review-');
 const MAX_REVIEW_FILES = 64;
 const MAX_REVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_REVIEW_OUTPUT_BYTES = 64 * 1024 * 1024;
+// The complete beta subject plus its five pinned specifications is currently
+// just over 1 MiB. Keep the exact-file bundle bounded below the separate 2 MiB
+// total-input ceiling while allowing that authoritative twelve-path union.
+const MAX_CODEX_BUNDLE_BYTES = 1280 * 1024;
+const MAX_CODEX_INPUT_BYTES = 2 * 1024 * 1024;
+// Codex CLI rejects an initial input above 1,048,576 JavaScript characters.
+// Bytes remain a separate defensive bound because UTF-8 can exceed one byte
+// per character.
+const MAX_CODEX_INPUT_CHARACTERS = 1_048_576;
+const REVIEW_KILL_GRACE_MS = 2_000;
+const REVIEW_REAPER_TIMEOUT_MS = 10_000;
+const GROK_BILLING_PREFLIGHT_TIMEOUT_MS = 10_000;
+const GROK_BILLING_MAX_STREAM_BYTES = 1024 * 1024;
+const GROK_EXPECTED_VERSION = 'grok 1.0.5 (5115b46bc909) [stable]';
+const GROK_EXPECTED_SHA256 = '3dfa7f04fbb5427a8fbead286591543aaecb478b3a0ab222c4329eca1a3b2f86';
 const OPERATOR_GROK_AUTH = path.join(os.homedir(), '.grok', 'auth.json');
 const OPERATOR_CODEX_AUTH = path.join(os.homedir(), '.codex', 'auth.json');
 
 const EXIT_PASS = 0;
 const EXIT_USAGE = 2;
 const EXIT_BLOCK = 3;
+const CANONICAL_DATA_CLASSES = Object.freeze(['PUBLIC', 'INTERNAL', 'CONFIDENTIAL', 'RESTRICTED']);
 
 // Absolute, verified install locations. These are recorded rather than
 // discovered on PATH because neither tool puts itself on PATH here, and a
@@ -68,9 +86,13 @@ const TOOLS = {
     role: 'independent reviewer',
   },
   grok: {
+    // Immutable pin remains separate from the updater-controlled ~/.grok/bin
+    // symlink. Version plus digest detects replacement at this exact path.
     bin: '/Users/marcpapineau/.grok/downloads/grok-macos-aarch64',
     label: 'Grok CLI',
     role: 'adversarial red team',
+    expectedVersion: GROK_EXPECTED_VERSION,
+    expectedSha256: GROK_EXPECTED_SHA256,
   },
   // Copilot IS installed locally — it is a real binary, not a GitHub API call.
   // It is also advisory: it holds no approval authority, and authorizeLaunch()
@@ -167,22 +189,93 @@ function cmdDoctor(args) {
 }
 
 // ── subject resolution (delegates; does not re-implement) ───────────────────
-function subjectOf(args) {
+// Dashboard runs execute in an isolated linked worktree. The runtime is the
+// authority that validates that worktree and constructs the Git environment;
+// the review bridge must consume that coordinate rather than recomputing a
+// second, control-checkout subject that merely happens to have similar paths.
+function resolveCanonicalRunContext(runId, packetPath, authority) {
+  if (typeof runId !== 'string' || !runId.trim()) {
+    throw new Error('canonical run review requires a non-empty --run-id');
+  }
+  const runAuthority = authority || require('./aegis-run.cjs');
+  if (typeof runAuthority.loadRun !== 'function' ||
+      typeof runAuthority.canonicalGitEnvironment !== 'function') {
+    throw new Error('canonical AEGIS run/worktree authority is unavailable');
+  }
+  const run = runAuthority.loadRun(runId);
+  if (!run || run.runId !== runId) {
+    throw new Error(`canonical run authority did not return exactly ${runId}`);
+  }
+  if (typeof run.packet !== 'string' || !run.packet.trim()) {
+    throw new Error(`run ${runId} has no canonical packet coordinate`);
+  }
+  const suppliedPacket = fs.realpathSync(path.resolve(packetPath));
+  const recordedPacket = fs.realpathSync(path.resolve(ROOT, run.packet));
+  if (suppliedPacket !== recordedPacket) {
+    throw new Error(`--packet does not match run ${runId}'s canonical packet`);
+  }
+  const gitEnv = runAuthority.canonicalGitEnvironment(run);
+  const sourceRoot = fs.realpathSync(path.resolve(run.worktree && run.worktree.path || ''));
+  let envWorktree;
+  try { envWorktree = fs.realpathSync(gitEnv && gitEnv.GIT_WORK_TREE); }
+  catch { throw new Error(`run ${runId} did not produce a readable canonical Git worktree`); }
+  if (sourceRoot !== envWorktree || sourceRoot === fs.realpathSync(ROOT)) {
+    throw new Error(`run ${runId} did not resolve to one isolated canonical worktree`);
+  }
+  return Object.freeze({ runId, run: Object.freeze(run), sourceRoot,
+    gitEnv: Object.freeze({ ...gitEnv, GIT_WORK_TREE: sourceRoot }) });
+}
+
+// A run-bound review inherits sensitivity from the canonical intake record.
+// A CLI flag may repeat that value for audit readability, but it may never
+// weaken or otherwise replace it. Non-run reviews retain the explicit CLI
+// class, with INTERNAL only as the absent-value default.
+function resolveReviewDataClass(runContext, cliDataClass) {
+  const supplied = cliDataClass === undefined || cliDataClass === null ? null : cliDataClass;
+  if (runContext && runContext.runId) {
+    const canonical = runContext.run && runContext.run.dataClass;
+    if (!CANONICAL_DATA_CLASSES.includes(canonical)) {
+      throw new Error(`run ${runContext.runId} has no canonical data class (${JSON.stringify(canonical)})`);
+    }
+    if (supplied !== null && supplied !== canonical) {
+      throw new Error(`--data-class ${JSON.stringify(supplied)} conflicts with run ${runContext.runId}'s canonical ${canonical} data class`);
+    }
+    return canonical;
+  }
+  const resolved = supplied === null ? 'INTERNAL' : supplied;
+  if (!CANONICAL_DATA_CLASSES.includes(resolved)) {
+    throw new Error(`review data class must be one of ${CANONICAL_DATA_CLASSES.join(', ')}; received ${JSON.stringify(resolved)}`);
+  }
+  return resolved;
+}
+
+function subjectOf(args, context = {}) {
   const a = [ENGOS, '--subject', '--json'];
+  if (args.packet) a.push('--packet', fs.realpathSync(path.resolve(args.packet)));
   if (args.base) a.push('--base', args.base);
   if (args.head) a.push('--head', args.head);
-  const r = spawnSync('node', a, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync('node', a, {
+    cwd: ROOT, env: context.gitEnv || strictEnvironment({}, process.env),
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  });
   if (r.status !== 0) throw new Error(`could not compute subject: ${(r.stderr || '').trim()}`);
   return JSON.parse(r.stdout);
 }
 
-function subjectDiff(subject, args) {
+function subjectDiff(subject, args, context = {}) {
   const a = ['diff'];
   if (args.base) a.push(`${args.base}..${args.head || 'HEAD'}`);
   else a.push(args.head || 'HEAD');
   a.push('--', ...subject.subjectPaths);
-  const r = spawnSync('git', a, { cwd: ROOT, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-  return r.status === 0 ? r.stdout : '';
+  const r = spawnSync('git', a, {
+    cwd: context.sourceRoot || ROOT, env: context.gitEnv || strictEnvironment({}, process.env),
+    encoding: 'utf8', maxBuffer: 256 * 1024 * 1024,
+  });
+  if (r.status !== 0) throw new Error(`could not compute exact subject diff: ${(r.stderr || '').trim()}`);
+  if (!r.stdout && Number(subject.diffBytes || 0) > 0 && !(subject.untrackedSubjectPaths || []).length) {
+    throw new Error('canonical subject reports changed bytes but Git returned an empty exact diff');
+  }
+  return r.stdout;
 }
 
 // ── prompts ─────────────────────────────────────────────────────────────────
@@ -190,7 +283,18 @@ function subjectDiff(subject, args) {
 // the exact output contract. No conversation history, and — for Codex — no
 // account of what the builder believes. A reviewer handed the author's
 // justification reviews the justification.
-const RECORD_CONTRACT = `
+function recordContract(reviewer) {
+  const codexProof = reviewer === 'codex'
+    ? `,
+  "inspectionProofs": [
+    {
+      "path": "<exact challenged repo-relative path>",
+      "lineNumber": <exact challenged 1-based line number>,
+      "lineText": "<exact complete UTF-8 text on that line, excluding the newline>"
+    }
+  ]`
+    : '';
+  return `
 Return ONLY a JSON object, no prose around it, with exactly these fields:
 {
   "disposition": "APPROVE" | "APPROVE_WITH_NOTES" | "REJECT",
@@ -201,16 +305,25 @@ Return ONLY a JSON object, no prose around it, with exactly these fields:
       "location": "<line/range/symbol>",
       "problem": "<what is wrong>",
       "evidence": "<the code, output, or spec line that shows it — REQUIRED, non-empty>",
-      "impact": "<what breaks — REQUIRED for CRITICAL/HIGH>",
-      "requiredCorrection": "<what must change — REQUIRED for CRITICAL/HIGH>",
-      "verificationMethod": "<what proves the fix — REQUIRED for CRITICAL/HIGH>",
+      "impact": "<what breaks; REQUIRED and non-empty for CRITICAL/HIGH, otherwise empty string allowed>",
+      "requiredCorrection": "<what must change; REQUIRED and non-empty for CRITICAL/HIGH, otherwise empty string allowed>",
+      "verificationMethod": "<what proves the fix; REQUIRED and non-empty for CRITICAL/HIGH, otherwise empty string allowed>",
       "status": "OPEN"
     }
   ],
-  "unverified": ["<anything you could not check>"]
+  "unverified": ["<anything you could not check>"]${codexProof}
 }
-Rules: a finding with no evidence is an opinion — omit it. Do not manufacture
-findings to justify the review; zero findings is a valid, useful result.`;
+Every listed field is required, including empty arrays. Extra fields are not
+allowed. A malformed object is refused as UNAVAILABLE rather than repaired or
+defaulted by the adapter. A finding with no evidence is an opinion — omit it.
+Do not manufacture findings to justify the review; zero findings is a valid,
+useful result. An OPEN CRITICAL or HIGH finding requires REJECT and blocks the
+gate. Use APPROVE_WITH_NOTES for MEDIUM, LOW, or INFORMATIONAL findings when
+you otherwise approve. If you return REJECT without an OPEN CRITICAL/HIGH
+finding, AEGIS preserves that completed reviewer opinion exactly as written but
+treats it as advisory; it does not gain blocking authority beyond the severities
+of the structured findings.`;
+}
 
 // CONFIRMED FINDING #6: prompts carried only the objective, paths and diff.
 // The packet requires reviewers to receive authoritative paths, test evidence
@@ -218,19 +331,219 @@ findings to justify the review; zero findings is a valid, useful result.`;
 // intentional design from an accident, and cannot know which claims were
 // actually checked. The exact bounded files are copied into the private
 // read-only review workspace; this block records their verified digests.
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+}
+
+function stableJson(value) {
+  return JSON.stringify(stableValue(value));
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function createInvocationIdentity(reviewer, date = new Date(), uuid = crypto.randomUUID()) {
+  const stamp = date.toISOString().replace(/[^0-9]/g, '').slice(0, 17);
+  const nonce = String(uuid).replace(/[^a-zA-Z0-9-]/g, '');
+  if (!stamp || !nonce || !/^[a-z0-9-]+$/.test(reviewer)) throw new Error('invalid review invocation identity');
+  const base = `${stamp}-${reviewer}-${nonce}`;
+  return Object.freeze({ base, reviewId: `REV-${base}`, ts: date.toISOString() });
+}
+
+function writeImmutableFile(target, value) {
+  const data = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'utf8');
+  const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  let fd;
+  try {
+    fd = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(fd, data);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.linkSync(temporary, target); // atomic publication which refuses EEXIST
+  } finally {
+    if (fd !== null && fd !== undefined) try { fs.closeSync(fd); } catch {}
+    try { fs.unlinkSync(temporary); } catch {}
+  }
+}
+
+function isExecutedCheckReceipt(check) {
+  return Boolean(check && String(check.status || '').toUpperCase() === 'EXECUTED'
+    && typeof check.cmd === 'string' && check.cmd.trim()
+    && Number.isInteger(check.exit)
+    && typeof check.ranAt === 'string' && Number.isFinite(Date.parse(check.ranAt)));
+}
+
+function runnablePacketChecks(packet) {
+  return (Array.isArray(packet && packet.testsRequired) ? packet.testsRequired : []).filter((command) => {
+    if (typeof command !== 'string') return false;
+    const tokens = command.trim().split(/\s+/);
+    const entrypoint = tokens[1] && tokens[1].replace(/^\.\//, '');
+    return !(tokens[0] === 'node' && entrypoint === 'builder-control/engineering-os.cjs'
+      && tokens.includes('--gate-done'));
+  });
+}
+
+function runnableHostContainmentChecks(packet) {
+  const required = packet && packet.packetId === 'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA';
+  if (!Array.isArray(packet && packet.hostContainmentRequired)) {
+    if (required) throw new Error('canonical operator-beta packet is missing host containment authority');
+    return [];
+  }
+  const commands = packet.hostContainmentRequired
+    .filter((command) => typeof command === 'string' && command.trim());
+  if (required && (commands.length !== 1 ||
+      commands[0] !== 'node builder-control/test/host-containment.test.cjs')) {
+    throw new Error('canonical operator-beta packet has ambiguous host containment authority');
+  }
+  if (required) {
+    const requiredFiles = [
+      'builder-control/test/host-containment.test.cjs',
+      'builder-control/test/review-adapters.test.cjs',
+      'builder-control/test/aegis-run.test.cjs',
+    ];
+    const filesAllowed = Array.isArray(packet.filesAllowed) ? packet.filesAllowed : [];
+    const protectedPaths = packet.authorization && Array.isArray(packet.authorization.allowsProtectedPaths)
+      ? packet.authorization.allowsProtectedPaths : [];
+    for (const requiredFile of requiredFiles) {
+      if (!filesAllowed.includes(requiredFile) || !protectedPaths.includes(requiredFile)) {
+        throw new Error(`canonical operator-beta packet does not authorize host containment file ${requiredFile}`);
+      }
+    }
+  }
+  return commands;
+}
+
+function resolveCanonicalCheckReceipt(packetPath, packet, subject, authority, options = {}) {
+  const runAuthority = authority || require('./aegis-run.cjs');
+  const expectedRunId = options && options.runId;
+  if ((!expectedRunId && typeof runAuthority.listRuns !== 'function') ||
+      (expectedRunId && typeof runAuthority.loadRun !== 'function') ||
+      typeof runAuthority.loadCanonicalCheckReceipt !== 'function' ||
+      typeof runAuthority.loadCanonicalPreHostCheckReceipt !== 'function') {
+    throw new Error('canonical AEGIS check-receipt authority is unavailable');
+  }
+  const packetReal = fs.realpathSync(path.resolve(packetPath));
+  if (!packetReal.startsWith(fs.realpathSync(ROOT) + path.sep)) {
+    throw new Error('packet path escapes the canonical repository');
+  }
+  const packetRelative = path.relative(ROOT, packetReal).split(path.sep).join('/');
+  const packetSha256 = sha256Hex(fs.readFileSync(packetReal));
+  const commands = runnablePacketChecks(packet);
+  const hostCommands = runnableHostContainmentChecks(packet);
+  if (!commands.length) throw new Error('packet declares no runnable deterministic checks');
+  const expected = { packetPath: packetRelative, packetSha256, subject, commands, hostCommands };
+  const candidateRuns = expectedRunId
+    ? [runAuthority.loadRun(expectedRunId)]
+    : runAuthority.listRuns();
+  if (expectedRunId && (!candidateRuns[0] || candidateRuns[0].runId !== expectedRunId)) {
+    throw new Error(`canonical run authority did not return exactly ${expectedRunId}`);
+  }
+  const matches = candidateRuns
+    .flatMap((run) => {
+      if (!run || !run.checks) return [];
+      const bound = { ...expected, runId: run.runId };
+      const completeReceipt = runAuthority.loadCanonicalCheckReceipt(run.checks, bound);
+      const preHostReceipt = runAuthority.loadCanonicalPreHostCheckReceipt(run.checks, bound);
+      const candidates = [];
+      if (completeReceipt && completeReceipt.outcome === 'PASS' && completeReceipt.complete === true) {
+        candidates.push({ run, receipt: completeReceipt, receiptStage: 'COMPLETE' });
+      }
+      if (preHostReceipt && preHostReceipt.outcome === 'PASS' && preHostReceipt.complete === true &&
+          preHostReceipt.receiptType === 'AEGIS_PRE_HOST_CHECK_RECEIPT_V1' &&
+          preHostReceipt.hostContainment && preHostReceipt.hostContainment.state === 'PENDING' &&
+          Array.isArray(preHostReceipt.hostContainment.commands) &&
+          stableJson(preHostReceipt.hostContainment.commands) === stableJson(hostCommands)) {
+        candidates.push({ run, receipt: preHostReceipt, receiptStage: 'PRE_HOST' });
+      }
+      return candidates;
+    });
+  if (!matches.length) {
+    throw new Error(`expected a canonical subject-bound PASS or pre-host snapshot PASS check receipt${expectedRunId ? ` for ${expectedRunId}` : ''}; found 0`);
+  }
+
+  // Legacy control-checkout reviews did not carry --run-id. They remain safe
+  // only when the canonical evidence identifies one and only one run. Choosing
+  // the newest of several matching runs would silently detach a reviewer from
+  // the objective/worktree whose lifecycle the operator is controlling.
+  const matchingRunIds = [...new Set(matches.map((entry) => entry.run.runId))];
+  if (!expectedRunId && matchingRunIds.length !== 1) {
+    throw new Error(`ambiguous canonical receipt coordinate across ${matchingRunIds.length} runs; provide --run-id`);
+  }
+
+  // Re-running the same deterministic checks for an unchanged subject creates
+  // another independently valid receipt; it does not invalidate the earlier
+  // evidence. Bind the latest completed receipt. The remaining keys provide a
+  // stable order for equal timestamps so listRuns() enumeration order can
+  // never change which receipt a reviewer receives.
+  matches.sort((left, right) => {
+    const completed = Date.parse(right.receipt.completedAt) - Date.parse(left.receipt.completedAt);
+    if (completed) return completed;
+    const started = Date.parse(right.receipt.startedAt) - Date.parse(left.receipt.startedAt);
+    if (started) return started;
+    if (right.receiptStage !== left.receiptStage) {
+      return right.receiptStage === 'COMPLETE' ? 1 : -1;
+    }
+    const rightRunId = String(right.run.runId);
+    const leftRunId = String(left.run.runId);
+    const runId = rightRunId < leftRunId ? -1 : rightRunId > leftRunId ? 1 : 0;
+    if (runId) return runId;
+    const rightDigest = String(right.receipt.receiptSha256);
+    const leftDigest = String(left.receipt.receiptSha256);
+    return rightDigest < leftDigest ? -1 : rightDigest > leftDigest ? 1 : 0;
+  });
+  const selected = matches[0];
+  return Object.freeze({ runId: selected.run.runId, receipt: selected.receipt,
+    receiptStage: selected.receiptStage,
+    packetPath: packetRelative, packetSha256, commands: Object.freeze(commands.slice()),
+    hostCommands: Object.freeze(hostCommands.slice()),
+    selection: Object.freeze({
+      rule: expectedRunId
+        ? 'explicit-run-id-then-latest-valid-complete-stage-receipt'
+        : 'unique-run-then-latest-valid-complete-stage-receipt',
+      candidateCount: matches.length,
+    }) });
+}
+
 function evidenceBlock(ctx) {
   if (!ctx) return '';
   const lines = [];
+  if (ctx.checkReceipt) {
+    lines.push('', 'CANONICAL SUBJECT-BOUND CHECK RECEIPT (validated before reviewer launch):');
+    lines.push(`  ${stableJson(ctx.checkReceipt)}`);
+  }
   if (ctx.specs && ctx.specs.length) {
     lines.push('', 'PINNED SPECIFICATIONS (authoritative intent, available read-only in the review workspace):');
     for (const sp of ctx.specs) lines.push(`  ${sp.path}  sha256:${sp.sha.slice(0, 16)}…`);
   }
   if (ctx.checks && ctx.checks.length) {
-    lines.push('', 'DETERMINISTIC EVIDENCE (already executed against this subject):');
-    for (const c of ctx.checks) lines.push(`  exit ${c.exit}  ${c.cmd}`);
-    lines.push('', 'Treat a passing check as evidence that the command ran, NOT that the');
-    lines.push('requirement is met. If a test passes but a user would still see wrong');
-    lines.push('behaviour, that is exactly the finding worth reporting.');
+    const declaredOnly = ctx.checks.filter((check) =>
+      String(check && check.status || '').toUpperCase() === 'DECLARED_ONLY');
+    const executed = ctx.checks.filter(isExecutedCheckReceipt);
+    const nonExecuted = ctx.checks.filter((check) =>
+      String(check && check.status || '').toUpperCase() !== 'DECLARED_ONLY'
+      && !isExecutedCheckReceipt(check));
+    // Preserve the complete caller-supplied evidence object. Reducing a check
+    // to only command + exit silently discarded output/digest/receipt fields
+    // that distinguish an observed run from a packet declaration.
+    if (executed.length) {
+      lines.push('', 'DETERMINISTIC EVIDENCE (executed receipts supplied for this subject):');
+      for (const check of executed) lines.push(`  ${stableJson(check)}`);
+      lines.push('', 'Treat a passing check as evidence that the command ran, NOT that the');
+      lines.push('requirement is met. If a test passes but a user would still see wrong');
+      lines.push('behaviour, that is exactly the finding worth reporting.');
+    }
+    if (declaredOnly.length) {
+      lines.push('', 'DECLARED CHECK REQUIREMENTS (not executed evidence; no run receipt was supplied):');
+      for (const check of declaredOnly) lines.push(`  ${stableJson(check)}`);
+    }
+    if (nonExecuted.length) {
+      lines.push('', 'NON-EXECUTED CHECK STATUS (not execution evidence; receipt shape is absent or incomplete):');
+      for (const check of nonExecuted) lines.push(`  ${stableJson(check)}`);
+    }
   }
   if (ctx.unverified && ctx.unverified.length) {
     lines.push('', 'EXPLICITLY UNVERIFIED (nobody checked these — do not assume either way):');
@@ -248,6 +561,14 @@ actually written. The exact bounded subject and specifications are available
 read-only at the listed repository-relative paths in the isolated workspace.
 Read only those paths. Do not inspect parent directories or unrelated files.
 
+The adapter appends a complete, length- and digest-bound copy of every listed
+subject and pinned specification to this same initial stdin message. It also
+appends one deterministic line challenge per file. Return every exact challenged
+line in inspectionProofs. The adapter independently verifies those responses
+against its retained copied bytes; stdin delivery alone is never file coverage.
+Use the appended contents as the authoritative review input and do not claim
+coverage from filesystem commands.
+
 OBJECTIVE (from the approved task packet):
 ${objective}
 
@@ -261,9 +582,15 @@ misleading tests, deleted functionality.
 
 ${evidenceBlock(ctx)}
 
-DIFF UNDER REVIEW:
-${diff}
-${RECORD_CONTRACT}`;
+EXACT CHANGE COORDINATES:
+  subject SHA-256: ${subject.subjectSha256 || 'UNAVAILABLE'}
+  range: ${subject.range || 'UNAVAILABLE'}
+  diff bytes: ${Number.isInteger(subject.diffBytes) ? subject.diffBytes : Buffer.byteLength(String(diff || ''), 'utf8')}
+
+The diff text is deliberately not duplicated here. The digest-bound exact file
+bundle appended below is the authoritative subject and preserves every subject
+and specification byte while keeping the initial input within the CLI limit.
+${recordContract('codex')}`;
 }
 
 function grokPrompt(objective, subject, diff, ctx) {
@@ -273,6 +600,20 @@ serious flaw that previous engineers missed, and try to prove it incorrect.
 The exact bounded subject and specifications are available read-only at the
 listed repository-relative paths in the isolated workspace. Read only those
 paths. Do not inspect parent directories or unrelated files.
+
+MANDATORY EVIDENCE SEQUENCE:
+1. Before emitting any verdict, invoke the Read tool for EVERY SUBJECT PATH and
+   EVERY PINNED SPECIFICATION path listed below.
+2. Read EVERY file completely. If Read paginates, continue with additional
+   offsets until every line has been returned. The adapter reconstructs each
+   file from native receipts and verifies its byte count and SHA-256; a first
+   page or ranges containing any gap are recorded as incomplete coverage.
+3. Complete those reads and inspect the relevant implementation and tests.
+4. Only then emit the final JSON review record.
+
+Do not emit a "pending", "starting", "in progress", or other placeholder
+verdict while reads remain. If an authorized read fails, name the exact failed
+path in unverified and finish with only evidence you actually inspected.
 
 Attack: requirement interpretation, edge cases, regression paths, authorization,
 security, data integrity, state, concurrency, error paths, dependency
@@ -289,9 +630,15 @@ ${subject.subjectPaths.map((p) => '  ' + p).join('\n')}
 
 ${evidenceBlock(ctx)}
 
-DIFF UNDER REVIEW:
-${diff}
-${RECORD_CONTRACT}`;
+EXACT CHANGE COORDINATES:
+  subject SHA-256: ${subject.subjectSha256 || 'UNAVAILABLE'}
+  range: ${subject.range || 'UNAVAILABLE'}
+  diff bytes: ${Number.isInteger(subject.diffBytes) ? subject.diffBytes : Buffer.byteLength(String(diff || ''), 'utf8')}
+
+The diff is deliberately not placed in argv. The reviewer must inspect the
+digest-bound copied files above; this prevents a large subject from exceeding
+the operating-system argument limit before the governed process starts.
+${recordContract('grok')}`;
 }
 
 // ── raw output -> record ────────────────────────────────────────────────────
@@ -308,10 +655,8 @@ ${RECORD_CONTRACT}`;
 // Fields a CLI envelope uses to carry the model's own output.
 const ENVELOPE_TEXT_FIELDS = ['text', 'output', 'result', 'response', 'content', 'message', 'last_message'];
 
-function extractJson(text, unwrapDepth = 0) {
+function topLevelJsonObjects(text) {
   if (typeof text !== 'string') return null;
-
-  // Collect EVERY balanced top-level object, not just the first.
   const objs = [];
   for (let k = 0; k < text.length; k++) {
     if (text[k] !== '{') continue;
@@ -332,6 +677,15 @@ function extractJson(text, unwrapDepth = 0) {
     try { objs.push(JSON.parse(text.slice(k, closed + 1))); } catch { /* not JSON */ }
     k = closed;                            // continue after this object
   }
+  return objs;
+}
+
+function extractJson(text, unwrapDepth = 0) {
+  // Verdict parsing is deliberately separate from terminal metadata parsing.
+  // A schema-valid structuredOutput can exist inside a cancelled/max-turns
+  // envelope, so selecting the verdict must never erase how the tool ended.
+  const objs = topLevelJsonObjects(text);
+  if (!objs) return null;
   if (!objs.length) return null;
 
   // PROVEN DEFECT (2026-08-25): --json-schema makes the model emit a
@@ -346,7 +700,12 @@ function extractJson(text, unwrapDepth = 0) {
   //   1. the envelope's structuredOutput — the tool's own authoritative result
   //   2. the LAST conforming object — the model's final word, not its first
   //   3. the last object of any shape, so a caller can still inspect an envelope
-  for (const o of objs) {
+  // A tool may emit more than one envelope while it works. The final envelope
+  // is authoritative in the same way the final plain verdict below is: an
+  // earlier planning/placeholder approval must never outrank a later rejection.
+  // Walk backwards so the two representations share one ordering rule.
+  for (let i = objs.length - 1; i >= 0; i--) {
+    const o = objs[i];
     if (o && typeof o === 'object' && o.structuredOutput) {
       const so = typeof o.structuredOutput === 'string'
         ? extractJson(o.structuredOutput, unwrapDepth + 1)
@@ -361,6 +720,13 @@ function extractJson(text, unwrapDepth = 0) {
     for (let i = objs.length - 1; i >= 0; i--) {
       const o = objs[i];
       if (!o || typeof o !== 'object') continue;
+      // `codex exec --json` carries the final answer in an item.completed
+      // event rather than in a top-level text field.
+      if (o.type === 'item.completed' && o.item && o.item.type === 'agent_message' &&
+          typeof o.item.text === 'string') {
+        const inner = extractJson(o.item.text, unwrapDepth + 1);
+        if (inner && typeof inner.disposition === 'string') return inner;
+      }
       for (const f of ENVELOPE_TEXT_FIELDS) {
         if (typeof o[f] === 'string') {
           const inner = extractJson(o[f], unwrapDepth + 1);
@@ -370,6 +736,342 @@ function extractJson(text, unwrapDepth = 0) {
     }
   }
   return objs[objs.length - 1];
+}
+
+// Grok's ordinary JSON output preserves only the final answer. That is not
+// enough for a gate reviewer: a model can say it read every bounded file even
+// when no read_file call occurred. streaming-json preserves the native ACP
+// tool_call/tool_call_update receipts, while text chunks remain the only place
+// a reviewer verdict is allowed to originate.
+function grokStreamEvents(rawText) {
+  if (typeof rawText !== 'string') return [];
+  const events = [];
+  for (const line of rawText.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      if (event && typeof event === 'object' && typeof event.type === 'string') events.push(event);
+    } catch { /* stderr and partial lines are not ACP receipts */ }
+  }
+  return events;
+}
+
+function authoritativeGrokSpend(rawText, capUsd) {
+  const cap = Number(capUsd);
+  if (!Number.isFinite(cap) || cap <= 0) {
+    return Object.freeze({ ok: false,
+      reason: 'Grok post-run telemetry comparison requires a positive finite authorized telemetry ceiling' });
+  }
+  const events = grokStreamEvents(rawText);
+  const terminals = events.filter((event) => event.type === 'end');
+  if (terminals.length !== 1 || terminals[0].stopReason !== 'end_turn'
+      || events[events.length - 1] !== terminals[0]) {
+    return Object.freeze({ ok: false, telemetryCeilingUsd: cap,
+      reason: 'Grok post-run cost telemetry is not bound to exactly one successful terminal stdout event' });
+  }
+  const terminal = terminals[0];
+  const candidates = [terminal.total_cost_usd, terminal.totalCostUsd,
+    terminal.usage && terminal.usage.total_cost_usd,
+    terminal.usage && terminal.usage.totalCostUsd]
+    .filter((value) => value !== undefined && value !== null);
+  const distinct = [...new Set(candidates.map(Number))];
+  if (distinct.length !== 1 || !Number.isFinite(distinct[0]) || distinct[0] < 0) {
+    return Object.freeze({ ok: false, telemetryCeilingUsd: cap,
+      reason: 'successful Grok terminal stdout event has missing, conflicting, or invalid cost telemetry' });
+  }
+  const actualUsd = distinct[0];
+  const withinCap = actualUsd <= cap;
+  return Object.freeze({
+    ok: withinCap,
+    telemetryCeilingUsd: cap,
+    actualUsd,
+    method: 'post-run-credit-equivalent-terminal-stdout',
+    authorizationScope: 'post-run-telemetry-only',
+    classification: 'credit-equivalent-pricing-telemetry',
+    billedSpend: false,
+    capEnforcement: false,
+    preRunSpendEnforced: false,
+    incrementalSpendEnforced: false,
+    enforceablePrechargeCap: false,
+    possibleEventOvershoot: true,
+    observedEventOvershoot: !withinCap,
+    reason: withinCap
+      ? 'terminal total_cost_usd is post-run credit-equivalent pricing telemetry under a separately proven fresh execution-bound zero-metered billing state; authentication is not usage evidence, this is not billed spend or cap enforcement, and one completed event can overshoot before this comparison'
+      : `terminal reported credit-equivalent pricing ${actualUsd} USD exceeds the authorized telemetry ceiling ${cap} USD after completion; an overshoot was observed and the review is unusable`,
+  });
+}
+
+function grokSpendContract(capUsd) {
+  const cap = Number(capUsd);
+  if (!Number.isFinite(cap) || cap <= 0) return null;
+  return Object.freeze({
+    authorizationScope: 'post-run-telemetry-only',
+    telemetryCeilingUsd: cap,
+    billingRequirement: 'fresh-execution-bound-zero-metered',
+    billedSpend: false,
+    capEnforcement: false,
+    preRunSpendEnforced: false,
+    incrementalSpendEnforced: false,
+    enforceablePrechargeCap: false,
+  });
+}
+
+// Only coverage objects created by grokReadReceiptCoverage() in this process
+// are eligible to unlock a Grok verdict. This capability boundary prevents a
+// caller from fabricating `{ complete: true }` (or a covered-path list) and
+// asking buildRecord() to turn prompt claims into gate evidence.
+const validatedGrokCoverage = new WeakSet();
+
+function extractGrokStreamingReview(rawText, coverage) {
+  if (!coverage || !validatedGrokCoverage.has(coverage) || coverage.complete !== true) return null;
+  const text = grokStreamEvents(rawText)
+    .filter((event) => event.type === 'text' && typeof event.data === 'string')
+    .map((event) => event.data)
+    .join('');
+  return text ? extractJson(text) : null;
+}
+
+function grokReadReceiptCoverage(rawText, manifest, reviewCwd) {
+  const manifestEntries = Array.isArray(manifest) ? manifest : [];
+  const expectedEntries = new Map(manifestEntries.map((entry) => [String(entry.path), entry]));
+  const expected = new Set(expectedEntries.keys());
+  const calls = new Map();
+  const failed = new Set();
+  const completedReads = new Set();
+  const coveredLines = new Map([...expected].map((relative) => [relative, new Map()]));
+  const reportedTotalLines = new Map();
+  const lexicalCwd = path.resolve(reviewCwd || '.');
+  // macOS exposes the same temporary directory through both /var and
+  // /private/var. Grok 1.0.5 reports the canonical /private/var path even when
+  // Node created and passed a lexical /var cwd. Resolve the live directory
+  // first, then apply only that one documented alias for frozen evidence whose
+  // ephemeral directory no longer exists. No other aliases are accepted.
+  function canonicalMacPath(rawPath) {
+    const resolved = path.resolve(rawPath);
+    if (resolved === '/var' || resolved.startsWith('/var/')) return `/private${resolved}`;
+    return resolved;
+  }
+  let realCwd = lexicalCwd;
+  try {
+    const realpath = fs.realpathSync.native || fs.realpathSync;
+    realCwd = realpath(lexicalCwd);
+  } catch { /* frozen review sandboxes are intentionally already removed */ }
+  const cwd = canonicalMacPath(realCwd);
+  let terminalCount = 0;
+  let terminalStopReason = null;
+  let postTerminalEvents = 0;
+  let terminalSeen = false;
+  let verdictText = '';
+  let verdictSeen = false;
+  let verdictBeforeCoverage = false;
+
+  const manifestSha256 = sha256Hex(Buffer.from(stableJson(
+    [...expectedEntries.values()]
+      .map((entry) => ({
+        path: String(entry.path),
+        lines: entry.lines,
+        bytes: entry.bytes,
+        sha256: entry.sha256,
+      }))
+      .sort((left, right) => left.path.localeCompare(right.path)),
+  ), 'utf8'));
+
+  function exactRelative(rawPath) {
+    if (typeof rawPath !== 'string' || !rawPath.trim()) return null;
+    const absolute = canonicalMacPath(path.isAbsolute(rawPath)
+      ? rawPath : path.resolve(lexicalCwd, rawPath));
+    if (absolute !== cwd && !absolute.startsWith(cwd + path.sep)) return null;
+    const relative = path.relative(cwd, absolute).split(path.sep).join('/');
+    return expected.has(relative) ? relative : null;
+  }
+
+  function reconstructedPaths() {
+    const successful = new Set();
+    for (const [relative, entry] of expectedEntries) {
+      if (failed.has(relative) || !completedReads.has(relative)) continue;
+      const lines = coveredLines.get(relative) || new Map();
+      if (!Number.isInteger(entry.lines) || lines.size !== entry.lines) continue;
+      const ordered = [];
+      let hasGap = false;
+      for (let lineNumber = 1; lineNumber <= entry.lines; lineNumber++) {
+        if (!lines.has(lineNumber)) { hasGap = true; break; }
+        ordered.push(lines.get(lineNumber));
+      }
+      if (hasGap) continue;
+      const rebuilt = ordered.join('');
+      const rebuiltBytes = Buffer.byteLength(rebuilt);
+      const rebuiltSha = crypto.createHash('sha256').update(rebuilt).digest('hex');
+      const totalLines = reportedTotalLines.get(relative);
+      const trailingEmptyLineConvention = totalLines === entry.lines + 1 && rebuilt.endsWith('\n');
+      if ((totalLines !== entry.lines && !trailingEmptyLineConvention)
+          || rebuiltBytes !== entry.bytes || rebuiltSha !== entry.sha256) continue;
+      successful.add(relative);
+    }
+    return successful;
+  }
+
+  for (const event of grokStreamEvents(rawText)) {
+    if (terminalSeen) {
+      if (event.type === 'end') terminalCount++;
+      postTerminalEvents++;
+      continue;
+    }
+    if (event.type === 'end') {
+      terminalSeen = true;
+      terminalCount++;
+      terminalStopReason = typeof event.stopReason === 'string' ? event.stopReason : null;
+      continue;
+    }
+    if (event.type === 'text' && typeof event.data === 'string') {
+      verdictText += event.data;
+      if (!verdictSeen) {
+        const candidate = extractJson(verdictText);
+        if (candidate && typeof candidate.disposition === 'string') {
+          verdictSeen = true;
+          const reconstructed = reconstructedPaths();
+          if (reconstructed.size !== expected.size) verdictBeforeCoverage = true;
+        }
+      }
+      continue;
+    }
+    if (event.type === 'tool_call' && event.toolName === 'read_file' && typeof event.toolCallId === 'string') {
+      const legacyRelative = exactRelative(event.rawInput && event.rawInput.path);
+      const currentRelative = exactRelative(event.rawInput && event.rawInput.target_file);
+      if (legacyRelative && currentRelative && legacyRelative !== currentRelative) continue;
+      const relative = legacyRelative || currentRelative;
+      if (!relative) continue;
+      const rawOffset = event.rawInput && event.rawInput.offset;
+      const rawLimit = event.rawInput && event.rawInput.limit;
+      calls.set(event.toolCallId, {
+        relative,
+        offset: Number.isInteger(rawOffset) && rawOffset >= 1 ? rawOffset : null,
+        limit: Number.isInteger(rawLimit) && rawLimit >= 1 ? rawLimit : null,
+      });
+      continue;
+    }
+    if (event.type !== 'tool_call_update' || typeof event.toolCallId !== 'string') continue;
+    const call = calls.get(event.toolCallId);
+    if (!call) continue;
+    const relative = call.relative;
+    if (event.status === 'failed') {
+      failed.add(relative);
+      continue;
+    }
+    if (event.status !== 'completed') continue;
+
+    // A completed status or requested range does not prove bytes were returned.
+    // Grok 1.0.5 exposes the copied path, exact unannotated raw_output, starting
+    // line and total line count. Rebuild each file from those native receipts;
+    // only a byte-for-byte manifest digest match proves complete coverage.
+    const output = event.rawOutput;
+    const fileContent = output && output.type === 'ReadFile' && output.FileContent;
+    const entry = expectedEntries.get(relative);
+    const totalLines = fileContent && fileContent.total_lines;
+    const outputOffset = fileContent && fileContent.offset;
+    const outputLimit = fileContent && fileContent.limit;
+    const start = Number.isInteger(outputOffset) && outputOffset >= 1
+      ? outputOffset : (call.offset || 1);
+    const rawOutput = fileContent && fileContent.raw_output;
+    const receiptLines = typeof rawOutput === 'string'
+      ? (rawOutput.match(/[^\n]*\n|[^\n]+$/g) || [])
+      : null;
+    const manifestComplete = entry
+      && Number.isInteger(entry.lines) && entry.lines >= 0
+      && Number.isInteger(entry.bytes) && entry.bytes >= 0
+      && typeof entry.sha256 === 'string' && /^[a-f0-9]{64}$/.test(entry.sha256);
+    const previousTotalLines = reportedTotalLines.get(relative);
+    const totalsConsistent = previousTotalLines === undefined || previousTotalLines === totalLines;
+    const totalConventionKnown = manifestComplete
+      && (totalLines === entry.lines || totalLines === entry.lines + 1);
+    const offsetAgrees = call.offset
+      ? outputOffset === call.offset
+      : (!Number.isInteger(outputOffset) || outputOffset === 1);
+    const limitAgrees = call.limit
+      ? outputLimit === call.limit
+      : !Number.isInteger(outputLimit);
+    const withinRequestedLimit = !call.limit || (receiptLines && receiptLines.length <= call.limit);
+    const withinOutputLimit = !Number.isInteger(outputLimit) || (receiptLines && receiptLines.length <= outputLimit);
+    const rangeFits = receiptLines && Number.isInteger(totalLines)
+      && start + receiptLines.length - 1 <= totalLines;
+    if (!fileContent || typeof fileContent.content !== 'string'
+        || exactRelative(fileContent.absolute_path) !== relative
+        || !manifestComplete || !totalConventionKnown || !totalsConsistent
+        || !offsetAgrees || !limitAgrees || !withinRequestedLimit || !withinOutputLimit || !rangeFits
+        || (entry.lines > 0 && receiptLines.length === 0)) {
+      failed.add(relative);
+      continue;
+    }
+    reportedTotalLines.set(relative, totalLines);
+    completedReads.add(relative);
+    const lines = coveredLines.get(relative);
+    for (let index = 0; index < receiptLines.length; index++) {
+      const lineNumber = start + index;
+      const existing = lines.get(lineNumber);
+      if (existing !== undefined && existing !== receiptLines[index]) failed.add(relative);
+      else lines.set(lineNumber, receiptLines[index]);
+    }
+  }
+
+  const successful = reconstructedPaths();
+
+  const missingPaths = [...expected].filter((relative) => !successful.has(relative)).sort();
+  const failedPaths = [...failed].filter((relative) => !successful.has(relative)).sort();
+  // Frozen successful Grok 1.0.5 streaming-json evidence terminates exactly
+  // once with {type:"end", stopReason:"end_turn"}. Missing, duplicate,
+  // unknown/refusal/interrupted reasons, or any parsed event after that receipt
+  // make the protocol incomplete regardless of otherwise valid file digests.
+  const terminalValid = terminalCount === 1
+    && terminalStopReason === 'end_turn'
+    && postTerminalEvents === 0;
+  const result = Object.freeze({
+    complete: terminalValid && missingPaths.length === 0
+      && manifestEntries.length === expectedEntries.size
+      && !verdictBeforeCoverage,
+    endSeen: terminalCount > 0,
+    terminalValid,
+    terminalCount,
+    terminalStopReason,
+    postTerminalEvents,
+    verdictSeen,
+    verdictBeforeCoverage,
+    manifestSha256,
+    expectedPaths: [...expected].sort(),
+    readPaths: [...successful].sort(),
+    missingPaths,
+    failedPaths,
+  });
+  validatedGrokCoverage.add(result);
+  return result;
+}
+
+function enforceGrokReadReceipts(reviewer, parsed, coverage) {
+  if (reviewer !== 'grok') return { parsed, unavailableReason: null };
+  if (coverage && coverage.complete) return { parsed, unavailableReason: null };
+  const missing = coverage && coverage.missingPaths && coverage.missingPaths.length
+    ? coverage.missingPaths.join(', ')
+    : '(receipt stream unavailable)';
+  const failed = coverage && coverage.failedPaths && coverage.failedPaths.length
+    ? ` Failed reads: ${coverage.failedPaths.join(', ')}.`
+    : '';
+  const terminal = coverage && !coverage.terminalValid
+    ? ` The Grok stream does not have exactly one successful terminal end receipt (count=${coverage.terminalCount || 0}, stopReason=${coverage.terminalStopReason || 'missing'}, postTerminalEvents=${coverage.postTerminalEvents || 0}).`
+    : '';
+  const ordering = coverage && coverage.verdictBeforeCoverage
+    ? ' A disposition-bearing verdict was emitted before complete digest-verified read coverage.'
+    : '';
+  return {
+    parsed: null,
+    unavailableReason: `Grok read coverage is not proven by successful read_file receipts for every copied subject/spec path. Missing: ${missing}.${failed}${terminal}${ordering}`,
+  };
+}
+
+// Reviewer protocols are defined on stdout only. Stderr remains in preserved
+// raw evidence for diagnosis, but it cannot contribute receipts, a verdict,
+// or terminal/abnormal-stop metadata for either Grok or Codex.
+function reviewerProtocolText(reviewer, result) {
+  if (reviewer === 'grok' || reviewer === 'codex') return String(result && result.stdout || '');
+  return String(result && result.raw || '');
 }
 
 // A parsed object is only a review if it actually carries a verdict. Some CLIs
@@ -398,59 +1100,278 @@ const ABNORMAL_STOP = /^(max_turns|max turns reached|cancelled|canceled|error|ti
  */
 function stopWasAbnormal(rawText) {
   if (typeof rawText !== 'string') return null;
-  const env = extractJson(rawText, 1);
-  const stop = env && typeof env.stopReason === 'string' ? env.stopReason : null;
-  if (stop && ABNORMAL_STOP.test(stop)) return stop;
+  const envelopes = (topLevelJsonObjects(rawText) || [])
+    .filter((value) => value && typeof value === 'object' && typeof value.stopReason === 'string');
+  const abnormal = envelopes.map((value) => value.stopReason)
+    .find((stop) => ABNORMAL_STOP.test(stop));
+  if (abnormal) return abnormal;
   if (/^\s*Error:\s*max turns reached/mi.test(rawText)) return 'max turns reached';
   if (/^\s*Error:\s*(timeout|cancelled)/mi.test(rawText)) return 'cancelled';
+  const codexFailure = (topLevelJsonObjects(rawText) || []).find((value) => value &&
+    typeof value === 'object' && ['turn.failed', 'item.failed', 'error'].includes(value.type));
+  if (codexFailure) return codexFailure.type;
   return null;
+}
+
+// `codex exec --json` emits JSONL protocol events. A successful run ends with
+// exactly one `turn.completed`; it does not emit the Grok/Claude-style
+// stopReason envelope the old adapter expected. Verdict parsing stays separate:
+// the final agent_message carries the review JSON, while this function proves
+// only that the pinned transport completed cleanly and drained its process
+// group. Missing, duplicate, failed, or post-terminal protocol events refuse.
+function validateCodexTerminalEnvelope(rawText, completionEvidence = null) {
+  if (typeof rawText !== 'string') {
+    return Object.freeze({ ok: false, reason: 'Codex JSONL terminal protocol is missing' });
+  }
+  const events = (topLevelJsonObjects(rawText) || [])
+    .filter((value) => value && typeof value === 'object' && typeof value.type === 'string');
+  const terminals = events.filter((value) => value.type === 'turn.completed' || value.type === 'turn.failed');
+  if (terminals.length !== 1) {
+    return Object.freeze({ ok: false,
+      reason: `Codex JSONL terminal count is ${terminals.length}; exactly one is required` });
+  }
+  const terminal = terminals[0];
+  if (terminal.type !== 'turn.completed') {
+    return Object.freeze({ ok: false,
+      reason: `Codex JSONL terminal did not complete successfully (${terminal.type})` });
+  }
+  const terminalIndex = events.indexOf(terminal);
+  if (terminalIndex !== events.length - 1) {
+    return Object.freeze({ ok: false,
+      reason: `Codex JSONL emitted ${events.length - terminalIndex - 1} protocol event(s) after turn.completed` });
+  }
+  const abnormal = events.find((value) => ['turn.failed', 'item.failed', 'error'].includes(value.type));
+  if (abnormal) {
+    return Object.freeze({ ok: false, reason: `Codex JSONL contains abnormal event ${abnormal.type}` });
+  }
+  const c = completionEvidence;
+  if (!c || c.authority !== 'review-adapters.cjs runTool' || c.status !== 0 ||
+      c.timedOut === true || c.outputOverflow === true || c.error ||
+      c.groupDrained !== true || c.inputComplete !== true ||
+      c.subjectSnapshotComplete !== true || c.manifestSnapshotComplete !== true ||
+      c.complete !== true) {
+    return Object.freeze({ ok: false,
+      reason: 'Codex process/transport completion evidence is missing or incomplete' });
+  }
+  return Object.freeze({ ok: true, terminalType: terminal.type, event: terminal });
 }
 
 // A findings array whose entries admit they are placeholders is not evidence.
 // Cheap, and it catches the exact shape the truncated run produced.
-const PLACEHOLDER = /\b(pending|not yet inspected|starting (the )?(adversarial )?review|in progress|to be determined|tbd)\b/i;
+const PLACEHOLDER_LOCATION = /^\s*(pending|not yet inspected|starting (the )?(adversarial )?review|in progress|to be determined|tbd)\s*$/i;
+const PLACEHOLDER_PROBLEM = /\b(full prompt and subject files|required subject files?) (?:are )?not yet inspected\b[\s\S]*\bstarting (the )?(adversarial )?review\b/i;
+const PLACEHOLDER_UNVERIFIED = /^\s*(required )?reads? (?:are |is )?not yet completed\.?\s*$/i;
 function looksUnfinished(parsed) {
   if (!parsed || !Array.isArray(parsed.findings)) return false;
-  return parsed.findings.some((f) =>
-    PLACEHOLDER.test(String(f && f.location || '')) ||
-    PLACEHOLDER.test(String(f && f.problem || '')));
+  const unfinishedFinding = parsed.findings.some((f) =>
+    PLACEHOLDER_LOCATION.test(String(f && f.location || '')) ||
+    PLACEHOLDER_PROBLEM.test(String(f && f.problem || '')));
+  const unfinishedAdmission = Array.isArray(parsed.unverified) &&
+    parsed.unverified.some((value) => PLACEHOLDER_UNVERIFIED.test(String(value || '')));
+  return unfinishedFinding || unfinishedAdmission;
 }
 
-function isUsableReview(o) {
-  return !!(o && typeof o === 'object' && typeof o.disposition === 'string');
+const REVIEW_DISPOSITIONS = ['APPROVE', 'APPROVE_WITH_NOTES', 'REJECT'];
+const REVIEW_SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFORMATIONAL'];
+const REVIEW_KEYS = ['disposition', 'findings', 'unverified'];
+const CODEX_REVIEW_KEYS = [...REVIEW_KEYS, 'inspectionProofs'];
+const FINDING_KEYS = ['evidence', 'file', 'impact', 'location', 'problem',
+  'requiredCorrection', 'severity', 'status', 'verificationMethod'];
+const INSPECTION_PROOF_KEYS = ['lineNumber', 'lineText', 'path'];
+
+function hasExactKeys(value, expected) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && stableJson(Object.keys(value).sort()) === stableJson(expected.slice().sort());
+}
+
+function validateReviewPayload(value, reviewer = null) {
+  const expectedKeys = reviewer === 'codex' ? CODEX_REVIEW_KEYS : REVIEW_KEYS;
+  if (!hasExactKeys(value, expectedKeys)) {
+    return { ok: false, reason: `review payload must contain exactly ${expectedKeys.join(', ')}` };
+  }
+  if (!REVIEW_DISPOSITIONS.includes(value.disposition)) {
+    return { ok: false, reason: 'review disposition is not recognized' };
+  }
+  if (!Array.isArray(value.findings) || !Array.isArray(value.unverified)
+    || !value.unverified.every((item) => typeof item === 'string')) {
+    return { ok: false, reason: 'findings and unverified must be explicit arrays with string unverified entries' };
+  }
+  for (let index = 0; index < value.findings.length; index++) {
+    const finding = value.findings[index];
+    if (!hasExactKeys(finding, FINDING_KEYS)) {
+      return { ok: false, reason: `finding ${index + 1} does not match the exact finding contract` };
+    }
+    if (!REVIEW_SEVERITIES.includes(finding.severity) || finding.status !== 'OPEN') {
+      return { ok: false, reason: `finding ${index + 1} has an invalid severity or status` };
+    }
+    for (const key of FINDING_KEYS.filter((key) => key !== 'severity')) {
+      if (typeof finding[key] !== 'string') {
+        return { ok: false, reason: `finding ${index + 1}.${key} must be a string` };
+      }
+    }
+    if (!finding.file.trim() || !finding.problem.trim() || !finding.evidence.trim()) {
+      return { ok: false, reason: `finding ${index + 1} is missing file, problem, or evidence` };
+    }
+    if (['CRITICAL', 'HIGH'].includes(finding.severity)
+      && (!finding.impact.trim() || !finding.requiredCorrection.trim()
+        || !finding.verificationMethod.trim())) {
+      return { ok: false, reason: `blocking finding ${index + 1} lacks impact, correction, or verification` };
+    }
+  }
+  const hasBlockingFinding = value.findings.some((finding) =>
+    ['CRITICAL', 'HIGH'].includes(finding.severity));
+  if (hasBlockingFinding && value.disposition !== 'REJECT') {
+    return { ok: false, reason: 'an OPEN CRITICAL or HIGH finding requires disposition REJECT' };
+  }
+  if (value.findings.length && !hasBlockingFinding
+    && !['APPROVE_WITH_NOTES', 'REJECT'].includes(value.disposition)) {
+    return { ok: false, reason: 'non-blocking findings require disposition APPROVE_WITH_NOTES or REJECT' };
+  }
+  if (!value.findings.length && value.disposition === 'APPROVE_WITH_NOTES') {
+    return { ok: false, reason: 'APPROVE_WITH_NOTES requires at least one non-blocking finding' };
+  }
+  if (reviewer === 'codex') {
+    if (!Array.isArray(value.inspectionProofs)) {
+      return { ok: false, reason: 'Codex inspectionProofs must be an explicit array' };
+    }
+    for (let index = 0; index < value.inspectionProofs.length; index++) {
+      const proof = value.inspectionProofs[index];
+      if (!hasExactKeys(proof, INSPECTION_PROOF_KEYS)
+        || typeof proof.path !== 'string'
+        || !Number.isInteger(proof.lineNumber) || proof.lineNumber < 1
+        || typeof proof.lineText !== 'string') {
+        return { ok: false, reason: `Codex inspection proof ${index + 1} is malformed` };
+      }
+    }
+  }
+  return { ok: true, reason: null };
+}
+
+function isUsableReview(o, reviewer = null) {
+  return validateReviewPayload(o, reviewer).ok;
+}
+
+function codexCoveredPaths(inputDelivery) {
+  return inputDelivery && Array.isArray(inputDelivery.coveredPaths)
+    ? inputDelivery.coveredPaths.slice()
+    : [];
+}
+
+const validatedCodexInspection = new WeakSet();
+
+function validateCodexInspectionProofs(parsed, inputDelivery) {
+  const payload = validateReviewPayload(parsed, 'codex');
+  if (!payload.ok) return Object.freeze({ complete: false, coveredPaths: [], reason: payload.reason });
+  const challenges = inputDelivery && Array.isArray(inputDelivery.inspectionChallenges)
+    ? inputDelivery.inspectionChallenges : [];
+  if (!challenges.length || parsed.inspectionProofs.length !== challenges.length) {
+    return Object.freeze({ complete: false, coveredPaths: [], reason: 'inspection proof count does not match the delivered challenge set' });
+  }
+  const expected = new Map(challenges.map((challenge) => [challenge.path, challenge]));
+  const coveredPaths = [];
+  for (const proof of parsed.inspectionProofs) {
+    const challenge = expected.get(proof.path);
+    if (!challenge || coveredPaths.includes(proof.path)
+      || proof.lineNumber !== challenge.lineNumber
+      || sha256Hex(Buffer.from(proof.lineText, 'utf8')) !== challenge.lineSha256) {
+      return Object.freeze({ complete: false, coveredPaths: [], reason: `inspection proof failed for ${proof.path}` });
+    }
+    coveredPaths.push(proof.path);
+  }
+  const attestation = Object.freeze({
+    complete: true,
+    method: 'exact subject delivery plus deterministic per-file reference challenge; proves bounded file reference, not complete cognitive inspection',
+    coveredPaths: Object.freeze(coveredPaths.slice().sort()),
+    challengeSha256: inputDelivery.inspectionChallengeSha256,
+    responseSha256: sha256Hex(Buffer.from(stableJson(parsed.inspectionProofs), 'utf8')),
+  });
+  validatedCodexInspection.add(attestation);
+  return attestation;
 }
 
 // Build a record. `parsed` null/unusable => UNAVAILABLE, never APPROVE.
-function buildRecord({ reviewer, reviewerModel, packetId, subject, parsed, unavailableReason, ts }) {
+function buildRecord({ reviewer, reviewerModel, packetId, subject, parsed, unavailableReason, ts,
+  coveredPaths, inputDelivery, codexInspection, readCoverage, invocationId, spendAuthorization, subjectSnapshot, checkReceipt }) {
+  const covered = new Set(codexInspection && Array.isArray(codexInspection.coveredPaths)
+    ? codexInspection.coveredPaths : []);
+  const codexCoverageComplete = reviewer !== 'codex'
+    || (codexInspection && validatedCodexInspection.has(codexInspection)
+      && codexInspection.complete === true
+      && subject.subjectPaths.every((subjectPath) => covered.has(subjectPath)));
+  const grokExpected = new Set(readCoverage && Array.isArray(readCoverage.expectedPaths)
+    ? readCoverage.expectedPaths : []);
+  const grokRead = new Set(readCoverage && Array.isArray(readCoverage.readPaths)
+    ? readCoverage.readPaths : []);
+  const grokCoverageComplete = reviewer !== 'grok'
+    || (readCoverage && validatedGrokCoverage.has(readCoverage)
+      && readCoverage.complete === true
+      && readCoverage.terminalValid === true
+      && readCoverage.verdictBeforeCoverage === false
+      && typeof readCoverage.manifestSha256 === 'string'
+      && /^[a-f0-9]{64}$/.test(readCoverage.manifestSha256)
+      && subject.subjectPaths.every((subjectPath) =>
+        grokExpected.has(subjectPath) && grokRead.has(subjectPath)));
   const base = {
-    reviewId: `REV-${ts.replace(/[^0-9]/g, '').slice(0, 14)}-${reviewer}`,
+    reviewId: invocationId || `REV-${ts.replace(/[^0-9]/g, '').slice(0, 14)}-${reviewer}`,
     ts,
     reviewer,
     reviewerModel,
     packetId,
     reviewOf: {
       diffSha256: subject.subjectSha256,
-      changedPaths: subject.subjectPaths.slice(),
+      // Paths identify the exact subject delivered to the reviewer for its
+      // verdict. Codex additionally must return one unpredictable per-file
+      // reference challenge. This is evidence that each bundled file was
+      // referenced; it is not a claim that cognition can be cryptographically
+      // measured. Grok paths retain their stronger native read-receipt rule.
+      changedPaths: (reviewer === 'codex' && !codexCoverageComplete)
+        || (reviewer === 'grok' && !grokCoverageComplete)
+        ? [] : subject.subjectPaths.slice(),
     },
   };
-  if (!parsed || typeof parsed !== 'object' || !parsed.disposition) {
+  const notes = [];
+  if (reviewer === 'codex' && inputDelivery) notes.push(`Codex inputDelivery ${stableJson(inputDelivery)}`);
+  if (reviewer === 'codex' && codexInspection) notes.push(`Codex inspectionProof ${stableJson(codexInspection)}`);
+  if (reviewer === 'grok' && readCoverage) notes.push(`Grok readCoverage ${stableJson(readCoverage)}`);
+  if (reviewer === 'grok' && spendAuthorization) notes.push(`Grok postRunSpendTelemetry ${stableJson(spendAuthorization)}`);
+  if (subjectSnapshot) notes.push(`subjectSnapshot ${stableJson(subjectSnapshot)}`);
+  if (checkReceipt) notes.push(`deterministicCheckReceipt ${stableJson({
+    runId: checkReceipt.runId,
+    receiptSha256: checkReceipt.receiptSha256,
+    subject: checkReceipt.subject,
+    packet: checkReceipt.packet,
+    hostContainmentReceiptSha256: checkReceipt.hostContainment
+      ? checkReceipt.hostContainment.receiptSha256 : null,
+  })}`);
+  if (notes.length) base.notes = notes.join('\n');
+  if (reviewer === 'codex' && !codexCoverageComplete) {
     return {
       ...base,
       disposition: 'UNAVAILABLE',
-      unavailableReason: unavailableReason || 'the reviewer produced no parseable review record',
+      unavailableReason: unavailableReason
+        || 'Codex inspection coverage was not proven by the deterministic exact-line challenge for every reviewed path',
       findings: [],
     };
   }
-  const allowed = ['APPROVE', 'APPROVE_WITH_NOTES', 'REJECT'];
-  if (!allowed.includes(parsed.disposition)) {
+  if (reviewer === 'grok' && !grokCoverageComplete) {
     return {
       ...base,
       disposition: 'UNAVAILABLE',
-      unavailableReason: `the reviewer returned an unrecognised disposition ${JSON.stringify(parsed.disposition)}`,
+      unavailableReason: unavailableReason
+        || 'Grok native read coverage was missing, incomplete, forged, out of order, or not bound to every subject path in the copied manifest',
       findings: [],
     };
   }
-  const findings = Array.isArray(parsed.findings) ? parsed.findings : [];
+  const payload = validateReviewPayload(parsed, reviewer);
+  if (!payload.ok) {
+    return {
+      ...base,
+      disposition: 'UNAVAILABLE',
+      unavailableReason: unavailableReason || `the reviewer payload was refused: ${payload.reason}`,
+      findings: [],
+    };
+  }
+  const findings = parsed.findings;
   return {
     ...base,
     disposition: parsed.disposition,
@@ -524,16 +1445,30 @@ function authorizeLaunch(reviewer, opts = {}) {
   let route;
   try {
     route = require('./tool-router.cjs').routeRole(roleId, {
-      dataClass: opts.dataClass || 'INTERNAL',
+      dataClass: (opts.dataClass === undefined || opts.dataClass === null) ? 'INTERNAL' : opts.dataClass,
       allowMetered: opts.allowMetered,
       approvedBy: opts.approvedBy,
       capUsd: opts.capUsd,
+      subscriptionProof: opts.subscriptionProof,
+      deferSubscriptionProof: opts.deferSubscriptionProof === true,
+      invocationId: opts.invocationId,
+      preflightStage: opts.preflightStage,
     });
   } catch (e) {
     return { ok: false, reason: `model routing policy unusable: ${e.message}` };
   }
   if (!route.ok) return { ok: false, reason: `${route.code}: ${route.reason}` };
-  return { ok: true, tool: canon.tool, route };
+  const spendContract = reviewer === 'grok' ? grokSpendContract(opts.capUsd) : null;
+  if (reviewer === 'grok' && !spendContract) {
+    return { ok: false, reason: 'Grok routing requires a positive finite post-run telemetry ceiling' };
+  }
+  const bounds = reviewer === 'grok' ? Object.freeze({
+    ...route.bounds,
+    boundsNote: 'maxTurns, timeout, no web access, and no subagents are bounded execution guards; they do not enforce a spend ceiling. Launch additionally requires a fresh execution-bound zero-metered billing proof; authentication is not usage evidence, and terminal cost is compared only as post-run telemetry.',
+    maxTurnsPurpose: 'runaway guard only; not a cost control',
+  }) : route.bounds;
+  return { ok: true, tool: canon.tool,
+    route: Object.freeze({ ...route, bounds, spendContract }) };
 }
 
 function canonGate(reviewer) {
@@ -573,7 +1508,7 @@ function safeReviewPath(rel) {
   return normalized;
 }
 
-function resolveBoundedReviewPaths(subject, packet) {
+function resolveBoundedReviewPaths(subject, packet, sourceRoot = ROOT) {
   if (!subject || !Array.isArray(subject.subjectPaths) || !packet || !Array.isArray(packet.filesAllowed)) {
     throw new Error('subject paths and packet filesAllowed are required for bounded review');
   }
@@ -585,7 +1520,7 @@ function resolveBoundedReviewPaths(subject, packet) {
   }
   const specs = Array.isArray(packet.sourceOfTruth) ? packet.sourceOfTruth.map(safeReviewPath) : [];
   const combined = [...new Set([...subjectPaths, ...specs])].sort();
-  const rootReal = fs.realpathSync(ROOT);
+  const rootReal = fs.realpathSync(sourceRoot);
   for (const rel of combined) {
     const candidate = path.resolve(rootReal, rel);
     if (!candidate.startsWith(rootReal + path.sep)) throw new Error(`review path escaped worktree: ${rel}`);
@@ -597,7 +1532,8 @@ function resolveBoundedReviewPaths(subject, packet) {
   return Object.freeze(combined);
 }
 
-function validateReviewSources(reviewPaths = []) {
+function validateReviewSources(reviewPaths = [], sourceRoot = ROOT) {
+  const rootReal = fs.realpathSync(sourceRoot);
   const uniquePaths = [...new Set(reviewPaths.map(safeReviewPath))].sort();
   if (uniquePaths.length > MAX_REVIEW_FILES) {
     throw new Error(`review file count ${uniquePaths.length} exceeds ${MAX_REVIEW_FILES}`);
@@ -605,24 +1541,29 @@ function validateReviewSources(reviewPaths = []) {
   let totalBytes = 0;
   const sources = [];
   for (const rel of uniquePaths) {
-    const src = path.resolve(ROOT, rel);
-    if (!src.startsWith(ROOT + path.sep)) throw new Error(`review source escaped repository root: ${rel}`);
+    const src = path.resolve(rootReal, rel);
+    if (!src.startsWith(rootReal + path.sep)) throw new Error(`review source escaped repository root: ${rel}`);
     const st = fs.lstatSync(src);
     if (!st.isFile() || st.isSymbolicLink()) throw new Error(`review source is not a regular file: ${rel}`);
     totalBytes += st.size;
     if (totalBytes > MAX_REVIEW_BYTES) {
       throw new Error(`review payload ${totalBytes} bytes exceeds ${MAX_REVIEW_BYTES}`);
     }
-    const sourceSha = crypto.createHash('sha256').update(fs.readFileSync(src)).digest('hex');
-    sources.push(Object.freeze({ rel, src, bytes: st.size, sourceSha }));
+    const sourceBuffer = fs.readFileSync(src);
+    const sourceSha = crypto.createHash('sha256').update(sourceBuffer).digest('hex');
+    const sourceText = sourceBuffer.toString('utf8');
+    const sourceLines = sourceText.length === 0
+      ? 0
+      : (sourceText.match(/\n/g) || []).length + (sourceText.endsWith('\n') ? 0 : 1);
+    sources.push(Object.freeze({ rel, src, bytes: st.size, sourceSha, lines: sourceLines }));
   }
   return Object.freeze({ sources: Object.freeze(sources), totalBytes });
 }
 
-function prepareReviewSandbox(reviewPaths = []) {
+function prepareReviewSandbox(reviewPaths = [], sourceRoot = ROOT) {
   // Refuse malformed, oversized or unreadable subjects before a temporary
   // directory exists and, critically, before any operator auth is copied.
-  const validated = validateReviewSources(reviewPaths);
+  const validated = validateReviewSources(reviewPaths, sourceRoot);
   // A fresh directory removes two attack surfaces from the old shared path:
   // another process cannot pre-populate reviewer config, and a symlink cannot
   // redirect writes into an operator-owned location. mkdtemp creates the path
@@ -665,7 +1606,7 @@ function prepareReviewSandbox(reviewPaths = []) {
       fs.chmodSync(dest, 0o400);
       const copiedSha = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex');
       if (source.sourceSha !== copiedSha) throw new Error(`review copy digest mismatch: ${source.rel}`);
-      manifest.push({ path: source.rel, sha256: source.sourceSha, bytes: source.bytes });
+      manifest.push({ path: source.rel, sha256: source.sourceSha, bytes: source.bytes, lines: source.lines });
     }
 
     // The old shared harness symlinked operator auth into a predictable path.
@@ -712,6 +1653,188 @@ function cleanupReviewSandbox(sandbox) {
   }
 }
 
+// Re-attest both authorities behind every manifest entry: the immutable source
+// selected by the packet and the private copy exposed to the reviewer. This is
+// deliberately independent of Git-subject validation so pinned specifications
+// receive the same before/after protection as subject files.
+function validateReviewManifestSnapshot(sandbox, phase = 'snapshot', sourceRoot = ROOT) {
+  if (!sandbox || !sandbox.cwd || !Array.isArray(sandbox.manifest)) {
+    throw new Error('review manifest snapshot requires a prepared sandbox');
+  }
+  const sourceBase = fs.realpathSync(sourceRoot);
+  const copyBase = fs.realpathSync(sandbox.cwd);
+  const checkedPaths = [];
+  for (const entry of sandbox.manifest) {
+    const rel = safeReviewPath(entry.path);
+    for (const [kind, base] of [['source', sourceBase], ['copy', copyBase]]) {
+      const candidate = path.resolve(base, rel);
+      if (!candidate.startsWith(base + path.sep)) throw new Error(`${kind} path escaped manifest root: ${rel}`);
+      const stat = fs.lstatSync(candidate);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${kind} is not a regular file: ${rel}`);
+      const bytes = fs.readFileSync(candidate);
+      if (bytes.length !== entry.bytes || sha256Hex(bytes) !== entry.sha256) {
+        throw new Error(`${kind} digest changed for ${rel}`);
+      }
+    }
+    checkedPaths.push(rel);
+  }
+  return Object.freeze({ complete: true, phase, checkedPaths: Object.freeze(checkedPaths) });
+}
+
+function buildCodexInput(prompt, sandbox, expectedPaths, opts = {}) {
+  if (!sandbox || !sandbox.cwd || !Array.isArray(sandbox.manifest)) {
+    throw new Error('Codex input bundle requires a prepared private review sandbox and manifest');
+  }
+  if (typeof prompt !== 'string' || !prompt.length) {
+    throw new Error('Codex input bundle requires a non-empty review prompt');
+  }
+  const bundleLimit = Number.isInteger(opts.bundleLimitBytes)
+    ? opts.bundleLimitBytes : MAX_CODEX_BUNDLE_BYTES;
+  const inputLimit = Number.isInteger(opts.inputLimitBytes)
+    ? opts.inputLimitBytes : MAX_CODEX_INPUT_BYTES;
+  // Tests may tighten this limit, but no caller may raise the observed CLI
+  // ceiling. A caller-controlled expansion would turn the preflight into a
+  // declaration rather than an enforced transport bound.
+  const characterLimit = Number.isInteger(opts.inputLimitCharacters)
+    ? Math.min(opts.inputLimitCharacters, MAX_CODEX_INPUT_CHARACTERS)
+    : MAX_CODEX_INPUT_CHARACTERS;
+  if (bundleLimit <= 0 || inputLimit <= 0 || characterLimit <= 0) {
+    throw new Error('Codex input limits must be positive integers');
+  }
+
+  const expected = [...new Set((expectedPaths || []).map(safeReviewPath))].sort();
+  const manifest = sandbox.manifest.map((entry) => ({
+    path: safeReviewPath(entry.path),
+    bytes: entry.bytes,
+    lines: entry.lines,
+    sha256: entry.sha256,
+  // Use the same deterministic UTF-16 code-unit ordering as the canonical
+  // review-path resolver/validator. localeCompare moves uppercase packet paths
+  // relative to lowercase paths, which made equal nine-path sets compare
+  // unequal despite originating from the same reviewPaths input.
+  })).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const manifestPaths = manifest.map((entry) => entry.path);
+  if (stableJson(manifestPaths) !== stableJson(expected)) {
+    throw new Error(`Codex input manifest does not exactly cover requested review paths (expected ${expected.length}, found ${manifestPaths.length})`);
+  }
+
+  const inspectionChallenges = manifest.map((entry) => {
+    const copiedPath = path.resolve(sandbox.cwd, entry.path);
+    const content = fs.readFileSync(copiedPath, 'utf8');
+    const lines = content.split(/\r\n|\n|\r/);
+    const allNonEmpty = lines.map((lineText, index) => ({ lineText, lineNumber: index + 1 }))
+      .filter((candidate) => candidate.lineText.trim().length > 0);
+    const candidates = allNonEmpty.map((candidate) => ({
+      ...candidate,
+      linePrefix: candidate.lineText.slice(0, Math.min(32, candidate.lineText.length)),
+    })).filter((candidate) => candidate.lineText.length >= 48
+      && lines.filter((lineText) => lineText.startsWith(candidate.linePrefix)).length === 1);
+    const available = candidates.length ? candidates : allNonEmpty.map((candidate) => ({
+      ...candidate,
+      linePrefix: candidate.lineText.slice(0, Math.min(16, candidate.lineText.length)),
+    }));
+    if (!available.length) available.push({ lineText: lines[0] || '', lineNumber: 1, linePrefix: '' });
+    const selector = Number.parseInt(sha256Hex(Buffer.from(`${entry.path}\0${entry.sha256}`, 'utf8')).slice(0, 8), 16);
+    const chosen = available[selector % available.length];
+    return Object.freeze({
+      path: entry.path,
+      lineNumber: chosen.lineNumber,
+      linePrefix: chosen.linePrefix,
+      lineSha256: sha256Hex(Buffer.from(chosen.lineText, 'utf8')),
+    });
+  });
+  const publicChallenges = inspectionChallenges.map(({ path: challengePath, lineNumber, linePrefix }) => ({
+    path: challengePath,
+    lineNumber,
+    linePrefix,
+  }));
+  const inspectionChallengeSha256 = sha256Hex(Buffer.from(stableJson(inspectionChallenges), 'utf8'));
+  const challengeBlock = [
+    '<<<AEGIS_CODEX_INSPECTION_CHALLENGES_V1_BEGIN>>>',
+    'For every challenge below, locate the unique line beginning with linePrefix in that appended file.',
+    'lineNumber is a reference, not a request to count rendered lines. Return the complete exact line',
+    'excluding the newline in inspectionProofs. Preserve all whitespace exactly.',
+    stableJson(publicChallenges),
+    '<<<AEGIS_CODEX_INSPECTION_CHALLENGES_V1_END>>>',
+  ].join('\n');
+
+  const manifestJson = stableJson(manifest);
+  const manifestSha256 = sha256Hex(Buffer.from(manifestJson, 'utf8'));
+  const parts = [
+    '<<<AEGIS_CODEX_EXACT_BUNDLE_V1_BEGIN>>>\n',
+    `MANIFEST_BYTES ${Buffer.byteLength(manifestJson)}\n`,
+    `MANIFEST_SHA256 ${manifestSha256}\n`,
+    '<<<AEGIS_CODEX_MANIFEST_BEGIN>>>\n',
+    manifestJson,
+    '\n<<<AEGIS_CODEX_MANIFEST_END>>>\n',
+  ];
+
+  for (let index = 0; index < manifest.length; index++) {
+    const entry = manifest[index];
+    const copiedPath = path.resolve(sandbox.cwd, entry.path);
+    if (!copiedPath.startsWith(path.resolve(sandbox.cwd) + path.sep)) {
+      throw new Error(`Codex input path escaped copied review tree: ${entry.path}`);
+    }
+    const st = fs.lstatSync(copiedPath);
+    if (!st.isFile() || st.isSymbolicLink()) {
+      throw new Error(`Codex input copy is not a regular file: ${entry.path}`);
+    }
+    const bytes = fs.readFileSync(copiedPath);
+    const copiedSha = sha256Hex(bytes);
+    if (bytes.length !== entry.bytes || copiedSha !== entry.sha256) {
+      throw new Error(`Codex input copy failed manifest verification: ${entry.path}`);
+    }
+    const content = bytes.toString('utf8');
+    if (!Buffer.from(content, 'utf8').equals(bytes)) {
+      throw new Error(`Codex input copy is not exact UTF-8 text: ${entry.path}`);
+    }
+    const begin = `<<<AEGIS_CODEX_FILE_${index}_BEGIN_${entry.sha256}>>>`;
+    const end = `<<<AEGIS_CODEX_FILE_${index}_END_${entry.sha256}>>>`;
+    if (content.includes(begin) || content.includes(end)) {
+      throw new Error(`Codex input delimiter collision: ${entry.path}`);
+    }
+    parts.push(
+      `${begin}\nPATH ${JSON.stringify(entry.path)}\nBYTES ${entry.bytes}\nLINES ${entry.lines}\nSHA256 ${entry.sha256}\nCONTENT_BEGIN\n`,
+      content,
+      `\nCONTENT_END\n${end}\n`,
+    );
+  }
+  parts.push('<<<AEGIS_CODEX_EXACT_BUNDLE_V1_END>>>\n');
+  const bundle = parts.join('');
+  const bundleBytes = Buffer.byteLength(bundle);
+  if (bundleBytes > bundleLimit) {
+    throw new Error(`Codex exact bundle ${bundleBytes} bytes exceeds conservative ${bundleLimit}-byte limit; use builder-control/review-chunker.cjs for exact chunked coverage`);
+  }
+  const input = `${prompt}\n\n${challengeBlock}\n\n${bundle}`;
+  if (input.length > characterLimit) {
+    throw new Error(`Codex initial input ${input.length} characters exceeds the observed CLI ${characterLimit}-character maximum; use builder-control/review-chunker.cjs for exact chunked coverage`);
+  }
+  const inputBuffer = Buffer.from(input, 'utf8');
+  if (inputBuffer.length > inputLimit) {
+    throw new Error(`Codex initial input ${inputBuffer.length} bytes exceeds conservative ${inputLimit}-byte limit; use builder-control/review-chunker.cjs for exact chunked coverage`);
+  }
+  const bundleSha256 = sha256Hex(Buffer.from(bundle, 'utf8'));
+  const inputSha256 = sha256Hex(inputBuffer);
+  const attested = {
+    version: 'codex-stdin-exact-bundle-v1',
+    method: 'complete copied review bundle delivered in initial stdin',
+    coveredPaths: manifestPaths,
+    manifest,
+    manifestSha256,
+    bundleBytes,
+    bundleSha256,
+    inputBytes: inputBuffer.length,
+    inputSha256,
+    inspectionChallenges,
+    inspectionChallengeSha256,
+  };
+  const inputDelivery = Object.freeze({
+    ...attested,
+    attestationSha256: sha256Hex(Buffer.from(stableJson(attested), 'utf8')),
+  });
+  return Object.freeze({ input, inputBuffer, inputDelivery });
+}
+
 // Build the exact argument vector a reviewer will be launched with. Exported
 // so a test can assert that every bound the policy DECLARES is actually
 // PRESENT on the command line — the gap that let maxTurns:1 run 13 turns.
@@ -721,12 +1844,14 @@ function cleanupReviewSandbox(sandbox) {
 // instruction, which is the same distinction this whole system is built on.
 const GROK_REVIEW_SCHEMA = {
   type: 'object',
+  additionalProperties: false,
   properties: {
     disposition: { type: 'string', enum: ['APPROVE', 'APPROVE_WITH_NOTES', 'REJECT'] },
     findings: {
       type: 'array',
       items: {
         type: 'object',
+        additionalProperties: false,
         properties: {
           severity: { type: 'string', enum: ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFORMATIONAL'] },
           file: { type: 'string' },
@@ -738,19 +1863,27 @@ const GROK_REVIEW_SCHEMA = {
           verificationMethod: { type: 'string' },
           status: { type: 'string', enum: ['OPEN'] },
         },
-        required: ['severity', 'file', 'problem', 'evidence', 'status'],
+        required: FINDING_KEYS,
       },
     },
     unverified: { type: 'array', items: { type: 'string' } },
   },
-  required: ['disposition', 'findings'],
+  required: REVIEW_KEYS,
 };
 
 function buildToolArgv(reviewer, prompt, bounds, reviewCwd) {
   if (reviewer === 'codex') {
-    return ['exec', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config',
+    // Codex's read-only mode starts a second sandbox-exec for model-issued
+    // reads. macOS refuses that nested sandbox from inside our deny-default
+    // outer profile (`sandbox_apply: Operation not permitted`). The CLI's
+    // documented external-containment mode leaves every model-issued process
+    // inside the already-active outer profile, whose only source read authority
+    // is the private copied subject and whose only writes are disposable HOME
+    // and TMPDIR. No repository source is writable.
+    return ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox', '--ephemeral', '--ignore-user-config',
       '--ignore-rules', '--skip-git-repo-check', '--color', 'never',
-      '--cd', reviewCwd || '.', prompt];
+      '--disable', 'shell_snapshot', '--disable', 'shell_tool', '--disable', 'unified_exec',
+      '--cd', reviewCwd || '.', '-'];
   }
   // Everything-that-is-not-Codex used to fall through to the Grok argv. That
   // was harmless while Grok was the only other entry and became a trap the
@@ -761,10 +1894,14 @@ function buildToolArgv(reviewer, prompt, bounds, reviewCwd) {
   if (reviewer !== 'grok') {
     throw new Error(`buildToolArgv: no launch argv is defined for reviewer "${reviewer}" — advisory and unknown workers are never launched, and silently reusing another reviewer's command line would hide that`);
   }
-  // --json-schema implies --output-format json AND constrains the model's
-  // output to this shape, so a verdict cannot come back as prose.
-  const argv = ['-p', prompt, '--json-schema', JSON.stringify(GROK_REVIEW_SCHEMA),
+  // Keep the CLI envelope machine-readable without constraining EVERY model
+  // turn to the final verdict schema. In Grok 1.0.5, --json-schema can make the
+  // first planning turn look like a finished review before read_file runs.
+  // The prompt contract, extractJson(), placeholder guard, signed schema
+  // validator and exact-subject gate still validate the final record.
+  const argv = ['-p', prompt, '--output-format', 'streaming-json',
     '--cwd', reviewCwd, '--no-subagents', '--verbatim',
+    '--tools', 'read_file',
     '--allow', `Read(${reviewCwd}/**)`,
     '--deny', `Read(${path.dirname(reviewCwd)}/home/**)`,
     '--deny', 'Read(../**)',
@@ -780,7 +1917,12 @@ function reviewerEnvironment(reviewer, sandbox, source = process.env) {
     TMPDIR: sandbox.tmp,
   };
   if (reviewer === 'codex') common.CODEX_HOME = path.join(sandbox.home, '.codex');
-  if (reviewer === 'grok') common.GROK_MANAGED_MCPS_ENABLED = 'false';
+  if (reviewer === 'grok') {
+    common.GROK_MANAGED_MCPS_ENABLED = 'false';
+    // Supported by the pinned binary (xai-grok-update); prevents a preflight
+    // or review from mutating the executable identity it was authorized to use.
+    common.GROK_DISABLE_AUTOUPDATER = '1';
+  }
   return strictEnvironment(common, source);
 }
 
@@ -791,7 +1933,7 @@ function containedReviewerCommand(reviewer, sandbox, argv) {
   const credentialReads = reviewer === 'grok'
     ? [sandbox.grokAuthPath].filter(Boolean)
     : [sandbox.codexAuthPath].filter(Boolean);
-  const profile = buildMacSandboxProfile({
+  const generated = buildMacSandboxProfile({
     root: sandbox.root,
     executable: tool.bin,
     readPaths: [sandbox.cwd, ...configReads],
@@ -799,18 +1941,786 @@ function containedReviewerCommand(reviewer, sandbox, argv) {
     // subject remains under sandbox.cwd and is never writable.
     writePaths: [sandbox.home, sandbox.tmp],
     processOnlyReadPaths: credentialReads,
+    // The pinned CLI may inspect only its one-use HOME/TMP cache trees. Child
+    // processes remain denied, and the copied subject is still read-only.
+    processOnlyReadDirectoryPaths: [sandbox.home, sandbox.tmp],
     allowNetwork: true,
     reviewerRuntime: true,
   });
+  // The generic runtime profile permits process* and ambient outbound network
+  // for trusted builders. Independent reviewers are stricter: only the pinned
+  // CLI may exec or use the network. Model-issued child processes therefore
+  // cannot obtain a shell or exfiltrate through curl even when a CLI flag or
+  // prompt contract regresses.
+  const executable = generated.executable.replace(/[\\"\n\r]/g, '');
+  const profileText = generated.profile
+    .replace('(allow process*)', `(allow process-info*)\n(allow process-fork)\n(allow process-exec (literal "${executable}"))`)
+    .replace('(allow network-outbound)', `(allow network-outbound (process-path "${executable}"))`);
+  const profile = Object.freeze({ ...generated, profile: profileText });
   assertSandboxOperational();
   return Object.freeze({ ...sandboxedCommand(profile, argv), profile });
 }
 
-function runTool(reviewer, prompt, timeoutSec, opts = {}) {
+function validateGrokExecutableIdentity(opts = {}) {
+  const tool = TOOLS.grok;
+  try {
+    const stat = fs.lstatSync(tool.bin);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      return Object.freeze({ ok: false, reason: 'pinned Grok executable is not a regular immutable-path file' });
+    }
+    const digestRunner = typeof opts.digestRunner === 'function'
+      ? opts.digestRunner : (file) => sha256Hex(fs.readFileSync(file));
+    const beforeSha256 = digestRunner(tool.bin);
+    if (beforeSha256 !== tool.expectedSha256) {
+      return Object.freeze({ ok: false, reason: `pinned Grok executable digest mismatch before version probe: ${beforeSha256}` });
+    }
+    const runner = typeof opts.versionRunner === 'function' ? opts.versionRunner : spawnSync;
+    const result = runner(tool.bin, ['--version'], {
+      encoding: 'utf8', timeout: 5_000,
+      env: strictEnvironment({ GROK_DISABLE_AUTOUPDATER: '1' }),
+    });
+    const version = result && typeof result.stdout === 'string' ? result.stdout.trim() : '';
+    if (!result || result.status !== 0 || version !== tool.expectedVersion) {
+      return Object.freeze({ ok: false,
+        reason: `pinned Grok version mismatch: expected ${tool.expectedVersion}, observed ${version || 'UNAVAILABLE'}` });
+    }
+    const afterSha256 = digestRunner(tool.bin);
+    if (afterSha256 !== tool.expectedSha256 || afterSha256 !== beforeSha256) {
+      return Object.freeze({ ok: false,
+        reason: `pinned Grok executable changed during version probe: before ${beforeSha256}, after ${afterSha256}` });
+    }
+    return Object.freeze({ ok: true, path: tool.bin, sha256: afterSha256, version,
+      updaterDisabled: true });
+  } catch (error) {
+    return Object.freeze({ ok: false, reason: `pinned Grok identity could not be proven: ${error.message}` });
+  }
+}
+
+// ACP billing preflight deliberately never creates a session or supplies a
+// prompt. It initializes the protocol, asks only the two vendor billing
+// extensions, then terminates the isolated process.
+function runGrokBillingAcp(contained, opts = {}) {
+  const timeoutMs = Math.max(1, Number(opts.timeoutMs) || GROK_BILLING_PREFLIGHT_TIMEOUT_MS);
+  const spawnImpl = typeof opts.spawnImpl === 'function' ? opts.spawnImpl : spawn;
+  const killImpl = typeof opts.killImpl === 'function' ? opts.killImpl : process.kill.bind(process);
+  return new Promise((resolve) => {
+    let child;
+    let settled = false;
+    let stopping = false;
+    let stdout = '';
+    let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let initialized = false;
+    let billing;
+    let autoTopup;
+    const seenResponseIds = new Set();
+    let pendingResult = null;
+    let provisionalSuccess = null;
+    let timeout = null;
+    let hardKill = null;
+    let forcedFinish = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearTimeout(hardKill);
+      clearTimeout(forcedFinish);
+      resolve(Object.freeze(result));
+    };
+    const proveGroupDrain = async () => {
+      const deadline = Date.now() + REVIEW_KILL_GRACE_MS;
+      do {
+        try {
+          if (processGroupMembers(child.pid).length === 0) return true;
+        } catch { return false; }
+        await sleep(25);
+      } while (Date.now() < deadline);
+      try { return processGroupMembers(child.pid).length === 0; }
+      catch { return false; }
+    };
+    const stop = (result) => {
+      if (stopping || settled) return;
+      stopping = true;
+      pendingResult = result;
+      try { child.stdin.end(); } catch {}
+      try { killImpl(-child.pid, 'SIGTERM'); } catch {}
+    };
+    try {
+      child = spawnImpl(contained.bin, contained.argv, {
+        cwd: opts.cwd,
+        env: opts.env,
+        detached: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      finish({ ok: false, reason: `Grok billing ACP failed to spawn: ${error.message}`,
+        groupDrained: true, retainSandbox: false });
+      return;
+    }
+    const send = (id, method, params) => child.stdin.write(`${JSON.stringify({
+      jsonrpc: '2.0', id, method, params,
+    })}\n`);
+    const boundedUtf8 = (bytes, remaining) => {
+      let text = bytes.subarray(0, remaining).toString('utf8');
+      while (Buffer.byteLength(text, 'utf8') > remaining) text = text.slice(0, -1);
+      return text;
+    };
+    let buffered = '';
+    child.stdout.on('data', (chunk) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+      const remaining = Math.max(0, GROK_BILLING_MAX_STREAM_BYTES - stdoutBytes);
+      const captured = boundedUtf8(bytes, remaining);
+      stdout += captured;
+      stdoutBytes += bytes.length;
+      if (stdoutBytes > GROK_BILLING_MAX_STREAM_BYTES) {
+        stop({ ok: false, reason: 'Grok billing ACP exceeded bounded stdout output', stdout, stderr });
+        return;
+      }
+      buffered += captured;
+      const lines = buffered.split(/\r?\n/);
+      buffered = lines.pop();
+      for (const line of lines) {
+        if (stopping || settled) return;
+        if (!line.trim().startsWith('{')) continue;
+        let message;
+        try { message = JSON.parse(line); } catch { continue; }
+        // ACP may interleave ordinary JSON-RPC notifications/events with
+        // request responses. A notification has no id, names a method, and
+        // cannot carry response-shaped result/error fields. Ignore only that
+        // narrow shape; an id-less response remains invalid evidence.
+        if (message.id === undefined && message && message.jsonrpc === '2.0'
+            && typeof message.method === 'string' && message.method.trim()
+            && !Object.prototype.hasOwnProperty.call(message, 'result')
+            && !Object.prototype.hasOwnProperty.call(message, 'error')) {
+          continue;
+        }
+        const correlated = !initialized ? message.id === 1 : message.id === 2 || message.id === 3;
+        if (!Number.isInteger(message.id) || !correlated || seenResponseIds.has(message.id)) {
+          stop({ ok: false,
+            reason: `Grok billing ACP received duplicate, uncorrelated, or unexpected response id ${String(message.id)}`,
+            stdout, stderr });
+          return;
+        }
+        seenResponseIds.add(message.id);
+        if (message.id === 1) {
+          if (message.error || !message.result) {
+            stop({ ok: false, reason: 'Grok billing ACP initialize failed', stdout, stderr });
+            return;
+          }
+          initialized = true;
+          send(2, '_x.ai/billing', {});
+          send(3, '_x.ai/auto-topup-rule', {});
+        } else if (message.id === 2) {
+          if (message.error || !message.result) {
+            stop({ ok: false, reason: 'Grok billing ACP billing request failed', stdout, stderr });
+            return;
+          }
+          billing = message.result;
+        } else if (message.id === 3) {
+          if (message.error || message.result === undefined || message.result === null) {
+            stop({ ok: false, reason: 'Grok billing ACP auto-topup request failed', stdout, stderr });
+            return;
+          }
+          autoTopup = message.result;
+        }
+        if (initialized && billing !== undefined && autoTopup !== undefined) {
+          // A valid id=3 is not final until stdout reaches clean process
+          // closure. Keep parsing so trailing duplicate/unexpected responses
+          // in this or a later chunk can still invalidate the preflight.
+          if (!provisionalSuccess) {
+            provisionalSuccess = { ok: true, initialized, billing, autoTopup, stdout, stderr };
+            try { child.stdin.end(); }
+            catch (error) {
+              stop({ ok: false, reason: `Grok billing ACP stdin close failed: ${error.message}`, stdout, stderr });
+              return;
+            }
+          }
+        }
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+      const remaining = Math.max(0, GROK_BILLING_MAX_STREAM_BYTES - stderrBytes);
+      stderr += boundedUtf8(bytes, remaining);
+      stderrBytes += bytes.length;
+      if (stderrBytes > GROK_BILLING_MAX_STREAM_BYTES) {
+        stop({ ok: false, reason: 'Grok billing ACP exceeded bounded stderr output', stdout, stderr });
+      }
+    });
+    child.once('error', (error) => stop({ ok: false, reason: `Grok billing ACP process error: ${error.message}`, stdout, stderr }));
+    child.once('close', async (status) => {
+      const groupDrained = await proveGroupDrain();
+      const boundary = { groupDrained, retainSandbox: !groupDrained };
+      if (pendingResult) finish({ ...pendingResult, ...boundary });
+      else if (provisionalSuccess && status === 0) {
+        finish({ ...provisionalSuccess, stdout, stderr, ...boundary });
+      }
+      else if (provisionalSuccess) {
+        finish({ ok: false, reason: `Grok billing ACP exited ${status} after provisional evidence`, stdout, stderr, ...boundary });
+      }
+      else finish({ ok: false, reason: `Grok billing ACP closed before complete evidence (exit ${status})`, stdout, stderr, ...boundary });
+    });
+    child.once('spawn', () => send(1, 'initialize', {
+      protocolVersion: 1,
+      clientCapabilities: {},
+      clientInfo: { name: 'AEGIS', title: 'AEGIS billing preflight', version: '1' },
+    }));
+    timeout = setTimeout(() => stop({ ok: false, reason: 'Grok billing ACP timed out before complete evidence', stdout, stderr }), timeoutMs);
+    hardKill = setTimeout(() => {
+      if (!settled && child && child.pid) {
+        try { killImpl(-child.pid, 'SIGKILL'); } catch {}
+        forcedFinish = setTimeout(async () => {
+          const groupDrained = await proveGroupDrain();
+          finish({ ...(pendingResult || { ok: false, reason: 'Grok billing ACP process did not terminate', stdout, stderr }),
+            groupDrained, retainSandbox: !groupDrained });
+        }, REVIEW_KILL_GRACE_MS);
+        forcedFinish.unref();
+      }
+    }, timeoutMs + 1_000);
+  });
+}
+
+function validateGrokBillingEvidence(evidence, opts = {}) {
+  if (!evidence || evidence.ok !== true || evidence.groupDrained !== true || evidence.initialized !== true
+      || !evidence.billing || typeof evidence.billing !== 'object'
+      || !Object.prototype.hasOwnProperty.call(evidence, 'autoTopup')) {
+    return Object.freeze({ ok: false, reason: 'Grok fresh execution-bound zero-metered billing evidence is missing or incomplete' });
+  }
+  const billing = evidence.billing;
+  const tierPresent = Object.prototype.hasOwnProperty.call(billing, 'subscription_tier');
+  const tier = tierPresent ? billing.subscription_tier : null;
+  const config = billing.config;
+  if (tierPresent && (typeof tier !== 'string' || !tier.trim())) {
+    return Object.freeze({ ok: false, reason: 'Grok billing preflight reported a malformed subscription tier' });
+  }
+  if (!config || typeof config !== 'object' || config.isUnifiedBillingUser !== true) {
+    return Object.freeze({ ok: false, reason: 'Grok billing preflight did not prove unified subscription billing' });
+  }
+  for (const field of ['onDemandCap', 'onDemandUsed', 'prepaidBalance']) {
+    if (!config[field] || config[field].val !== 0) {
+      return Object.freeze({ ok: false, reason: `Grok billing preflight requires ${field}.val === 0` });
+    }
+  }
+  const autoTopup = evidence.autoTopup;
+  const absent = autoTopup && typeof autoTopup === 'object' && Object.keys(autoTopup).length === 0;
+  const disabled = autoTopup && typeof autoTopup === 'object' && autoTopup.enabled === false;
+  if (!absent && !disabled) {
+    return Object.freeze({ ok: false, reason: 'Grok billing preflight did not prove auto-topup absent or disabled' });
+  }
+  if (typeof opts.invocationId !== 'string' || !opts.invocationId.trim()) {
+    return Object.freeze({ ok: false, reason: 'Grok billing preflight is not bound to a review invocation' });
+  }
+  const observedAt = new Date(Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now()).toISOString();
+  const expiresAt = new Date(Date.parse(observedAt) + 5 * 60 * 1000).toISOString();
+  const preflightId = `GBPF-${crypto.randomUUID()}`;
+  return Object.freeze({ ok: true, mode: 'zero-metered',
+    invocationId: opts.invocationId, preflightId, observedAt, expiresAt,
+    subscriptionTier: tierPresent ? tier.trim() : null,
+    subscriptionTierState: tierPresent ? 'REPORTED' : 'UNREPORTED',
+    unifiedBilling: true, onDemandCap: 0, onDemandUsed: 0, prepaidBalance: 0,
+    autoTopup: absent ? 'ABSENT' : 'DISABLED' });
+}
+
+async function grokBillingPreflight(sandbox, opts = {}) {
+  let contained;
+  try { contained = containedReviewerCommand('grok', sandbox, ['agent', '--no-leader', 'stdio']); }
+  catch (error) { return Object.freeze({ ok: false, reason: `Grok billing containment unavailable: ${error.message}` }); }
+  // Prove the immutable pin after every non-invoking preparation step and
+  // immediately before the ACP executable is allowed to start.
+  const identity = validateGrokExecutableIdentity({ versionRunner: opts.grokVersionRunner });
+  if (!identity.ok) return Object.freeze({ ok: false, reason: identity.reason, identity });
+  const runner = typeof opts.grokBillingRunner === 'function' ? opts.grokBillingRunner : runGrokBillingAcp;
+  let raw;
+  try {
+    raw = await runner(contained, {
+      timeoutMs: GROK_BILLING_PREFLIGHT_TIMEOUT_MS,
+      cwd: sandbox.cwd,
+      env: reviewerEnvironment('grok', sandbox),
+    });
+  } catch (error) {
+    return Object.freeze({ ok: false, reason: `Grok billing preflight failed: ${error.message}`, identity });
+  }
+  if (!raw || raw.ok !== true) {
+    return Object.freeze({ ok: false,
+      reason: raw && typeof raw.reason === 'string'
+        ? raw.reason : 'Grok billing ACP did not produce successful complete evidence',
+      identity, retainSandbox: Boolean(raw && raw.retainSandbox),
+      transport: Object.freeze({ method: 'ACP initialize + _x.ai/billing + _x.ai/auto-topup-rule',
+        sessionCreated: false, promptSent: false }) });
+  }
+  const validated = validateGrokBillingEvidence(raw, {
+    invocationId: opts.invocationId,
+    nowMs: opts.nowMs,
+  });
+  return Object.freeze({ ...validated, identity, retainSandbox: Boolean(raw && raw.retainSandbox),
+    transport: Object.freeze({ method: 'ACP initialize + _x.ai/billing + _x.ai/auto-topup-rule',
+      sessionCreated: false, promptSent: false }) });
+}
+
+function processGroupAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(process.platform === 'win32' ? pid : -pid, 0);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'ESRCH') return false;
+    if (error && error.code === 'EPERM') return true;
+    throw error;
+  }
+}
+
+function processGroupMembers(processGroupId, timeoutMs = 1_000) {
+  if (!Number.isInteger(processGroupId) || processGroupId <= 0) return [];
+  const ps = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
+  const observed = spawnSync(ps, ['-axo', 'pid=,pgid='], {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+  });
+  if (observed.error) throw observed.error;
+  if (observed.status !== 0) {
+    throw new Error(`process-group member probe exited ${String(observed.status)}`);
+  }
+  const members = [];
+  for (const line of String(observed.stdout || '').split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (!match || Number(match[2]) !== processGroupId) continue;
+    members.push(Number(match[1]));
+  }
+  return members;
+}
+
+function signalProcessGroup(pid, signal) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(process.platform === 'win32' ? pid : -pid, signal);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function reapUndrainedReviewerGroup(terminationEvidence, opts = {}) {
+  const processGroupId = terminationEvidence && terminationEvidence.processGroupId;
+  const membersOf = typeof opts.processGroupMembers === 'function'
+    ? opts.processGroupMembers : processGroupMembers;
+  const signalGroup = typeof opts.signalProcessGroup === 'function'
+    ? opts.signalProcessGroup : signalProcessGroup;
+  const wait = typeof opts.sleep === 'function' ? opts.sleep : sleep;
+  const clock = typeof opts.now === 'function' ? opts.now : Date.now;
+  const timeoutMs = Math.max(1, Number(opts.timeoutMs) || REVIEW_REAPER_TIMEOUT_MS);
+  const intervalMs = Math.max(1, Number(opts.intervalMs) || 100);
+  const attempts = [];
+  if (!Number.isInteger(processGroupId) || processGroupId <= 0) {
+    return Object.freeze({ drained: false, retained: true,
+      reason: 'reviewer process-group identity is unavailable; signalling is forbidden', attempts });
+  }
+  const deadline = clock() + timeoutMs;
+  do {
+    let members;
+    try { members = membersOf(processGroupId); }
+    catch (error) {
+      attempts.push({ action: 'PROBE', ok: false, code: error && error.code || null });
+      return Object.freeze({ drained: false, retained: true,
+        reason: 'identity-bound process-group probe failed; signalling is forbidden', attempts });
+    }
+    if (!Array.isArray(members) || members.some((pid) => !Number.isInteger(pid) || pid <= 0)) {
+      return Object.freeze({ drained: false, retained: true,
+        reason: 'identity-bound process-group probe returned invalid evidence', attempts });
+    }
+    const unique = Array.from(new Set(members));
+    if (unique.length === 0) {
+      return Object.freeze({ drained: true, retained: false,
+        reason: 'the owned reviewer process group drained during bounded reaping', attempts });
+    }
+    // The original leader has already closed. A member whose pid equals the
+    // old pgid proves numeric process-group reuse, so authority to signal ends.
+    if (unique.includes(processGroupId)) {
+      return Object.freeze({ drained: false, retained: true,
+        reason: 'the reviewer process-group id was reused; signalling authority was relinquished', attempts });
+    }
+    try {
+      const signalled = signalGroup(processGroupId, 'SIGKILL');
+      attempts.push({ action: 'SIGKILL', ok: signalled === true, memberCount: unique.length });
+    } catch (error) {
+      attempts.push({ action: 'SIGKILL', ok: false, code: error && error.code || null });
+      return Object.freeze({ drained: false, retained: true,
+        reason: 'identity-bound residual reviewer termination failed', attempts });
+    }
+    await wait(intervalMs);
+  } while (clock() < deadline);
+  return Object.freeze({ drained: false, retained: true,
+    reason: 'bounded identity-bound reviewer reaper expired before positive drainage proof', attempts });
+}
+
+/**
+ * Run one already-contained reviewer under a real wall-clock watchdog.
+ *
+ * Node's spawnSync timeout only sends a signal to the immediate child and then
+ * waits for that child (and inherited pipes) to close. A CLI that ignores TERM,
+ * or a descendant that keeps stdout open, can therefore outlive the declared
+ * timeout indefinitely. The reviewer is instead launched as an owned process
+ * group: timeout/overflow sends TERM to the whole group, escalates to KILL,
+ * and does not report completion until the group has drained or the bounded
+ * drain window has expired. The caller always treats an undrained result as a
+ * refusal, never as usable review evidence.
+ */
+function runContainedWithWatchdog(contained, opts = {}) {
+  const timeoutMs = Math.max(1, Number(opts.timeoutMs) || 1);
+  const killGraceMs = Math.max(25, Number(opts.killGraceMs) || REVIEW_KILL_GRACE_MS);
+  const maxOutputBytes = Math.max(1, Number(opts.maxOutputBytes) || MAX_REVIEW_OUTPUT_BYTES);
+  const groupAlive = typeof opts.processGroupAlive === 'function' ? opts.processGroupAlive : processGroupAlive;
+  const groupMembers = typeof opts.processGroupMembers === 'function'
+    ? opts.processGroupMembers : processGroupMembers;
+  const signalGroup = typeof opts.signalProcessGroup === 'function' ? opts.signalProcessGroup : signalProcessGroup;
+  const hasStdinInput = opts.stdinInput !== undefined && opts.stdinInput !== null;
+  const stdinInput = hasStdinInput
+    ? (Buffer.isBuffer(opts.stdinInput) ? opts.stdinInput : Buffer.from(String(opts.stdinInput), 'utf8'))
+    : null;
+  const stdinWriter = typeof opts.stdinWriter === 'function'
+    ? opts.stdinWriter
+    : ((stream, input, callback) => stream.end(input, callback));
+  let child;
+  try {
+    child = spawn(contained.bin, contained.argv || [], {
+      encoding: 'utf8',
+      cwd: opts.cwd,
+      detached: process.platform !== 'win32',
+      stdio: [hasStdinInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      env: opts.env,
+    });
+  } catch (error) {
+    const structuredError = {
+      code: error && error.code ? String(error.code) : 'SPAWN_FAILED',
+      message: error && error.message ? String(error.message) : String(error),
+    };
+    return Promise.resolve({
+      status: null,
+      signal: null,
+      error: structuredError,
+      timedOut: false,
+      outputOverflow: false,
+      terminationSignals: [],
+      terminationFailures: [],
+      processGroupId: null,
+      groupDrained: true,
+      stdinDelivery: hasStdinInput ? {
+        delivered: false,
+        bytes: stdinInput.length,
+        sha256: sha256Hex(stdinInput),
+        error: structuredError,
+      } : null,
+      stdout: '',
+      stderr: '',
+    });
+  }
+  const ownedChild = child;
+  const ownedProcessGroupId = child.pid;
+
+  return new Promise((resolve) => {
+    const stdout = [];
+    const stderr = [];
+    let capturedBytes = 0;
+    let timedOut = false;
+    let outputOverflow = false;
+    let spawnError = null;
+    let terminationStarted = false;
+    let childClosed = false;
+    let drainageProvenBeforeClose = false;
+    let settling = false;
+    let settled = false;
+    let graceTimer = null;
+    let stdinSettled = !hasStdinInput;
+    let stdinDelivered = false;
+    let stdinError = null;
+    const terminationSignals = [];
+    const terminationFailures = [];
+
+    const ownsLiveChild = (allowSettling = false) => !childClosed && !settled
+      && (allowSettling || !settling)
+      && child === ownedChild && ownedChild.pid === ownedProcessGroupId;
+
+    const probeOwnedGroup = (phase, allowSettling = false) => {
+      if (!ownsLiveChild(allowSettling)) return null;
+      try {
+        const result = groupAlive(ownedProcessGroupId);
+        if (result === true || result === false) return result;
+        throw new Error(`process-group probe returned non-boolean ${String(result)}`);
+      } catch (error) {
+        terminationFailures.push({
+          signal: 'PROBE', phase,
+          code: error && error.code ? String(error.code) : null,
+          message: error && error.message ? String(error.message) : String(error),
+        });
+        return null;
+      }
+    };
+
+    const attemptSignal = (signal, phase, allowSettling = false) => {
+      if (!ownsLiveChild(allowSettling)) return false;
+      try {
+        if (signalGroup(ownedProcessGroupId, signal)) {
+          terminationSignals.push(signal);
+          return true;
+        }
+      } catch (error) {
+        terminationFailures.push({
+          signal,
+          phase,
+          code: error && error.code ? String(error.code) : null,
+          message: error && error.message ? String(error.message) : String(error),
+        });
+      }
+      return false;
+    };
+
+    const listOwnedGroupMembers = (phase) => {
+      try {
+        const result = groupMembers(ownedProcessGroupId);
+        if (!Array.isArray(result)
+            || result.some((pid) => !Number.isInteger(pid) || pid <= 0)) {
+          throw new Error('process-group member probe returned an invalid member list');
+        }
+        return Array.from(new Set(result));
+      } catch (error) {
+        terminationFailures.push({
+          signal: 'PROBE', phase,
+          code: error && error.code ? String(error.code) : null,
+          message: error && error.message ? String(error.message) : String(error),
+        });
+        return null;
+      }
+    };
+
+    const recordReusedGroupRefusal = (phase) => {
+      terminationFailures.push({
+        signal: 'PROBE', phase,
+        code: 'PROCESS_GROUP_REUSED',
+        message: 'the former reviewer process-group id now has a leader process; signalling authority was relinquished',
+      });
+    };
+
+    const waitForClosedGroupDrain = async (phase, waitMs) => {
+      const deadline = Date.now() + waitMs;
+      do {
+        const members = listOwnedGroupMembers(phase);
+        if (members === null) return false;
+        if (members.length === 0) return true;
+        // The original leader has already emitted close and cannot still be a
+        // member. Seeing pid===pgid therefore proves numeric PGID reuse. Read
+        // probes remain safe, but signalling that new group is forbidden.
+        if (members.includes(ownedProcessGroupId)) {
+          recordReusedGroupRefusal(phase);
+          return false;
+        }
+        await sleep(25);
+      } while (Date.now() < deadline);
+      const members = listOwnedGroupMembers(`${phase}-final`);
+      if (members === null) return false;
+      if (members.includes(ownedProcessGroupId)) {
+        recordReusedGroupRefusal(`${phase}-final`);
+        return false;
+      }
+      return members.length === 0;
+    };
+
+    const signalClosedResidualGroup = (signal, phase) => {
+      const members = listOwnedGroupMembers(`${phase}-pre-signal`);
+      if (members === null || members.length === 0) return members !== null;
+      if (members.includes(ownedProcessGroupId)) {
+        recordReusedGroupRefusal(`${phase}-pre-signal`);
+        return false;
+      }
+      try {
+        if (signalGroup(ownedProcessGroupId, signal)) terminationSignals.push(signal);
+        return true;
+      } catch (error) {
+        terminationFailures.push({
+          signal, phase,
+          code: error && error.code ? String(error.code) : null,
+          message: error && error.message ? String(error.message) : String(error),
+        });
+        return false;
+      }
+    };
+
+    const proveClosedGroupDrain = async () => {
+      const members = listOwnedGroupMembers('close-proof');
+      if (members === null) return false;
+      if (members.length === 0) return true;
+      if (members.includes(ownedProcessGroupId)) {
+        recordReusedGroupRefusal('close-proof');
+        return false;
+      }
+
+      // The group still exists after its original leader closed, so these are
+      // descendants of the owned review invocation. Drain them before review
+      // output can become usable or the disposable sandbox can be removed.
+      terminationStarted = true;
+      signalClosedResidualGroup('SIGTERM', 'close-residual');
+      if (await waitForClosedGroupDrain('close-term-drain', killGraceMs)) return true;
+      signalClosedResidualGroup('SIGKILL', 'close-residual');
+      return waitForClosedGroupDrain('close-kill-drain', killGraceMs);
+    };
+
+    const finish = async (status, signal, source) => {
+      if (settled || settling) return;
+      settling = true;
+      clearTimeout(timeout);
+      clearTimeout(hardStop);
+      if (graceTimer) {
+        clearTimeout(graceTimer);
+        graceTimer = null;
+      }
+      // Before close, the immutable ChildProcess lifetime authorises the
+      // existing numeric-group probe. After close, use a read-only member
+      // snapshot first: an empty list proves drainage, a leader pid proves
+      // reuse and forbids signalling, and leaderless members are residual
+      // descendants of the still-existing owned group.
+      if (source !== 'close') {
+        const alive = probeOwnedGroup('finish', true);
+        if (alive === true) {
+          attemptSignal('SIGKILL', 'finish', true);
+          for (let i = 0; i < 20; i++) {
+            const stillAlive = probeOwnedGroup('finish-drain', true);
+            if (stillAlive === false) {
+              drainageProvenBeforeClose = true;
+              break;
+            }
+            if (stillAlive === null) break;
+            await sleep(25);
+          }
+        } else if (alive === false) {
+          drainageProvenBeforeClose = true;
+        }
+      }
+      if (childClosed || source === 'close') {
+        drainageProvenBeforeClose = await proveClosedGroupDrain();
+      }
+      if (hasStdinInput && !stdinSettled) {
+        stdinSettled = true;
+        stdinError = { code: 'STDIN_CLOSED_EARLY', message: 'reviewer process closed before complete stdin delivery was acknowledged' };
+        try { child.stdin.destroy(); } catch { /* result remains fail-closed */ }
+      }
+      const out = Buffer.concat(stdout).toString('utf8');
+      const err = Buffer.concat(stderr).toString('utf8');
+      const groupDrained = drainageProvenBeforeClose;
+      settled = true;
+      settling = false;
+      resolve({
+        status,
+        signal,
+        error: spawnError,
+        timedOut,
+        outputOverflow,
+        terminationSignals,
+        terminationFailures,
+        processGroupId: ownedProcessGroupId,
+        groupDrained,
+        stdinDelivery: hasStdinInput ? {
+          delivered: stdinDelivered,
+          bytes: stdinInput.length,
+          sha256: sha256Hex(stdinInput),
+          error: stdinError,
+        } : null,
+        stdout: out,
+        stderr: err,
+      });
+    };
+
+    const capture = (bucket, chunk) => {
+      if (settled || settling) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      const remaining = Math.max(0, maxOutputBytes - capturedBytes);
+      if (remaining > 0) bucket.push(buffer.subarray(0, remaining));
+      capturedBytes += buffer.length;
+      if (capturedBytes > maxOutputBytes && !outputOverflow) {
+        outputOverflow = true;
+        beginTermination();
+      }
+    };
+
+    const beginTermination = () => {
+      if (settled || settling || childClosed || terminationStarted || !ownedProcessGroupId
+          || child !== ownedChild || ownedChild.pid !== ownedProcessGroupId) return;
+      terminationStarted = true;
+      attemptSignal('SIGTERM', 'initial');
+      graceTimer = setTimeout(() => {
+        graceTimer = null;
+        if (settled || settling || childClosed || child !== ownedChild
+            || ownedChild.pid !== ownedProcessGroupId) return;
+        const alive = probeOwnedGroup('grace');
+        if (alive === false) drainageProvenBeforeClose = true;
+        else if (alive === true) attemptSignal('SIGKILL', 'grace');
+      }, killGraceMs).unref();
+    };
+
+    child.stdout.on('data', (chunk) => capture(stdout, chunk));
+    child.stderr.on('data', (chunk) => capture(stderr, chunk));
+    child.once('error', (error) => {
+      if (settled || settling) return;
+      spawnError = error;
+    });
+    child.once('exit', () => {
+      if (!terminationStarted || settled || settling || childClosed) return;
+      const alive = probeOwnedGroup('exit');
+      if (alive === false) drainageProvenBeforeClose = true;
+    });
+
+    const timeout = setTimeout(() => {
+      if (settled || settling) return;
+      timedOut = true;
+      beginTermination();
+    }, timeoutMs);
+
+    const hardStop = setTimeout(() => {
+      if (settled || settling || childClosed || child !== ownedChild
+          || ownedChild.pid !== ownedProcessGroupId) return;
+      if (probeOwnedGroup('hard-stop') === true) attemptSignal('SIGKILL', 'hard-stop');
+      child.stdout.destroy();
+      child.stderr.destroy();
+      setTimeout(() => finish(null, 'SIGKILL', 'hard-stop'), 100).unref();
+    }, timeoutMs + killGraceMs + 1_000);
+
+    child.once('close', (status, signal) => {
+      childClosed = true;
+      finish(status, signal, 'close');
+    });
+    if (hasStdinInput) {
+      const settleStdin = (error) => {
+        if (settled || settling || stdinSettled) return;
+        stdinSettled = true;
+        if (error) {
+          stdinError = {
+            code: error && error.code ? String(error.code) : 'STDIN_WRITE_FAILED',
+            message: error && error.message ? String(error.message) : String(error),
+          };
+          beginTermination();
+        } else {
+          stdinDelivered = true;
+        }
+      };
+      child.stdin.once('error', settleStdin);
+      try { stdinWriter(child.stdin, stdinInput, settleStdin); }
+      catch (error) { settleStdin(error); }
+    }
+  });
+}
+
+async function runTool(reviewer, prompt, timeoutSec, opts = {}) {
   const t = TOOLS[reviewer];
   if (!t) return { ok: false, reason: `unknown reviewer ${reviewer}` };
-  const gateResult = authorizeLaunch(reviewer, opts);
+  const gateResult = authorizeLaunch(reviewer, reviewer === 'grok'
+    ? { ...opts, invocationId: opts.invocationId,
+      deferSubscriptionProof: true, preflightStage: 'adapter-billing-preflight' } : opts);
   if (!gateResult.ok) return { ok: false, reason: gateResult.reason, raw: '' };
+  const spendContract = reviewer === 'grok' ? gateResult.route.spendContract : null;
   if (!isExecutable(t.bin)) {
     return { ok: false, reason: `${t.label} is not executable at ${t.bin}`, raw: '' };
   }
@@ -818,11 +2728,8 @@ function runTool(reviewer, prompt, timeoutSec, opts = {}) {
   // red proofs assert against, so the tested argv and the executed argv cannot
   // drift. Duplicating this list is exactly how maxTurns came to be "declared
   // in policy, enforced nowhere".
-  let bounds = null;
+  const bounds = reviewer === 'codex' ? null : gateResult.route.bounds;
   if (reviewer !== 'codex') {
-    try {
-      bounds = (require('./tool-router.cjs').loadPolicy().roles['adversarial-review'] || {}).bounds || null;
-    } catch { /* an absent policy is handled by the router's own refusal above */ }
     // Sub-agents are expressed by OMITTING --agents. If a policy ever turns them
     // on, this adapter refuses rather than silently ignoring the setting.
     if (bounds && bounds.subagents === true) {
@@ -830,37 +2737,200 @@ function runTool(reviewer, prompt, timeoutSec, opts = {}) {
     }
   }
   let sandbox;
+  let retainReviewSandbox = false;
   try {
-    sandbox = prepareReviewSandbox(opts.reviewPaths || []);
+    sandbox = prepareReviewSandbox(opts.reviewPaths || [], opts.sourceRoot || ROOT);
   } catch (error) {
     return { ok: false, reason: `review sandbox preparation failed: ${error.message}`, raw: '' };
   }
   try {
+    let manifestSnapshot;
+    try { manifestSnapshot = validateReviewManifestSnapshot(sandbox, 'post-copy', opts.sourceRoot || ROOT); }
+    catch (error) {
+      return { ok: false, reason: `review manifest changed before launch: ${error.message}`,
+        raw: '', stdout: '', stderr: '',
+        manifestSnapshot: { complete: false, phase: 'post-copy', reason: error.message } };
+    }
+    if (typeof opts.validateSubjectSnapshot === 'function') {
+      try { opts.validateSubjectSnapshot('post-copy', sandbox); }
+      catch (error) {
+        return { ok: false, reason: `review subject changed before launch: ${error.message}`,
+          raw: '', stdout: '', stderr: '', subjectSnapshot: { complete: false, phase: 'post-copy' } };
+      }
+    }
+    let billingPreflight = null;
+    if (reviewer === 'grok') {
+      billingPreflight = await grokBillingPreflight(sandbox, opts);
+      if (!billingPreflight.ok) {
+        retainReviewSandbox = billingPreflight.retainSandbox === true;
+        return {
+          ok: false,
+          reason: `Grok zero-metered billing preflight refused launch: ${billingPreflight.reason}`,
+          raw: '', stdout: '', stderr: '', billingPreflight, spendContract,
+        };
+      }
+      const finalGate = authorizeLaunch(reviewer, {
+        ...opts, invocationId: opts.invocationId, subscriptionProof: billingPreflight,
+      });
+      if (!finalGate.ok) {
+        return { ok: false, reason: `Grok final billing authorization refused launch: ${finalGate.reason}`,
+          raw: '', stdout: '', stderr: '', billingPreflight, spendContract };
+      }
+    }
+    let codexInput = null;
+    if (reviewer === 'codex') {
+      try {
+        codexInput = buildCodexInput(prompt, sandbox, opts.reviewPaths || [], {
+          bundleLimitBytes: opts.codexBundleLimitBytes,
+          inputLimitBytes: opts.codexInputLimitBytes,
+          inputLimitCharacters: opts.codexInputLimitCharacters,
+        });
+      } catch (error) {
+        return {
+          ok: false,
+          reason: `Codex exact input delivery refused before launch: ${error.message}`,
+          raw: '', stdout: '', stderr: '',
+          inputDelivery: Object.freeze({ complete: false, delivered: false, reason: error.message }),
+        };
+      }
+    }
     const argv = buildToolArgv(reviewer, prompt, bounds, sandbox.cwd);
     let contained;
     try { contained = containedReviewerCommand(reviewer, sandbox, argv); }
     catch (e) { return { ok: false, reason: `OS containment unavailable: ${e.message}`, raw: '' }; }
-    const r = spawnSync(contained.bin, contained.argv, {
-      encoding: 'utf8',
-      timeout: timeoutSec * 1000,
-      maxBuffer: 64 * 1024 * 1024,
-      cwd: sandbox.cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: reviewerEnvironment(reviewer, sandbox),
-    });
-    const raw = (r.stdout || '') + (r.stderr ? `\n--- stderr ---\n${r.stderr}` : '');
-    if (r.error && r.error.code === 'ETIMEDOUT') {
-      return { ok: false, reason: `${t.label} exceeded the ${timeoutSec}s timeout`, raw };
+    const watchdogRunner = typeof opts.watchdogRunner === 'function'
+      ? opts.watchdogRunner : runContainedWithWatchdog;
+    let reviewExecutableIdentity = null;
+    if (reviewer === 'grok') {
+      reviewExecutableIdentity = validateGrokExecutableIdentity({
+        versionRunner: opts.grokVersionRunner,
+      });
+      if (!reviewExecutableIdentity.ok) {
+        return {
+          ok: false,
+          reason: `Grok executable identity refused reviewer launch: ${reviewExecutableIdentity.reason}`,
+          raw: '', stdout: '', stderr: '', billingPreflight, spendContract, reviewExecutableIdentity,
+        };
+      }
     }
-    if (r.error) return { ok: false, reason: `${t.label} failed to start: ${r.error.message}`, raw };
-    if (r.status !== 0) return { ok: false, reason: `${t.label} exited ${r.status}`, raw };
-    return { ok: true, raw };
+    const r = await watchdogRunner(contained, {
+      timeoutMs: timeoutSec * 1000,
+      maxOutputBytes: MAX_REVIEW_OUTPUT_BYTES,
+      cwd: sandbox.cwd,
+      env: reviewerEnvironment(reviewer, sandbox),
+      stdinInput: codexInput ? codexInput.inputBuffer : null,
+      stdinWriter: opts.stdinWriter,
+    });
+    const stdout = r.stdout || '';
+    const stderr = r.stderr || '';
+    const raw = stdout + (stderr ? `\n--- stderr ---\n${stderr}` : '');
+    const terminationEvidence = Object.freeze({
+      processGroupId: r.processGroupId,
+      signals: Array.isArray(r.terminationSignals) ? r.terminationSignals.slice() : [],
+      failures: Array.isArray(r.terminationFailures) ? r.terminationFailures.slice() : [],
+      groupDrained: r.groupDrained === true,
+    });
+    const terminationFailureNote = terminationEvidence.failures.length
+      ? `; termination signalling failed: ${terminationEvidence.failures.map((failure) =>
+        `${failure.phase}/${failure.signal}${failure.code ? ` ${failure.code}` : ''}: ${failure.message}`).join(' | ')}`
+      : '';
+    const inputDelivery = codexInput ? (() => {
+      const transport = r.stdinDelivery || null;
+      const delivered = !!(transport && transport.delivered === true
+        && transport.bytes === codexInput.inputDelivery.inputBytes
+        && transport.sha256 === codexInput.inputDelivery.inputSha256
+        && !transport.error);
+      const completed = {
+        ...codexInput.inputDelivery,
+        delivered,
+        complete: delivered,
+        transport: transport ? {
+          bytes: transport.bytes,
+          sha256: transport.sha256,
+          error: transport.error || null,
+        } : null,
+      };
+      return Object.freeze({
+        ...completed,
+        deliveryAttestationSha256: sha256Hex(Buffer.from(stableJson(completed), 'utf8')),
+      });
+    })() : null;
+    const readCoverage = reviewer === 'grok'
+      ? grokReadReceiptCoverage(stdout, sandbox.manifest, sandbox.cwd)
+      : null;
+    try { manifestSnapshot = validateReviewManifestSnapshot(sandbox, 'post-run', opts.sourceRoot || ROOT); }
+    catch (error) {
+      manifestSnapshot = { complete: false, phase: 'post-run', reason: error.message };
+    }
+    let subjectSnapshot = { complete: true, phase: 'post-run' };
+    if (typeof opts.validateSubjectSnapshot === 'function') {
+      try { opts.validateSubjectSnapshot('post-run', sandbox); }
+      catch (error) {
+        subjectSnapshot = { complete: false, phase: 'post-run', reason: error.message };
+      }
+    }
+    const spendAuthorization = reviewer === 'grok'
+      ? authoritativeGrokSpend(stdout, opts.capUsd) : null;
+    const completionEvidence = reviewer === 'codex' ? Object.freeze({
+      authority: 'review-adapters.cjs runTool',
+      status: Number.isInteger(r.status) ? r.status : null,
+      timedOut: r.timedOut === true,
+      outputOverflow: r.outputOverflow === true,
+      error: r.error ? String(r.error.message || r.error) : null,
+      groupDrained: r.groupDrained === true,
+      inputComplete: Boolean(inputDelivery && inputDelivery.complete === true),
+      subjectSnapshotComplete: subjectSnapshot && subjectSnapshot.complete === true,
+      manifestSnapshotComplete: manifestSnapshot && manifestSnapshot.complete === true,
+      complete: r.status === 0 && r.timedOut !== true && r.outputOverflow !== true
+        && !r.error && r.groupDrained === true
+        && Boolean(inputDelivery && inputDelivery.complete === true)
+        && subjectSnapshot && subjectSnapshot.complete === true
+        && manifestSnapshot && manifestSnapshot.complete === true,
+    }) : null;
+    const commonEvidence = { raw, stdout, stderr, readCoverage, inputDelivery,
+      terminationEvidence, subjectSnapshot, manifestSnapshot, spendAuthorization,
+      spendContract, billingPreflight, reviewExecutableIdentity, completionEvidence };
+    if (reviewer === 'codex' && (!inputDelivery || !inputDelivery.complete)) {
+      const detail = r.error
+        ? `spawn failed: ${r.error.message}`
+        : inputDelivery && inputDelivery.transport && inputDelivery.transport.error
+        ? `${inputDelivery.transport.error.code || 'STDIN_WRITE_FAILED'}: ${inputDelivery.transport.error.message}`
+        : 'the reviewer transport did not acknowledge the exact stdin bytes and digest';
+      return { ok: false, reason: `Codex exact input delivery was not proven (${detail})`, ...commonEvidence };
+    }
+    if (r.timedOut) {
+      return { ok: false, reason: `${t.label} exceeded the ${timeoutSec}s timeout${terminationFailureNote}`, ...commonEvidence };
+    }
+    if (r.outputOverflow) {
+      return { ok: false, reason: `${t.label} exceeded the bounded ${MAX_REVIEW_OUTPUT_BYTES}-byte output limit${terminationFailureNote}`, ...commonEvidence };
+    }
+    if (!r.groupDrained) {
+      retainReviewSandbox = true;
+      const reaper = await reapUndrainedReviewerGroup(terminationEvidence, opts.reaperOptions || {});
+      if (reaper.drained) retainReviewSandbox = false;
+      return { ok: false, reason: `${t.label} process group did not drain after forced termination${terminationFailureNote}`, ...commonEvidence,
+        sandboxRetention: Object.freeze({ retained: retainReviewSandbox,
+          cleanup: 'bounded-identity-bound-reaper', reason: reaper.reason,
+          attempts: reaper.attempts.length }) };
+    }
+    if (!subjectSnapshot.complete) {
+      return { ok: false, reason: `review subject changed during execution: ${subjectSnapshot.reason}`, ...commonEvidence };
+    }
+    if (!manifestSnapshot.complete) {
+      return { ok: false, reason: `review manifest changed during execution: ${manifestSnapshot.reason}`, ...commonEvidence };
+    }
+    if (r.error) return { ok: false, reason: `${t.label} failed to start: ${r.error.message}`, ...commonEvidence };
+    if (r.status !== 0) return { ok: false, reason: `${t.label} exited ${r.status}`, ...commonEvidence };
+    if (reviewer === 'grok' && (!spendAuthorization || !spendAuthorization.ok)) {
+      return { ok: false, reason: `Grok post-run telemetry validation failed: ${spendAuthorization ? spendAuthorization.reason : 'missing terminal cost evidence'}`, ...commonEvidence };
+    }
+    return { ok: true, ...commonEvidence };
   } finally {
-    cleanupReviewSandbox(sandbox);
+    if (!retainReviewSandbox) cleanupReviewSandbox(sandbox);
   }
 }
 
-function cmdRun(args) {
+async function cmdRun(args) {
   const reviewer = args.reviewer;
   if (!reviewer) return usage('--reviewer is required');
   if (!['codex', 'grok', 'copilot'].includes(reviewer)) return usage(`unknown reviewer ${reviewer}`);
@@ -868,7 +2938,29 @@ function cmdRun(args) {
   if (!fs.existsSync(args.packet)) return usage(`packet not found: ${args.packet}`);
 
   const packet = JSON.parse(fs.readFileSync(args.packet, 'utf8'));
-  const subject = subjectOf(args);
+  if (Array.isArray(packet.hostContainmentRequired) && packet.hostContainmentRequired.length && !args.runId) {
+    console.error('[review-adapters] refusing beta/dashboard review without mandatory --run-id canonical coordinate');
+    return EXIT_BLOCK;
+  }
+  let runContext = Object.freeze({ runId: null, sourceRoot: fs.realpathSync(ROOT), gitEnv: null });
+  if (args.runId) {
+    try { runContext = resolveCanonicalRunContext(args.runId, args.packet); }
+    catch (error) {
+      console.error(`[review-adapters] refusing invalid canonical run coordinate: ${error.message}`);
+      return EXIT_BLOCK;
+    }
+  }
+  let reviewDataClass;
+  try { reviewDataClass = resolveReviewDataClass(runContext, args.dataClass); }
+  catch (error) {
+    console.error(`[review-adapters] refusing review data class: ${error.message}`);
+    return EXIT_BLOCK;
+  }
+  const subject = subjectOf(args, runContext);
+  const canonicalSubject = Object.freeze({
+    ...subject,
+    subjectPaths: Object.freeze(subject.subjectPaths.slice()),
+  });
 
   // Chunked review: the reviewer sees only this group's paths, but the record
   // stays bound to the FULL subject hash. That is what lets several group
@@ -890,7 +2982,7 @@ function cmdRun(args) {
   }
 
   let boundedReviewPaths;
-  try { boundedReviewPaths = resolveBoundedReviewPaths(subject, packet); }
+  try { boundedReviewPaths = resolveBoundedReviewPaths(subject, packet, runContext.sourceRoot); }
   catch (e) {
     console.error(`[review-adapters] refusing unbounded review: ${e.message}`);
     return EXIT_BLOCK;
@@ -898,8 +2990,8 @@ function cmdRun(args) {
 
   fs.mkdirSync(REVIEWS_DIR, { recursive: true });
   fs.mkdirSync(RAW_DIR, { recursive: true });
-  const ts = new Date().toISOString();
-  const stamp = ts.replace(/[^0-9]/g, '').slice(0, 14);
+  const invocation = createInvocationIdentity(reviewer);
+  const ts = invocation.ts;
 
   // Copilot IS installed and authenticated here — and it still produces
   // UNAVAILABLE, deliberately. The reason is not that the tool is missing; it
@@ -919,17 +3011,29 @@ function cmdRun(args) {
       unavailableReason:
         `No gate review was collected from Copilot, and none can be. Copilot is an ADVISORY repository guardian with approvalAuthority NONE in the Tool Capability Canon: it may comment, it may not approve, and a required review is never satisfied by it. Local detection reports: ${d.status} — ${d.detail}.`,
       ts,
+      invocationId: invocation.reviewId,
     });
-    return writeRecord(record, `${stamp}-copilot`, '(no tool invoked — Copilot is advisory and is never launched as a gate reviewer)', { packetPath: args.packet });
+    return writeRecord(record, invocation.base, '(no tool invoked — Copilot is advisory and is never launched as a gate reviewer)', { packetPath: args.packet });
   }
 
-  const diff = subjectDiff(subject, args);
+  const diff = subjectDiff(subject, args, runContext);
+  let checkBinding;
+  try {
+    checkBinding = resolveCanonicalCheckReceipt(
+      args.packet, packet, canonicalSubject, undefined,
+      runContext.runId ? { runId: runContext.runId } : {});
+  }
+  catch (error) {
+    console.error(`[review-adapters] refusing review without canonical deterministic evidence: ${error.message}`);
+    return EXIT_BLOCK;
+  }
   const promptContext = {
-    specs: (packet.sourceOfTruth || []).filter((p) => fs.existsSync(path.join(ROOT, p))).map((p) => ({
+    specs: (packet.sourceOfTruth || []).filter((p) => fs.existsSync(path.join(runContext.sourceRoot, p))).map((p) => ({
       path: p,
-      sha: crypto.createHash('sha256').update(fs.readFileSync(path.join(ROOT, p))).digest('hex'),
+      sha: crypto.createHash('sha256').update(fs.readFileSync(path.join(runContext.sourceRoot, p))).digest('hex'),
     })),
-    checks: (packet.testsRequired || []).map((cmd) => ({ cmd, exit: 'declared; verify from gate evidence' })),
+    checks: checkBinding.receipt.results,
+    checkReceipt: checkBinding.receipt,
     unverified: packet.stopConditions || [],
   };
   const prompt = reviewer === 'codex'
@@ -942,17 +3046,52 @@ function cmdRun(args) {
   }
 
   const timeoutSec = Number(args.timeout) > 0 ? Number(args.timeout) : 900;
-  const res = runTool(reviewer, prompt, timeoutSec, {
-    dataClass: args.dataClass || 'INTERNAL',
+  const res = await runTool(reviewer, prompt, timeoutSec, {
+    invocationId: invocation.reviewId,
+    dataClass: reviewDataClass,
     allowMetered: args.allowMetered,
     approvedBy: args.approvedBy,
     capUsd: args.capUsd,
     reviewPaths: boundedReviewPaths,
+    sourceRoot: runContext.sourceRoot,
+    validateSubjectSnapshot(phase) {
+      const current = subjectOf(args, runContext);
+      const same = current.subjectSha256 === canonicalSubject.subjectSha256
+        && stableJson(current.subjectPaths.slice().sort()) === stableJson(canonicalSubject.subjectPaths.slice().sort())
+        && current.diffBytes === canonicalSubject.diffBytes
+        && (current.range || null) === (canonicalSubject.range || null);
+      if (!same) throw new Error(`${phase}: canonical subject coordinates no longer match the copied snapshot`);
+      if (sha256Hex(fs.readFileSync(fs.realpathSync(path.resolve(args.packet)))) !== checkBinding.packetSha256) {
+        throw new Error(`${phase}: canonical packet bytes no longer match the validated check receipt`);
+      }
+    },
   });
-  const rawPath = path.join(RAW_DIR, `${stamp}-${reviewer}.txt`);
-  fs.writeFileSync(rawPath, res.raw || '(no output captured)', 'utf8');
+  const rawPath = path.join(RAW_DIR, `${invocation.base}.txt`);
+  const rawInputDelivery = res.inputDelivery
+    ? `\n--- inputDelivery ---\n${JSON.stringify(res.inputDelivery, null, 2)}\n`
+    : '';
+  const rawControlEvidence = (res.spendAuthorization || res.billingPreflight || res.reviewExecutableIdentity || res.subjectSnapshot || res.manifestSnapshot || res.completionEvidence)
+    ? `\n--- controlEvidence ---\n${JSON.stringify({
+      spendAuthorization: res.spendAuthorization || null,
+      billingPreflight: res.billingPreflight || null,
+      reviewExecutableIdentity: res.reviewExecutableIdentity || null,
+      subjectSnapshot: res.subjectSnapshot || null,
+      manifestSnapshot: res.manifestSnapshot || null,
+      completionEvidence: res.completionEvidence || null,
+    }, null, 2)}\n`
+    : '';
+  writeImmutableFile(rawPath, (res.raw || '(no output captured)') + rawInputDelivery + rawControlEvidence);
 
-  let parsed = res.ok ? extractJson(res.raw) : null;
+  // Failed Codex transport still becomes durable UNAVAILABLE evidence. It
+  // carries zero verified changedPaths and can never satisfy a reviewer slot,
+  // but it lets the operator distinguish a bounded transport refusal from a
+  // reviewer that was never launched. The schema permits zero paths only for
+  // UNAVAILABLE; engineering-os rejects them for every substantive verdict.
+
+  const protocolText = reviewerProtocolText(reviewer, res);
+  let parsed = res.ok
+    ? (reviewer === 'grok' ? extractGrokStreamingReview(protocolText, res.readCoverage) : extractJson(protocolText))
+    : null;
   // When a tool exits 0 but returns no usable record, "no parseable JSON" is
   // true but unhelpfully vague — and a vague UNAVAILABLE reason is the kind of
   // thing an operator learns to ignore. Several CLIs report why they stopped
@@ -960,18 +3099,40 @@ function cmdRun(args) {
   // because "cancelled after 9 turns" and "returned prose" call for completely
   // different responses.
   let why = res.ok ? 'the reviewer ran but produced no parseable JSON review record' : res.reason;
+  let codexInspection = null;
 
   // Truncation guard — applied BEFORE the payload is trusted.
-  const abnormal = stopWasAbnormal(res.raw);
-  if (abnormal) {
+  if (res.ok) {
+    const receiptResult = enforceGrokReadReceipts(reviewer, parsed, res.readCoverage);
+    if (!receiptResult.parsed && receiptResult.unavailableReason) {
+      why = receiptResult.unavailableReason;
+      parsed = null;
+    }
+  }
+  if (res.ok && reviewer === 'codex' && parsed) {
+    codexInspection = validateCodexInspectionProofs(parsed, res.inputDelivery);
+    if (!codexInspection.complete) {
+      why = `Codex inspection coverage was not proven: ${codexInspection.reason}`;
+      parsed = null;
+    }
+  }
+
+  const codexTerminal = reviewer === 'codex'
+    ? validateCodexTerminalEnvelope(protocolText, res.completionEvidence)
+    : Object.freeze({ ok: true });
+  const abnormal = stopWasAbnormal(protocolText);
+  if (!codexTerminal.ok) {
+    why = `Codex terminal evidence was refused: ${codexTerminal.reason}`;
+    parsed = null;
+  } else if (abnormal) {
     why = `the reviewer stopped abnormally (${abnormal}) — any verdict in its output describes an unfinished review and is refused`;
     parsed = null;
-  } else if (isUsableReview(parsed) && looksUnfinished(parsed)) {
+  } else if (isUsableReview(parsed, reviewer) && looksUnfinished(parsed)) {
     why = 'the reviewer emitted a schema-valid but self-declared PLACEHOLDER verdict (findings marked pending / not yet inspected); refused rather than recorded as a real review';
     parsed = null;
   }
-  if (res.ok && !isUsableReview(parsed)) {
-    const envelope = extractJson(res.raw);
+  if (res.ok && !isUsableReview(parsed, reviewer)) {
+    const envelope = extractJson(protocolText);
     const stop = envelope && typeof envelope.stopReason === 'string' ? envelope.stopReason : null;
     const turns = envelope && typeof envelope.num_turns === 'number' ? envelope.num_turns : null;
     if (stop && stop !== 'end_turn') {
@@ -983,9 +3144,19 @@ function cmdRun(args) {
     reviewerModel: reviewer === 'codex' ? 'codex-cli (ChatGPT.app)' : 'grok-cli (grok-macos-aarch64)',
     packetId: packet.packetId,
     subject,
-    parsed: isUsableReview(parsed) ? parsed : null,
+    parsed: isUsableReview(parsed, reviewer) ? parsed : null,
     unavailableReason: why,
     ts,
+    coveredPaths: reviewer === 'codex'
+      ? codexCoveredPaths(res.inputDelivery)
+      : (res.readCoverage && res.readCoverage.complete ? res.readCoverage.readPaths : []),
+    inputDelivery: reviewer === 'codex' ? res.inputDelivery : null,
+    codexInspection: reviewer === 'codex' ? codexInspection : null,
+    readCoverage: reviewer === 'grok' ? res.readCoverage : null,
+    invocationId: invocation.reviewId,
+    spendAuthorization: res.spendAuthorization || null,
+    subjectSnapshot: res.subjectSnapshot || null,
+    checkReceipt: checkBinding.receipt,
   });
   if (args.groupId) {
     record.group = { groupId: args.groupId, groupDigest: args.groupDigest || null };
@@ -994,12 +3165,14 @@ function cmdRun(args) {
   // the aggregate reaches the gate, and only when every group beneath it
   // covered the subject exactly. A stray group record must never be mistaken
   // for a review of the whole change.
-  return writeRecord(record, `${stamp}-${reviewer}${args.groupId ? '-' + args.groupId : ''}`, rawPath,
+  return writeRecord(record, `${invocation.base}${args.groupId ? '-' + args.groupId : ''}`, rawPath,
     { packetPath: args.packet, subdir: args.groupId ? 'groups' : null });
 }
 
 function writeRecord(record, base, rawPath, opts = {}) {
-  const dir = opts.subdir ? path.join(REVIEWS_DIR, opts.subdir) : REVIEWS_DIR;
+  const reviewsRoot = opts.reviewsRoot || REVIEWS_DIR;
+  const diagnosticsRoot = opts.diagnosticsRoot || path.join(RAW_DIR, 'invalid-review-records');
+  const dir = opts.subdir ? path.join(reviewsRoot, opts.subdir) : reviewsRoot;
   fs.mkdirSync(dir, { recursive: true });
   const outPath = path.join(dir, `${base}.json`);
   // ROOT CAUSE of the 2026-08-25 report: the adapter wrote records UNSIGNED, so
@@ -1012,6 +3185,27 @@ function writeRecord(record, base, rawPath, opts = {}) {
   // could not run" is a real, useful, gateable fact and deserves the same
   // integrity guarantee as an approval — otherwise the only records that carry
   // provenance are the convenient ones.
+  const incomplete = [];
+  for (const [index, finding] of (Array.isArray(record && record.findings) ? record.findings : []).entries()) {
+    if (!finding || !['CRITICAL', 'HIGH'].includes(String(finding.severity || '').toUpperCase())) continue;
+    for (const field of ['impact', 'requiredCorrection', 'verificationMethod']) {
+      if (typeof finding[field] !== 'string' || !finding[field].trim()) {
+        incomplete.push(`findings[${index}].${field}`);
+      }
+    }
+  }
+  if (incomplete.length) {
+    fs.mkdirSync(diagnosticsRoot, { recursive: true, mode: 0o700 });
+    const diagnosticPath = path.join(diagnosticsRoot, `${base}.pre-sign.json`);
+    writeImmutableFile(diagnosticPath, JSON.stringify({
+      reason: 'structurally incomplete blocking finding refused before signing',
+      incomplete,
+      record,
+    }, null, 2) + '\n');
+    process.stderr.write(`[review-adapters] REFUSING structurally incomplete blocking finding before signing: ${incomplete.join(', ')}\n`);
+    process.stderr.write(`[review-adapters] diagnostic retained outside the active gate at ${path.relative(ROOT, diagnosticPath)}\n`);
+    return EXIT_BLOCK;
+  }
   let signed;
   try {
     signed = require('./review-sign.cjs').sign(record, { packetPath: opts.packetPath });
@@ -1019,19 +3213,39 @@ function writeRecord(record, base, rawPath, opts = {}) {
     process.stderr.write(`[review-adapters] REFUSING to write an unsigned record: ${e.message}\n`);
     return EXIT_BLOCK;
   }
-  fs.writeFileSync(outPath, JSON.stringify(signed, null, 2) + '\n', 'utf8');
   record = signed;
-  const v = validateRecord(outPath);
+  // Never validate inside the active reviews tree. A signed record can still
+  // be schema-invalid (for example a HIGH finding without impact/correction),
+  // and engineering-os intentionally treats every JSON file in reviews/ as
+  // active evidence. Validate the exact signed bytes in a private 0700
+  // quarantine, then publish by a single hard-link only after validation.
+  const quarantineRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-review-record-'));
+  const quarantinePath = path.join(quarantineRoot, `${base}.json`);
+  let v;
+  try {
+    writeImmutableFile(quarantinePath, JSON.stringify(signed, null, 2) + '\n');
+    v = (opts.validateRecord || validateRecord)(quarantinePath);
+    if (v.ok) {
+      fs.linkSync(quarantinePath, outPath); // atomic publication; refuses EEXIST
+    } else {
+      fs.mkdirSync(diagnosticsRoot, { recursive: true, mode: 0o700 });
+      const diagnosticPath = path.join(diagnosticsRoot, `${base}.json`);
+      fs.linkSync(quarantinePath, diagnosticPath);
+      process.stderr.write(`[review-adapters] invalid signed record retained outside the active gate at ${path.relative(ROOT, diagnosticPath)}\n`);
+    }
+  } finally {
+    fs.rmSync(quarantineRoot, { recursive: true, force: true });
+  }
   console.log(`[review-adapters] reviewer   : ${record.reviewer} (${record.reviewerModel})`);
   console.log(`[review-adapters] disposition: ${record.disposition}`);
   if (record.unavailableReason) console.log(`[review-adapters] reason     : ${record.unavailableReason}`);
   console.log(`[review-adapters] findings   : ${(record.findings || []).length}`);
   console.log(`[review-adapters] raw output : ${rawPath}`);
-  console.log(`[review-adapters] record     : ${path.relative(ROOT, outPath)}`);
+  if (v.ok) console.log(`[review-adapters] record     : ${path.relative(ROOT, outPath)}`);
   if (!v.ok) {
     console.error('[review-adapters] the produced record FAILED schema validation:');
     for (const e of v.errors) console.error(`    ${e}`);
-    console.error('[review-adapters] the record is left on disk for inspection. The gate will refuse it.');
+    console.error('[review-adapters] no active review file was published. Diagnostic evidence was retained outside the gated directory.');
     return EXIT_BLOCK;
   }
   console.log('[review-adapters] record is SIGNED and validates against engineering-review.schema.json');
@@ -1046,7 +3260,7 @@ review-adapters.cjs — read-only reviewer bridges
   --doctor [--json]
         Which reviewers are actually installed, at which absolute path.
 
-  --run --reviewer codex|grok|copilot --packet <p>
+  --run --reviewer codex|grok|copilot --packet <p> [--run-id <RUN-...>]
         [--subject-sha <sha>] [--base <ref>] [--head <ref>]
         [--timeout <seconds>] [--dry-run]
         Run a reviewer read-only against the bound subject diff, preserve raw
@@ -1064,6 +3278,7 @@ function parseArgs(argv) {
     const t = argv[i];
     if (t === '--reviewer') a.reviewer = argv[++i];
     else if (t === '--packet') a.packet = argv[++i];
+    else if (t === '--run-id') a.runId = argv[++i];
     else if (t === '--subject-sha') a.subjectSha = argv[++i];
     else if (t === '--base') a.base = argv[++i];
     else if (t === '--head') a.head = argv[++i];
@@ -1085,16 +3300,18 @@ function parseArgs(argv) {
 
 if (require.main === module) {
   const args = parseArgs(process.argv.slice(2));
-  let code;
-  try {
-    if (args.doctor) code = cmdDoctor(args);
-    else if (args.run) code = cmdRun(args);
-    else code = usage();
-  } catch (e) {
-    process.stderr.write(`\n[review-adapters] ${e.message}\n`);
-    code = EXIT_BLOCK;
-  }
-  process.exit(code);
+  (async () => {
+    let code;
+    try {
+      if (args.doctor) code = cmdDoctor(args);
+      else if (args.run) code = await cmdRun(args);
+      else code = usage();
+    } catch (e) {
+      process.stderr.write(`\n[review-adapters] ${e.message}\n`);
+      code = EXIT_BLOCK;
+    }
+    process.exit(code);
+  })();
 }
 
-module.exports = { detect, extractJson, buildRecord, codexPrompt, grokPrompt, isUsableReview, stopWasAbnormal, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, runTool, prepareReviewSandbox, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, GROK_REVIEW_SCHEMA, TOOLS };
+module.exports = { detect, extractJson, extractGrokStreamingReview, grokStreamEvents, grokReadReceiptCoverage, enforceGrokReadReceipts, authoritativeGrokSpend, grokSpendContract, reviewerProtocolText, buildRecord, codexPrompt, grokPrompt, isUsableReview, validateReviewPayload, validateCodexInspectionProofs, codexCoveredPaths, stopWasAbnormal, validateCodexTerminalEnvelope, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, buildCodexInput, runTool, runContainedWithWatchdog, reapUndrainedReviewerGroup, processGroupAlive, prepareReviewSandbox, validateReviewManifestSnapshot, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, validateGrokExecutableIdentity, runGrokBillingAcp, validateGrokBillingEvidence, grokBillingPreflight, createInvocationIdentity, writeImmutableFile, writeRecord, runnablePacketChecks, resolveCanonicalCheckReceipt, resolveCanonicalRunContext, resolveReviewDataClass, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, MAX_REVIEW_OUTPUT_BYTES, MAX_CODEX_BUNDLE_BYTES, MAX_CODEX_INPUT_BYTES, MAX_CODEX_INPUT_CHARACTERS, REVIEW_KILL_GRACE_MS, REVIEW_REAPER_TIMEOUT_MS, GROK_BILLING_PREFLIGHT_TIMEOUT_MS, GROK_BILLING_MAX_STREAM_BYTES, GROK_EXPECTED_VERSION, GROK_EXPECTED_SHA256, GROK_REVIEW_SCHEMA, TOOLS };

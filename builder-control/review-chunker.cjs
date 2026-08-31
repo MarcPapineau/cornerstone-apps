@@ -39,8 +39,8 @@
  *
  *   node builder-control/review-chunker.cjs --plan   [--base <ref>] [--head <ref>] [--groups N] [--json]
  *   node builder-control/review-chunker.cjs --run    --group <id> --packet <p> [--timeout <s>]
- *   node builder-control/review-chunker.cjs --run-all --packet <p> [--timeout <s>]
- *   node builder-control/review-chunker.cjs --aggregate --packet <p> [--json]
+ *   node builder-control/review-chunker.cjs --run-all --groups <n> --packet <p> [--timeout <s>]
+ *   node builder-control/review-chunker.cjs --aggregate --groups <n> --reviewer <r> --packet <p> [--json]
  *
  * Exit: 0 ok · 2 usage · 3 refused / incomplete coverage
  */
@@ -64,6 +64,7 @@ const EXIT_USAGE = 2;
 const EXIT_REFUSED = 3;
 
 const DEFAULT_GROUPS = 5;
+const RUN_ID_RE = /^RUN-\d{8}-[0-9a-f]{8}$/;
 
 // GROK G9 FINDING #1: with 7 roles and DEFAULT_GROUPS = 5 the planner only ever
 // reached the MERGE branch — the byte-weight split added to fix the timeout was
@@ -75,8 +76,20 @@ const DEFAULT_GROUPS = 5;
 // of how many groups the target asked for. The budget is derived from evidence —
 // 46KB completed in 14 turns, 101KB exhausted 16 — so the ceiling sits below the
 // size that has actually failed.
+// Changed bytes remain capped by the reviewer-work evidence above. The total
+// payload has a separate ceiling matching the Codex exact-file bundle, because
+// every group also carries pinned specifications and deterministic-check proof.
 const MAX_GROUP_BYTES = 60000;
+const MAX_GROUP_PAYLOAD_BYTES = 1280 * 1024;
+const FIXED_CHECK_OVERHEAD_BYTES = 32 * 1024;
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+function planningRefusal(code, message, details = {}) {
+  const error = new Error(`${code}: ${message}`);
+  error.code = code;
+  Object.assign(error, details);
+  return error;
+}
 
 // ── coherence classification ────────────────────────────────────────────────
 // Ordered, first-match-wins. Order is part of the contract: moving a rule
@@ -105,9 +118,17 @@ function roleOf(p) {
  * large coherent roles intact). If there are fewer, the largest role splits on
  * a stable sort — never on file size, which would vary between machines.
  */
-function planGroups(subjectPaths, target = DEFAULT_GROUPS, sizes = null) {
+function planGroups(subjectPaths, target = DEFAULT_GROUPS, sizes = null, planOptions = {}) {
   const paths = [...new Set(subjectPaths)].sort();
   if (!paths.length) return [];
+  const options = planOptions && typeof planOptions === 'object' ? planOptions : {};
+  const fixedOverheadBytes = Number.isInteger(options.fixedOverheadBytes) && options.fixedOverheadBytes >= 0
+    ? options.fixedOverheadBytes : 0;
+  if (fixedOverheadBytes > MAX_GROUP_PAYLOAD_BYTES) {
+    throw planningRefusal('REVIEW_GROUP_FIXED_OVERHEAD_OVERSIZE',
+      `pinned-spec/check overhead ${fixedOverheadBytes} exceeds payload budget ${MAX_GROUP_PAYLOAD_BYTES}`,
+      { fixedOverheadBytes, maxPayloadBytes: MAX_GROUP_PAYLOAD_BYTES });
+  }
 
   const byRole = new Map();
   for (const p of paths) {
@@ -119,6 +140,9 @@ function planGroups(subjectPaths, target = DEFAULT_GROUPS, sizes = null) {
   const weight = (g) => (sizes
     ? g.paths.reduce((n, p) => n + (sizes[p] || 0), 0)
     : g.paths.length);
+  const payloadWeight = (g) => fixedOverheadBytes + weight(g);
+  const oversize = (g) => sizes &&
+    (weight(g) > MAX_GROUP_BYTES || payloadWeight(g) > MAX_GROUP_PAYLOAD_BYTES);
 
   let groups = ROLES
     .filter((r) => byRole.has(r.id))
@@ -177,17 +201,27 @@ function planGroups(subjectPaths, target = DEFAULT_GROUPS, sizes = null) {
     groups.splice(bigI, 1, a, b);
   }
 
-  // Oversize split — runs AFTER merge/split-to-target and is independent of it.
-  // Without sizes this is a no-op, which is correct: an unknown size must not be
-  // guessed at.
+  // Oversize split — runs AFTER merge/split-to-target. MAX_GROUP_BYTES is the
+  // observed safe reviewer-work budget, so an explicit --groups value is a
+  // deterministic minimum/hint, never authority to merge unsafe work back
+  // together. Without sizes this is a no-op, which is correct: an unknown size
+  // must not be guessed at.
   if (sizes) {
     let guard = 0;
     for (;;) {
       if (++guard > 64) break;                      // structural stop, not a policy
       let idx = -1;
       for (let i = 0; i < groups.length; i++) {
-        if (groups[i].paths.length < 2) continue;   // a single path cannot be split
-        if (weight(groups[i]) > MAX_GROUP_BYTES) { idx = i; break; }
+        if (!oversize(groups[i])) continue;
+        if (groups[i].paths.length < 2) {
+          const onlyPath = groups[i].paths[0];
+          throw planningRefusal('REVIEW_GROUP_UNSPLITTABLE_OVERSIZE',
+            `${onlyPath} requires ${weight(groups[i])} changed byte(s) and ${payloadWeight(groups[i])} total review byte(s), exceeding the ${MAX_GROUP_BYTES} changed-byte or ${MAX_GROUP_PAYLOAD_BYTES} payload ceiling`,
+            { path: onlyPath, changedBytes: weight(groups[i]), totalBytes: payloadWeight(groups[i]),
+              fixedOverheadBytes, maxChangedBytes: MAX_GROUP_BYTES,
+              maxPayloadBytes: MAX_GROUP_PAYLOAD_BYTES });
+        }
+        idx = i; break;
       }
       if (idx === -1) break;
       const src = groups[idx].paths;
@@ -217,38 +251,191 @@ function planGroups(subjectPaths, target = DEFAULT_GROUPS, sizes = null) {
     paths: g.paths,
     pathCount: g.paths.length,
     groupDigest: sha256(g.paths.join('\n')),
+    changedBytes: sizes ? weight(g) : null,
+    fixedOverheadBytes: sizes ? fixedOverheadBytes : null,
+    estimatedReviewBytes: sizes ? payloadWeight(g) : null,
   }));
 }
 
 // ── subject ────────────────────────────────────────────────────────────────
-function subjectOf(args) {
+function normalizeRunId(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || !RUN_ID_RE.test(value)) {
+    throw new Error(`${JSON.stringify(value)} is not a canonical RUN-YYYYMMDD-xxxxxxxx id`);
+  }
+  return value;
+}
+
+// Resolve the same run/worktree authority the adapter consumes. The legacy
+// no-run-id path remains available because the adapter itself then resolves an
+// exact packet+subject check receipt and refuses if more than one run matches;
+// it is not a guess or a "latest run" fallback.
+function resolveRunContext(args, authority = null) {
+  const runId = normalizeRunId(args && args.runId);
+  let packetPath = null;
+  if (args && args.packet) {
+    try { packetPath = fs.realpathSync(path.resolve(args.packet)); }
+    catch (error) { throw new Error(`cannot resolve --packet: ${error.message}`); }
+  }
+  if (!runId) {
+    if (packetPath) {
+      const packet = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
+      if (Array.isArray(packet.hostContainmentRequired) && packet.hostContainmentRequired.length) {
+        throw new Error('beta/dashboard chunked review requires a canonical --run-id coordinate');
+      }
+    }
+    return Object.freeze({ runId: null, run: null, sourceRoot: fs.realpathSync(ROOT),
+      packetPath, gitEnv: null });
+  }
+  if (!packetPath) throw new Error('--packet is required with --run-id');
+
+  const runAuthority = authority || require('./aegis-run.cjs');
+  if (typeof runAuthority.loadRun !== 'function'
+      || typeof runAuthority.canonicalGitEnvironment !== 'function') {
+    throw new Error('canonical AEGIS run/worktree authority is unavailable');
+  }
+  const run = runAuthority.loadRun(runId);
+  if (!run || run.runId !== runId) {
+    throw new Error(`canonical run authority did not return exactly ${runId}`);
+  }
+  if (typeof run.packet !== 'string' || !run.packet.trim()) {
+    throw new Error(`run ${runId} has no canonical packet coordinate`);
+  }
+  let recordedPacket;
+  try { recordedPacket = fs.realpathSync(path.resolve(ROOT, run.packet)); }
+  catch (error) { throw new Error(`run ${runId} packet is unreadable: ${error.message}`); }
+  if (packetPath !== recordedPacket) {
+    throw new Error(`--packet does not match run ${runId}'s canonical packet`);
+  }
+
+  const gitEnv = runAuthority.canonicalGitEnvironment(run);
+  let sourceRoot;
+  let envWorktree;
+  try {
+    sourceRoot = fs.realpathSync(path.resolve(run.worktree && run.worktree.path || ''));
+    envWorktree = fs.realpathSync(gitEnv && gitEnv.GIT_WORK_TREE);
+  } catch {
+    throw new Error(`run ${runId} did not produce a readable canonical Git worktree`);
+  }
+  if (sourceRoot !== envWorktree || sourceRoot === fs.realpathSync(ROOT)) {
+    throw new Error(`run ${runId} did not resolve to one isolated canonical worktree`);
+  }
+  return Object.freeze({ runId, run: Object.freeze(run), sourceRoot, packetPath,
+    gitEnv: Object.freeze({ ...gitEnv, GIT_WORK_TREE: sourceRoot }) });
+}
+
+function buildSubjectInvocation(args, context) {
   const a = [ENGOS, '--subject', '--json'];
+  if (context.packetPath) a.push('--packet', context.packetPath);
   if (args.base) a.push('--base', args.base);
   if (args.head) a.push('--head', args.head);
-  const r = spawnSync('node', a, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  return Object.freeze({ argv: Object.freeze(a), cwd: ROOT,
+    env: context.gitEnv || process.env });
+}
+
+function subjectOf(args, context = resolveRunContext(args)) {
+  const invocation = buildSubjectInvocation(args, context);
+  const r = spawnSync('node', invocation.argv, {
+    cwd: invocation.cwd, env: invocation.env,
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  });
   if (r.status !== 0) throw new Error(`could not compute subject: ${(r.stderr || '').trim()}`);
   return JSON.parse(r.stdout);
 }
 
-function groupBytes(g, args) {
+function groupBytes(g, args, context = resolveRunContext(args)) {
   const a = ['diff'];
   if (args.base) a.push(`${args.base}..${args.head || 'HEAD'}`);
   else a.push(args.head || 'HEAD');
   a.push('--', ...g.paths);
-  const r = spawnSync('git', a, { cwd: ROOT, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-  return r.status === 0 ? r.stdout.length : 0;
+  const r = spawnSync('git', a, {
+    cwd: ROOT, env: context.gitEnv || process.env,
+    encoding: 'utf8', maxBuffer: 256 * 1024 * 1024,
+  });
+  if (r.status !== 0) {
+    throw planningRefusal('REVIEW_GROUP_DIFF_UNAVAILABLE',
+      `git diff failed while sizing ${g.paths.join(', ')}: ${(r.stderr || '').trim() || `exit ${r.status}`}`);
+  }
+  return Buffer.byteLength(r.stdout || '', 'utf8');
 }
 
-function pathSizes(subject, args) {
+function pathSizes(subject, args, context = resolveRunContext(args)) {
   const sizes = {};
-  for (const p of subject.subjectPaths) sizes[p] = groupBytes({ paths: [p] }, args);
+  const untracked = new Set(Array.isArray(subject.untrackedSubjectPaths)
+    ? subject.untrackedSubjectPaths : []);
+  const sourceRoot = fs.realpathSync(context.sourceRoot || ROOT);
+  for (const p of subject.subjectPaths) {
+    if (!untracked.has(p)) {
+      sizes[p] = groupBytes({ paths: [p] }, args, context);
+      continue;
+    }
+    const candidate = path.resolve(sourceRoot, p);
+    if (!candidate.startsWith(sourceRoot + path.sep)) {
+      throw planningRefusal('REVIEW_GROUP_UNTRACKED_PATH_ESCAPE', `${p} escapes the canonical source root`);
+    }
+    let stat;
+    try { stat = fs.lstatSync(candidate); }
+    catch (error) {
+      throw planningRefusal('REVIEW_GROUP_UNTRACKED_UNREADABLE', `${p} cannot be sized: ${error.message}`);
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw planningRefusal('REVIEW_GROUP_UNTRACKED_NOT_FILE', `${p} is not a regular canonical untracked file`);
+    }
+    sizes[p] = stat.size;
+  }
   return sizes;
 }
 
-function cmdPlan(args) {
-  const subject = subjectOf(args);
+function fixedReviewOverheadBytes(args = {}, context = null) {
+  const packetPath = (context && context.packetPath) || (args.packet && fs.realpathSync(path.resolve(args.packet)));
+  if (!packetPath) return FIXED_CHECK_OVERHEAD_BYTES;
+  const packet = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
+  const sourceRoot = fs.realpathSync(context && context.sourceRoot || ROOT);
+  let pinnedSpecBytes = 0;
+  for (const rel of [...new Set(Array.isArray(packet.sourceOfTruth) ? packet.sourceOfTruth : [])].sort()) {
+    const candidate = path.resolve(sourceRoot, rel);
+    if (!candidate.startsWith(sourceRoot + path.sep)) {
+      throw planningRefusal('REVIEW_GROUP_PINNED_SPEC_ESCAPE', `${rel} escapes the canonical source root`);
+    }
+    const stat = fs.lstatSync(candidate);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw planningRefusal('REVIEW_GROUP_PINNED_SPEC_NOT_FILE', `${rel} is not a regular pinned specification`);
+    }
+    pinnedSpecBytes += stat.size;
+  }
+  return pinnedSpecBytes + FIXED_CHECK_OVERHEAD_BYTES;
+}
+
+// One canonical planner for every executable path and for the release-path
+// capacity proof. Calling planGroups directly without the per-path diff sizes
+// is a valid pure-unit fallback, but it is not the plan that --plan, --run, and
+// --aggregate execute. Keeping target parsing and size collection here prevents
+// a test from certifying a count-only approximation while release uses a
+// different byte-aware plan.
+function planSubjectGroups(subject, args = {}, measuredSizes = null, context = null) {
+  if (!subject || !Array.isArray(subject.subjectPaths) || !subject.subjectPaths.length) {
+    throw new Error('cannot plan a review without a non-empty canonical subject path list');
+  }
   const target = Number(args.groups) > 0 ? Number(args.groups) : DEFAULT_GROUPS;
-  const groups = planGroups(subject.subjectPaths, target, pathSizes(subject, args));
+  const runId = normalizeRunId(args.runId);
+  const resolvedContext = context || resolveRunContext(args);
+  const sizes = measuredSizes || pathSizes(subject, args, resolvedContext);
+  const overhead = fixedReviewOverheadBytes(args, resolvedContext);
+  const groups = planGroups(subject.subjectPaths, target, sizes,
+    { fixedOverheadBytes: overhead });
+  if (!runId) return groups;
+  // There is no unsigned runId field in a group record. Bind the coordinate in
+  // the signed groupDigest instead: a group from another run with identical
+  // paths can no longer satisfy this plan's checkPlanBinding().
+  return groups.map((group) => ({ ...group,
+    groupDigest: sha256(`${runId}\0${group.paths.join('\n')}`),
+  }));
+}
+
+function cmdPlan(args) {
+  const context = resolveRunContext(args);
+  const subject = subjectOf(args, context);
+  const groups = planSubjectGroups(subject, args, null, context);
 
   // Coverage is asserted on the PLAN too, not only on the evidence. A planner
   // that could emit an incomplete plan would produce group records that can
@@ -257,10 +444,12 @@ function cmdPlan(args) {
   if (!cov.ok) throw new Error(`the plan does not cover the subject: ${cov.reason}`);
 
   const out = {
+    ...(context.runId ? { runId: context.runId } : {}),
+    ...(context.packetPath ? { packet: path.relative(ROOT, context.packetPath) } : {}),
     subjectSha256: subject.subjectSha256,
     subjectPathCount: subject.subjectPaths.length,
     groupCount: groups.length,
-    groups: groups.map((g) => ({ ...g, diffBytes: groupBytes(g, args) })),
+    groups: groups.map((g) => ({ ...g, diffBytes: g.changedBytes })),
   };
   if (args.json) { console.log(JSON.stringify(out, null, 2)); return EXIT_PASS; }
 
@@ -322,6 +511,38 @@ function matchesLane(rec, lane) {
   return true;
 }
 
+// A reviewer rerun may overlap another reviewer's publication. Directory
+// creation time alone cannot establish ownership: both records are "new" to
+// the caller's snapshot. Partition by the immutable lane coordinates before
+// verification or quarantine so Codex can never move Grok's record (or vice
+// versa). An unreadable record is foreign/ambiguous and remains active for the
+// aggregate to fail closed on; it is never guessed into this invocation.
+function partitionCreatedLaneRecords({ groupsDir, names, lane }) {
+  const owned = [];
+  const foreign = [];
+  for (const name of names || []) {
+    let rec;
+    try { rec = JSON.parse(fs.readFileSync(path.join(groupsDir, name), 'utf8')); }
+    catch { foreign.push(name); continue; }
+    (matchesLane(rec, lane) ? owned : foreign).push(name);
+  }
+  return { owned: owned.sort(), foreign: foreign.sort() };
+}
+
+function quarantineCreatedLaneRecords({ groupsDir, names }) {
+  if (!(names || []).length) return [];
+  const failed = path.join(groupsDir, 'failed-reruns');
+  fs.mkdirSync(failed, { recursive: true });
+  const moved = [];
+  for (const name of names) {
+    fs.renameSync(path.join(groupsDir, name), path.join(failed, name));
+    moved.push(name);
+  }
+  fsyncDirectory(failed);
+  fsyncDirectory(groupsDir);
+  return moved;
+}
+
 // Splits an already-verified record list into the requested reviewer's lane
 // for the current subject, plus what was excluded and why. Pure — no fs, no
 // signing — so the aggregation policy can be proven without writing evidence
@@ -339,11 +560,138 @@ function selectAggregationLane(records, { subjectSha, reviewer }) {
   return { usable, excludedSubject, excludedReviewer };
 }
 
+// Aggregate replacement is scoped just as narrowly as group replacement. An
+// aggregate from another required reviewer is independent evidence, not a
+// predecessor. Archiving it would make a two-reviewer FULL gate impossible:
+// whichever aggregate was written second would erase the first reviewer.
+//
+// Unreadable and legacy records deliberately do not match. Guessing that a
+// malformed record belongs to this lane would let publication hide evidence it
+// cannot attribute; leaving it top-level makes the canonical gate fail closed.
+function matchesAggregateLane(rec, { reviewer, subjectSha }) {
+  return Boolean(rec && rec.aggregate && rec.reviewer === reviewer &&
+    rec.reviewOf && rec.reviewOf.diffSha256 === subjectSha);
+}
+
+function selectAggregateRetention(records, lane) {
+  const superseded = [];
+  const preserved = [];
+  for (const item of records) {
+    if (matchesAggregateLane(item && item.rec, lane)) superseded.push(item);
+    else preserved.push(item);
+  }
+  return { superseded, preserved };
+}
+
+function checkPlanBinding(records, plan) {
+  const problems = [];
+  const expected = new Map((plan || []).map((group) => [group.groupId, group]));
+  const seen = new Set();
+  for (const record of records || []) {
+    const group = record && record.group;
+    const groupId = group && group.groupId;
+    if (!groupId || !expected.has(groupId)) {
+      problems.push({ code: 'GROUP-PLAN-UNKNOWN', detail: `record ${record && record.reviewId || '(unknown)'} is not bound to a current planned group` });
+      continue;
+    }
+    if (seen.has(groupId)) {
+      problems.push({ code: 'GROUP-PLAN-DUPLICATE', detail: `current plan has more than one record for ${groupId}` });
+      continue;
+    }
+    seen.add(groupId);
+    const planned = expected.get(groupId);
+    if (group.groupDigest !== planned.groupDigest) {
+      problems.push({ code: 'GROUP-PLAN-DIGEST-MISMATCH', detail: `${groupId} digest does not match the current deterministic plan` });
+    }
+    const recordedPaths = ((record.reviewOf && record.reviewOf.changedPaths) || []).slice().sort();
+    if (JSON.stringify(recordedPaths) !== JSON.stringify(planned.paths.slice().sort())) {
+      problems.push({ code: 'GROUP-PLAN-PATH-MISMATCH', detail: `${groupId} paths do not match the current deterministic plan` });
+    }
+  }
+  for (const group of plan || []) {
+    if (!seen.has(group.groupId)) {
+      problems.push({ code: 'GROUP-PLAN-MISSING', detail: `current deterministic plan has no record for ${group.groupId}` });
+    }
+  }
+  return { ok: problems.length === 0, problems };
+}
+
+function normalizeAggregateReviewer(value) {
+  if (!value) throw new Error('--reviewer is required for aggregation');
+  if (!['codex', 'grok'].includes(value)) throw new Error(`unsupported aggregate reviewer ${value}`);
+  return value;
+}
+
+function fsyncDirectory(dir) {
+  let fd;
+  try {
+    fd = fs.openSync(dir, 'r');
+    fs.fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function publishAggregateReplacement({ reviewsDir, filename, signed, predecessors = [] }) {
+  const bytes = JSON.stringify(signed, null, 2) + '\n';
+  const outPath = path.join(reviewsDir, filename);
+  const tempPath = path.join(reviewsDir, `.${filename}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  let fd;
+  try {
+    fd = fs.openSync(tempPath, 'wx', 0o600);
+    fs.writeFileSync(fd, bytes, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tempPath, outPath);
+    fsyncDirectory(reviewsDir);
+  } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* original publication error wins */ }
+    }
+    if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true });
+    throw error;
+  }
+
+  const attic = path.join(reviewsDir, 'superseded-aggregates');
+  const moved = [];
+  try {
+    if (predecessors.length) fs.mkdirSync(attic, { recursive: true });
+    for (const prior of predecessors) {
+      const from = path.join(reviewsDir, prior.file);
+      const to = path.join(attic, prior.file);
+      fs.renameSync(from, to);
+      moved.push({ from, to, prior });
+    }
+    if (predecessors.length) {
+      fsyncDirectory(attic);
+      fsyncDirectory(reviewsDir);
+    }
+  } catch (error) {
+    // Restore the previously active authority before withdrawing the failed
+    // replacement. Every move is recoverable and remains on the same volume.
+    for (const item of moved.reverse()) {
+      try { if (!fs.existsSync(item.from) && fs.existsSync(item.to)) fs.renameSync(item.to, item.from); }
+      catch { /* the gate now sees ambiguity and therefore fails closed */ }
+    }
+    const failures = path.join(reviewsDir, 'publication-failures');
+    try {
+      fs.mkdirSync(failures, { recursive: true });
+      if (fs.existsSync(outPath)) fs.renameSync(outPath, path.join(failures, filename));
+      fsyncDirectory(reviewsDir);
+    } catch { /* preserve both active files rather than delete evidence */ }
+    throw error;
+  }
+  return { outPath, archived: predecessors.map((prior) => prior.file) };
+}
+
 // ── per-group review ────────────────────────────────────────────────────────
 function cmdRun(args) {
   if (!args.packet) return usage('--packet is required');
-  const subject = subjectOf(args);
-  const groups = planGroups(subject.subjectPaths, Number(args.groups) > 0 ? Number(args.groups) : DEFAULT_GROUPS, pathSizes(subject, args));
+  const context = resolveRunContext(args);
+  const effectiveArgs = { ...args, packet: context.packetPath || args.packet };
+  const subject = subjectOf(effectiveArgs, context);
+  const groups = planSubjectGroups(subject, effectiveArgs, null, context);
   const wanted = args.group
     ? groups.filter((g) => g.groupId === args.group)
     : groups;
@@ -364,6 +712,7 @@ function cmdRun(args) {
   // in "-G1.json", which could not tell Codex's G1 from Grok's G1, nor this
   // subject's G1 from a G1 left over from a previous one.
   const reviewerLane = args.reviewer || 'codex';
+  let worst = 0;
   for (const g of wanted) {
     const candidates = fs.readdirSync(GROUPS_DIR, { withFileTypes: true })
       .filter((d) => d.isFile() && d.name.endsWith('.json'));
@@ -376,22 +725,68 @@ function cmdRun(args) {
         stale.push(d.name);
       }
     }
-    if (stale.length) {
-      const attic = path.join(GROUPS_DIR, 'superseded');
-      fs.mkdirSync(attic, { recursive: true });
-      for (const f of stale) {
-        fs.renameSync(path.join(GROUPS_DIR, f), path.join(attic, f));
-        console.log(`[review-chunker] archived superseded record for ${reviewerLane} ${g.groupId}: ${f}`);
-      }
-    }
-  }
-  let worst = 0;
-  for (const g of wanted) {
+    const before = new Set(candidates.map((entry) => entry.name));
     console.log(`\n── ${g.groupId}  ${g.label}  (${g.pathCount} path(s)) ──`);
-    const rc = runGroup(g, subject, args);
+    const rc = runGroup(g, subject, effectiveArgs);
     worst = Math.max(worst, rc);
+    const created = fs.readdirSync(GROUPS_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && !before.has(entry.name))
+      .map((entry) => entry.name).sort();
+    const createdByLane = partitionCreatedLaneRecords({
+      groupsDir: GROUPS_DIR,
+      names: created,
+      lane: { groupId: g.groupId, reviewer: reviewerLane, subjectSha: subject.subjectSha256 },
+    });
+    let replacement = null;
+    if (rc === EXIT_PASS && createdByLane.owned.length === 1) {
+      try {
+        const rec = JSON.parse(fs.readFileSync(path.join(GROUPS_DIR, createdByLane.owned[0]), 'utf8'));
+        const v = require('./review-sign.cjs').verify(rec, { packetPath: effectiveArgs.packet });
+        if (v.ok === true && v.gateable === true
+            && rec.disposition !== 'UNAVAILABLE'
+            && matchesLane(rec, { groupId: g.groupId, reviewer: reviewerLane, subjectSha: subject.subjectSha256 })) {
+          replacement = createdByLane.owned[0];
+        }
+      } catch { /* invalid replacement is quarantined below */ }
+    }
+    if (!replacement) {
+      quarantineCreatedLaneRecords({ groupsDir: GROUPS_DIR, names: createdByLane.owned });
+      worst = Math.max(worst, EXIT_REFUSED);
+      continue;
+    }
+    publishGroupReplacement({ groupsDir: GROUPS_DIR, replacement, predecessors: stale });
+    for (const name of stale) console.log(`[review-chunker] archived superseded record for ${reviewerLane} ${g.groupId}: ${name}`);
   }
   return worst;
+}
+
+function publishGroupReplacement({ groupsDir, replacement, predecessors }) {
+  const attic = path.join(groupsDir, 'superseded');
+  const moved = [];
+  try {
+    if (predecessors.length) fs.mkdirSync(attic, { recursive: true });
+    for (const name of predecessors) {
+      const from = path.join(groupsDir, name);
+      const to = path.join(attic, name);
+      fs.renameSync(from, to);
+      moved.push({ from, to });
+    }
+    if (predecessors.length) fsyncDirectory(attic);
+    fsyncDirectory(groupsDir);
+  } catch (error) {
+    for (const item of moved.reverse()) {
+      try { if (fs.existsSync(item.to) && !fs.existsSync(item.from)) fs.renameSync(item.to, item.from); } catch {}
+    }
+    const failed = path.join(groupsDir, 'publication-failures');
+    try {
+      fs.mkdirSync(failed, { recursive: true });
+      const source = path.join(groupsDir, replacement);
+      if (fs.existsSync(source)) fs.renameSync(source, path.join(failed, replacement));
+      fsyncDirectory(groupsDir);
+    } catch {}
+    throw error;
+  }
+  return { replacement, archived: predecessors.slice() };
 }
 
 // One bounded reviewer call for one group. The adapter does the signing; this
@@ -403,6 +798,7 @@ function buildGroupArgv(group, subject, args) {
     '--reviewer', args.reviewer || 'codex',
     '--packet', args.packet,
     '--timeout', String(args.timeout || 420)];
+  if (args.runId) a.push('--run-id', normalizeRunId(args.runId));
   if (args.base) a.push('--base', args.base);
   if (args.head) a.push('--head', args.head);
   if (args.allowMetered) a.push('--allow-metered');
@@ -442,9 +838,43 @@ function loadGroupRecords() {
     });
 }
 
+// Reviewer limitations are evidence too. An aggregate that carries the
+// findings but drops what individual groups could not verify overstates the
+// review. Preserve every signed entry (including duplicates, which can show
+// that more than one group hit the same limit) and sort by JavaScript code-unit
+// order so publication is independent of directory order and host locale.
+function mergeGroupUnverified(records) {
+  const values = [];
+  const problems = [];
+  for (const record of records || []) {
+    const entries = record && record.unverified === undefined ? [] : record && record.unverified;
+    if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== 'string')) {
+      problems.push({
+        code: 'GROUP-UNVERIFIED-MALFORMED',
+        detail: `record ${(record && record.reviewId) || '(unknown)'} has a non-string unverified evidence list`,
+      });
+      continue;
+    }
+    values.push(...entries);
+  }
+  values.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  return { values, problems };
+}
+
+function gateableGroupProblem(verification, filename = '(unknown group)') {
+  if (verification && verification.ok === true && verification.gateable === true) return null;
+  return {
+    code: 'GROUP-NON-GATEABLE',
+    detail: `${filename}: ${(verification && verification.code) || 'ATTESTATION-NON-GATEABLE'} — ` +
+      `${(verification && verification.reason) || 'constituent verification did not grant current gate authority'}`,
+  };
+}
+
 function aggregate(args) {
-  const subject = subjectOf(args);
-  const plan = planGroups(subject.subjectPaths, Number(args.groups) > 0 ? Number(args.groups) : DEFAULT_GROUPS, pathSizes(subject, args));
+  const context = resolveRunContext(args);
+  const effectiveArgs = { ...args, packet: context.packetPath || args.packet };
+  const subject = subjectOf(effectiveArgs, context);
+  const plan = planSubjectGroups(subject, effectiveArgs, null, context);
   const loaded = loadGroupRecords();
   const problems = [];
 
@@ -479,7 +909,8 @@ function aggregate(args) {
     // Every group record must be signed and verify. An unsigned group is not a
     // smaller piece of evidence — it is no evidence.
     const v = require('./review-sign.cjs').verify(l.rec, { packetPath: args.packet });
-    if (!v.ok) { problems.push({ code: 'GROUP-UNSIGNED', detail: `${path.basename(l.path)}: ${v.code} — ${v.reason}` }); continue; }
+    const verificationProblem = gateableGroupProblem(v, path.basename(l.path));
+    if (verificationProblem) { problems.push(verificationProblem); continue; }
     verified.push(l.rec);
   }
 
@@ -504,6 +935,12 @@ function aggregate(args) {
     problems.push({ code: 'GROUP-UNAVAILABLE', detail: `${unavailable.length} group(s) could not be reviewed: ${unavailable.map((r) => (r.group && r.group.groupId) || r.reviewId).join(', ')}. A timeout on one group leaves that code unreviewed; the aggregate cannot cover for it.` });
   }
 
+  const planBinding = checkPlanBinding(usable, plan);
+  problems.push(...planBinding.problems);
+
+  const mergedUnverified = mergeGroupUnverified(usable);
+  problems.push(...mergedUnverified.problems);
+
   const cov = checkCoverage(
     usable.map((r) => ({ groupId: (r.group && r.group.groupId) || r.reviewId, paths: (r.reviewOf && r.reviewOf.changedPaths) || [] })),
     subject.subjectPaths
@@ -526,23 +963,48 @@ function aggregate(args) {
     : usable.some((r) => r.disposition === 'APPROVE_WITH_NOTES') ? 'APPROVE_WITH_NOTES'
     : 'APPROVE';
 
-  return { ok, problems, usable, plan, subject, disposition, findings, cov };
+  return {
+    ok, problems, usable, plan, planBinding, subject, disposition, findings,
+    unverified: mergedUnverified.values, cov, runId: context.runId,
+    packetPath: context.packetPath,
+  };
+}
+
+// `informational` is an operator-only control flag used while deciding whether
+// aggregation may proceed. It is deliberately not part of the signed review
+// record: the engineering-review schema permits only the durable problem code
+// and explanation. Keeping the projection explicit prevents an otherwise valid
+// aggregate from becoming schema-invalid merely because another reviewer lane
+// or an older subject was observed during aggregation.
+function schemaAggregateProblems(problems) {
+  return (problems || []).map((problem) => ({
+    code: problem.code,
+    detail: problem.detail,
+  }));
 }
 
 function cmdAggregate(args) {
   if (!args.packet) return usage('--packet is required');
+  let reviewer;
+  try { reviewer = normalizeAggregateReviewer(args.reviewer); }
+  catch (error) { return usage(error.message); }
   const a = aggregate(args);
   const ts = new Date().toISOString();
 
+  const recordStamp = ts.replace(/[^0-9]/g, '');
+  const runSuffix = a.runId ? `-${a.runId}` : '';
   const record = {
-    reviewId: `REV-${ts.replace(/[^0-9]/g, '').slice(0, 14)}-aggregate`,
+    // reviewId is attested, so the explicit run coordinate is durable without
+    // adding an unsigned parallel authority to the review schema.
+    reviewId: `REV-${recordStamp}-${reviewer}${runSuffix}-aggregate`,
     ts,
-    reviewer: a.usable.length ? a.usable[0].reviewer : (args.reviewer || 'codex'),
+    reviewer,
     reviewerModel: a.usable.length ? a.usable[0].reviewerModel : 'unknown',
-    packetId: (() => { try { return JSON.parse(fs.readFileSync(args.packet, 'utf8')).packetId; } catch { return 'unknown'; } })(),
+    packetId: (() => { try { return JSON.parse(fs.readFileSync(a.packetPath || args.packet, 'utf8')).packetId; } catch { return 'unknown'; } })(),
     reviewOf: { diffSha256: a.subject.subjectSha256, changedPaths: a.subject.subjectPaths.slice() },
     disposition: a.disposition,
     findings: a.ok ? a.findings : [],
+    unverified: a.unverified,
     aggregate: {
       groupCount: a.usable.length,
       plannedGroupCount: a.plan.length,
@@ -558,7 +1020,7 @@ function cmdAggregate(args) {
         attestationDigest: (r.attestation && r.attestation.payloadDigest) || null,
       })),
       coverage: a.cov.ok ? 'EXACT' : a.cov.code,
-      problems: a.problems,
+      problems: schemaAggregateProblems(a.problems),
     },
   };
   if (!a.ok) {
@@ -566,48 +1028,49 @@ function cmdAggregate(args) {
   }
 
   fs.mkdirSync(REVIEWS_DIR, { recursive: true });
+  const signed = require('./review-sign.cjs').sign(record, { packetPath: a.packetPath || args.packet });
 
-  // GROK G11 FINDING #2: archiving superseded GROUP records did not help,
-  // because the record the gate actually reads is the top-level aggregate — and
-  // cmdAggregate always wrote a NEW one beside the old. Two aggregates for one
-  // reviewer on one subject is exactly the ambiguity the gate refuses, so a
-  // re-run could never clear. The new aggregate now supersedes its predecessors
-  // explicitly AND they are archived, so the gate sees exactly one authority
-  // while the audit trail keeps every version.
+  // A rerun replaces only the aggregate in the SAME reviewer + exact-subject
+  // lane. Codex and Grok are separate required authorities, so both aggregates
+  // must remain discoverable at the top level regardless of publication order.
+  // A predecessor moved to the archive is no longer an active gate record, so
+  // the replacement must not carry a `supersedes` pointer to that invisible
+  // record; engineering-os correctly refuses pointers whose target is absent.
   const priorAggregates = fs.readdirSync(REVIEWS_DIR, { withFileTypes: true })
     .filter((d) => d.isFile() && d.name.endsWith('-aggregate.json'))
-    .map((d) => d.name).sort();
-  let supersedesId = null;
-  if (priorAggregates.length) {
-    const attic = path.join(REVIEWS_DIR, 'superseded-aggregates');
-    fs.mkdirSync(attic, { recursive: true });
-    for (const f of priorAggregates) {
-      const full = path.join(REVIEWS_DIR, f);
-      try {
-        const prior = JSON.parse(fs.readFileSync(full, 'utf8'));
-        // Name the most recent predecessor, so supersession is an explicit,
-        // signed claim rather than an inference from file order.
-        if (prior.reviewId) supersedesId = prior.reviewId;
-      } catch { /* unreadable predecessor still gets archived */ }
-      fs.renameSync(full, path.join(attic, f));
-      console.log(`[review-chunker] superseded prior aggregate: ${f}`);
-    }
+    .map((d) => {
+      const file = d.name;
+      try { return { file, rec: JSON.parse(fs.readFileSync(path.join(REVIEWS_DIR, file), 'utf8')) }; }
+      catch { return { file, rec: null }; }
+    })
+    .sort((left, right) => left.file.localeCompare(right.file));
+  const retention = selectAggregateRetention(priorAggregates, {
+    reviewer: record.reviewer,
+    subjectSha: a.subject.subjectSha256,
+  });
+  const filename = `${recordStamp}-${reviewer}${runSuffix}-aggregate.json`;
+  const publication = publishAggregateReplacement({
+    reviewsDir: REVIEWS_DIR,
+    filename,
+    signed,
+    predecessors: retention.superseded,
+  });
+  const outPath = publication.outPath;
+  for (const prior of retention.superseded) {
+    console.log(`[review-chunker] superseded prior ${record.reviewer} aggregate for ${a.subject.subjectSha256.slice(0, 12)}…: ${prior.file}`);
   }
-  if (supersedesId) record.supersedes = supersedesId;
-
-  const signed = require('./review-sign.cjs').sign(record, { packetPath: args.packet });
-  const outPath = path.join(REVIEWS_DIR, `${ts.replace(/[^0-9]/g, '').slice(0, 14)}-aggregate.json`);
-  fs.writeFileSync(outPath, JSON.stringify(signed, null, 2) + '\n', 'utf8');
 
   if (args.json) { console.log(JSON.stringify(signed, null, 2)); return a.ok ? EXIT_PASS : EXIT_REFUSED; }
 
   console.log('AEGIS — AGGREGATE REVIEW VERDICT');
   console.log('='.repeat(64));
   console.log(`subject     : ${a.subject.subjectSha256.slice(0, 16)}…`);
+  if (a.runId) console.log(`run         : ${a.runId}`);
   console.log(`groups      : ${a.usable.length} usable of ${a.plan.length} planned`);
   console.log(`coverage    : ${a.cov.ok ? 'EXACT' : a.cov.code}`);
   console.log(`disposition : ${a.disposition}`);
   console.log(`findings    : ${record.findings.length}`);
+  console.log(`unverified  : ${record.unverified.length}`);
   console.log(`record      : ${path.relative(ROOT, outPath)}  (signed)`);
   if (a.problems.length) {
     console.log('');
@@ -625,15 +1088,15 @@ function usage(msg) {
   process.stderr.write(`
 review-chunker.cjs — chunked review for subjects too large for one call
 
-  --plan [--groups N] [--base <ref>] [--head <ref>] [--json]
-  --run --group <G1..Gn> --packet <p> [--reviewer codex|grok] [--timeout <s>]
+  --plan [--groups N] [--run-id <RUN-...> --packet <p>] [--base <ref>] [--head <ref>] [--json]
+  --run --group <G1..Gn> --packet <p> [--run-id <RUN-...>] [--reviewer codex|grok] [--timeout <s>]
         [--allow-metered --approved-by "<name>" --cap-usd <n>] [--data-class <c>]
-  --run-all --packet <p> [--reviewer codex|grok] [--timeout <s>]
+  --run-all --groups <N> --packet <p> [--run-id <RUN-...>] [--reviewer codex|grok] [--timeout <s>]
         [--allow-metered --approved-by "<name>" --cap-usd <n>] [--data-class <c>]
 
 A METERED reviewer (grok) needs all three of --allow-metered, --approved-by and
 --cap-usd. Without them the adapter refuses — deliberately, and before spending.
-  --aggregate --packet <p> [--json]
+  --aggregate --groups <N> --reviewer codex|grok --packet <p> [--run-id <RUN-...>] [--json]
 
 An aggregate is consumable only on EXACT coverage with every group signed.
 `);
@@ -651,6 +1114,7 @@ function parseArgs(argv) {
     else if (t === '--group') a.group = argv[++i];
     else if (t === '--groups') a.groups = argv[++i];
     else if (t === '--packet') a.packet = argv[++i];
+    else if (t === '--run-id') a.runId = argv[++i];
     else if (t === '--reviewer') a.reviewer = argv[++i];
     else if (t === '--timeout') a.timeout = argv[++i];
     else if (t === '--base') a.base = argv[++i];
@@ -679,4 +1143,4 @@ if (require.main === module) {
   process.exit(code);
 }
 
-module.exports = { planGroups, checkCoverage, aggregate, buildGroupArgv, roleOf, ROLES, DEFAULT_GROUPS, MAX_GROUP_BYTES, matchesLane, selectAggregationLane };
+module.exports = { planGroups, planSubjectGroups, pathSizes, groupBytes, fixedReviewOverheadBytes, checkCoverage, checkPlanBinding, aggregate, mergeGroupUnverified, gateableGroupProblem, schemaAggregateProblems, buildGroupArgv, roleOf, ROLES, DEFAULT_GROUPS, MAX_GROUP_BYTES, MAX_GROUP_PAYLOAD_BYTES, FIXED_CHECK_OVERHEAD_BYTES, matchesLane, partitionCreatedLaneRecords, quarantineCreatedLaneRecords, selectAggregationLane, matchesAggregateLane, selectAggregateRetention, normalizeAggregateReviewer, normalizeRunId, resolveRunContext, buildSubjectInvocation, parseArgs, publishAggregateReplacement, publishGroupReplacement };

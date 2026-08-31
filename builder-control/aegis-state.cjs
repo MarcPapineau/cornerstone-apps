@@ -36,6 +36,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 const HERE = __dirname;
@@ -44,6 +45,11 @@ const REGISTRY = path.join(HERE, 'connector-registry.json');
 const CANON = path.join(HERE, 'TOOL-CAPABILITY-CANON.json');
 const LEDGER = path.join(HERE, 'ledger.json');
 const ENGOS = path.join(HERE, 'engineering-os.cjs');
+const PACKETS_DIR = path.join(HERE, 'packets');
+// Private control identity captured with each run. Symbols are deliberately
+// non-enumerable, so absolute worktree coordinates can be used to evaluate the
+// canonical gate without ever entering JSON, state.js, or the public API.
+const RUN_CONTROL_IDENTITY = Symbol('aegis-run-control-identity');
 // The ONLY place a USD→CAD rate may come from. It is a dated, cited artifact on
 // disk, never a network call and never a constant in this file. If it is absent
 // or malformed, CAD renders UNAVAILABLE — an invented rate on a spend figure is
@@ -127,6 +133,12 @@ const REQUIRED_STAGES = [
   { id: 'checkpoint',    step: 10, label: 'Checkpoint + rollback',  evidence: 'aegis-run run.checkpoint.rollbackPoint' },
   { id: 'surface',       step: 11, label: 'Evidence + cost surface', evidence: 'this projection: cost, blockers, provenance' },
 ];
+
+// These are the three non-terminal states the canonical asynchronous worker
+// writes while the run itself remains BUILDING.  A null exit in any of these
+// states means exactly "the worker has not exited yet"; it is not a failed
+// exit and must never be rendered as one.
+const ACTIVE_ASYNC_WORKER_STATES = new Set(['LAUNCH_CLAIMED', 'STARTING', 'RUNNING']);
 
 function readJSON(p) {
   return JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -775,32 +787,210 @@ function projectReviewers(now, canonPath = CANON) {
 }
 
 // ── engineering state (the gate's own verdict — never re-judged here) ───────
-function projectEngineering(args) {
+function unavailableEngineering(reason, context = {}) {
+  const runs = Array.isArray(context.runs) ? context.runs : [];
+  const derivedStages = runs.length
+    ? deriveStages({ problems: [], observed: [] }, runs, context.surfaceEvidence || null)
+    : REQUIRED_STAGES.map((stage) => ({
+        ...stage,
+        state: 'UNVERIFIED',
+        reason: `engineering gate unavailable: ${reason}`,
+      }));
+  // Runtime lifecycle evidence may still truthfully describe build/check
+  // progress while the exact-subject gate is unavailable. Independent review
+  // is different: without one parsed gate, mutable run state cannot establish
+  // a review failure or approval, so that stage must fail closed as unknown.
+  const stages = derivedStages.map((stage) => stage.id === 'review'
+    ? { ...stage, state: 'UNVERIFIED', reason: `engineering gate unavailable: ${reason}` }
+    : stage);
+  return {
+    state: 'UNAVAILABLE',
+    reason,
+    source: rel(ENGOS),
+    stages,
+  };
+}
+
+function currentPacketCoordinate(packetPath) {
+  if (typeof packetPath !== 'string' ||
+      !/^builder-control\/packets\/[A-Za-z0-9._-]+\.json$/.test(packetPath)) return null;
+  let packetReal;
+  let packetsReal;
+  try {
+    packetReal = fs.realpathSync(path.resolve(ROOT, packetPath));
+    packetsReal = fs.realpathSync(PACKETS_DIR);
+    if (!fs.statSync(packetReal).isFile() ||
+        (packetReal !== packetsReal && !packetReal.startsWith(packetsReal + path.sep))) return null;
+  } catch { return null; }
+  const bytes = fs.readFileSync(packetReal);
+  return {
+    path: path.relative(ROOT, packetReal),
+    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+  };
+}
+
+function validCanonicalSubject(value) {
+  return Boolean(value && isSubjectSha(value.subjectSha256) &&
+    Array.isArray(value.subjectPaths) && value.subjectPaths.length > 0 &&
+    new Set(value.subjectPaths).size === value.subjectPaths.length &&
+    value.subjectPaths.every((item) => typeof item === 'string' && item.length > 0 &&
+      !path.isAbsolute(item) && !item.split('/').includes('..')) &&
+    Number.isInteger(value.diffBytes) && value.diffBytes > 0 &&
+    typeof value.range === 'string' && value.range.length > 0);
+}
+
+function canonicalReviewRefusal(gate, claim, subject, packet, receipt) {
+  if (!claim || !gate || gate.ok !== false || gate.state !== 'BLOCKED' ||
+      !validCanonicalSubject(subject) || !gate.subject ||
+      gate.subject.subjectSha256 !== subject.subjectSha256 ||
+      !gate.reviewerCompleteness || gate.reviewerCompleteness.complete !== true ||
+      gate.reviewerCompleteness.subjectSha256 !== subject.subjectSha256 ||
+      !Array.isArray(gate.reviewerCompleteness.rows) || !Array.isArray(gate.problems) ||
+      !packet || !receipt || receipt.receiptSha256 !== claim.checkReceiptSha256 ||
+      claim.subjectSha256 !== subject.subjectSha256 ||
+      !claim.packet || claim.packet.path !== packet.path || claim.packet.sha256 !== packet.sha256) return null;
+  const coverage = gate.reviewerCompleteness.pathCoverage;
+  const requiredRows = gate.reviewerCompleteness.rows.filter((row) => row && row.required === 'REQUIRED');
+  if (!coverage || !Array.isArray(coverage.notCoveredByEveryRequiredReviewer) ||
+      coverage.notCoveredByEveryRequiredReviewer.length !== 0 || requiredRows.length === 0 ||
+      requiredRows.some((row) => row.executed !== 'EXECUTED' ||
+        typeof row.reviewer !== 'string' || typeof row.reviewId !== 'string' ||
+        (Array.isArray(row.missingPaths) && row.missingPaths.length !== 0) ||
+        (Array.isArray(row.stalePaths) && row.stalePaths.length !== 0))) return null;
+  const refusalProblems = gate.problems.filter((problem) => problem &&
+    (problem.rule === 'ENGOS-REVIEW-REJECTED' || problem.rule === 'ENGOS-OPEN-BLOCKING-FINDING'));
+  if (refusalProblems.length === 0) return null;
+  const openBlockingReviewers = new Set();
+  for (const problem of refusalProblems) {
+    if (problem.rule !== 'ENGOS-OPEN-BLOCKING-FINDING') continue;
+    const match = /^(?:CRITICAL|HIGH) from ([a-z0-9][a-z0-9._-]{0,63}) in /i.exec(
+      String(problem.detail || ''));
+    if (!match) return null;
+    openBlockingReviewers.add(match[1].toLowerCase());
+  }
+  const rejectedReviewers = gate.reviewerCompleteness.rows.flatMap((row) => {
+    if (!row || row.executed !== 'EXECUTED' ||
+        (row.disposition !== 'REJECT' &&
+          !openBlockingReviewers.has(String(row.reviewer || '').toLowerCase())) ||
+        typeof row.reviewer !== 'string' || typeof row.reviewId !== 'string') return [];
+    return [{ reviewer: row.reviewer, reviewId: row.reviewId }];
+  });
+  const blockingFindingCount = refusalProblems.filter((problem) =>
+    problem.rule === 'ENGOS-OPEN-BLOCKING-FINDING').length;
+  if (rejectedReviewers.length === 0 ||
+      JSON.stringify(rejectedReviewers) !== JSON.stringify(claim.rejectedReviewers) ||
+      blockingFindingCount !== claim.blockingFindingCount ||
+      refusalProblems.length !== claim.refusalRuleCount) return null;
+  return claim;
+}
+
+function projectEngineering(args, context = {}) {
+  const currentRun = context.currentRun || null;
+  const identity = currentRun && currentRun[RUN_CONTROL_IDENTITY];
+  if (!identity) {
+    return unavailableEngineering(
+      'no unique validated current run worktree is available, so the engineering gate cannot be attributed to this dashboard run',
+      context);
+  }
+  let gateEnv;
+  try {
+    gateEnv = require('./aegis-run.cjs').canonicalGitEnvironment(identity);
+  } catch (error) {
+    return unavailableEngineering(
+      `the current run worktree could not be validated for gate projection: ${error.message}`,
+      context);
+  }
+  const runPacket = currentRun.packetId;
+  const packet = currentPacketCoordinate(runPacket);
+  if (!packet) {
+    return unavailableEngineering(
+      'the current run does not carry one currently validated bounded packet coordinate, so no gate verdict is attributed to it',
+      context);
+  }
+  if (args.packet && args.packet !== runPacket) {
+    return unavailableEngineering(
+      'the caller-supplied packet conflicts with the validated current run; refusing to combine different subjects',
+      context);
+  }
+  const reviewedGateRange = identity.reviewedGateRange || null;
+  if (reviewedGateRange &&
+      ((args.base && args.base !== reviewedGateRange.base) ||
+       (args.head && args.head !== reviewedGateRange.head))) {
+    return unavailableEngineering(
+      'caller-supplied gate range conflicts with the validated reviewed checkpoint range; refusing to recompute a different subject',
+      context);
+  }
+  const gateBase = reviewedGateRange ? reviewedGateRange.base : args.base;
+  const gateHead = reviewedGateRange ? reviewedGateRange.head : args.head;
+  const subjectArgs = [ENGOS, '--subject', '--packet', runPacket, '--json'];
+  if (gateBase) subjectArgs.push('--base', gateBase);
+  if (gateHead) subjectArgs.push('--head', gateHead);
+  if (args.diffLines) subjectArgs.push('--diff-lines', String(args.diffLines));
+  for (const c of args.changed || []) subjectArgs.push('--changed', c);
+  const subjectResult = spawnSync(process.execPath, subjectArgs, {
+    cwd: ROOT, env: gateEnv, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  });
+  let canonicalSubject = null;
+  try { canonicalSubject = JSON.parse(subjectResult.stdout); } catch { /* handled below */ }
+  if (subjectResult.status !== 0 || !validCanonicalSubject(canonicalSubject)) {
+    return unavailableEngineering(
+      `the canonical subject could not be derived from this run's validated worktree and packet (exit ${subjectResult.status})`,
+      context);
+  }
+  const runSubject = currentRun.subjectSha256;
+  if ((isSubjectSha(runSubject) && runSubject !== canonicalSubject.subjectSha256) ||
+      (args.subjectSha && args.subjectSha !== canonicalSubject.subjectSha256)) {
+    return unavailableEngineering(
+      'the current worktree subject conflicts with a recorded or caller-supplied subject; refusing to combine different versions',
+      context);
+  }
+  const runtime = require('./aegis-run.cjs');
+  const checkRefs = identity.checks || {};
+  const expectedReceipt = {
+    runId: currentRun.runId,
+    packetPath: packet.path,
+    packetSha256: packet.sha256,
+    subject: canonicalSubject,
+  };
+  const receipt = runtime.loadCanonicalCheckReceipt(checkRefs, expectedReceipt) ||
+    runtime.loadCanonicalPreHostCheckReceipt(checkRefs, expectedReceipt);
+  const gateDependent = ['CHECKS_PASSED', 'REVIEW_FAILED', 'REVIEW_BOUND', 'CHECKPOINTED', 'ROLLED_BACK']
+    .includes(currentRun.state);
+  if (gateDependent && !receipt) {
+    return unavailableEngineering(
+      'the current run has no digest-bound canonical check receipt for its current packet and worktree subject',
+      context);
+  }
   const a = [ENGOS, '--gate-done', '--json'];
-  if (args.base) a.push('--base', args.base);
-  if (args.head) a.push('--head', args.head);
+  if (gateBase) a.push('--base', gateBase);
+  if (gateHead) a.push('--head', gateHead);
   if (args.diffLines) a.push('--diff-lines', String(args.diffLines));
   for (const c of args.changed || []) a.push('--changed', c);
-  if (args.packet) a.push('--packet', args.packet);
-  if (args.subjectSha) a.push('--subject-sha', args.subjectSha);
-  const r = spawnSync('node', a, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  a.push('--packet', runPacket, '--subject-sha', canonicalSubject.subjectSha256);
+  const r = spawnSync(process.execPath, a, {
+    cwd: ROOT, env: gateEnv, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  });
 
   // A BLOCKED gate exits 3. That is a successful reading of a blocked system,
   // not a failure to read — so it is projected, not swallowed.
   let parsed = null;
   try { parsed = JSON.parse(r.stdout); } catch { /* handled below */ }
   if (!parsed) {
-    return { state: 'UNAVAILABLE',
-      reason: `could not read a gate verdict (exit ${r.status}): ${(r.stderr || '').trim().split('\n')[0] || 'no output'}`,
-      source: rel(ENGOS) };
+    return unavailableEngineering(
+      `could not read a gate verdict (exit ${r.status}): ${(r.stderr || '').trim().split('\n')[0] || 'no output'}`,
+      context);
   }
 
   // Runtime evidence for steps 1-5 and 8-10. Read directly from the run
   // records the runtime writes; a missing runs/ directory means those steps
   // simply have not been exercised, which renders UNVERIFIED rather than absent.
-  let runs = [];
-  try { runs = require('./aegis-run.cjs').listRuns(); } catch { runs = []; }
-  const stageEvidence = deriveStages(parsed, runs);
+  let runs = Array.isArray(context.runs) ? context.runs : [];
+  if (!Array.isArray(context.runs)) {
+    try { runs = require('./aegis-run.cjs').listRuns(); } catch { runs = []; }
+  }
+  const stageEvidence = deriveStages(parsed, runs, context.surfaceEvidence || null);
+  const reviewFailure = canonicalReviewRefusal(
+    parsed, identity.reviewFailure, canonicalSubject, packet, receipt);
   return {
     state: 'OK',
     gateExit: r.status,
@@ -825,6 +1015,7 @@ function projectEngineering(args) {
     // "why blocked" cite a reviewer by name and coverage score instead of a
     // rule code. Absent only when the gate itself produced no verdict at all.
     reviewerCompleteness: parsed.reviewerCompleteness || null,
+    reviewFailure,
     source: rel(ENGOS),
   };
 }
@@ -845,63 +1036,154 @@ function projectEngineering(args) {
  * A step with no evidence is UNVERIFIED. Nothing here infers a pass from the
  * absence of a failure.
  */
-function deriveStages(parsed, runs) {
+function deriveStages(parsed, runs, surfaceEvidence = null) {
   const problems = parsed.problems || [];
   const observed = (parsed.observed || []).join(' | ');
   const has = (re) => problems.some((p) => re.test(p.rule + ' ' + p.detail));
 
   // Most-recently-updated run, if any. The dashboard reports on the newest run
   // rather than inventing an aggregate across runs that never happened together.
-  const run = Array.isArray(runs) && runs.length
-    ? runs.slice().sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0]
-    : null;
+  // Runtime lifecycle claims are indivisible: one malformed, ambiguous or
+  // future-dated record makes the runtime evidence plane unavailable. A valid
+  // neighbouring file must not continue driving green lifecycle stages while
+  // the dashboard simultaneously says the run evidence is unreadable.
+  const runtimeEvidenceAvailable = !surfaceEvidence ||
+    (surfaceEvidence.runs && surfaceEvidence.runs.state === 'OK');
+  const run = runtimeEvidenceAvailable ? selectCurrentRun(runs) : null;
   const noRun = { state: 'UNVERIFIED', reason: 'no run record exists; this step has not been exercised' };
+  const corroboratedStages = new Set(run && run.watchdog &&
+    Array.isArray(run.watchdog.corroboratedStages) ? run.watchdog.corroboratedStages : []);
+  const lifecycleProven = (stage) => corroboratedStages.has(stage);
+  const uncorroborated = (stage) => ({ state: 'UNVERIFIED',
+    reason: `${stage} is claimed by mutable run state but has no correctly ordered canonical ledger transition` });
 
   const stageFor = (id) => {
     switch (id) {
       // ── steps 1-5: the runtime ──────────────────────────────────────────
       case 'objective':
         if (!run) return noRun;
+        if (!lifecycleProven('INTAKE_RECORDED')) return uncorroborated('objective intake');
         return run.objective
           ? { state: 'PASS', reason: `objective recorded: "${String(run.objective).slice(0, 60)}"` }
           : { state: 'FAILED', reason: 'the run carries no objective' };
       case 'acceptance': {
         if (!run) return noRun;
+        if (!lifecycleProven('ROUTED')) return uncorroborated('scope and risk routing');
         const risk = run.risk || null;
         if (!risk) return { state: 'UNVERIFIED', reason: 'no risk classification was recorded' };
         if (risk.state === 'UNVERIFIED') return { state: 'UNVERIFIED', reason: risk.reason || 'risk unknown' };
-        return { state: 'PASS', reason: `lane ${risk.lane}${risk.highRisk ? ' (high-risk)' : ''}; ${(run.acceptanceCriteria || []).length} acceptance criterion(a)` };
+        if (!Number.isInteger(run.acceptanceCriteriaCount) || run.acceptanceCriteriaCount < 1) {
+          return { state: 'UNVERIFIED', reason: 'the run does not carry a validated acceptance-criteria count' };
+        }
+        return { state: 'PASS', reason: `lane ${risk.lane}${risk.highRisk ? ' (high-risk)' : ''}; ${run.acceptanceCriteriaCount} acceptance criterion(a)` };
       }
       case 'routing': {
         if (!run) return noRun;
         const r = run.route;
+        // A routing refusal is the canonical reason ROUTED never happened.
+        // It is persisted by aegis-run before the route authority throws and
+        // is projected only through projectRoute's closed, bounded shape.
+        // Requiring a ROUTED transition before reading REFUSED made this
+        // branch unreachable and erased the operator's actual blocker.
+        if (r && r.state === 'REFUSED') return { state: 'FAILED', reason: `${r.code}: ${r.reason}` };
+        if (!lifecycleProven('ROUTED')) return uncorroborated('model routing');
         if (!r) return { state: 'UNVERIFIED', reason: 'no route was recorded' };
-        if (r.state === 'REFUSED') return { state: 'FAILED', reason: `${r.code}: ${r.reason}` };
         if (r.state === 'UNVERIFIED') return { state: 'UNVERIFIED', reason: r.reason };
         return { state: 'PASS', reason: `routed to ${r.model} (${r.execution})` };
       }
       case 'worktree':
         if (!run) return noRun;
+        if (!lifecycleProven('WORKTREE_READY')) return uncorroborated('isolated worktree readiness');
         if (!run.worktree) return { state: 'UNVERIFIED', reason: 'no isolated worktree was created' };
-        return { state: 'PASS', reason: `isolated worktree on branch ${run.worktree.branch}` };
+        if (run.worktree.state !== 'VALIDATED' || run.worktree.isolated !== true ||
+            typeof run.worktree.branch !== 'string' || !run.worktree.branch) {
+          return { state: 'FAILED', reason: run.worktree.reason ||
+            'the recorded worktree did not pass the canonical bounded path and branch validation' };
+        }
+        return { state: 'PASS', reason: `isolated worktree on validated branch ${run.worktree.branch}` };
       case 'build':
         if (!run) return noRun;
         if (!run.build) return { state: 'UNVERIFIED', reason: 'the builder has not run' };
-        return run.build.exit === 0
-          ? { state: 'PASS', reason: 'builder exited 0 inside the isolated worktree' }
-          : { state: 'FAILED', reason: `builder exited ${run.build.exit}` };
+        if (Number.isInteger(run.build.exit)) {
+          if (run.state === 'BUILDING') {
+            return { state: 'FAILED',
+              reason: `the run still says BUILDING even though terminal builder exit ${run.build.exit} is recorded` };
+          }
+          if (run.state === 'BUILD_FAILED') {
+            if (run.build.failure && run.build.failure.code === 'MODEL_AUTH_FAILURE') {
+              return { state: 'FAILED', reason: run.build.failover
+                ? 'Claude authentication failed; Grok is the next eligible builder, but automatic failover is not enabled for this beta'
+                : 'Claude authentication failed; no executable failover was recorded' };
+            }
+            return run.build.exit === 0
+              ? { state: 'FAILED', reason: 'the run says BUILD_FAILED but the recorded builder exit is 0' }
+              : { state: 'FAILED', reason: `builder exited ${run.build.exit}` };
+          }
+          if (run.build.exit === 0 && !lifecycleProven('BUILT')) {
+            return uncorroborated('successful build completion');
+          }
+          return run.build.exit === 0
+            ? { state: 'PASS', reason: 'builder exited 0 inside the isolated worktree' }
+            : { state: 'FAILED', reason: `builder exited ${run.build.exit} while the run state is ${run.state}` };
+        }
+        if (run.state === 'BUILDING' && run.build.mode === 'async' &&
+            ACTIVE_ASYNC_WORKER_STATES.has(run.build.workerState)) {
+          if (!lifecycleProven('BUILDING')) return uncorroborated('active builder execution');
+          return { state: 'RUNNING',
+            reason: `asynchronous builder is ${run.build.workerState}; no terminal exit has been recorded yet` };
+        }
+        if (run.state === 'BUILD_FAILED') {
+          return { state: 'FAILED',
+            reason: 'the canonical run state is BUILD_FAILED, but no numeric builder exit was recorded' };
+        }
+        return { state: 'UNVERIFIED',
+          reason: 'the build has no terminal numeric exit, so success or failure is not yet proven' };
 
       // ── steps 6-7: the gate ─────────────────────────────────────────────
       case 'deterministic':
+        if (run && run.state === 'CHECKS_FAILED') {
+          const failures = [];
+          if (run.checks && run.checks.integrityState === 'FAILED') failures.push('subject or packet integrity failed');
+          if (run.checks && run.checks.hostContainmentState === 'FAILED') failures.push('host containment failed');
+          if (run.checks && run.checks.executionBoundaryState === 'FAILED') failures.push('the contained execution boundary failed');
+          if (run.checks && run.checks.preconditionState === 'FAILED') failures.push('a check precondition failed');
+          return { state: 'FAILED', reason: failures.length
+            ? `deterministic checks failed: ${failures.join('; ')}`
+            : 'the canonical run state is CHECKS_FAILED' };
+        }
         if (has(/ENGOS-DETERMINISTIC-FAILED/)) return { state: 'FAILED', reason: 'a declared check failed' };
         if (has(/ENGOS-NO-DETERMINISTIC-CHECKS/)) return { state: 'FAILED', reason: 'the packet declares no runnable checks; zero passing is not evidence' };
+        if (run && run.checks && (run.state === 'BUILDING' || run.state === 'CORRECTING')) {
+          return { state: 'RUNNING',
+            reason: 'a correction cycle is active; the prior check receipt does not verify this new build generation' };
+        }
         if (/deterministic checks executed here: (\d+)\/\1 passed/.test(observed)) {
           return { state: 'PASS', reason: observed.match(/deterministic checks executed here: [^|]*/)[0].trim() };
         }
         if (run && run.checks) {
-          return run.checks.passed === run.checks.total && run.checks.total > 0
-            ? { state: 'PASS', reason: `${run.checks.passed}/${run.checks.total} checks passed in the run` }
-            : { state: 'FAILED', reason: `${run.checks.passed}/${run.checks.total} checks passed` };
+          const receiptAppliesToCurrentGeneration =
+            ['CHECKS_PASSED', 'REVIEW_FAILED', 'REVIEW_BOUND', 'CHECKPOINTED', 'ROLLED_BACK']
+              .includes(run.state);
+          if (!receiptAppliesToCurrentGeneration) {
+            return { state: run.state === 'BUILDING' || run.state === 'CORRECTING' ? 'RUNNING' : 'UNVERIFIED',
+              reason: run.state === 'BUILDING' || run.state === 'CORRECTING'
+                ? 'a correction cycle is active; the prior check receipt does not verify this new build generation'
+                : `the canonical run is ${run.state}; no current checked generation is active` };
+          }
+          if (run.checks.outcome === 'SNAPSHOT_PASS_HOST_PENDING') {
+            return { state: 'UNVERIFIED',
+              reason: run.checks.hostContainmentReason ||
+                'snapshot checks passed; mandatory host containment is pending until exact-subject review completes' };
+          }
+          if (run.checks.passed !== run.checks.total || run.checks.total <= 0) {
+            return { state: 'FAILED', reason: `${run.checks.passed}/${run.checks.total} checks passed` };
+          }
+          if (!lifecycleProven('CHECKS_PASSED')) return uncorroborated('deterministic check completion');
+          if (!run.watchdog || run.watchdog.checkReceiptValid !== true) {
+            return { state: 'UNVERIFIED',
+              reason: 'check counters claim success, but no digest-bound canonical PASS receipt proves them' };
+          }
+          return { state: 'PASS', reason: `${run.checks.passed}/${run.checks.total} checks passed with a canonical digest-bound receipt` };
         }
         return { state: 'UNVERIFIED', reason: 'this gate did not execute the checks itself; passing elsewhere is not evidence here' };
       case 'review': {
@@ -911,8 +1193,38 @@ function deriveStages(parsed, runs) {
         }
         if (has(/ENGOS-REVIEW-REJECTED/)) return { state: 'FAILED', reason: 'a required reviewer returned REJECT' };
         if (has(/ENGOS-REVIEWER-UNAVAILABLE/)) return { state: 'FAILED', reason: 'a required reviewer reported UNAVAILABLE' };
-        if (/: (APPROVE|APPROVE_WITH_NOTES)/.test(observed)) {
-          return { state: 'PASS', reason: 'every required reviewer approved this exact subject' };
+        const invalidReviewAuthority = problems.find((problem) => problem &&
+          /ENGOS-(?:OPEN-BLOCKING-FINDING|REVIEW-(?:MALFORMED|WRONG-PACKET|COVERAGE-(?:SHORT|EXTRA))|AMBIGUOUS-REVIEWS)/
+            .test(String(problem.rule || '')));
+        if (invalidReviewAuthority) {
+          return { state: 'FAILED', reason:
+            `${invalidReviewAuthority.rule}: the review gate is blocked; approval labels and coverage cannot override it` };
+        }
+        if (!parsed || parsed.ok !== true) {
+          return { state: 'FAILED', reason:
+            'the parsed engineering gate is blocked; review approval cannot be projected as PASS' };
+        }
+        const completenessRows = parsed && parsed.reviewerCompleteness &&
+          Array.isArray(parsed.reviewerCompleteness.rows)
+          ? parsed.reviewerCompleteness.rows.filter((row) => row && row.required === 'REQUIRED') : [];
+        const advisoryReject = completenessRows.some((row) => row.disposition === 'REJECT');
+        const reviewComplete = parsed && parsed.reviewerCompleteness &&
+          parsed.reviewerCompleteness.complete === true && completenessRows.length > 0 &&
+          completenessRows.every((row) => row.executed === 'EXECUTED');
+        if (reviewComplete || /: (APPROVE|APPROVE_WITH_NOTES)/.test(observed)) {
+          const gateSubject = parsed && parsed.subject && parsed.subject.subjectSha256;
+          const runSubject = run && run.subjectSha256;
+          if (!run) return { state: 'UNVERIFIED',
+            reason: 'review approval exists, but no current run is available to bind it to' };
+          if (!isSubjectSha(gateSubject)) return { state: 'UNVERIFIED',
+            reason: 'review approval exists, but the gate subject is unavailable or malformed' };
+          if (!isSubjectSha(runSubject)) return { state: 'UNVERIFIED',
+            reason: 'review approval exists, but the current run is not linked to a canonical subject' };
+          if (gateSubject !== runSubject) return { state: 'UNVERIFIED',
+            reason: 'review subject mismatch: the gate approval does not cover the current run subject' };
+          return advisoryReject
+            ? { state: 'PASS', reason: 'required review is complete with no blocking findings; one reviewer did not approve' }
+            : { state: 'PASS', reason: 'every required reviewer approved this exact subject' };
         }
         return { state: 'UNVERIFIED', reason: 'no reviewer disposition was observed' };
       }
@@ -920,31 +1232,81 @@ function deriveStages(parsed, runs) {
       // ── steps 8-10: the runtime again ───────────────────────────────────
       case 'correction': {
         if (!run) return noRun;
-        const used = run.corrections || 0;
-        const max = run.maxCorrections || 3;
+        if (!Number.isInteger(run.corrections) || run.corrections < 0 ||
+            !Number.isInteger(run.maxCorrections) || run.maxCorrections < 1) {
+          return { state: 'UNVERIFIED', reason: 'the bounded correction count or cap is unavailable' };
+        }
+        const used = run.corrections;
+        const max = run.maxCorrections;
         if (used === 0) return { state: 'UNVERIFIED', reason: 'no correction cycle has been needed or exercised' };
+        const watchdogProblems = run.watchdog && Array.isArray(run.watchdog.problems)
+          ? run.watchdog.problems : [];
+        const correctingReached = Boolean(run.watchdog && Array.isArray(run.watchdog.reached) &&
+          run.watchdog.reached.includes('CORRECTING'));
+        const correctingUnrecorded = watchdogProblems.some((problem) => problem &&
+          problem.rule === 'WATCHDOG-UNRECORDED-TRANSITION' &&
+          / -> CORRECTING\b/.test(String(problem.detail || '')));
+        if (!correctingReached || correctingUnrecorded) {
+          return { state: 'UNVERIFIED',
+            reason: 'a mutable correction count exists, but no canonical ledger-corroborated CORRECTING transition proves it' };
+        }
         if (used >= max) return { state: 'FAILED', reason: `${used}/${max} correction cycles used — escalation required` };
         return { state: 'PASS', reason: `${used}/${max} correction cycles used, within bound` };
       }
       case 'watchdog': {
         if (!run) return noRun;
         if (!run.watchdog) return { state: 'UNVERIFIED', reason: 'the watchdog has not been run against this run' };
-        return run.watchdog.ok
-          ? { state: 'PASS', reason: 'the required sequence occurred, in order, and is recorded in the ledger' }
-          : { state: 'FAILED', reason: `process drift: ${(run.watchdog.problems || []).map((x) => x.rule).join(', ')}` };
+        if (run.watchdog.ok) {
+          return { state: 'PASS', reason: 'the required sequence occurred, in order, and is recorded in the ledger' };
+        }
+        const watchdogProblems = Array.isArray(run.watchdog.problems) ? run.watchdog.problems : [];
+        const drift = watchdogProblems.filter((problem) => problem && problem.rule !== 'WATCHDOG-STAGE-MISSING');
+        if (drift.length) {
+          return { state: 'FAILED', reason: `process drift: ${drift.map((x) => x.rule).join(', ')}` };
+        }
+        const prefix = Array.isArray(run.watchdog.corroboratedStages)
+          ? run.watchdog.corroboratedStages : [];
+        if (prefix.length) {
+          const last = prefix[prefix.length - 1];
+          return { state: run.state === 'BUILDING' ? 'RUNNING' : 'UNVERIFIED',
+            reason: `the canonical sequence is corroborated through ${last}; later required stages have not occurred yet` };
+        }
+        return { state: 'UNVERIFIED', reason: 'no correctly ordered canonical lifecycle prefix is corroborated yet' };
       }
       case 'checkpoint':
         if (!run) return noRun;
-        if (!run.checkpoint) return { state: 'UNVERIFIED', reason: 'no checkpoint has been recorded for this run' };
-        if (!run.checkpoint.rollbackPoint) return { state: 'FAILED', reason: 'a checkpoint exists but names no rollback point' };
-        return { state: 'PASS', reason: `checkpoint ${run.checkpoint.checkpointId} at ${String(run.checkpoint.rollbackPoint).slice(0, 12)}` };
+        if (run.checkpointState === 'INVALID') return { state: 'FAILED',
+          reason: run.checkpointReason || 'the checkpoint receipt or rollback point is malformed' };
+        if (!run.checkpoint && !run.rollbackPoint) {
+          return { state: 'UNVERIFIED', reason: 'no checkpoint has been recorded for this run' };
+        }
+        if (typeof run.checkpoint !== 'string' || !run.checkpoint ||
+            typeof run.rollbackPoint !== 'string' || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(run.rollbackPoint)) {
+          return { state: 'FAILED', reason: 'a checkpoint requires one bounded receipt id and one canonical rollback commit' };
+        }
+        return { state: 'PASS', reason: `checkpoint ${run.checkpoint} at ${run.rollbackPoint.slice(0, 12)}` };
 
       // ── step 11: this surface ───────────────────────────────────────────
       case 'surface':
         // PASS only if this projection can actually cite what it claims to
         // show. Otherwise the step that exists to prove honesty would be the
         // one lying.
-        return { state: 'PASS', reason: 'evidence, cost, blockers and provenance are projected from cited artifacts' };
+        {
+          const gaps = [];
+          if (!surfaceEvidence) gaps.push('surface evidence was not supplied');
+          else {
+            if (!surfaceEvidence.runs || surfaceEvidence.runs.state !== 'OK') gaps.push('run evidence unavailable');
+            else if (!surfaceEvidence.runs.current || surfaceEvidence.runs.current.state !== 'BOUND') {
+              gaps.push('current run binding unavailable');
+            }
+            if (!surfaceEvidence.events || surfaceEvidence.events.state !== 'OK') gaps.push('event evidence unavailable');
+            if (!surfaceEvidence.cost || surfaceEvidence.cost.state !== 'OK') gaps.push('cost evidence unavailable');
+            if (!surfaceEvidence.reviewers || surfaceEvidence.reviewers.state !== 'OK') gaps.push('reviewer provenance unavailable');
+          }
+          return gaps.length
+            ? { state: 'UNVERIFIED', reason: `surface gaps: ${gaps.join('; ')}` }
+            : { state: 'PASS', reason: 'evidence, cost, blockers and provenance are projected from cited artifacts' };
+        }
 
       default:
         return { state: 'UNVERIFIED', reason: 'no evidence source is defined for this step' };
@@ -984,29 +1346,60 @@ function projectEvents(limit, ledgerFile) {
 // from an average, never silently treated as zero. A cost display that quietly
 // drops the runs it cannot see reads as complete while understating the bill,
 // which is the same failure as a dashboard that shows a fabricated PASS.
-// The run's OWN envelope: the first balanced top-level JSON object in the
-// transcript. Anything quoted deeper in the text belongs to some other run.
-function ownEnvelope(body) {
-  if (typeof body !== 'string') return null;
-  const start = body.indexOf('{');
-  if (start === -1) return null;
-  let depth = 0, inStr = false, esc = false;
-  for (let i = start; i < body.length; i++) {
-    const c = body[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
+// Reviewer stdout has two canonical OWN-envelope encodings in preserved
+// evidence: newline-delimited compact JSON events and one pretty-printed
+// top-level JSON event.  In both encodings the complete stdout payload is the
+// envelope stream: whitespace may separate objects, but prose may not precede,
+// follow or interrupt it.  This whole-stream boundary is what prevents a JSON
+// object quoted while Codex was reviewing another transcript from becoming the
+// current run's telemetry, even when that quoted object starts on its own line.
+function ownEnvelopeEvents(body) {
+  if (typeof body !== 'string') return [];
+  const stdout = body.split(/^--- stderr ---\s*$/m)[0];
+  const events = [];
+  let i = 0;
+  while (i < stdout.length) {
+    while (i < stdout.length && /\s/.test(stdout[i])) i++;
+    if (i === stdout.length) break;
+    // Any non-whitespace outside a top-level JSON object means stdout is prose
+    // containing JSON, not a canonical telemetry envelope stream.
+    if (stdout[i] !== '{') return [];
+    const start = i;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (; i < stdout.length; i++) {
+      const char = stdout[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === '{') depth++;
+      else if (char === '}') {
+        depth--;
+        if (depth === 0) { end = i; break; }
+      }
     }
-    if (c === '"') inStr = true;
-    else if (c === '{') depth++;
-    else if (c === '}') {
-      depth--;
-      if (depth === 0) { try { return JSON.parse(body.slice(start, i + 1)); } catch { return null; } }
-    }
+    if (end === -1) return [];
+    try { events.push(JSON.parse(stdout.slice(start, end + 1))); }
+    catch { return []; }
+    i = end + 1;
   }
-  return null;
+  return events;
+}
+
+function successfulTerminalCostEnvelope(body) {
+  const events = ownEnvelopeEvents(body);
+  const terminals = events.filter((event) => event && event.type === 'end');
+  if (terminals.length !== 1 || events[events.length - 1] !== terminals[0]) return null;
+  const terminal = terminals[0];
+  if (terminal.stopReason !== 'end_turn' || typeof terminal.total_cost_usd !== 'number' ||
+      !Number.isFinite(terminal.total_cost_usd) || terminal.total_cost_usd < 0) return null;
+  return terminal;
 }
 
 // ── canonical FX evidence (USD → CAD) ──────────────────────────────────────
@@ -1054,7 +1447,13 @@ function projectFx(now = Date.now(), fxPath = FX_CANON) {
       reason: `${source} is not usable FX evidence: it is missing ${missing.join(', ')}. ` +
         'An incomplete rate record is not converted from — CAD stays UNAVAILABLE.' };
   }
-  const ageDays = Math.floor((now - Date.parse(asOf)) / 86400000);
+  const observedAt = Date.parse(asOf);
+  if (observedAt > now) {
+    return { state: 'UNAVAILABLE', source,
+      reason: `${source} is future-dated (${asOf}), so it cannot prove a CAD rate observed by the current projection clock. ` +
+        'Future evidence is not converted from — CAD stays UNAVAILABLE.' };
+  }
+  const ageDays = Math.floor((now - observedAt) / 86400000);
   return {
     state: ageDays > FX_STALE_DAYS ? 'STALE' : 'OK',
     rate, base, quote, asOf, ageDays, fxSource, source,
@@ -1072,8 +1471,8 @@ function toCad(usd, fx) {
   return Math.ceil(usd * fx.rate * 100) / 100;
 }
 
-function projectCost() {
-  const dir = path.join(HERE, 'review-raw');
+function projectCost(opts = {}) {
+  const dir = resolveEvidencePath(opts.reviewRawDir, path.join(HERE, 'review-raw'), null);
   if (!fs.existsSync(dir)) {
     return { state: 'UNAVAILABLE', reason: `no reviewer transcripts at ${rel(dir)}`, runs: [] };
   }
@@ -1091,7 +1490,7 @@ function projectCost() {
     // nothing, because it looks precise.
     //
     // Cost is read ONLY from the run's own top-level envelope.
-    const env = ownEnvelope(body);
+    const env = successfulTerminalCostEnvelope(body);
     const usdRaw = env && typeof env.total_cost_usd === 'number' ? env.total_cost_usd : null;
     const turnsRaw = env && typeof env.num_turns === 'number' ? env.num_turns : null;
     const stopRaw = env && typeof env.stopReason === 'string' ? env.stopReason : null;
@@ -1187,6 +1586,36 @@ function orderRuns(runs) {
   });
 }
 
+// Keep this identical to aegis-run.cjs RUN_ID_RE. The state projector does not
+// own run identity, but it must independently refuse a forged working-state
+// filename before any of that file can reach the founder surface. Tests compare
+// both authorities over the same positive and negative table.
+const RUN_ID_RE = /^RUN-\d{8}-[0-9a-f]{8}$/;
+
+function normalizeRunTimes(run) {
+  return {
+    ...run,
+    createdAtMs: typeof run.createdAtMs === 'number' && Number.isFinite(run.createdAtMs)
+      ? run.createdAtMs : (typeof run.createdAt !== 'string' || Number.isNaN(Date.parse(run.createdAt)) ? null : Date.parse(run.createdAt)),
+    updatedAtMs: typeof run.updatedAtMs === 'number' && Number.isFinite(run.updatedAtMs)
+      ? run.updatedAtMs : (typeof run.updatedAt !== 'string' || Number.isNaN(Date.parse(run.updatedAt)) ? null : Date.parse(run.updatedAt)),
+  };
+}
+
+function futureRunTimestamp(run, nowMs) {
+  return (Number.isFinite(run.createdAtMs) && run.createdAtMs > nowMs) ||
+    (Number.isFinite(run.updatedAtMs) && run.updatedAtMs > nowMs);
+}
+
+function selectCurrentRun(runs, nowMs = Date.now()) {
+  if (!Array.isArray(runs) || !runs.length) return null;
+  const effectiveNow = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const normalized = runs.map(normalizeRunTimes);
+  const dated = orderRuns(normalized).filter((run) =>
+    Number.isFinite(run.updatedAtMs) && !futureRunTimestamp(run, effectiveNow));
+  return dated.length ? dated[dated.length - 1] : null;
+}
+
 // The canonical subject-hash shape, as engineering-os computes and validates
 // it. Reused here so "is this a subject hash" has ONE answer in this system,
 // not a second, looser one living in the projector.
@@ -1219,7 +1648,7 @@ function runSubjectOf(run) {
 // other private worker internals.  The dashboard needs only this bounded
 // lifecycle identity.  Keep this allowlist here, before hosting, so a status
 // snapshot can never accidentally carry raw worker data forward.
-function projectWorker(build) {
+function projectWorker(build, runState, runtime) {
   if (!build || typeof build !== 'object' || Array.isArray(build)) return null;
   const exit = Number.isInteger(build.exit) ? build.exit : null;
   if (build.mode !== 'async') return { exit };
@@ -1227,7 +1656,30 @@ function projectWorker(build) {
     typeof value === 'string' && value.length <= max ? value : null;
   const boundedTimestamp = (value) => boundedText(value, 64);
   const recovery = build.recovery && typeof build.recovery === 'object' && !Array.isArray(build.recovery)
-    ? { reason: boundedText(build.recovery.reason), retrySafe: build.recovery.retrySafe === true }
+    ? { reason: boundedText(build.recovery.reason), retrySafe: build.recovery.retrySafe === true,
+        ...(build.recovery.terminationVerified === false ? { terminationVerified: false } : {}) }
+    : null;
+  const failure = build.failure && typeof build.failure === 'object' && !Array.isArray(build.failure) &&
+      build.failure.code === 'MODEL_AUTH_FAILURE' && build.failure.provider === 'claude-subscription' &&
+      build.failure.failoverEligible === true
+    ? { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
+        summary: 'Claude authentication failed.' }
+    : null;
+  const failover = failure && build.providerSelection && typeof build.providerSelection === 'object' &&
+      !Array.isArray(build.providerSelection) && build.providerSelection.provider === 'grok-subscription' &&
+      typeof build.providerSelection.model === 'string' && build.providerSelection.model.length > 0 &&
+      build.providerSelection.model.length <= 128 && build.handoff && typeof build.handoff === 'object' &&
+      build.handoff.state === 'UNAVAILABLE' && build.handoff.executable === false &&
+      build.handoff.failureCode === 'MODEL_AUTH_FAILURE' &&
+      build.handoff.fromProvider === 'claude-subscription' &&
+      build.handoff.toProvider === 'grok-subscription' &&
+      build.handoff.sameProviderRetryAllowed === false && build.handoff.unchangedObjective === true &&
+      build.recovery && build.recovery.reason === 'MODEL_AUTH_FAILURE' &&
+      build.recovery.retrySafe === false && build.recovery.providerFailoverRequired === true &&
+      build.recovery.selectedProvider === 'grok-subscription' &&
+      build.recovery.selectedModel === build.providerSelection.model
+    ? { state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: build.providerSelection.model,
+        reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.' }
     : null;
   return {
     mode: 'async',
@@ -1239,6 +1691,64 @@ function projectWorker(build) {
     exit,
     timedOut: build.timedOut === true,
     recovery,
+    failure,
+    failover,
+    // Compute this one public capability while the canonical raw control and
+    // child identity are still present. Hosting receives only the boolean;
+    // it can neither reconstruct nor expose the mailbox secret.
+    cancelAvailable: build.workerState === 'RUNNING' && runtime &&
+      typeof runtime.workerCancellationCapability === 'function' &&
+      runtime.workerCancellationCapability({ state: runState, build }) === true,
+  };
+}
+
+function projectChecks(checks, runState, watchdog) {
+  if (!checks || typeof checks !== 'object' || Array.isArray(checks)) return null;
+  const state = (value, allowPending = false) => value && typeof value === 'object' &&
+    (value.state === 'PASSED' || value.state === 'FAILED' ||
+      (allowPending && value.state === 'PENDING')) ? value.state : null;
+  const passed = Number.isInteger(checks.passed) && checks.passed >= 0 ? checks.passed : null;
+  const total = Number.isInteger(checks.total) && checks.total > 0 ? checks.total : null;
+  const hostContainmentState = state(checks.hostContainment, true);
+  const lifecycleChecksPassed = Boolean(watchdog &&
+    Array.isArray(watchdog.corroboratedStages) &&
+    watchdog.corroboratedStages.includes('CHECKS_PASSED'));
+  const verifiedReceipt = lifecycleChecksPassed && watchdog.checkReceiptValid === true;
+  const preHostReceiptApplies = runState === 'CHECKS_PASSED' || runState === 'REVIEW_FAILED';
+  const finalReceiptApplies = [
+    'CHECKS_PASSED', 'REVIEW_FAILED', 'REVIEW_BOUND', 'CHECKPOINTED', 'ROLLED_BACK',
+  ].includes(runState);
+  const snapshotPassedHostPending = preHostReceiptApplies &&
+    passed === total && total > 0 && verifiedReceipt &&
+    watchdog.checkReceiptStage === 'PRE_HOST' && watchdog.hostContainmentState === 'PENDING' &&
+    hostContainmentState === 'PENDING';
+  const finalReceiptPassed = finalReceiptApplies &&
+    passed === total && total > 0 && verifiedReceipt &&
+    watchdog.checkReceiptStage === 'COMPLETE';
+  const hostContainmentReason = snapshotPassedHostPending
+    ? (runState === 'REVIEW_FAILED'
+      ? 'Snapshot checks passed; mandatory host containment remains pending because exact-subject review did not pass.'
+      : 'Snapshot checks passed; mandatory host containment is pending until exact-subject review completes.')
+    : null;
+  return {
+    passed,
+    total,
+    outcome: runState === 'CHECKS_FAILED' ? 'FAIL'
+      : snapshotPassedHostPending ? 'SNAPSHOT_PASS_HOST_PENDING'
+      : finalReceiptPassed ? 'PASS' : 'UNVERIFIED',
+    snapshotOutcome: runState === 'CHECKS_FAILED' ? 'FAIL'
+      : (snapshotPassedHostPending || finalReceiptPassed) ? 'PASS'
+      : passed === null || total === null ? 'UNVERIFIED'
+      : passed < total ? 'FAIL' : 'UNVERIFIED',
+    integrityState: state(checks.integrity),
+    integrityGapCount: checks.integrity && Array.isArray(checks.integrity.gaps)
+      ? checks.integrity.gaps.length : null,
+    hostContainmentState,
+    hostContainmentReason,
+    executionBoundaryState: state(checks.executionBoundary),
+    preconditionState: state(checks.precondition),
+    preconditionCode: checks.precondition && typeof checks.precondition.code === 'string' &&
+      /^[A-Z0-9_-]{1,96}$/.test(checks.precondition.code) ? checks.precondition.code : null,
   };
 }
 
@@ -1248,6 +1758,13 @@ function projectWorker(build) {
 function projectRoute(route) {
   if (!route || typeof route !== 'object' || Array.isArray(route)) return null;
   const keys = Object.keys(route).sort();
+  if (keys.join('\u0000') === 'code\u0000reason\u0000state') {
+    if (route.state !== 'REFUSED' ||
+        typeof route.code !== 'string' || !/^[A-Z][A-Z0-9_-]{1,95}$/.test(route.code) ||
+        typeof route.reason !== 'string' || route.reason.length < 1 || route.reason.length > 512 ||
+        route.reason.trim() !== route.reason || /[\u0000-\u001f\u007f]/.test(route.reason)) return null;
+    return { state: 'REFUSED', code: route.code, reason: route.reason };
+  }
   if (keys.join('\u0000') !== 'execution\u0000model\u0000source') return null;
   if (route.source !== 'tool-router.cjs routeRole') return null;
   if (typeof route.model !== 'string' || route.model.length === 0 || route.model.length > 128 ||
@@ -1255,22 +1772,194 @@ function projectRoute(route) {
   return { model: route.model, execution: route.execution, source: route.source };
 }
 
+// The browser never needs the operator's absolute worktree path.  The stage
+// does need stronger evidence than a truthy string, however, so validate the
+// exact shape created by aegis-run before projecting a bounded branch receipt.
+// This is structural validation of the recorded creation receipt; live Git
+// identity is re-proved by aegis-run before any state-mutating operation.
+function projectWorktree(worktree, run) {
+  if (worktree === undefined || worktree === null) return null;
+  const invalid = (reason) => ({ state: 'INVALID', isolated: false, branch: null, reason });
+  if (!worktree || typeof worktree !== 'object' || Array.isArray(worktree)) {
+    return invalid('the recorded worktree is not an object');
+  }
+  const expectedBranch = `aegis/${run.runId}`;
+  const expectedDirectory = `aegis-wt-${run.runId}`;
+  if (typeof worktree.path !== 'string' || !path.isAbsolute(worktree.path) ||
+      path.basename(path.normalize(worktree.path)) !== expectedDirectory) {
+    return invalid(`the recorded worktree path is not the bounded ${expectedDirectory} directory`);
+  }
+  if (typeof worktree.branch !== 'string' || worktree.branch !== expectedBranch) {
+    return invalid(`the recorded worktree branch is not ${expectedBranch}`);
+  }
+  if (typeof worktree.createdAt !== 'string' || !Number.isFinite(Date.parse(worktree.createdAt))) {
+    return invalid('the recorded worktree has no parseable creation timestamp');
+  }
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(run.baseCommit || '') ||
+      worktree.baseCommit !== run.baseCommit) {
+    return invalid('the run and worktree do not carry one matching canonical base commit');
+  }
+  return { state: 'VALIDATED', isolated: true, branch: expectedBranch };
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+  }
+  return value;
+}
+
+function checkpointDigest(checkpoint) {
+  const body = { ...checkpoint };
+  delete body.digest;
+  return crypto.createHash('sha256').update(JSON.stringify(stableValue(body))).digest('hex');
+}
+
+function projectCheckpoint(checkpoint, run, watchdog) {
+  if (checkpoint === undefined || checkpoint === null) {
+    return { state: 'ABSENT', checkpoint: null, rollbackPoint: null, reason: null };
+  }
+  const invalid = (reason) => ({ state: 'INVALID', checkpoint: null, rollbackPoint: null, reason });
+  if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) {
+    return invalid('the checkpoint receipt is not an object');
+  }
+  if (typeof checkpoint.checkpointId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(checkpoint.checkpointId)) {
+    return invalid('the checkpoint receipt id is missing or malformed');
+  }
+  const oid = (value) => typeof value === 'string' && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(value);
+  if (!oid(checkpoint.rollbackPoint) || !oid(checkpoint.baseCommit) || !oid(checkpoint.tree) ||
+      !oid(checkpoint.reviewedBase)) {
+    return invalid('the checkpoint does not name canonical rollback, base, tree, and reviewed-base commits');
+  }
+  if (!run || checkpoint.runId !== run.runId || checkpoint.baseCommit !== run.baseCommit) {
+    return invalid('the checkpoint receipt is not bound to this run and its canonical base commit');
+  }
+  if (typeof checkpoint.createdAt !== 'string' || !Number.isFinite(Date.parse(checkpoint.createdAt))) {
+    return invalid('the checkpoint receipt has no parseable creation timestamp');
+  }
+  if (!isSubjectSha(checkpoint.digest) || checkpointDigest(checkpoint) !== checkpoint.digest) {
+    return invalid('the checkpoint digest does not authenticate the complete canonical receipt');
+  }
+  const packet = checkpoint.packet;
+  const subject = checkpoint.subject;
+  const review = run.reviewGate;
+  const runSubject = run.subject;
+  if (!packet || typeof packet.path !== 'string' || !packet.path || !isSubjectSha(packet.sha256) ||
+      !subject || !isSubjectSha(subject.subjectSha256) || !Array.isArray(subject.subjectPaths) ||
+      subject.subjectPaths.length < 1 || subject.subjectPaths.some((item) =>
+        typeof item !== 'string' || !item || path.isAbsolute(item) || item.split('/').includes('..')) ||
+      !Number.isInteger(subject.diffBytes) || subject.diffBytes <= 0 ||
+      typeof subject.reviewedRange !== 'string' || !subject.reviewedRange ||
+      typeof subject.committedRange !== 'string' || !subject.committedRange ||
+      !isSubjectSha(checkpoint.checkReceiptSha256)) {
+    return invalid('the checkpoint packet, subject, or deterministic receipt coordinate is malformed');
+  }
+  if (subject.committedRange !== `${checkpoint.reviewedBase}..${checkpoint.rollbackPoint}`) {
+    return invalid('the checkpoint committed range does not bind the reviewed base to the rollback commit');
+  }
+  if (!review || !runSubject || review.subjectSha256 !== subject.subjectSha256 ||
+      runSubject.subjectSha256 !== subject.subjectSha256 ||
+      review.checkReceiptSha256 !== checkpoint.checkReceiptSha256 ||
+      !review.packet || review.packet.path !== packet.path || review.packet.sha256 !== packet.sha256 ||
+      review.headCommit !== checkpoint.reviewedBase || runSubject.pathCount !== subject.subjectPaths.length ||
+      runSubject.diffBytes !== subject.diffBytes || runSubject.range !== subject.reviewedRange) {
+    return invalid('the checkpoint does not bind one reviewed subject, packet, and deterministic receipt');
+  }
+  if (!checkpoint.checks || !run.checks || checkpoint.checks.passed !== checkpoint.checks.total ||
+      checkpoint.checks.total < 1 || checkpoint.checks.passed !== run.checks.passed ||
+      checkpoint.checks.total !== run.checks.total || checkpoint.objective !== run.objective) {
+    return invalid('the checkpoint does not bind the run objective and its complete passing checks');
+  }
+  const transition = Array.isArray(run.transitions) && run.transitions.find((item) =>
+    item && item.from === 'REVIEW_BOUND' && item.to === 'CHECKPOINTED' &&
+    typeof item.ts === 'string' && Number.isFinite(Date.parse(item.ts)) &&
+    Date.parse(item.ts) >= Date.parse(checkpoint.createdAt) &&
+    typeof item.ledgerEntryId === 'string' && /^LED-RUN-/.test(item.ledgerEntryId) &&
+    item.notes === `checkpoint ${checkpoint.checkpointId} at ${checkpoint.rollbackPoint.slice(0, 12)}`);
+  if (!transition || !['CHECKPOINTED', 'ROLLED_BACK'].includes(run.state) || !watchdog || watchdog.ok !== true) {
+    return invalid('the checkpoint is not corroborated by the canonical CHECKPOINTED transition and ledger watchdog');
+  }
+  return { state: 'VALIDATED', checkpoint: checkpoint.checkpointId,
+    rollbackPoint: checkpoint.rollbackPoint, reason: null };
+}
+
+function projectReviewFailure(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      value.schemaVersion !== 1 || value.status !== 'REFUSED' ||
+      value.reasonCode !== 'EXACT_SUBJECT_REVIEW_REFUSED' ||
+      !isSubjectSha(value.subjectSha256) || !isSubjectSha(value.checkReceiptSha256) ||
+      typeof value.refusedAt !== 'string' || !Number.isFinite(Date.parse(value.refusedAt)) ||
+      value.authority !== 'engineering-os.cjs --gate-done' ||
+      !value.packet || typeof value.packet !== 'object' ||
+      !/^builder-control\/packets\/[A-Za-z0-9._-]+\.json$/.test(value.packet.path || '') ||
+      !isSubjectSha(value.packet.sha256) ||
+      !Number.isInteger(value.blockingFindingCount) || value.blockingFindingCount < 0 ||
+      !Number.isInteger(value.refusalRuleCount) || value.refusalRuleCount < 1 ||
+      !Array.isArray(value.rejectedReviewers) || value.rejectedReviewers.length < 1) return null;
+  const rejectedReviewers = value.rejectedReviewers.flatMap((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row) ||
+        typeof row.reviewer !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(row.reviewer) ||
+        typeof row.reviewId !== 'string' || !/^REV-[A-Za-z0-9._-]{1,127}$/.test(row.reviewId)) return [];
+    return [{ reviewer: row.reviewer, reviewId: row.reviewId }];
+  });
+  if (rejectedReviewers.length !== value.rejectedReviewers.length) return null;
+  // The run JSON is mutable and is not an attestation surface. Its shape can
+  // establish only that a review-failure claim was recorded. The parsed,
+  // exact-subject engineering gate owns the blocking verdict; until that
+  // evidence is provided to this projector, publish no reviewer identity,
+  // counts, hashes, or refusal conclusion as fact.
+  return {
+    status: 'UNVERIFIED',
+    reasonCode: 'REVIEW_FAILURE_UNCORROBORATED',
+    summary: 'The run records a review-failure claim, but attested exact-subject gate evidence is unavailable in this projection.',
+  };
+}
+
+function privateReviewFailureClaim(value) {
+  const projected = projectReviewFailure(value);
+  if (!projected) return null;
+  return Object.freeze({
+    schemaVersion: 1,
+    status: 'REFUSED',
+    reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+    subjectSha256: value.subjectSha256,
+    checkReceiptSha256: value.checkReceiptSha256,
+    packet: Object.freeze({ path: value.packet.path, sha256: value.packet.sha256 }),
+    refusedAt: value.refusedAt,
+    authority: value.authority,
+    rejectedReviewers: Object.freeze(value.rejectedReviewers.map((row) =>
+      Object.freeze({ reviewer: row.reviewer, reviewId: row.reviewId }))),
+    blockingFindingCount: value.blockingFindingCount,
+    refusalRuleCount: value.refusalRuleCount,
+    summary: value.blockingFindingCount > 0
+      ? `Independent review found ${value.blockingFindingCount} blocking issue(s) on this exact checked version.`
+      : 'An independent reviewer rejected this exact checked version.',
+  });
+}
+
 // The one binding the founder panel reads. It names all four coordinates the
 // summary claims to be about — run, time, packet, subject hash — and refuses to
 // exist when any of the first two is unknown. A panel bound to nothing renders
 // UNAVAILABLE rather than to whatever happened to be last in a directory.
-function bindCurrentRun(ordered, subjectSha256) {
+function bindCurrentRun(ordered, subjectSha256, nowMs = Date.now()) {
   const gateSubject = typeof subjectSha256 === 'string' && subjectSha256 ? subjectSha256 : null;
-  const dated = ordered.filter((r) => r.updatedAtMs !== null);
+  const effectiveNow = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const normalized = ordered.map(normalizeRunTimes);
+  const futureRuns = normalized.filter((r) => futureRunTimestamp(r, effectiveNow));
+  const dated = normalized.filter((r) =>
+    Number.isFinite(r.updatedAtMs) && !futureRunTimestamp(r, effectiveNow));
   if (!dated.length) {
     return { state: 'UNAVAILABLE', runId: null, updatedAt: null, packetId: null,
       subjectSha256: null, runSubjectSha256: null, gateSubjectSha256: gateSubject,
       subjectState: 'UNAVAILABLE',
-      reason: ordered.length
-        ? `${ordered.length} run record(s) exist but none carries a parseable updatedAt timestamp, so which one is current cannot be established. Selecting by filename order would be a guess.`
+      reason: futureRuns.length
+        ? `${futureRuns.length} run record(s) carry a timestamp in the future, so current run evidence is unavailable until the clock and records agree.`
+        : normalized.length
+        ? `${normalized.length} run record(s) exist but none carries a parseable updatedAt timestamp, so which one is current cannot be established. Selecting by filename order would be a guess.`
         : 'no run records exist yet, so no run is current.' };
   }
-  const latest = dated[dated.length - 1];
+  const latest = selectCurrentRun(dated, effectiveNow);
   const tied = dated.filter((r) => r.updatedAtMs === latest.updatedAtMs);
 
   const runSubject = latest.subjectSha256 && isSubjectSha(latest.subjectSha256) ? latest.subjectSha256 : null;
@@ -1305,10 +1994,12 @@ function bindCurrentRun(ordered, subjectSha256) {
     subjectState,
     selectedBy: 'the newest updatedAt timestamp recorded by the run itself',
     tiedCount: tied.length,
-    undatedRuns: ordered.length - dated.length,
+    undatedRuns: normalized.length - dated.length - futureRuns.length,
+    futureRuns: futureRuns.length,
     reason: `Bound to ${latest.runId}, whose own record was last written ${latest.updatedAt}.` +
       (tied.length > 1 ? ` ${tied.length} runs share that exact timestamp; the tie was broken by run id, so this binding is deterministic but not unambiguous.` : '') +
-      (ordered.length - dated.length > 0 ? ` ${ordered.length - dated.length} run record(s) carry no usable timestamp and were excluded from this selection.` : '') +
+      (normalized.length - dated.length - futureRuns.length > 0 ? ` ${normalized.length - dated.length - futureRuns.length} run record(s) carry no usable timestamp and were excluded from this selection.` : '') +
+      (futureRuns.length > 0 ? ` ${futureRuns.length} future-dated run record(s) were excluded and cannot establish current state.` : '') +
       subjectPlain,
   };
 }
@@ -1322,16 +2013,67 @@ function bindCurrentRun(ordered, subjectSha256) {
 // alternate location is refused.
 function projectRuns(opts = {}) {
   const subjectSha256 = opts && typeof opts.subjectSha256 === 'string' ? opts.subjectSha256 : null;
+  const requestedNow = typeof opts.now === 'string' ? Date.parse(opts.now) : opts.now;
+  const nowMs = Number.isFinite(requestedNow) ? requestedNow : Date.now();
   const dir = resolveEvidencePath(opts && opts.runsDir, path.join(HERE, 'runs'), null);
   if (!fs.existsSync(dir)) {
-    return { state: 'UNAVAILABLE', reason: 'no runs recorded yet', runs: [],
-      current: bindCurrentRun([], subjectSha256) };
+    return { state: 'UNAVAILABLE', reason: 'the run evidence directory is unavailable', runs: [],
+      current: { ...bindCurrentRun([], subjectSha256), evidenceState: 'UNAVAILABLE',
+        reason: 'the run evidence directory is unavailable, so an empty run list is not proof that no run exists.' } };
   }
   const runs = [];
+  const invalidFiles = new Set();
+  const invalidReasons = [];
+  const seenRunIds = new Set();
+  const runtime = require('./aegis-run.cjs');
+  const knownStates = runtime.STATES;
   for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.json')).sort()) {
     try {
       const r = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
-      runs.push({
+      // Parseable JSON is not necessarily a run record. The public lifecycle
+      // identity must at least be attributable to a non-empty run id and one
+      // canonical runtime state. Timestamps remain separately fail-closed so
+      // an otherwise valid historical record may still be reported as undated.
+      if (!r || typeof r !== 'object' || Array.isArray(r)) {
+        invalidFiles.add(f);
+        invalidReasons.push(`${f} is not a run-record object.`);
+        continue;
+      }
+      const recordProblems = [];
+      if (typeof r.runId !== 'string' || !RUN_ID_RE.test(r.runId)) {
+        recordProblems.push(`${f} does not contain a canonical RUN-YYYYMMDD-8hex runId`);
+      } else {
+        if (seenRunIds.has(r.runId)) recordProblems.push(`${r.runId} appears in more than one run file`);
+        seenRunIds.add(r.runId);
+        if (f !== `${r.runId}.json`) recordProblems.push(`${f} is an alias; canonical filename is ${r.runId}.json`);
+      }
+      if (typeof r.state !== 'string' || !Object.prototype.hasOwnProperty.call(knownStates, r.state)) {
+        recordProblems.push(`${f} does not carry a canonical runtime state`);
+      }
+      const times = normalizeRunTimes(r);
+      if (futureRunTimestamp(times, nowMs)) {
+        recordProblems.push(`${f} carries a future timestamp (${r.updatedAt || r.createdAt})`);
+      }
+      if (recordProblems.length) {
+        invalidFiles.add(f);
+        invalidReasons.push(...recordProblems.map((reason) => `${reason}.`));
+        continue;
+      }
+      // The runtime's exported watchdog remains the one sequence/ledger
+      // authority.  Project it from the exact raw run object captured above;
+      // do not wait for a `run.watchdog` field that the runtime never writes,
+      // and do not recreate its required sequence in this projector.
+      let watchdog;
+      try { watchdog = runtime.watchdog(r); }
+      catch (error) {
+        watchdog = { ok: false, problems: [{
+          rule: 'WATCHDOG-EVIDENCE-UNAVAILABLE',
+          detail: `the canonical watchdog could not read this run: ${String(error && error.message || error).slice(0, 240)}`,
+        }], reached: [], required: [] };
+      }
+      const worktree = projectWorktree(r.worktree, r);
+      const checkpoint = projectCheckpoint(r.checkpoint, r, watchdog);
+      const projected = {
         runId: r.runId, state: r.state, objective: r.objective,
         // Authoritative time, from the record itself — never the filename and
         // never the file's mtime, which a copy or a checkout would rewrite.
@@ -1347,20 +2089,101 @@ function projectRuns(opts = {}) {
         // borrowing the page's gate subject.
         subjectSha256: runSubjectOf(r),
         risk: r.risk || null,
-        contractStep: (require('./aegis-run.cjs').STATES[r.state] || {}).step ?? null,
-        worktree: r.worktree ? r.worktree.path : null,
-        build: projectWorker(r.build),
+        contractStep: (knownStates[r.state] || {}).step ?? null,
+        // The private absolute path never crosses the projection boundary.
+        // A positive stage consumes only this structurally validated receipt.
+        worktree,
+        build: projectWorker(r.build, r.state, runtime),
         route: projectRoute(r.route),
-        checks: r.checks ? { passed: r.checks.passed, total: r.checks.total } : null,
-        checkpoint: r.checkpoint ? r.checkpoint.checkpointId : null,
-        rollbackPoint: r.checkpoint ? r.checkpoint.rollbackPoint : null,
+        checks: projectChecks(r.checks, r.state, watchdog),
+        acceptanceCriteriaCount: Array.isArray(r.acceptanceCriteria) &&
+          r.acceptanceCriteria.length > 0 && r.acceptanceCriteria.every((criterion) =>
+            typeof criterion === 'string' && criterion.trim().length > 0)
+          ? r.acceptanceCriteria.length : null,
+        corrections: Number.isInteger(r.corrections) && r.corrections >= 0 ? r.corrections : null,
+        maxCorrections: Number.isInteger(runtime.MAX_CORRECTIONS) && runtime.MAX_CORRECTIONS > 0
+          ? runtime.MAX_CORRECTIONS : null,
+        reviewFailure: projectReviewFailure(r.reviewFailure),
+        watchdog,
+        checkpoint: checkpoint.checkpoint,
+        rollbackPoint: checkpoint.rollbackPoint,
+        checkpointState: checkpoint.state,
+        checkpointReason: checkpoint.reason,
         transitions: (r.transitions || []).length,
         source: rel(path.join(dir, f)),
+      };
+      Object.defineProperty(projected, RUN_CONTROL_IDENTITY, {
+        value: Object.freeze({
+          baseCommit: r.baseCommit,
+          reviewedGateRange: checkpoint.state === 'VALIDATED'
+            ? Object.freeze({ base: r.checkpoint.reviewedBase, head: r.checkpoint.rollbackPoint })
+            : null,
+          worktree: Object.freeze({
+            path: r.worktree && r.worktree.path,
+            branch: r.worktree && r.worktree.branch,
+            baseCommit: r.worktree && r.worktree.baseCommit,
+          }),
+          checks: Object.freeze({
+            receiptRef: r.checks && r.checks.receiptRef
+              ? Object.freeze({ entryId: r.checks.receiptRef.entryId,
+                  receiptSha256: r.checks.receiptRef.receiptSha256 }) : null,
+            preHostReceiptRef: r.checks && r.checks.preHostReceiptRef
+              ? Object.freeze({ entryId: r.checks.preHostReceiptRef.entryId,
+                  receiptSha256: r.checks.preHostReceiptRef.receiptSha256 }) : null,
+          }),
+          reviewFailure: privateReviewFailureClaim(r.reviewFailure),
+        }),
+        enumerable: false,
       });
-    } catch { /* skip unreadable */ }
+      runs.push(projected);
+    } catch {
+      invalidFiles.add(f);
+      invalidReasons.push(`${f} could not be read as JSON.`);
+    }
   }
   const ordered = orderRuns(runs);
-  return { state: 'OK', runs: ordered, current: bindCurrentRun(ordered, subjectSha256), source: rel(dir) };
+  if (invalidFiles.size > 0) {
+    const details = invalidReasons.slice(0, 4).join(' ');
+    const remainder = invalidReasons.length > 4 ? ` ${invalidReasons.length - 4} additional validation problem(s) are withheld from this summary.` : '';
+    const reason = `${invalidFiles.size} run record(s) could not be read or validated, so current run status and lifecycle evidence are unavailable. ${details}${remainder}`;
+    return { state: 'UNAVAILABLE', reason, invalidRecords: invalidFiles.size, invalidReasons, runs: ordered,
+      current: { ...bindCurrentRun([], subjectSha256), evidenceState: 'UNAVAILABLE', reason }, source: rel(dir) };
+  }
+  return { state: 'OK', runs: ordered,
+    current: { ...bindCurrentRun(ordered, subjectSha256, nowMs), evidenceState: 'OK' }, source: rel(dir) };
+}
+
+// Rebind a gate subject to an ALREADY CAPTURED run projection. This function
+// deliberately performs no filesystem I/O: a snapshot must not reopen the run
+// directory after the gate has run, because a worker may legitimately advance
+// a run in between those reads. Mixing the stages from the first read with the
+// run list/current binding from the second produces a snapshot that never
+// existed at any instant.
+function bindCapturedRuns(capture, subjectSha256, nowMs) {
+  const runs = capture && Array.isArray(capture.runs) ? capture.runs : [];
+  if (!capture || capture.state !== 'OK') {
+    const reason = capture && capture.reason
+      ? capture.reason
+      : 'the captured run evidence is unavailable, so current run status cannot be established.';
+    return {
+      ...(capture || { state: 'UNAVAILABLE', runs: [] }),
+      current: { ...bindCurrentRun([], subjectSha256, nowMs), evidenceState: 'UNAVAILABLE', reason },
+    };
+  }
+  return {
+    ...capture,
+    current: { ...bindCurrentRun(runs, subjectSha256, nowMs), evidenceState: 'OK' },
+  };
+}
+
+// Freeze the captured evidence recursively before any downstream projector
+// receives it. The capture is a value object (JSON-compatible data only), so a
+// recursive freeze is sufficient and makes accidental mutation fail loudly in
+// strict mode instead of creating another mixed-time view in memory.
+function freezeEvidence(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) freezeEvidence(child);
+  return Object.freeze(value);
 }
 
 // `deps` injects the evidence artifacts the snapshot is projected FROM:
@@ -1372,7 +2195,37 @@ function projectRuns(opts = {}) {
 function snapshot(args, deps = {}) {
   const nowIso = new Date().toISOString();
   const now = Date.parse(nowIso);
-  const engineering = projectEngineering(args);
+  const cost = projectCost();
+  const events = projectEvents(Number(args.events) > 0 ? Number(args.events) : 12, deps.ledgerFile);
+  const reviewers = projectReviewers(now, deps.canonPath);
+  // Read and validate the run directory ONCE. Everything below — engineering
+  // stages, the public runs list, and the current binding — is derived from
+  // this immutable capture. `afterRunCapture` is a test-only mutation seam: it
+  // lets a proof advance the directory at the exact point where the former
+  // second read observed a different world. The CLI supplies no deps, so the
+  // production path has no callback or alternate authority.
+  const runCapture = freezeEvidence(projectRuns({ subjectSha256: null, runsDir: deps.runsDir, now }));
+  if (typeof deps.afterRunCapture === 'function') deps.afterRunCapture(runCapture);
+  const currentRun = runCapture && runCapture.current && runCapture.current.runId
+    ? runCapture.runs.find((run) => run.runId === runCapture.current.runId) || null
+    : null;
+  const engineering = projectEngineering(args, {
+    runs: runCapture.runs,
+    currentRun,
+    surfaceEvidence: { cost, events, reviewers, runs: runCapture },
+  });
+  // Reuse the one immutable run capture. A canonical gate-backed refusal may
+  // replace only the generic claim on the selected REVIEW_FAILED run; no file
+  // is reopened and no mutable run verdict is promoted on its own.
+  const publicRunCapture = engineering.reviewFailure && currentRun
+    ? {
+        ...runCapture,
+        runs: runCapture.runs.map((run) => run.runId === currentRun.runId &&
+          run.state === 'REVIEW_FAILED'
+          ? { ...run, reviewFailure: engineering.reviewFailure }
+          : run),
+      }
+    : runCapture;
   const integration = { connectors: projectConnectors(now, deps) };
 
   // Failure isolation, made structural: these are two objects. There is no
@@ -1398,13 +2251,14 @@ function snapshot(args, deps = {}) {
         return { state: 'REFUSED', reason: e.message, records: [], conflicts: 0 };
       }
     })(),
-    reviewers: projectReviewers(now, deps.canonPath),
-    cost: projectCost(),
-    runs: projectRuns({
-      subjectSha256: engineering.state === 'OK' ? engineering.subjectSha256 : null,
-      runsDir: deps.runsDir,
-    }),
-    events: projectEvents(Number(args.events) > 0 ? Number(args.events) : 12, deps.ledgerFile),
+    reviewers,
+    cost,
+    runs: bindCapturedRuns(
+      publicRunCapture,
+      engineering.state === 'OK' ? engineering.subjectSha256 : null,
+      now,
+    ),
+    events,
   };
 }
 
@@ -1420,6 +2274,8 @@ function parseArgs(argv) {
     const t = argv[i];
     if (t === '--subject-sha') a.subjectSha = argv[++i];
     else if (t === '--packet') a.packet = argv[++i];
+    else if (t === '--base') a.base = argv[++i];
+    else if (t === '--head') a.head = argv[++i];
     else if (t === '--events') a.events = argv[++i];
     else if (t === '--json') a.json = true;
     else if (t === '--out') a.out = argv[++i];
@@ -1460,9 +2316,11 @@ if (require.main === module) {
 }
 
 module.exports = {
-  projectCost, projectFx, toCad, projectRuns, orderRuns, bindCurrentRun, snapshot, projectConnectors, projectReviewers, projectEvents,
+  projectCost, projectFx, toCad, projectRuns, bindCapturedRuns, orderRuns, selectCurrentRun, bindCurrentRun, snapshot, projectConnectors, projectReviewers, projectEvents,
+  successfulTerminalCostEnvelope,
   deriveStages, REQUIRED_STAGES, REVIEWER_ROLES,
   projectAuthentication, projectLastVerified, projectLastUsedByRun,
+  canonicalReviewRefusal,
   latestProbe, classifyProbeOutcome, ledgerUsageEvents, normalizeLedgerUsageEvents,
   LEDGER_USAGE_GATE, USAGE_CORRELATION_WINDOW_MINUTES,
   PROBE_SUCCESS, PROBE_FAILURE, PROBE_INCONCLUSIVE, PROBE_CONTRADICTORY,
@@ -1470,4 +2328,6 @@ module.exports = {
   // Injection surface, exported so a test can prove the confinement rule holds
   // rather than take it on faith.
   resolveEvidencePath, ENV_REGISTRY, REGISTRY, LEDGER,
+  RUN_ID_RE,
+  ACTIVE_ASYNC_WORKER_STATES,
 };

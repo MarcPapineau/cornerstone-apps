@@ -15,6 +15,7 @@ const os = require('os');
 const path = require('path');
 const C = require('../review-chunker.cjs');
 const SIGN = require('../review-sign.cjs');
+const ROOT = path.resolve(__dirname, '..', '..');
 
 let passed = 0;
 function test(n, fn) {
@@ -50,6 +51,20 @@ test('a plan covers the subject exactly', () => {
   const cov = C.checkCoverage(g, SUBJECT);
   assert.strictEqual(cov.ok, true, cov.reason);
   assert.strictEqual(cov.covered, SUBJECT.length);
+});
+
+test('the executable planner and its release proof share the same byte-aware plan', () => {
+  const subject = { subjectPaths: SUBJECT.slice() };
+  const sizes = Object.fromEntries(SUBJECT.map((p, i) => [p, (i + 1) * 1000]));
+  const expected = C.planGroups(subject.subjectPaths, 6, sizes, {
+    fixedOverheadBytes: C.FIXED_CHECK_OVERHEAD_BYTES,
+  });
+  const actual = C.planSubjectGroups(subject, { groups: 6 }, sizes);
+  assert.deepStrictEqual(actual, expected,
+    'the tested planner must be the exact helper used by --plan, --run, and --aggregate');
+  assert.strictEqual(C.checkCoverage(actual, SUBJECT).ok, true);
+  assert.throws(() => C.planSubjectGroups({ subjectPaths: [] }, { groups: 6 }, sizes),
+    /non-empty canonical subject path list/);
 });
 
 test('groups are coherent — tests do not scatter across groups', () => {
@@ -125,6 +140,82 @@ function groupRecord(groupId, paths, over = {}) {
 }
 const sign = (r) => SIGN.sign(r, { packetPath: PACKET });
 
+test('RED: a historically valid but non-gateable V1 constituent cannot enter a current aggregate', () => {
+  const problem = C.gateableGroupProblem({
+    ok: true,
+    gateable: false,
+    code: 'ATTESTATION-LEGACY-NON-GATEABLE',
+    reason: 'historical V1 fields were only partially authenticated',
+  }, 'legacy-v1.json');
+  assert.ok(problem, 'ok:true was incorrectly treated as current gate authority');
+  assert.strictEqual(problem.code, 'GROUP-NON-GATEABLE');
+  assert.match(problem.detail, /ATTESTATION-LEGACY-NON-GATEABLE/);
+  assert.strictEqual(C.gateableGroupProblem({ ok: true, gateable: true }, 'v2.json'), null);
+});
+
+test('run-id parsing accepts only canonical RUN coordinates', () => {
+  const runId = 'RUN-20260830-deadbeef';
+  assert.strictEqual(C.parseArgs(['--plan', '--run-id', runId]).runId, runId);
+  assert.strictEqual(C.normalizeRunId(runId), runId);
+  for (const invalid of ['', 'run-20260830-deadbeef', 'RUN-../../escape',
+    'RUN-20260830-DEADBEEF', 'RUN-20260830-deadbeef-extra']) {
+    assert.throws(() => C.normalizeRunId(invalid), /not a canonical RUN/);
+  }
+});
+
+test('canonical run context refuses ROOT and packet drift before subject computation', () => {
+  const runId = 'RUN-20260830-deadbeef';
+  const worktree = fs.mkdtempSync(path.join(TMP, 'run-worktree-'));
+  const run = { runId, packet: PACKET, worktree: { path: worktree } };
+  const authority = {
+    loadRun: (wanted) => { assert.strictEqual(wanted, runId); return run; },
+    canonicalGitEnvironment: () => ({ ...process.env, GIT_WORK_TREE: worktree, GIT_DIR: '/fixed/git-dir' }),
+  };
+  const context = C.resolveRunContext({ runId, packet: PACKET }, authority);
+  assert.strictEqual(context.runId, runId);
+  assert.strictEqual(context.sourceRoot, fs.realpathSync(worktree));
+  assert.notStrictEqual(context.sourceRoot, fs.realpathSync(ROOT),
+    'the run silently resolved to the control checkout');
+
+  const invocation = C.buildSubjectInvocation({ packet: PACKET }, context);
+  assert.strictEqual(invocation.argv[invocation.argv.indexOf('--packet') + 1],
+    fs.realpathSync(PACKET));
+  assert.strictEqual(invocation.env.GIT_WORK_TREE, fs.realpathSync(worktree),
+    'engineering-os would compute the ROOT subject instead of the run-worktree subject');
+
+  const rootRun = { ...run, worktree: { path: ROOT } };
+  assert.throws(() => C.resolveRunContext({ runId, packet: PACKET }, {
+    loadRun: () => rootRun,
+    canonicalGitEnvironment: () => ({ ...process.env, GIT_WORK_TREE: ROOT }),
+  }), /did not resolve to one isolated canonical worktree/);
+
+  const wrongPacket = path.join(TMP, 'wrong-run-packet.json');
+  fs.writeFileSync(wrongPacket, '{}');
+  assert.throws(() => C.resolveRunContext({ runId, packet: wrongPacket }, authority),
+    /does not match.*canonical packet/);
+});
+
+test('the run coordinate changes the signed group plan and cross-run groups cannot aggregate', () => {
+  const subject = { subjectPaths: SUBJECT.slice() };
+  const sizes = Object.fromEntries(SUBJECT.map((reviewPath) => [reviewPath, 100]));
+  const runA = 'RUN-20260830-aaaaaaaa';
+  const runB = 'RUN-20260830-bbbbbbbb';
+  const unitContext = { sourceRoot: ROOT, packetPath: null, gitEnv: null };
+  const planA = C.planSubjectGroups(subject, { groups: 5, runId: runA }, sizes, unitContext);
+  const planB = C.planSubjectGroups(subject, { groups: 5, runId: runB }, sizes, unitContext);
+  assert.deepStrictEqual(planA.map((group) => group.paths), planB.map((group) => group.paths));
+  assert.notDeepStrictEqual(planA.map((group) => group.groupDigest),
+    planB.map((group) => group.groupDigest),
+    'identical paths from two runs produced interchangeable signed group coordinates');
+
+  const recordsFromA = planA.map((group) => groupRecord(group.groupId, group.paths, {
+    group: { groupId: group.groupId, groupDigest: group.groupDigest },
+  }));
+  const binding = C.checkPlanBinding(recordsFromA, planB);
+  assert.strictEqual(binding.ok, false);
+  assert.ok(binding.problems.every((problem) => problem.code === 'GROUP-PLAN-DIGEST-MISMATCH'));
+});
+
 test('RED: an UNSIGNED group record is not smaller evidence — it is none', () => {
   const rec = groupRecord('G1', SUBJECT.slice(0, 3));
   const v = SIGN.verify(rec, { packetPath: PACKET });
@@ -183,6 +274,29 @@ test('RED: a CONFLICTING verdict is carried into the aggregate, not averaged awa
     'one rejecting group must reject the whole aggregate — verdicts are not votes');
 });
 
+test('group-level unverified evidence is merged deterministically without hiding duplicates', () => {
+  const groups = [
+    groupRecord('G2', SUBJECT.slice(3, 6), { unverified: ['zeta', 'same limit'] }),
+    groupRecord('G1', SUBJECT.slice(0, 3), { unverified: ['alpha', 'same limit'] }),
+    groupRecord('G3', SUBJECT.slice(6), {}),
+  ];
+  const forward = C.mergeGroupUnverified(groups);
+  const reverse = C.mergeGroupUnverified(groups.slice().reverse());
+  assert.deepStrictEqual(forward, reverse, 'group file order changed aggregate evidence');
+  assert.deepStrictEqual(forward.values, ['alpha', 'same limit', 'same limit', 'zeta']);
+  assert.deepStrictEqual(forward.problems, []);
+});
+
+test('malformed group-level unverified evidence blocks aggregation rather than being dropped', () => {
+  const merged = C.mergeGroupUnverified([
+    groupRecord('G1', SUBJECT.slice(0, 3), { unverified: ['valid'] }),
+    groupRecord('G2', SUBJECT.slice(3, 6), { unverified: ['valid', { hidden: true }] }),
+  ]);
+  assert.deepStrictEqual(merged.values, ['valid']);
+  assert.strictEqual(merged.problems.length, 1);
+  assert.strictEqual(merged.problems[0].code, 'GROUP-UNVERIFIED-MALFORMED');
+});
+
 test('RED: AGGREGATION TAMPERING — editing a group after aggregation is detected', () => {
   const g = sign(groupRecord('G1', SUBJECT.slice(0, 3), { disposition: 'REJECT' }));
   const embeddedDigest = g.attestation.payloadDigest;
@@ -190,7 +304,7 @@ test('RED: AGGREGATION TAMPERING — editing a group after aggregation is detect
   g.disposition = 'APPROVE';
   const v = SIGN.verify(g, { packetPath: PACKET });
   assert.strictEqual(v.ok, false, 'a flipped group verdict must not verify');
-  assert.strictEqual(v.code, 'ATTESTATION-INVALID');
+  assert.strictEqual(v.code, 'ATTESTATION-PAYLOAD-DIGEST');
   // And the aggregate's embedded digest no longer describes the record on disk.
   const reSigned = SIGN.sign(g, { packetPath: PACKET });
   assert.notStrictEqual(reSigned.attestation.payloadDigest, embeddedDigest,
@@ -238,15 +352,23 @@ test('RED: metered authorization is FORWARDED to the adapter', () => {
   assert.ok(ci !== -1 && argv[ci + 1] === '5', '--cap-usd was dropped or mangled');
 });
 
-test('RED: the chunker INVENTS no authorization when none was given', () => {
+test('the exact canonical run-id is forwarded to every group adapter call', () => {
+  const runId = 'RUN-20260830-deadbeef';
+  const argv = C.buildGroupArgv(GROUP, SUBJ, {
+    reviewer: 'codex', packet: 'P.json', runId,
+  });
+  assert.strictEqual(argv.filter((value) => value === '--run-id').length, 1);
+  assert.strictEqual(argv[argv.indexOf('--run-id') + 1], runId);
+  assert.throws(() => C.buildGroupArgv(GROUP, SUBJ, {
+    reviewer: 'codex', packet: 'P.json', runId: 'RUN-../../escape',
+  }), /not a canonical RUN/);
+});
+
+test('RED: the chunker INVENTS no optional authorization or telemetry ceiling when none was given', () => {
   const argv = C.buildGroupArgv(GROUP, SUBJ, { reviewer: 'grok', packet: 'P.json' });
   for (const f of ['--allow-metered', '--approved-by', '--cap-usd']) {
     assert.ok(!argv.includes(f), `${f} appeared without the operator supplying it`);
   }
-  // The adapter must then refuse — which is the correct outcome, not a bug.
-  const r = require('../tool-router.cjs').routeRole('adversarial-review', {});
-  assert.strictEqual(r.ok, false);
-  assert.strictEqual(r.code, 'METERED_UNAUTHORIZED');
 });
 
 test('RED: group binding survives the added flags', () => {
@@ -277,13 +399,13 @@ test('RED: the splitter targets the BYTE-heaviest group, not the path-heaviest',
   const paths = ['a/many1.md', 'a/many2.md', 'a/many3.md', 'a/many4.md', 'b/huge.cjs', 'b/huge2.cjs'];
   const sizes = {
     'a/many1.md': 1000, 'a/many2.md': 1000, 'a/many3.md': 1000, 'a/many4.md': 1000,
-    'b/huge.cjs': 90000, 'b/huge2.cjs': 90000,
+    'b/huge.cjs': 55000, 'b/huge2.cjs': 55000,
   };
   const withSizes = C.planGroups(paths, 3, sizes);
   const weight = (g) => g.paths.reduce((n, p) => n + (sizes[p] || 0), 0);
   const heaviest = Math.max(...withSizes.map(weight));
-  assert.ok(heaviest < 180000,
-    `the two 90KB files stayed together (heaviest group ${heaviest}B) — size was ignored`);
+  assert.ok(heaviest < 110000,
+    `the two 55KB files stayed together (heaviest group ${heaviest}B) — size was ignored`);
 
   // And without sizes it must still work, just on counts.
   const noSizes = C.planGroups(paths, 3);
@@ -316,7 +438,7 @@ test('RED #1: the DEFAULT plan splits oversize groups — the split path is reac
   assert.ok(C.ROLES.length >= C.DEFAULT_GROUPS,
     'this proof is only meaningful while roles outnumber the default target');
   const paths = ['a/x1.cjs', 'a/x2.cjs', 'b/y1.md', 'b/y2.md'];
-  const sizes = { 'a/x1.cjs': 90000, 'a/x2.cjs': 90000, 'b/y1.md': 500, 'b/y2.md': 400 };
+  const sizes = { 'a/x1.cjs': 50000, 'a/x2.cjs': 50000, 'b/y1.md': 500, 'b/y2.md': 400 };
   const g = C.planGroups(paths, C.DEFAULT_GROUPS, sizes);
   const weight = (x) => x.paths.reduce((n, q) => n + (sizes[q] || 0), 0);
   for (const grp of g) {
@@ -327,12 +449,35 @@ test('RED #1: the DEFAULT plan splits oversize groups — the split path is reac
   assert.strictEqual(C.checkCoverage(g, paths).ok, true, 'the oversize split must preserve exact coverage');
 });
 
-test('RED #1b: a single oversize path is not split into nothing', () => {
+test('RED #1b: a single oversize path receives a named refusal', () => {
   const paths = ['solo/huge.cjs'];
   const sizes = { 'solo/huge.cjs': 500000 };
-  const g = C.planGroups(paths, C.DEFAULT_GROUPS, sizes);
-  assert.strictEqual(g.length, 1, 'one path cannot become two groups');
-  assert.strictEqual(C.checkCoverage(g, paths).ok, true);
+  assert.throws(() => C.planGroups(paths, C.DEFAULT_GROUPS, sizes), (error) => {
+    assert.strictEqual(error.code, 'REVIEW_GROUP_UNSPLITTABLE_OVERSIZE');
+    assert.strictEqual(error.path, 'solo/huge.cjs');
+    return true;
+  });
+});
+
+test('RED: explicit cardinality cannot merge byte-safe groups back over the planning ceiling', () => {
+  // Sixteen requested lanes over eighteen 40KB files first reaches sixteen,
+  // then the preferred-size pass safely splits the remaining two-file groups.
+  // The requested count is a minimum routing width, not permission to undo a
+  // safety split merely to force an exact cardinality.
+  const paths = Array.from({ length: 18 }, (_, i) =>
+    `builder-control/test/cardinality-${String(i + 1).padStart(2, '0')}.test.cjs`);
+  const sizes = Object.fromEntries(paths.map((p) => [p, 40000]));
+  const adaptive = C.planGroups(paths, 16, sizes);
+  assert.ok(adaptive.length > 16,
+    'the fixture no longer proves that preferred-size splitting can add adaptive lanes');
+  const g = C.planGroups(paths, 16, sizes, true);
+  assert.strictEqual(g.length, adaptive.length,
+    'an explicit count changed the deterministic size-aware production plan');
+  assert.ok(g.every((group) => group.paths.length === 1 ||
+    group.paths.reduce((sum, reviewPath) => sum + sizes[reviewPath], 0) <= C.MAX_GROUP_BYTES));
+  assert.strictEqual(C.checkCoverage(g, paths).ok, true,
+    'restoring exact cardinality lost or duplicated subject coverage');
+  assert.deepStrictEqual(g.flatMap((group) => group.paths).sort(), paths.slice().sort());
 });
 
 test('RED #2: re-running a group ARCHIVES its predecessor rather than duplicating it', () => {
@@ -350,31 +495,74 @@ test('RED: the oversize split never produces an EMPTY group', () => {
   // oversize — so the loop split again to the iteration guard. Observed: 69
   // groups, most empty. A split that does not reduce what it split is not a split.
   const paths = ['g/a.cjs', 'g/b.cjs', 'g/c.cjs', 'g/d.cjs'];
-  const sizes = { 'g/a.cjs': 200000, 'g/b.cjs': 100, 'g/c.cjs': 100, 'g/d.cjs': 100 };
+  const sizes = { 'g/a.cjs': 55000, 'g/b.cjs': 10000, 'g/c.cjs': 10000, 'g/d.cjs': 10000 };
   const g = C.planGroups(paths, 2, sizes);
   assert.ok(g.length <= 12, `runaway split produced ${g.length} groups`);
   for (const grp of g) assert.ok(grp.paths.length > 0, `${grp.groupId} is empty`);
   assert.strictEqual(C.checkCoverage(g, paths).ok, true, 'coverage must survive the oversize pass');
 });
 
-test('RED: a group that cannot be reduced below budget is left intact, not split forever', () => {
-  // One path bigger than the budget is irreducible. It must stay one group.
+test('RED: a group that cannot be reduced below budget receives a named refusal', () => {
+  // One path bigger than the budget is irreducible. It must never be silently
+  // emitted as a runnable group that exceeds the review budget.
   const paths = ['solo/enormous.cjs', 'solo/small.md'];
   const sizes = { 'solo/enormous.cjs': 900000, 'solo/small.md': 50 };
-  const g = C.planGroups(paths, 2, sizes);
-  assert.ok(g.length <= 4, `irreducible group split ${g.length} times`);
-  assert.strictEqual(C.checkCoverage(g, paths).ok, true);
-  const singles = g.filter((x) => x.paths.length === 1 && x.paths[0] === 'solo/enormous.cjs');
-  assert.strictEqual(singles.length, 1, 'the oversize single path must end up alone, exactly once');
+  assert.throws(() => C.planGroups(paths, 2, sizes), (error) => {
+    assert.strictEqual(error.code, 'REVIEW_GROUP_UNSPLITTABLE_OVERSIZE');
+    assert.strictEqual(error.path, 'solo/enormous.cjs');
+    return true;
+  });
+});
+
+test('canonical untracked subject bytes are measured from the run source root', () => {
+  const sourceRoot = fs.mkdtempSync(path.join(TMP, 'untracked-source-'));
+  const bytes = Buffer.from('untracked-\u03c0-payload\n', 'utf8');
+  fs.writeFileSync(path.join(sourceRoot, 'new-file.cjs'), bytes);
+  const sizes = C.pathSizes({
+    subjectPaths: ['new-file.cjs'],
+    untrackedSubjectPaths: ['new-file.cjs'],
+  }, {}, { sourceRoot, gitEnv: null });
+  assert.strictEqual(sizes['new-file.cjs'], bytes.length,
+    'untracked bytes were omitted or measured as JavaScript characters');
+});
+
+test('pinned specifications and fixed checks are included in every group payload estimate', () => {
+  const sourceRoot = fs.mkdtempSync(path.join(TMP, 'pinned-source-'));
+  fs.mkdirSync(path.join(sourceRoot, 'specs'));
+  fs.writeFileSync(path.join(sourceRoot, 'specs', 'a.md'), Buffer.alloc(41));
+  fs.writeFileSync(path.join(sourceRoot, 'specs', 'b.md'), Buffer.alloc(59));
+  const packetPath = path.join(sourceRoot, 'packet.json');
+  fs.writeFileSync(packetPath, JSON.stringify({ sourceOfTruth: ['specs/a.md', 'specs/b.md', 'specs/a.md'] }));
+  const overhead = C.fixedReviewOverheadBytes({}, { sourceRoot, packetPath });
+  assert.strictEqual(overhead, C.FIXED_CHECK_OVERHEAD_BYTES + 100);
+
+  const plan = C.planGroups(['one.cjs'], 1, { 'one.cjs': 123 }, { fixedOverheadBytes: overhead });
+  assert.strictEqual(plan[0].changedBytes, 123);
+  assert.strictEqual(plan[0].fixedOverheadBytes, overhead);
+  assert.strictEqual(plan[0].estimatedReviewBytes, overhead + 123);
+});
+
+test('a single file that exceeds only the total payload ceiling receives the same named refusal', () => {
+  const changedBytes = 10;
+  const fixedOverheadBytes = C.MAX_GROUP_PAYLOAD_BYTES - changedBytes + 1;
+  assert.throws(() => C.planGroups(['solo/small.cjs'], 1,
+    { 'solo/small.cjs': changedBytes }, { fixedOverheadBytes }), (error) => {
+    assert.strictEqual(error.code, 'REVIEW_GROUP_UNSPLITTABLE_OVERSIZE');
+    assert.strictEqual(error.changedBytes, changedBytes);
+    assert.strictEqual(error.totalBytes, C.MAX_GROUP_PAYLOAD_BYTES + 1);
+    return true;
+  });
 });
 
 // ── GROK G11 FINDINGS #2 and #3 ──────────────────────────────────────────
-test('RED #2: a new aggregate SUPERSEDES and archives its predecessors', () => {
+test('RED #2: a new aggregate archives only its same-reviewer exact-subject predecessor', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'review-chunker.cjs'), 'utf8');
   assert.ok(/superseded-aggregates/.test(src),
-    'prior aggregates must be archived, or the gate sees two authorities for one subject');
-  assert.ok(/record\.supersedes = supersedesId/.test(src),
-    'supersession must be an explicit signed claim, not an inference from file order');
+    'a same-lane predecessor must be archived, or the gate sees two authorities from one reviewer');
+  assert.ok(/selectAggregateRetention/.test(src),
+    'aggregate archival must be selected by the tested reviewer+subject lane helper');
+  assert.ok(!/record\.supersedes = supersedesId/.test(src),
+    'an archived predecessor is not active, so the replacement must not point at an invisible target');
   assert.ok(/renameSync/.test(src) && !/unlinkSync\(full\)/.test(src),
     'predecessors are archived, never deleted — the audit trail keeps every version');
 });
@@ -468,6 +656,186 @@ test('RED: with no --reviewer filter, selectAggregationLane preserves prior mixe
   const lane = C.selectAggregationLane(records, { subjectSha: SHA_A, reviewer: null });
   assert.strictEqual(lane.usable.length, 2,
     'without a --reviewer filter, both lanes still load so GROUP-MIXED-REVIEWER can be detected downstream');
+});
+
+const aggregateRecord = (reviewer, subjectSha, id) => ({
+  reviewId: id,
+  reviewer,
+  reviewOf: { diffSha256: subjectSha, changedPaths: SUBJECT.slice() },
+  aggregate: { groupCount: 1, groups: [], coverage: 'EXACT' },
+});
+
+function publishAggregate(active, rec) {
+  const retention = C.selectAggregateRetention(active, {
+    reviewer: rec.rec.reviewer,
+    subjectSha: rec.rec.reviewOf.diffSha256,
+  });
+  return { active: [...retention.preserved, rec], archived: retention.superseded };
+}
+
+test('RED: Codex then Grok leaves both exact-subject aggregates top-level discoverable', () => {
+  const codex = { file: 'codex-aggregate.json', rec: aggregateRecord('codex', SHA_A, 'REV-codex-a') };
+  const grok = { file: 'grok-aggregate.json', rec: aggregateRecord('grok', SHA_A, 'REV-grok-a') };
+  let published = publishAggregate([], codex);
+  published = publishAggregate(published.active, grok);
+  assert.deepStrictEqual(published.active.map((item) => item.rec.reviewer).sort(), ['codex', 'grok']);
+  assert.strictEqual(published.archived.length, 0,
+    'publishing Grok must not archive Codex for the same subject');
+});
+
+test('RED: Grok then Codex leaves both exact-subject aggregates top-level discoverable', () => {
+  const codex = { file: 'codex-aggregate.json', rec: aggregateRecord('codex', SHA_A, 'REV-codex-a') };
+  const grok = { file: 'grok-aggregate.json', rec: aggregateRecord('grok', SHA_A, 'REV-grok-a') };
+  let published = publishAggregate([], grok);
+  published = publishAggregate(published.active, codex);
+  assert.deepStrictEqual(published.active.map((item) => item.rec.reviewer).sort(), ['codex', 'grok']);
+  assert.strictEqual(published.archived.length, 0,
+    'publishing Codex must not archive Grok for the same subject');
+});
+
+test('RED: a same-reviewer rerun archives exactly its own exact-subject predecessor', () => {
+  const codexOld = { file: 'codex-old-aggregate.json', rec: aggregateRecord('codex', SHA_A, 'REV-codex-old') };
+  const codexNew = { file: 'codex-new-aggregate.json', rec: aggregateRecord('codex', SHA_A, 'REV-codex-new') };
+  const grok = { file: 'grok-aggregate.json', rec: aggregateRecord('grok', SHA_A, 'REV-grok-a') };
+  const otherSubject = { file: 'codex-other-aggregate.json', rec: aggregateRecord('codex', SHA_B, 'REV-codex-b') };
+  const published = publishAggregate([codexOld, grok, otherSubject], codexNew);
+  assert.deepStrictEqual(published.archived.map((item) => item.file), ['codex-old-aggregate.json']);
+  assert.deepStrictEqual(published.active.map((item) => item.file).sort(),
+    ['codex-new-aggregate.json', 'codex-other-aggregate.json', 'grok-aggregate.json']);
+});
+
+test('RED: malformed aggregate evidence is never guessed into an archival lane', () => {
+  const malformed = { file: 'unreadable-aggregate.json', rec: null };
+  const result = C.selectAggregateRetention([malformed], { reviewer: 'codex', subjectSha: SHA_A });
+  assert.deepStrictEqual(result.superseded, []);
+  assert.deepStrictEqual(result.preserved, [malformed],
+    'unattributable evidence must stay visible so the canonical gate fails closed');
+});
+
+test('RED: aggregate records must bind exactly to every deterministic planned group', () => {
+  const plan = C.planGroups(SUBJECT, 3);
+  const records = plan.map((group, index) => ({
+    reviewId: `REV-${index}`,
+    group: { groupId: group.groupId, groupDigest: group.groupDigest },
+    reviewOf: { changedPaths: group.paths.slice() },
+  }));
+  assert.deepStrictEqual(C.checkPlanBinding(records, plan), { ok: true, problems: [] });
+
+  const wrongDigest = JSON.parse(JSON.stringify(records));
+  wrongDigest[0].group.groupDigest = '0'.repeat(64);
+  assert.ok(C.checkPlanBinding(wrongDigest, plan).problems.some((p) => p.code === 'GROUP-PLAN-DIGEST-MISMATCH'));
+  const wrongPaths = JSON.parse(JSON.stringify(records));
+  wrongPaths[0].reviewOf.changedPaths = [];
+  assert.ok(C.checkPlanBinding(wrongPaths, plan).problems.some((p) => p.code === 'GROUP-PLAN-PATH-MISMATCH'));
+  assert.ok(C.checkPlanBinding(records.slice(1), plan).problems.some((p) => p.code === 'GROUP-PLAN-MISSING'));
+  assert.ok(C.checkPlanBinding([...records, records[0]], plan).problems.some((p) => p.code === 'GROUP-PLAN-DUPLICATE'));
+});
+
+test('RED: operator-only aggregate flags are omitted from the signed schema projection', () => {
+  assert.deepStrictEqual(C.schemaAggregateProblems([
+    { code: 'GROUPS-EXCLUDED-OTHER-REVIEWER', detail: 'one excluded', informational: true },
+    { code: 'GROUP-UNSIGNED', detail: 'bad signature' },
+  ]), [
+    { code: 'GROUPS-EXCLUDED-OTHER-REVIEWER', detail: 'one excluded' },
+    { code: 'GROUP-UNSIGNED', detail: 'bad signature' },
+  ]);
+});
+
+test('RED: aggregate publication requires an explicit supported reviewer', () => {
+  assert.throws(() => C.normalizeAggregateReviewer(), /--reviewer is required/);
+  assert.throws(() => C.normalizeAggregateReviewer('other'), /unsupported aggregate reviewer/);
+  assert.strictEqual(C.normalizeAggregateReviewer('codex'), 'codex');
+  assert.strictEqual(C.normalizeAggregateReviewer('grok'), 'grok');
+});
+
+test('RED: signed aggregate replacement publishes before archiving its predecessor', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-aggregate-publication-'));
+  try {
+    const predecessor = 'codex-old.json';
+    fs.writeFileSync(path.join(root, predecessor), '{"old":true}\n');
+    const signed = { reviewId: 'REV-new', signature: { algorithm: 'fixture' } };
+    const publication = C.publishAggregateReplacement({
+      reviewsDir: root, filename: 'codex-new.json', signed,
+      predecessors: [{ file: predecessor }],
+    });
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(publication.outPath, 'utf8')), signed);
+    assert.strictEqual(fs.existsSync(path.join(root, predecessor)), false);
+    assert.strictEqual(fs.existsSync(path.join(root, 'superseded-aggregates', predecessor)), true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('RED: a failed replacement publication leaves the predecessor active', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-aggregate-publication-fail-'));
+  try {
+    const predecessor = 'codex-old.json';
+    fs.writeFileSync(path.join(root, predecessor), '{"old":true}\n');
+    fs.mkdirSync(path.join(root, 'blocked-target.json'));
+    assert.throws(() => C.publishAggregateReplacement({
+      reviewsDir: root, filename: 'blocked-target.json', signed: { reviewId: 'REV-new' },
+      predecessors: [{ file: predecessor }],
+    }));
+    assert.strictEqual(fs.existsSync(path.join(root, predecessor)), true,
+      'publication failure archived the only active predecessor');
+    assert.strictEqual(fs.existsSync(path.join(root, 'superseded-aggregates', predecessor)), false);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('RED: a verified group replacement is active before predecessors retire', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-group-replacement-'));
+  try {
+    fs.writeFileSync(path.join(root, 'old.json'), '{"old":true}\n');
+    fs.writeFileSync(path.join(root, 'new.json'), '{"new":true}\n');
+    const result = C.publishGroupReplacement({ groupsDir: root, replacement: 'new.json', predecessors: ['old.json'] });
+    assert.deepStrictEqual(result.archived, ['old.json']);
+    assert.strictEqual(fs.existsSync(path.join(root, 'new.json')), true);
+    assert.strictEqual(fs.existsSync(path.join(root, 'old.json')), false);
+    assert.strictEqual(fs.existsSync(path.join(root, 'superseded', 'old.json')), true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('RED: interleaved cross-reviewer records are partitioned and only the caller lane is quarantined', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-group-lane-race-'));
+  const subjectSha = 'a'.repeat(64);
+  try {
+    const codex = 'codex-new.json';
+    const grok = 'grok-new.json';
+    fs.writeFileSync(path.join(root, codex), JSON.stringify({
+      reviewer: 'codex', group: { groupId: 'G1' }, reviewOf: { diffSha256: subjectSha },
+    }));
+    fs.writeFileSync(path.join(root, grok), JSON.stringify({
+      reviewer: 'grok', group: { groupId: 'G1' }, reviewOf: { diffSha256: subjectSha },
+    }));
+
+    const partition = C.partitionCreatedLaneRecords({
+      groupsDir: root,
+      names: [grok, codex],
+      lane: { reviewer: 'codex', groupId: 'G1', subjectSha },
+    });
+    assert.deepStrictEqual(partition.owned, [codex]);
+    assert.deepStrictEqual(partition.foreign, [grok]);
+
+    C.quarantineCreatedLaneRecords({ groupsDir: root, names: partition.owned });
+    assert.strictEqual(fs.existsSync(path.join(root, codex)), false);
+    assert.strictEqual(fs.existsSync(path.join(root, 'failed-reruns', codex)), true);
+    assert.strictEqual(fs.existsSync(path.join(root, grok)), true,
+      'Codex failure moved the concurrently published Grok record');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('RED: a group archival failure restores every predecessor and quarantines replacement', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-group-replacement-fail-'));
+  try {
+    for (const name of ['old-a.json', 'old-b.json', 'new.json']) fs.writeFileSync(path.join(root, name), '{}\n');
+    fs.mkdirSync(path.join(root, 'superseded'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'superseded', 'old-b.json'));
+    assert.throws(() => C.publishGroupReplacement({
+      groupsDir: root, replacement: 'new.json', predecessors: ['old-a.json', 'old-b.json'],
+    }));
+    assert.strictEqual(fs.existsSync(path.join(root, 'old-a.json')), true);
+    assert.strictEqual(fs.existsSync(path.join(root, 'old-b.json')), true);
+    assert.strictEqual(fs.existsSync(path.join(root, 'new.json')), false);
+    assert.strictEqual(fs.existsSync(path.join(root, 'publication-failures', 'new.json')), true);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 const failed = process.exitCode ? 'at least 1' : '0';

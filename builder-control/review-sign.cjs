@@ -50,7 +50,8 @@ const EXIT_USAGE = 2;
 const EXIT_FAIL = 3;
 
 const ALG = 'sha256';
-const VERSION = 'aegis-attest-v1';
+const V1_VERSION = 'aegis-attest-v1';
+const VERSION = 'aegis-attest-v2';
 
 /**
  * The key never enters the repository. It is read from the environment first
@@ -90,7 +91,7 @@ const digest = (s) => crypto.createHash(ALG).update(s).digest('hex');
  * edit moves nothing). Hashing the authorization-bearing fields means widening
  * filesAllowed after a review invalidates that review.
  */
-function packetDigest(packetPath) {
+function packetDigest(packetPath, version = VERSION) {
   if (!packetPath || !fs.existsSync(packetPath)) return null;
   const p = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
   // GROK G9 FINDING #3: this covered six fields and omitted testsRequired,
@@ -100,7 +101,7 @@ function packetDigest(packetPath) {
   // from the subject hash, so such an edit moves nothing else the gate binds to.
   //
   // Everything the packet uses to authorize or constrain the work is hashed now.
-  return digest(canonical({
+  const authority = {
     packetId: p.packetId,
     agentId: p.agentId,
     objective: p.objective,
@@ -110,7 +111,12 @@ function packetDigest(packetPath) {
     stopConditions: p.stopConditions,
     authorization: p.authorization,
     sourceOfTruth: p.sourceOfTruth,
-  }));
+  };
+  // V1 records were minted before hostContainmentRequired joined the packet
+  // digest. Verification must reproduce that historical byte sequence; all new
+  // V2 records cover the host proof requirement as authorization-bearing data.
+  if (version !== V1_VERSION) authority.hostContainmentRequired = p.hostContainmentRequired;
+  return digest(canonical(authority));
 }
 
 /**
@@ -168,7 +174,14 @@ function resolvePacket(rec, opts = {}) {
       reason: `${active.length} active packet files declare packetId ${rec.packetId} (${active.map((p) => path.basename(p)).join(', ')}). Which one authorized this review cannot be decided by reading a directory, so it is refused rather than guessed. Name the authority explicitly with --packet <path>.`,
     };
   }
-  return { ok: true, path: active[0] || null, active, backups };
+  if (active.length === 0) {
+    return {
+      ok: false, code: 'ATTESTATION-PACKET-MISSING', path: null, active, backups,
+      reason: `no readable active packet declares packetId ${rec && rec.packetId ? rec.packetId : '(missing)'}`
+        + (backups.length ? `; only backup copy/copies exist (${backups.map((p) => path.basename(p)).join(', ')}), and a backup is a copy, not an authority` : ''),
+    };
+  }
+  return { ok: true, path: active[0], active, backups };
 }
 
 /** Back-compatible shape: a path, or null when there is no single active packet. */
@@ -178,27 +191,11 @@ function resolvePacketForRecord(rec, opts = {}) {
 }
 
 /** The exact bytes an attestation covers. */
-function attestationPayload(rec, pktDigest) {
+function attestationPayloadV1(rec, pktDigest) {
   return canonical({
-    v: VERSION,
-    // PROVEN DEFECT (2026-08-25): these four were outside the attestation and
-    // could be rewritten on a signed record without detection. Two of them are
-    // load-bearing: reviewId is how supersession names its target, so relabelling
-    // one record could retire a different reviewer's rejection; group.groupId is
-    // how coverage is computed, so relabelling G1 to G3 could fake exact coverage
-    // over a subject that was never fully reviewed.
+    v: V1_VERSION,
     reviewId: rec.reviewId,
-    // GROK G11 FINDING #1: reviewId was covered because supersession names its
-    // target by it — but the POINTER was not. A hand-edit could add or retarget
-    // `supersedes` on a validly-signed record and retire a different reviewer's
-    // rejection. Covering the target without covering the pointer secures the
-    // noun and leaves the verb open.
     supersedes: rec.supersedes || null,
-    // GROK G11 FINDING #5: the schema and chunker both claimed that embedding
-    // each group's attestation digest makes an aggregate stop matching if a
-    // group is edited later. That claim was false: the aggregate object sat
-    // OUTSIDE the signed payload, so every embedded digest could be rewritten
-    // to match whatever the groups had become. The claim is now true.
     aggregate: rec.aggregate ? {
       groupCount: rec.aggregate.groupCount,
       plannedGroupCount: rec.aggregate.plannedGroupCount,
@@ -219,12 +216,94 @@ function attestationPayload(rec, pktDigest) {
     reviewer: rec.reviewer,
     reviewerModel: rec.reviewerModel,
     disposition: rec.disposition,
-    // Findings are covered so severities cannot be downgraded after the fact.
     findings: (rec.findings || []).map((f) => ({
       severity: f.severity, file: f.file, problem: f.problem,
       evidence: f.evidence, status: f.status,
     })),
   });
+}
+
+/**
+ * V2 covers the complete finding objects plus explicit finding-level
+ * re-verification evidence. V1 remains verifiable for historical ordinary
+ * reviews, but a record that claims FIXED or re-verifies a finding is always
+ * minted as V2 so neither the linkage nor its proof can be edited afterwards.
+ */
+function attestationPayloadV2(rec, pktDigest) {
+  // Do not derive this from V1. V1 is a frozen historical byte contract while
+  // V2 is the current complete contract; changing one must not silently change
+  // the other under an already-issued version marker.
+  return canonical({
+    v: VERSION,
+    reviewId: rec.reviewId,
+    supersedes: rec.supersedes || null,
+    aggregate: rec.aggregate ? {
+      groupCount: rec.aggregate.groupCount,
+      plannedGroupCount: rec.aggregate.plannedGroupCount,
+      coverage: rec.aggregate.coverage,
+      groups: (rec.aggregate.groups || []).map((g) => ({
+        groupId: g.groupId, groupDigest: g.groupDigest,
+        pathCount: g.pathCount, disposition: g.disposition,
+        reviewId: g.reviewId, attestationDigest: g.attestationDigest,
+      })),
+    } : null,
+    ts: rec.ts,
+    unavailableReason: rec.unavailableReason || null,
+    group: rec.group ? { groupId: rec.group.groupId, groupDigest: rec.group.groupDigest || null } : null,
+    subjectSha256: rec.reviewOf && rec.reviewOf.diffSha256,
+    changedPaths: (rec.reviewOf && rec.reviewOf.changedPaths) || [],
+    packetId: rec.packetId,
+    packetDigest: pktDigest,
+    reviewer: rec.reviewer,
+    reviewerModel: rec.reviewerModel,
+    disposition: rec.disposition,
+    findings: rec.findings || [],
+    reverifiedFindings: rec.reverifiedFindings || [],
+    unverified: rec.unverified || [],
+  });
+}
+
+function attestationPayload(rec, pktDigest, version = VERSION) {
+  return version === V1_VERSION
+    ? attestationPayloadV1(rec, pktDigest)
+    : attestationPayloadV2(rec, pktDigest);
+}
+
+function packetAuthority(rec, packetPath, version = VERSION) {
+  if (!packetPath) {
+    return { ok: false, code: 'ATTESTATION-PACKET-MISSING',
+      reason: 'an attestation requires one readable active authorizing packet' };
+  }
+  const full = path.resolve(packetPath);
+  if (isBackupPacketName(full)) {
+    return { ok: false, code: 'ATTESTATION-PACKET-BACKUP',
+      reason: `${path.basename(full)} is a backup copy, not an active packet authority` };
+  }
+  let packet;
+  try {
+    const st = fs.lstatSync(full);
+    if (!st.isFile() || st.isSymbolicLink()) throw new Error('not a regular non-symlink file');
+    packet = JSON.parse(fs.readFileSync(full, 'utf8'));
+  } catch (error) {
+    return { ok: false, code: error && error.code === 'ENOENT'
+      ? 'ATTESTATION-PACKET-MISSING' : 'ATTESTATION-PACKET-UNREADABLE',
+      reason: `cannot read active packet ${path.basename(full)}: ${error.message}` };
+  }
+  if (!rec || !rec.packetId || packet.packetId !== rec.packetId) {
+    return { ok: false, code: 'ATTESTATION-PACKET-MISMATCH',
+      reason: `packetId ${String(packet.packetId)} does not match review packetId ${String(rec && rec.packetId)}` };
+  }
+  let packetDigestValue;
+  try { packetDigestValue = packetDigest(full, version); }
+  catch (error) {
+    return { ok: false, code: 'ATTESTATION-PACKET-UNREADABLE',
+      reason: `cannot digest active packet ${path.basename(full)}: ${error.message}` };
+  }
+  if (!packetDigestValue) {
+    return { ok: false, code: 'ATTESTATION-PACKET-MISSING',
+      reason: 'the active packet produced no canonical authorization digest' };
+  }
+  return { ok: true, path: full, packetDigest: packetDigestValue };
 }
 
 function sign(rec, opts = {}) {
@@ -238,13 +317,20 @@ function sign(rec, opts = {}) {
     if (!r.ok) throw new Error(`${r.code}: ${r.reason}`);
     pkt = r.path;
   }
-  const pd = packetDigest(pkt);
-  const payload = attestationPayload(rec, pd);
+  const authority = packetAuthority(rec, pkt, VERSION);
+  if (!authority.ok) throw new Error(`${authority.code}: ${authority.reason}`);
+  const pd = authority.packetDigest;
+  // Every newly minted record uses V2. V1 remains verification-only for
+  // historical records; choosing it for a new DISPUTED, FALSE_POSITIVE or
+  // ACCEPTED_RISK finding would leave governance-bearing fields outside the
+  // authenticated payload.
+  const version = VERSION;
+  const payload = attestationPayload(rec, pd, version);
   const mac = crypto.createHmac(ALG, key).update(payload).digest('hex');
   return {
     ...rec,
     attestation: {
-      v: VERSION, alg: `HMAC-${ALG.toUpperCase()}`,
+      v: version, alg: `HMAC-${ALG.toUpperCase()}`,
       packetDigest: pd,
       payloadDigest: digest(payload),
       mac,
@@ -255,12 +341,161 @@ function sign(rec, opts = {}) {
   };
 }
 
-function verify(rec, opts = {}) {
+function aggregateFailure(code, reason) {
+  return { ok: false, code, reason };
+}
+
+function canonicalGroupFilename(expected) {
+  const reviewId = expected && expected.reviewId;
+  const groupId = expected && expected.groupId;
+  if (typeof reviewId !== 'string' || !/^REV-[A-Za-z0-9-]+$/.test(reviewId)
+      || typeof groupId !== 'string' || !/^G[1-9][0-9]*$/.test(groupId)) return null;
+  return `${reviewId.slice(4)}-${groupId}.json`;
+}
+
+function loadActiveGroupRecords(groupsDir, expectedGroups) {
+  if (!fs.existsSync(groupsDir)) {
+    return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-MISSING',
+      `active review group directory does not exist: ${groupsDir}`);
+  }
+  const records = [];
+  const expectedNames = new Map();
+  for (const expected of expectedGroups || []) {
+    const name = canonicalGroupFilename(expected);
+    if (!name) return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-MISMATCH', 'aggregate carries an invalid constituent identity');
+    if (expectedNames.has(name)) return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-DUPLICATE', `duplicate canonical constituent filename ${name}`);
+    expectedNames.set(name, expected);
+    const full = path.join(groupsDir, name);
+    try {
+      const st = fs.lstatSync(full);
+      if (!st.isFile() || st.isSymbolicLink()) {
+        return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-UNREADABLE',
+          `${name} is not a regular non-symlink active group record`);
+      }
+      records.push({ path: full, rec: JSON.parse(fs.readFileSync(full, 'utf8')) });
+    } catch (error) {
+      return aggregateFailure(error && error.code === 'ENOENT'
+        ? 'ATTESTATION-AGGREGATE-GROUP-MISSING' : 'ATTESTATION-AGGREGATE-GROUP-UNREADABLE',
+      `cannot read expected active group ${name}: ${error.message}`);
+    }
+  }
+
+  // Ignore unrelated malformed siblings, but never ignore a second valid
+  // record that claims an expected signed reviewId. That preserves ambiguity
+  // refusal without letting another lane's truncated write invalidate this one.
+  const expectedIds = new Set((expectedGroups || []).map((group) => group.reviewId));
+  for (const entry of fs.readdirSync(groupsDir, { withFileTypes: true })) {
+    if (!entry.name.endsWith('.json') || expectedNames.has(entry.name)) continue;
+    const full = path.join(groupsDir, entry.name);
+    try {
+      const st = fs.lstatSync(full);
+      if (!entry.isFile() || !st.isFile() || st.isSymbolicLink()) continue;
+      const rec = JSON.parse(fs.readFileSync(full, 'utf8'));
+      if (expectedIds.has(rec && rec.reviewId)) records.push({ path: full, rec });
+    } catch {
+      // Not named by this signed aggregate and not parseable as a duplicate:
+      // it has no authority over this aggregate.
+    }
+  }
+  return { ok: true, records };
+}
+
+function verifyAggregateEvidence(rec, opts, packetPath) {
+  const aggregate = rec.aggregate;
+  const embedded = Array.isArray(aggregate && aggregate.groups) ? aggregate.groups : [];
+  if (!aggregate || aggregate.coverage !== 'EXACT') {
+    return aggregateFailure('ATTESTATION-AGGREGATE-COVERAGE-NONEXACT',
+      `aggregate coverage is ${JSON.stringify(aggregate && aggregate.coverage)}; only EXACT coverage is gateable`);
+  }
+  if (aggregate.groupCount !== embedded.length) {
+    return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-COUNT',
+      `aggregate groupCount ${String(aggregate.groupCount)} does not match ${embedded.length} embedded group record(s)`);
+  }
+  if (aggregate.plannedGroupCount !== embedded.length) {
+    return aggregateFailure('ATTESTATION-AGGREGATE-PLAN-COUNT',
+      `EXACT aggregate planned ${String(aggregate.plannedGroupCount)} group(s) but embeds ${embedded.length}`);
+  }
+  const ids = embedded.map((group) => group.reviewId);
+  const groupIds = embedded.map((group) => group.groupId);
+  if (new Set(ids).size !== ids.length || new Set(groupIds).size !== groupIds.length) {
+    return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-DUPLICATE',
+      'aggregate embeds a duplicate reviewId or groupId');
+  }
+
+  const loaded = loadActiveGroupRecords(opts.groupsDir || path.join(HERE, 'reviews', 'groups'), embedded);
+  if (!loaded.ok) return loaded;
+  const byReviewId = new Map();
+  for (const item of loaded.records) {
+    const id = item.rec && item.rec.reviewId;
+    if (!byReviewId.has(id)) byReviewId.set(id, []);
+    byReviewId.get(id).push(item);
+  }
+
+  const coveredPaths = [];
+  const groupUnverified = [];
+  for (const expected of embedded) {
+    const matches = byReviewId.get(expected.reviewId) || [];
+    if (matches.length !== 1) {
+      return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-MISSING',
+        `${expected.reviewId} resolves to ${matches.length} active group record(s); exactly one is required`);
+    }
+    const group = matches[0].rec;
+    if (group.aggregate) {
+      return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-MISMATCH',
+        `${expected.reviewId} resolves to another aggregate rather than a group record`);
+    }
+    const verified = verifyRecord(group, { ...opts, packetPath }, { skipAggregateEvidence: true });
+    if (!verified.ok || verified.gateable !== true) {
+      return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-INVALID',
+        `${expected.reviewId} is not current gateable active evidence: ${verified.code || 'ATTESTATION-NON-GATEABLE'} — ${verified.reason || 'constituent verification did not grant gate authority'}`);
+    }
+    const paths = (group.reviewOf && group.reviewOf.changedPaths) || [];
+    const comparisons = [
+      ['reviewer', group.reviewer, rec.reviewer],
+      ['reviewerModel', group.reviewerModel, rec.reviewerModel],
+      ['subject', group.reviewOf && group.reviewOf.diffSha256, rec.reviewOf && rec.reviewOf.diffSha256],
+      ['groupId', group.group && group.group.groupId, expected.groupId],
+      ['groupDigest', group.group && group.group.groupDigest, expected.groupDigest],
+      ['disposition', group.disposition, expected.disposition],
+      ['pathCount', paths.length, expected.pathCount],
+      ['attestationDigest', verified.payloadDigest, expected.attestationDigest],
+    ];
+    const mismatch = comparisons.find(([, actual, wanted]) => actual !== wanted);
+    if (mismatch) {
+      return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-MISMATCH',
+        `${expected.reviewId} ${mismatch[0]} does not match the signed aggregate`);
+    }
+    const unverified = group.unverified === undefined ? [] : group.unverified;
+    if (!Array.isArray(unverified) || unverified.some((entry) => typeof entry !== 'string')) {
+      return aggregateFailure('ATTESTATION-AGGREGATE-GROUP-INVALID',
+        `${expected.reviewId} has a non-string unverified evidence list`);
+    }
+    groupUnverified.push(...unverified);
+    coveredPaths.push(...paths);
+  }
+  groupUnverified.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  const publishedUnverified = rec.unverified === undefined ? [] : rec.unverified;
+  if (!Array.isArray(publishedUnverified)
+      || publishedUnverified.some((entry) => typeof entry !== 'string')
+      || canonical(publishedUnverified) !== canonical(groupUnverified)) {
+    return aggregateFailure('ATTESTATION-AGGREGATE-UNVERIFIED',
+      'aggregate unverified evidence does not exactly match the deterministic merge of its active signed groups');
+  }
+  const subjectPaths = (rec.reviewOf && rec.reviewOf.changedPaths) || [];
+  if (new Set(coveredPaths).size !== coveredPaths.length
+    || canonical(coveredPaths.slice().sort()) !== canonical(subjectPaths.slice().sort())) {
+    return aggregateFailure('ATTESTATION-AGGREGATE-COVERAGE',
+      'active group records do not cover the aggregate subject exactly once');
+  }
+  return { ok: true };
+}
+
+function verifyRecord(rec, opts = {}, context = {}) {
   if (!rec || !rec.attestation) {
     return { ok: false, code: 'ATTESTATION-MISSING', reason: 'the record carries no attestation. An unsigned record is not review evidence — anyone can write JSON into reviews/.' };
   }
   const a = rec.attestation;
-  if (a.v !== VERSION) return { ok: false, code: 'ATTESTATION-VERSION', reason: `unknown attestation version ${a.v}` };
+  if (a.v !== VERSION && a.v !== V1_VERSION) return { ok: false, code: 'ATTESTATION-VERSION', reason: `unknown attestation version ${a.v}` };
 
   let key;
   try { key = loadKey({ create: false }).key; }
@@ -274,7 +509,9 @@ function verify(rec, opts = {}) {
     pkt = r.path;
     backups = r.backups;
   }
-  const pd = packetDigest(pkt);
+  const authority = packetAuthority(rec, pkt, a.v);
+  if (!authority.ok) return { ok: false, code: authority.code, reason: authority.reason };
+  const pd = authority.packetDigest;
 
   // Finding #3: if the packet's authorizing content changed since signing, the
   // review no longer describes the permissions it was granted under.
@@ -282,7 +519,7 @@ function verify(rec, opts = {}) {
   // whenever the packet was gone, so DELETING the authorizing packet verified
   // exactly like leaving it untouched. Deletion is the largest possible change
   // to an authorization and must never be the quietest.
-  if (a.packetDigest && !pd) {
+  if (!a.packetDigest || !pd) {
     return {
       ok: false, code: 'ATTESTATION-PACKET-MISSING',
       reason: 'this record was signed against a task packet that can no longer be read. A review cannot be verified against an authorization that no longer exists.'
@@ -296,7 +533,14 @@ function verify(rec, opts = {}) {
     };
   }
 
-  const payload = attestationPayload(rec, a.packetDigest);
+  const payload = attestationPayload(rec, a.packetDigest, a.v);
+  const payloadDigest = digest(payload);
+  if (a.v === VERSION && a.payloadDigest !== payloadDigest) {
+    return {
+      ok: false, code: 'ATTESTATION-PAYLOAD-DIGEST',
+      reason: 'the recorded V2 payload digest does not match the canonical attested payload',
+    };
+  }
   const expect = crypto.createHmac(ALG, key).update(payload).digest('hex');
   const got = String(a.mac || '');
   const eq = got.length === expect.length &&
@@ -307,7 +551,25 @@ function verify(rec, opts = {}) {
       reason: 'the attestation does not match the record contents. A covered field (subject, packet, reviewer, model, disposition, or findings) was changed after signing.',
     };
   }
-  return { ok: true, packetDigest: pd };
+  if (a.v === VERSION && rec.aggregate && !context.skipAggregateEvidence) {
+    const aggregateResult = verifyAggregateEvidence(rec, opts, authority.path);
+    if (!aggregateResult.ok) return aggregateResult;
+  }
+  if (a.v === V1_VERSION) {
+    return {
+      ok: true,
+      gateable: false,
+      code: 'ATTESTATION-LEGACY-NON-GATEABLE',
+      reason: 'historical V1 attestation verified for audit, but V1 did not cover every governance-bearing finding field and cannot satisfy the current gate',
+      packetDigest: pd,
+      payloadDigest,
+    };
+  }
+  return { ok: true, gateable: true, packetDigest: pd, payloadDigest };
+}
+
+function verify(rec, opts = {}) {
+  return verifyRecord(rec, opts, {});
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────

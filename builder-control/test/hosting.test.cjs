@@ -15,6 +15,25 @@ const fs = require('fs');
 const { spawn, spawnSync } = require('child_process');
 const { EventEmitter } = require('events');
 const S = require('../hosting/server.cjs');
+const AegisState = require('../aegis-state.cjs');
+const INHERITED_IMMUTABLE_SNAPSHOT =
+  process.env.AEGIS_CHECK_SNAPSHOT_POLICY === 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1';
+const HOST_ONLY = process.argv.slice(2).includes('--host-only');
+const HOST_COMPOSITION_ONLY = HOST_ONLY && (INHERITED_IMMUTABLE_SNAPSHOT ||
+  process.env.AEGIS_HOST_OUTER_CONTAINMENT === 'AEGIS_TOP_LEVEL_HOST_CONTAINMENT_V1');
+
+function validatedSwitchboardPacket() {
+  const packetPath = path.join(__dirname, '..', 'packets',
+    'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json');
+  const bytes = fs.readFileSync(packetPath);
+  const parsed = JSON.parse(bytes);
+  return Object.freeze({
+    path: S.SWITCHBOARD_PACKET,
+    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    packetId: parsed.packetId,
+    parsed,
+  });
+}
 
 let passed = 0;
 function test(n, fn) {
@@ -26,6 +45,22 @@ async function atest(n, fn) {
   catch (e) { console.error(`FAIL ${n}: ${e.message}`); process.exitCode = 1; }
 }
 const TOKEN = 'test-token-' + crypto.randomBytes(16).toString('hex');
+function configuredListenerPort(name, directFallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') {
+    assert.strictEqual(require.main, module,
+      `${name} is required when hosting.test.cjs is not executed directly`);
+    return directFallback;
+  }
+  const port = Number(raw);
+  assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535,
+    `${name} must be an unprivileged TCP port`);
+  return port;
+}
+const HOSTING_TEST_PORT = configuredListenerPort('AEGIS_TEST_HOSTING_PORT', 8796);
+const HOSTING_API_TEST_PORT = configuredListenerPort('AEGIS_TEST_HOSTING_API_PORT', 18797);
+assert.notStrictEqual(HOSTING_TEST_PORT, HOSTING_API_TEST_PORT,
+  'the two hosting test listeners require distinct ports');
 const HOSTILE_WORKER_OUTPUT = Object.freeze({
   source: 'function INTERNAL_SOURCE_SENTINEL(){ return "repository text must stay private"; }',
   pem: '-----BEGIN PRIVATE KEY-----\nAEGIS-PEM-SENTINEL-DO-NOT-PUBLISH\n-----END PRIVATE KEY-----',
@@ -46,6 +81,13 @@ function assertNoHostileWorkerOutput(value, surface) {
 
 console.log('AEGIS dashboard hosting — red proofs');
 
+test('listener ports honor the snapshot supervisor environment', () => {
+  assert.strictEqual(HOSTING_TEST_PORT,
+    process.env.AEGIS_TEST_HOSTING_PORT ? Number(process.env.AEGIS_TEST_HOSTING_PORT) : 8796);
+  assert.strictEqual(HOSTING_API_TEST_PORT,
+    process.env.AEGIS_TEST_HOSTING_API_PORT ? Number(process.env.AEGIS_TEST_HOSTING_API_PORT) : 18797);
+});
+
 test('loopback with a generated token is allowed', () => {
   const v = S.validateConfig({ port: 8791, host: '127.0.0.1' }, {});
   assert.strictEqual(v.ok, true);
@@ -53,22 +95,48 @@ test('loopback with a generated token is allowed', () => {
   assert.ok(v.config.token.length >= 24);
 });
 
-test('RED: binding beyond loopback is refused without an explicit flag', () => {
+test('RED: binding beyond loopback is refused', () => {
   const v = S.validateConfig({ port: 8791, host: '0.0.0.0' }, {});
   assert.strictEqual(v.ok, false);
   assert.strictEqual(v.code, 'NON_LOOPBACK_REFUSED');
 });
 
-test('RED: one flag is not enough — exposure must also be acknowledged', () => {
-  const v = S.validateConfig({ port: 8791, host: '0.0.0.0', allowNonLoopback: true }, {});
+test('RED: localhost is refused because post-validation name resolution is mutable', () => {
+  const v = S.validateConfig({ port: 8791, host: 'localhost', token: 'x'.repeat(32) }, {});
   assert.strictEqual(v.ok, false);
-  assert.strictEqual(v.code, 'EXPOSURE_UNACKNOWLEDGED');
+  assert.strictEqual(v.code, 'NON_LOOPBACK_REFUSED');
 });
 
-test('RED: an exposed bind may NOT use a generated token', () => {
-  const v = S.validateConfig({ port: 8791, host: '0.0.0.0', allowNonLoopback: true, acknowledged: true }, {});
-  assert.strictEqual(v.ok, false);
-  assert.strictEqual(v.code, 'TOKEN_REQUIRED');
+test('RED: IPv6 loopback is refused consistently before any listener or malformed URL authority exists', () => {
+  const validated = S.validateConfig({ port: HOSTING_TEST_PORT, host: '::1', token: 'x'.repeat(32) }, {});
+  assert.strictEqual(validated.ok, false);
+  assert.strictEqual(validated.code, 'NON_LOOPBACK_REFUSED');
+  const started = S.start({ port: HOSTING_TEST_PORT, host: '::1', token: 'x'.repeat(32) });
+  assert.deepStrictEqual(started, { ok: false, code: 'NON_LOOPBACK_REFUSED' });
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(started, 'server'), false,
+    'the refused IPv6 address still created a runtime listener');
+});
+
+test('RED: legacy acknowledgement flags and a strong token cannot expose plaintext HTTP', () => {
+  for (const host of ['0.0.0.0', '192.0.2.10', '::']) {
+    const v = S.validateConfig({
+      port: 8791, host, token: 'x'.repeat(32),
+      allowNonLoopback: true, acknowledged: true,
+    }, {});
+    assert.strictEqual(v.ok, false, `${host} escaped the loopback-only boundary`);
+    assert.strictEqual(v.code, 'NON_LOOPBACK_REFUSED');
+    assert.match(v.reason, /local-only.*no flag can expose/i);
+  }
+});
+
+test('RED: start refuses non-loopback HTTP before creating a listener', () => {
+  const started = S.start({
+    port: HOSTING_TEST_PORT, host: '0.0.0.0', token: 'x'.repeat(32),
+    allowNonLoopback: true, acknowledged: true,
+  });
+  assert.deepStrictEqual(started, { ok: false, code: 'NON_LOOPBACK_REFUSED' });
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(started, 'server'), false,
+    'refused exposure still returned a server handle');
 });
 
 test('RED: a weak token is refused', () => {
@@ -125,6 +193,14 @@ test('switchboard: intake posts to /api/objective, start posts to /api/start', (
   assert.ok(/INTAKE_RECORDED/.test(html), 'no honest INTAKE_RECORDED confirmation rendering');
 });
 
+test('switchboard: objective intake is pinned to the approved operator-beta packet', () => {
+  assert.strictEqual(
+    S.SWITCHBOARD_PACKET,
+    'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json',
+    'dashboard intake is not bound to the approved functional-beta packet',
+  );
+});
+
 test('switchboard: deterministic checks use the canonical authenticated /api/checks route only for BUILT', () => {
   const html = dashboardHtml();
   assert.ok(/\/api\/checks/.test(html), 'no deterministic-checks control wiring');
@@ -133,9 +209,11 @@ test('switchboard: deterministic checks use the canonical authenticated /api/che
   assert.ok(/Run deterministic checks/.test(row), 'the checks control has no founder-readable label');
   assert.strictEqual(S.API_POST_ROUTES['/api/checks'], 'checks',
     'hosting does not declare the canonical checks route');
+  assert.strictEqual(S.DEFAULT_CONTROL_AUTHORITIES.runChecks, require('../aegis-run.cjs').runChecks,
+    'the production HTTP route is not pinned to canonical runChecks');
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8'),
-    /pathname === '\/api\/checks'\) result = AegisRun\.runChecks\(runId\)/,
-    'the HTTP route is not a thin pass-through to the canonical runChecks authority');
+    /pathname === '\/api\/checks'\) result = controlAuthorities\.runChecks\(runId\)/,
+    'the HTTP route is not a thin pass-through to its fixed runChecks authority');
 });
 
 test('switchboard: review verification uses the canonical bind-only route only for CHECKS_PASSED', () => {
@@ -150,9 +228,35 @@ test('switchboard: review verification uses the canonical bind-only route only f
     'the dashboard could imply that binding launches a reviewer');
   assert.strictEqual(S.API_POST_ROUTES['/api/review-bind'], 'review-bind',
     'hosting does not declare the canonical review-bind route');
+  assert.strictEqual(S.DEFAULT_CONTROL_AUTHORITIES.bindIndependentReview,
+    require('../aegis-run.cjs').bindIndependentReview,
+    'the production HTTP route is not pinned to canonical bindIndependentReview');
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8'),
-    /pathname === '\/api\/review-bind'\) result = AegisRun\.bindIndependentReview\(runId\)/,
-    'the HTTP route is not a thin pass-through to canonical bindIndependentReview authority');
+    /pathname === '\/api\/review-bind'\) result = controlAuthorities\.bindIndependentReview\(runId\)/,
+    'the HTTP route is not a thin pass-through to its fixed bindIndependentReview authority');
+});
+
+test('control authority composition seam is exact, frozen, and unavailable to browser input', () => {
+  assert.ok(Object.isFrozen(S.DEFAULT_CONTROL_AUTHORITIES));
+  assert.deepStrictEqual(Object.keys(S.DEFAULT_CONTROL_AUTHORITIES).sort(),
+    ['bindIndependentReview', 'runChecks']);
+  assert.throws(() => S.resolveControlAuthorities({ runChecks() {} }), /provide exactly/);
+  assert.throws(() => S.resolveControlAuthorities({
+    runChecks() {}, bindIndependentReview() {}, startRun() {},
+  }), /provide exactly/);
+  const supplied = S.resolveControlAuthorities({
+    runChecks() { return 'checks'; },
+    bindIndependentReview() { return 'review'; },
+  });
+  assert.ok(Object.isFrozen(supplied));
+  assert.deepStrictEqual(Object.keys(supplied).sort(), ['bindIndependentReview', 'runChecks']);
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8');
+  assert.match(serverSource, /http\.createServer\(handler\(config\)\)/,
+    'production server construction must not inject alternate control authorities');
+  assert.throws(() => S.resolveControlAuthorities(Object.defineProperty({
+    bindIndependentReview() {},
+  }, 'runChecks', { enumerable: true, get() { throw new Error('getter executed'); } })),
+  /provide exactly/, 'accessor-backed control authority was accepted');
 });
 
 // Cancel and retry are wired because they are operational: cancelRun takes the
@@ -174,10 +278,10 @@ test('switchboard: cancel and retry are wired; Pause remains unavailable without
 
 // "Wired" is not the whole contract — cancel and retry must be wired ONLY where
 // they can actually succeed. An always-rendered Cancel on a terminal run is the
-// same defect as a live Pause: a control that looks available and answers with a
-// refusal after the click. Both are gated on the run's state, and BUILDING is
-// excluded from cancel for the same reason pause does not exist — builder
-// execution is synchronous, so there is nothing to interrupt.
+// same defect as a live Pause. BUILDING is different: the canonical async
+// worker publishes verified ownership evidence and cancelRun uses its
+// authenticated, attempt-bound cancellation mailbox. The browser may expose
+// Cancel only when that public ownership projection is complete.
 test('RED: cancel and retry render only in states where they are operational', () => {
   const html = dashboardHtml();
   const row = html.slice(html.indexOf('function runActionRow'), html.indexOf('function renderRuns'));
@@ -186,18 +290,37 @@ test('RED: cancel and retry render only in states where they are operational', (
   const cancelable = row.slice(row.indexOf('CANCELABLE'), row.indexOf('/api/cancel'));
   assert.ok(/CANCELABLE\.indexOf\(run\.state\)\s*!==\s*-1/.test(row),
     'Cancel is rendered unconditionally — it must be gated on the run state');
-  assert.ok(!/'BUILDING'/.test(cancelable),
-    'BUILDING is listed as cancelable — builder execution is synchronous, so there is nothing to interrupt');
+  assert.ok(/hasCancellationCapability\(run\)/.test(cancelable),
+    'BUILDING cancellation is not gated on the canonical public capability');
+  const capability = html.slice(html.indexOf('function hasCancellationCapability'),
+    html.indexOf('function buildEvidence'));
+  assert.match(capability,
+    /run\.state\s*===\s*'BUILDING'[\s\S]{0,160}run\.build\.cancelAvailable\s*===\s*true/,
+    'the dashboard does not require the bounded server-projected cancellation capability');
+  assert.doesNotMatch(capability, /workerPid|status\s*===\s*'STARTING'/,
+    'the browser inferred cancellation authority from process or activity telemetry');
   for (const terminal of ['ABANDONED', 'ROLLED_BACK', 'CHECKPOINTED']) {
     assert.ok(!new RegExp(`'${terminal}'`).test(cancelable),
       `${terminal} is listed as cancelable — a terminal run cannot be cancelled, and offering it is theater`);
   }
 
-  assert.ok(/run\.state\s*===\s*'BUILD_FAILED'\s*\|\|\s*run\.state\s*===\s*'CHECKS_FAILED'/.test(row),
+  assert.ok(/run\.state\s*===\s*'BUILD_FAILED'\s*\|\|\s*run\.state\s*===\s*'CHECKS_FAILED'\s*\|\|\s*run\.state\s*===\s*'REVIEW_FAILED'/.test(row),
     'Retry is not gated to the failed states it can actually re-enter');
-  const retryIdx = row.indexOf('/api/retry');
-  assert.ok(row.lastIndexOf('BUILD_FAILED', retryIdx) > row.indexOf('CANCELABLE'),
-    'the retry guard must precede the retry wiring, not trail it');
+  const retryHelper = html.slice(html.indexOf('async function requestRunRetry'),
+    html.indexOf('function renderFounderSummary'));
+  assert.match(retryHelper,
+    /\['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'\]\.indexOf\(run\.state\)\s*===\s*-1/,
+    'the shared Retry helper does not fail closed outside canonical failed states');
+  assert.match(retryHelper, /callApi\('\/api\/retry',\s*\{\s*runId:\s*run\.runId\s*\}\)/,
+    'Retry must send only the canonical runId to /api/retry');
+  assert.match(row,
+    /run\.state\s*===\s*'BUILD_FAILED'[\s\S]*?retryBtn\.addEventListener\('click',[\s\S]*?window\.AEGIS_DASHBOARD\.requestRunRetry\(run,\s*retryBtn\)/,
+    'the failed-state guard must enclose wiring to the one exported Retry helper');
+  assert.match(html, /requestRunRetry:\s*requestRunRetry/,
+    'the canonical Retry helper is not exported through the shared dashboard seam');
+  const cancelCall = row.slice(row.indexOf("callApi('/api/cancel'"), row.indexOf("callApi('/api/cancel'") + 100);
+  assert.match(cancelCall, /callApi\('\/api\/cancel',\s*\{\s*runId:\s*run\.runId\s*\}\)/,
+    'Cancel must send only the canonical runId to /api/cancel');
 });
 
 test('RED: the Pause button is rendered disabled, not merely titled or hidden', () => {
@@ -282,6 +405,156 @@ test('RED: a missing binding minimizes to UNAVAILABLE, never to the first run in
   });
   assert.strictEqual(min.runsBinding.state, 'UNAVAILABLE');
   assert.strictEqual(min.runsBinding.runId, null);
+});
+
+test('RED: an unavailable live gate still preserves the truthful eleven-stage projection', () => {
+  const stages = Array.from({ length: 11 }, (_, index) => ({
+    id: index + 1,
+    step: `step-${index + 1}`,
+    label: `Stage ${index + 1}`,
+    state: index < 5 ? 'PASS' : 'UNVERIFIED',
+    reason: index < 5 ? 'canonical evidence is present' : 'awaiting canonical evidence',
+    privateDetail: 'must not travel',
+  }));
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T',
+    engineering: { state: 'UNAVAILABLE', reason: 'no current subject is bound', stages },
+    runs: { state: 'OK', runs: [] },
+  });
+  assert.strictEqual(min.engineering.state, 'UNAVAILABLE');
+  assert.strictEqual(min.engineering.reason, 'no current subject is bound');
+  assert.strictEqual(min.engineering.stages.length, 11,
+    'the live minimizer discarded the canonical route before subject binding');
+  assert.deepStrictEqual(min.engineering.stages[4], {
+    id: 5, step: 'step-5', label: 'Stage 5', state: 'PASS',
+    reason: 'canonical evidence is present',
+  });
+  assert.ok(!JSON.stringify(min.engineering.stages).includes('privateDetail'));
+});
+
+test('RED: /api/status preserves the checkpoint receipt id and its safe rollback commit', () => {
+  const rollbackPoint = '0123456789abcdef0123456789abcdef01234567';
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T', engineering: { state: 'UNAVAILABLE' },
+    runs: { state: 'OK', runs: [{
+      runId: 'RUN-A', state: 'CHECKPOINTED', checkpoint: 'CP-A', rollbackPoint,
+      checkpointState: 'VALIDATED', checkpointReason: null,
+      checkpointInternal: { secret: 'must not travel' },
+    }] },
+  });
+  assert.strictEqual(min.runs[0].checkpoint, 'CP-A',
+    'the public run lost its canonical checkpoint receipt id');
+  assert.strictEqual(min.runs[0].rollbackPoint, rollbackPoint,
+    'the public run lost the canonical safe rollback commit');
+  assert.strictEqual(min.runs[0].checkpointState, 'VALIDATED',
+    'the public run lost the projector\'s checkpoint validation result');
+  assert.strictEqual(min.runs[0].checkpointReason, null);
+  assert.ok(!('checkpointInternal' in min.runs[0]),
+    'checkpoint internals crossed the public run allowlist');
+});
+
+test('RED: /api/status carries only the bounded validated worktree receipt, never its private path', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T', engineering: { state: 'UNAVAILABLE' },
+    runs: { state: 'OK', runs: [{
+      runId: 'RUN-20260829-c0ffee01', state: 'WORKTREE_READY',
+      worktree: { state: 'VALIDATED', isolated: true, branch: 'aegis/RUN-20260829-c0ffee01',
+        path: '/Users/operator/private/aegis-wt-RUN-20260829-c0ffee01' },
+    }] },
+  });
+  assert.deepStrictEqual(min.runs[0].worktree, {
+    state: 'VALIDATED', isolated: true, branch: 'aegis/RUN-20260829-c0ffee01',
+  });
+  assert.ok(!JSON.stringify(min).includes('/Users/operator/private'),
+    'the private absolute worktree path crossed the live public boundary');
+
+  const malformed = S.minimizeApiStatus({
+    generatedAt: 'T', engineering: { state: 'UNAVAILABLE' },
+    runs: { state: 'OK', runs: [{ runId: 'RUN-20260829-c0ffee02', state: 'WORKTREE_READY',
+      worktree: { state: 'INVALID', reason: 'bounded branch validation failed', path: '/private/secret' } }] },
+  });
+  assert.deepStrictEqual(malformed.runs[0].worktree, {
+    state: 'INVALID', isolated: false, branch: null, reason: 'bounded branch validation failed',
+  });
+  assert.ok(!JSON.stringify(malformed).includes('/private/secret'));
+});
+
+test('RED: /api/status exposes only minimized exact-subject review refusal evidence', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: '2026-08-29T10:00:00.000Z', engineering: { state: 'UNAVAILABLE' },
+    runs: { state: 'OK', runs: [{
+      runId: 'RUN-20260829-a1b2c3d4', state: 'REVIEW_FAILED', objective: 'correct review findings',
+      reviewFailure: {
+        status: 'REFUSED', reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+        subjectSha256: 'a'.repeat(64), checkReceiptSha256: 'b'.repeat(64),
+        refusedAt: '2026-08-29T09:59:00.000Z', authority: 'engineering-os.cjs --gate-done',
+        rejectedReviewers: [{ reviewer: 'codex', reviewId: 'REV-codex-current', raw: 'SECRET' }],
+        blockingFindingCount: 2, refusalRuleCount: 3,
+        summary: 'caller-selected message', rawGate: { detail: 'SECRET' },
+      },
+    }] },
+  });
+  const refusal = min.runs[0].reviewFailure;
+  assert.deepStrictEqual(Object.keys(refusal).sort(), [
+    'authority', 'blockingFindingCount', 'checkReceiptSha256', 'reasonCode', 'refusedAt',
+    'rejectedReviewers', 'status', 'subjectSha256', 'summary',
+  ].sort());
+  assert.deepStrictEqual(refusal.rejectedReviewers,
+    [{ reviewer: 'codex', reviewId: 'REV-codex-current' }]);
+  assert.strictEqual(refusal.summary,
+    'Independent review found 2 blocking issue(s) on this exact checked version.');
+  assert.ok(!JSON.stringify(refusal).includes('SECRET'));
+  assert.ok(!JSON.stringify(refusal).includes('caller-selected'));
+});
+
+test('RED: /api/status preserves only a bounded canonical route refusal', () => {
+  const base = { generatedAt: 'T', engineering: { state: 'UNAVAILABLE' } };
+  const refused = S.minimizeApiStatus({ ...base, runs: { state: 'OK', runs: [{
+    runId: 'RUN-20260830-a1b2c3d4', state: 'INTAKE_RECORDED', objective: 'route refusal',
+    route: { state: 'REFUSED', code: 'DATA_CLASS_REFUSED', reason: 'SENSITIVE data exceeds this route.' },
+  }] } });
+  assert.deepStrictEqual(refused.runs[0].route, {
+    state: 'REFUSED', code: 'DATA_CLASS_REFUSED', reason: 'SENSITIVE data exceeds this route.',
+  });
+  for (const malformed of [
+    { state: 'REFUSED', code: 'bad', reason: 'reason' },
+    { state: 'REFUSED', code: 'ROUTE_REFUSED', reason: ' secret\ntext' },
+    { state: 'REFUSED', code: 'ROUTE_REFUSED', reason: 'x'.repeat(513) },
+    { state: 'REFUSED', code: 'ROUTE_REFUSED', reason: 'reason', detail: 'private' },
+  ]) {
+    const projected = S.minimizeApiStatus({ ...base, runs: { state: 'OK', runs: [{
+      runId: 'RUN-20260830-a1b2c3d5', state: 'INTAKE_RECORDED', objective: 'bad route', route: malformed,
+    }] } });
+    assert.strictEqual(projected.runs[0].route, null);
+  }
+});
+
+test('snapshot to live status retains the fail-closed uncorroborated review claim', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-host-review-failure-'));
+  try {
+    const runId = 'RUN-20260830-feed0002';
+    fs.writeFileSync(path.join(temp, `${runId}.json`), JSON.stringify({
+      runId, state: 'REVIEW_FAILED', objective: 'Correct exact review findings',
+      createdAt: '2026-08-30T12:00:00.000Z', updatedAt: '2026-08-30T12:01:00.000Z',
+      packet: 'builder-control/packets/PKT-TEST.json', corrections: 0,
+      reviewFailure: {
+        schemaVersion: 1, status: 'REFUSED', reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+        subjectSha256: 'a'.repeat(64), checkReceiptSha256: 'b'.repeat(64),
+        packet: { path: 'builder-control/packets/PKT-TEST.json', sha256: 'c'.repeat(64) },
+        refusedAt: '2026-08-30T12:01:00.000Z', authority: 'engineering-os.cjs --gate-done',
+        rejectedReviewers: [{ reviewer: 'codex', reviewId: 'REV-codex-current' }],
+        blockingFindingCount: 1, refusalRuleCount: 2,
+      },
+    }));
+    const status = S.minimizeApiStatus(AegisState.snapshot({}, { runsDir: temp }));
+    assert.deepStrictEqual(status.runs[0].reviewFailure, {
+      status: 'UNVERIFIED', reasonCode: 'REVIEW_FAILURE_UNCORROBORATED',
+      summary: 'The run records a review-failure claim, but attested exact-subject gate evidence is unavailable in this projection.',
+    });
+    assert.strictEqual(status.runs[0].state, 'REVIEW_FAILED');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test('RED: /api/status carries risk reasons, subject hash and reviewer completeness', () => {
@@ -477,14 +750,18 @@ test('RED: the browser cannot select the governed builder executable, provider, 
     timeoutSec: 900,
   });
   assert.ok(Object.isFrozen(S.GOVERNED_BUILDER), 'the governed builder specification is mutable');
-  const run = { runId: 'RUN-20260826-safe0001', objective: "build it'; touch /tmp/SHOULD_NOT_RUN; echo '",
-    packet: 'packet.json', route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' } };
-  const governed = S.buildGovernedLaunchSpec(run);
+  const run = { runId: 'RUN-20260826-5afe0001', objective: "build it'; touch /tmp/SHOULD_NOT_RUN; echo '",
+    constraints: ['Edit only packet-authorized files'], acceptanceCriteria: ['Focused checks pass'],
+    packet: S.SWITCHBOARD_PACKET, route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' } };
+  const governed = S.buildGovernedLaunchSpec(run, undefined, validatedSwitchboardPacket());
   assert.deepStrictEqual(Object.keys(governed).sort(), ['model', 'prompt', 'provider', 'timeoutSec']);
   assert.strictEqual(governed.provider, 'claude-subscription');
   assert.strictEqual(governed.model, 'opus');
   assert.strictEqual(governed.timeoutSec, 900);
   assert.ok(governed.prompt.includes(run.objective), 'the objective must remain prompt data');
+  assert.match(governed.prompt, /Canonical run constraints JSON: \["Edit only packet-authorized files"\]/);
+  assert.match(governed.prompt, /Canonical acceptance criteria JSON: \["Focused checks pass"\]/);
+  assert.match(governed.prompt, /Canonical packet constraints JSON:/);
   assert.match(governed.prompt, /Use the authorized Edit or Write tools to apply the smallest correct change/,
     'the headless builder was not explicitly required to apply its change');
   assert.match(governed.prompt, /never describe a no-write response as a completed build/,
@@ -496,20 +773,22 @@ test('RED: the browser cannot select the governed builder executable, provider, 
 
 test('the current canonical route is the sole provider/model authority and policy changes propagate', () => {
   const policy = S.loadModelRoutingPolicy();
-  const run = { runId: 'RUN-20260826-safe0002', objective: 'bounded task', packet: 'packet.json',
+  const run = { runId: 'RUN-20260826-5afe0002', objective: 'bounded task', constraints: [], acceptanceCriteria: [],
+    packet: S.SWITCHBOARD_PACKET,
     route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' } };
   assert.deepStrictEqual(S.canonicalWorkerRoute(run, policy),
     { provider: 'claude-subscription', model: 'opus' });
   const changed = JSON.parse(JSON.stringify(policy));
   changed.models.claude.workerRoute.model = 'sonnet';
-  const governed = S.buildGovernedLaunchSpec(run, changed);
+  const governed = S.buildGovernedLaunchSpec(run, changed, validatedSwitchboardPacket());
   assert.strictEqual(governed.model, 'sonnet',
     'a canonical policy model change required an edit to hosting/server.cjs');
 });
 
 test('RED: missing, stale, unsupported and caller-augmented routes fail closed', () => {
   const policy = S.loadModelRoutingPolicy();
-  const base = { runId: 'RUN-20260826-safe0003', objective: 'bounded task', packet: 'packet.json' };
+  const base = { runId: 'RUN-20260826-5afe0003', objective: 'bounded task', constraints: [], acceptanceCriteria: [],
+    packet: S.SWITCHBOARD_PACKET };
   const canonical = { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' };
   const cases = [
     [{ ...base }, 'ROUTE_MISSING'],
@@ -519,63 +798,50 @@ test('RED: missing, stale, unsupported and caller-augmented routes fail closed',
     [{ ...base, route: { ...canonical, provider: 'caller-selected' } }, 'ROUTE_MISMATCH'],
   ];
   for (const [run, code] of cases) {
-    assert.throws(() => S.buildGovernedLaunchSpec(run, policy),
+    assert.throws(() => S.buildGovernedLaunchSpec(run, policy, validatedSwitchboardPacket()),
       (error) => error && error.code === code, `${code} did not fail closed`);
   }
   const unsupported = JSON.parse(JSON.stringify(policy));
   unsupported.models.claude.workerRoute.model = 'not-supported';
-  assert.throws(() => S.buildGovernedLaunchSpec({ ...base, route: canonical }, unsupported),
+  assert.throws(() => S.buildGovernedLaunchSpec(
+    { ...base, route: canonical }, unsupported, validatedSwitchboardPacket()),
     (error) => error && error.code === 'ROUTE_UNSUPPORTED');
+
+  for (const malformed of [
+    { ...base, constraints: 'not-an-array', route: canonical },
+    { ...base, constraints: [' leading'], route: canonical },
+    { ...base, acceptanceCriteria: [42], route: canonical },
+    { ...base, acceptanceCriteria: ['x'.repeat(501)], route: canonical },
+  ]) {
+    assert.throws(() => S.buildGovernedLaunchSpec(malformed, policy, validatedSwitchboardPacket()),
+      (error) => error && error.code === 'INVALID_RUN');
+  }
 });
 
-test('Start delegates the complete intake-to-launch transaction to one canonical claimed authority', () => {
-  let run = { runId: 'RUN-20260826-fake0001', state: 'INTAKE_RECORDED', objective: 'bounded task', packet: 'packet.json',
-    route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' } };
-  let prepareCalls = 0;
-  let launch;
-  const fake = {
-    startGovernedWorker(runId, launchSpecForRun, options) {
-      prepareCalls++;
-      run = { ...run, state: 'WORKTREE_READY' };
-      const launchSpec = launchSpecForRun({ ...run });
-      // Exercise the actual hardened worker contract instead of accepting
-      // whatever shape this loose authority mock happens to receive.
-      const Worker = require('../aegis-worker.cjs');
-      launch = {
-        runId,
-        launchSpec: Worker.normalizeLaunchSpec(launchSpec),
-        timeoutSec: Worker.normalizeTimeoutSec(options.timeoutSec),
-      };
-      return { runId, state: 'BUILDING', action: 'start', workerPid: 4321, attempt: 1, nextAction: 'monitor' };
-    },
+test('RED: launch composition refuses to reopen or substitute for the validated packet generation', () => {
+  const run = {
+    runId: 'RUN-20260826-5afe0004', objective: 'bounded task', constraints: [], acceptanceCriteria: [],
+    packet: S.SWITCHBOARD_PACKET,
+    route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
   };
-  const result = S.startGovernedRun(run.runId, fake);
-  assert.strictEqual(prepareCalls, 1);
-  assert.strictEqual(launch.runId, run.runId);
-  const governed = S.buildGovernedLaunchSpec(run);
-  assert.deepStrictEqual(launch.launchSpec,
-    { provider: governed.provider, prompt: governed.prompt, model: governed.model });
-  assert.strictEqual(launch.timeoutSec, governed.timeoutSec);
-  assert.deepStrictEqual(result.builder, { provider: 'claude-subscription', model: 'opus' });
+  assert.throws(() => S.buildGovernedLaunchSpec(run),
+    (error) => error && error.code === 'INVALID_PACKET');
+  const valid = validatedSwitchboardPacket();
+  assert.throws(() => S.buildGovernedLaunchSpec(run, undefined,
+    { ...valid, sha256: '0'.repeat(64), packetId: 'PKT-SUBSTITUTED' }),
+  (error) => error && error.code === 'INVALID_PACKET');
 });
 
-test('RED: a canonical-route mismatch is refused before BUILDING or process creation', () => {
-  let state = 'WORKTREE_READY';
-  let processCreated = false;
-  const fake = {
-    startGovernedWorker(runId, launchSpecForRun) {
-      const run = { runId, state, objective: 'bounded task', packet: 'packet.json',
-        route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'caller', modelOverride: 'opus' } };
-      launchSpecForRun(run);
-      state = 'BUILDING';
-      processCreated = true;
-      throw new Error('unreachable');
-    },
-  };
-  assert.throws(() => S.startGovernedRun('RUN-20260826-fake0002', fake),
-    (error) => error && error.code === 'ROUTE_MISMATCH');
-  assert.strictEqual(state, 'WORKTREE_READY');
-  assert.strictEqual(processCreated, false);
+test('RED: the only Start composition seam is the trusted low-level worker launcher', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8');
+  const start = source.slice(source.indexOf('function startGovernedRun'),
+    source.indexOf('// ── authenticated SSE event stream', source.indexOf('function startGovernedRun')));
+  assert.match(start, /AegisRun\.startGovernedWorker\(/,
+    'server Start bypassed the canonical prepare and routing authority');
+  assert.match(start, /launchWorker/,
+    'host tests have no seam below canonical prepare/routing for a bounded process launcher');
+  assert.doesNotMatch(start, /authority\.startGovernedWorker/,
+    'an injected object can replace canonical Start authority');
 });
 
 test('RED: server Start never composes public prepareRun plus public startWorker', () => {
@@ -608,15 +874,85 @@ test('RED: the public worker projection is an exact lifecycle allowlist with no 
   });
   const worker = min.runs[0].build;
   assert.deepStrictEqual(Object.keys(worker).sort(),
-    ['activity', 'endedAt', 'exit', 'heartbeatAt', 'mode', 'recoveryCode', 'retrySafe', 'startedAt', 'status', 'timedOut', 'workerPid'].sort());
+    ['activity', 'cancelAvailable', 'endedAt', 'exit', 'failover', 'failure', 'heartbeatAt', 'mode',
+      'recoveryCode', 'retrySafe', 'startedAt', 'status', 'timedOut', 'workerPid'].sort());
   assert.strictEqual(worker.status, 'RUNNING');
+  assert.strictEqual(worker.cancelAvailable, false,
+    'RUNNING plus PID must not imply authenticated cancellation authority');
   assert.strictEqual(worker.workerPid, 123);
   assert.strictEqual(worker.heartbeatAt, '2026-08-27T15:00:01.000Z');
   assert.strictEqual(worker.exit, 23);
   assert.deepStrictEqual(worker.activity,
-    { code: 'RUNNING', phase: 'RUNNING', active: true, summary: 'Builder is running' });
+    { code: 'TERMINAL_STATE_MISMATCH', phase: 'BLOCKED', active: false,
+      summary: 'Terminal builder exit 23 conflicts with an active lifecycle claim' });
   assert.strictEqual(worker.recoveryCode, null, 'arbitrary recovery text crossed the public allowlist');
   assertNoHostileWorkerOutput(worker, 'unit worker projection');
+});
+
+test('RED: public cancelAvailable is true only for the canonical authenticated RUNNING capability', () => {
+  const build = {
+    mode: 'async', workerState: 'RUNNING', workerPid: 123,
+    cancelAvailable: true,
+  };
+  const available = S.minimizeWorker(build, 'BUILDING');
+  assert.strictEqual(available.cancelAvailable, true);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(available, 'control'), false);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(available, 'childProcessIdentity'), false);
+  for (const [label, candidate, state] of [
+    ['launch claim', { ...build, workerState: 'LAUNCH_CLAIMED' }, 'BUILDING'],
+    ['starting', { ...build, workerState: 'STARTING' }, 'BUILDING'],
+    ['capability absent', { ...build, cancelAvailable: false }, 'BUILDING'],
+    ['terminal exit', { ...build, exit: 0 }, 'BUILDING'],
+    ['wrong lifecycle', build, 'BUILT'],
+  ]) assert.strictEqual(S.minimizeWorker(candidate, state).cancelAvailable, false, label);
+});
+
+test('MODEL_AUTH_FAILURE and non-executable Grok failover cross the public status allowlist without raw output', () => {
+  const worker = S.minimizeWorker({
+    mode: 'async', workerState: 'FAILED', exit: 1,
+    recovery: { reason: 'MODEL_AUTH_FAILURE', retrySafe: false },
+    failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
+      summary: 'Claude authentication failed.' },
+    failover: { state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: 'grok-4.6',
+      reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.' },
+    stdoutTail: 'must not cross', stderrTail: 'must not cross',
+  }, 'BUILD_FAILED');
+  assert.deepStrictEqual(worker.failure, {
+    code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription', summary: 'Claude authentication failed.',
+  });
+  assert.deepStrictEqual(worker.failover, {
+    state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: 'grok-4.6',
+    reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.',
+  });
+  assert.deepStrictEqual(worker.activity, {
+    code: 'MODEL_AUTH_FAILURE', phase: 'BLOCKED', active: false,
+    summary: 'Claude authentication failed',
+  });
+  assert.strictEqual(worker.recoveryCode, 'MODEL_AUTH_FAILURE');
+  assert.strictEqual(worker.retrySafe, false);
+  assert.ok(!JSON.stringify(worker).includes('must not cross'));
+
+  const augmented = S.minimizeWorker({
+    mode: 'async', workerState: 'FAILED', exit: 1,
+    recovery: { reason: 'MODEL_AUTH_FAILURE', retrySafe: false },
+    failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
+      summary: 'Claude authentication failed.', raw: 'forged' },
+  }, 'BUILD_FAILED');
+  assert.strictEqual(augmented.failure, null, 'caller-augmented auth failure crossed the closed vocabulary');
+  assert.notStrictEqual(augmented.activity.code, 'MODEL_AUTH_FAILURE');
+});
+
+test('a successful async worker stays completed while later governed stages execute', () => {
+  const build = { mode: 'async', workerState: 'EXITED', exit: 0,
+    endedAt: '2026-08-30T12:00:00.000Z' };
+  for (const state of ['BUILT', 'CHECKS_PASSED', 'REVIEW_BOUND', 'REVIEW_FAILED',
+                       'CORRECTING', 'CHECKS_FAILED', 'CHECKPOINTED', 'ROLLED_BACK', 'ABANDONED']) {
+    const worker = S.minimizeWorker(build, state);
+    assert.deepStrictEqual(worker.activity, {
+      code: 'EXITED', phase: 'SUCCEEDED', active: false,
+      summary: 'Builder finished successfully',
+    }, `${state} rewrote a successful builder exit as a stopped/failed build`);
+  }
 });
 
 test('RED: the public run projection carries canonical route identity and no route extras', () => {
@@ -680,17 +1016,19 @@ test('RED: status reads never invoke worker reconciliation', () => {
   assert.ok(statusSource.length > 0, 'buildApiStatus source boundary was not found');
   assert.ok(!/reconcileWorkerRun|reconcileBuildingRuns|startRunReconciler/.test(statusSource),
     'a status read must not mutate lifecycle state through reconciliation');
+  assert.ok(!/AegisRun\.loadRun|hydrateWorkerEvidence/.test(statusSource),
+    'status must not reopen mutable run files after the immutable AegisState snapshot');
 });
 
 test('RED: failed bootstrap and unverified termination never project as running activity', () => {
-  for (const [workerState, expected] of [
-    ['BOOTSTRAP_FAILED', 'Builder failed during startup'],
-    ['SPAWN_FAILED', 'Builder failed before its process started'],
-    ['TERMINATION_UNVERIFIED', 'Termination could not be verified; retry is blocked'],
-    ['ORPHANED', 'Worker supervisor exited unexpectedly; builder termination is unverified and retry is blocked'],
+  for (const [workerState, expected, exit, terminationVerified] of [
+    ['BOOTSTRAP_FAILED', 'Builder failed during startup', null, null],
+    ['SPAWN_FAILED', 'Builder failed before its process started', null, null],
+    ['TERMINATION_UNVERIFIED', 'Termination could not be verified; retry is blocked', 124, false],
+    ['ORPHANED', 'Worker supervisor exited unexpectedly; builder termination is unverified and retry is blocked', 127, false],
   ]) {
-    const worker = S.minimizeWorker({ mode: 'async', workerState,
-      recovery: { reason: workerState, retrySafe: false } }, 'BUILD_FAILED');
+    const worker = S.minimizeWorker({ mode: 'async', workerState, exit,
+      recovery: { reason: workerState, retrySafe: false, terminationVerified } }, 'BUILD_FAILED');
     assert.strictEqual(worker.status, workerState);
     assert.strictEqual(worker.activity.summary, expected);
     assert.strictEqual(worker.retrySafe, false);
@@ -699,7 +1037,21 @@ test('RED: failed bootstrap and unverified termination never project as running 
       'only canonical unsafe-recovery codes may cross the public boundary');
     assert.ok(!/Builder is running/.test(worker.activity.summary),
       `${workerState} was falsely projected as active execution`);
+    if (terminationVerified === false) {
+      assert.strictEqual(worker.activity.phase, 'BLOCKED');
+      assert.notStrictEqual(worker.activity.phase, 'STOPPED',
+        `${workerState} converted an unverified descendant into a stopped process`);
+    }
   }
+
+  const inferred = S.minimizeWorker({
+    mode: 'async', workerState: 'FAILED', exit: 124,
+    recovery: { reason: 'TERMINATION_UNVERIFIED', retrySafe: false, terminationVerified: false },
+  }, 'BUILD_FAILED');
+  assert.deepStrictEqual(inferred.activity, {
+    code: 'TERMINATION_UNVERIFIED', phase: 'BLOCKED', active: false,
+    summary: 'Termination could not be verified; retry is blocked',
+  }, 'the canonical recovery signal did not outrank generic FAILED plus a numeric exit');
 });
 
 test('RED: no innerHTML assignment anywhere in the dashboard', () => {
@@ -755,38 +1107,59 @@ function get(port, path_, headers = {}) {
     reconciler.stop();
   });
 
-  const v = S.validateConfig({ port: 8796, host: '127.0.0.1', token: TOKEN }, {});
-  const srv = http.createServer(S.handler(v.config));
-  await new Promise((r) => srv.listen(8796, '127.0.0.1', r));
+  // Generate and serve the projection entirely from a disposable dashboard
+  // root. A host test must never rewrite the operator's canonical state.js.
+  const servedRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-hosting-projection-'));
+  const servedStatePath = path.join(servedRoot, 'state.js');
+  fs.copyFileSync(path.join(__dirname, '..', 'dashboard', 'index.html'), path.join(servedRoot, 'index.html'));
+  const generatedState = spawnSync(process.execPath,
+    [path.join(__dirname, '..', 'aegis-state.cjs'), '--out', servedStatePath],
+    { cwd: path.resolve(__dirname, '..', '..'), encoding: 'utf8' });
+  assert.strictEqual(generatedState.status, 0,
+    `canonical served state generation failed: ${generatedState.stderr || generatedState.stdout}`);
+  const expectedServedState = fs.readFileSync(servedStatePath);
+
+  const v = S.validateConfig({ port: HOSTING_TEST_PORT, host: '127.0.0.1', token: TOKEN }, {});
+  const srv = http.createServer(S.handler(v.config, { dashboardRoot: servedRoot }));
+  await new Promise((r) => srv.listen(HOSTING_TEST_PORT, '127.0.0.1', r));
 
   await atest('RED: a request with no token is 401', async () => {
-    const r = await get(8796, '/');
+    const r = await get(HOSTING_TEST_PORT, '/');
     assert.strictEqual(r.status, 401);
   });
 
   await atest('RED: a wrong token is 401', async () => {
-    const r = await get(8796, '/', { authorization: 'Bearer ' + 'x'.repeat(40) });
+    const r = await get(HOSTING_TEST_PORT, '/', { authorization: 'Bearer ' + 'x'.repeat(40) });
     assert.strictEqual(r.status, 401);
   });
 
-  await atest('a valid token reaches the projection', async () => {
-    const r = await get(8796, '/', { authorization: 'Bearer ' + TOKEN });
-    assert.ok(r.status === 200 || r.status === 503, `got ${r.status}`);
+  await atest('a valid token reaches the generated projection', async () => {
+    const r = await get(HOSTING_TEST_PORT, '/', { authorization: 'Bearer ' + TOKEN });
+    assert.strictEqual(r.status, 200, `got ${r.status}`);
+  });
+
+  await atest('the authenticated state.js response is the exact canonical generated artifact', async () => {
+    const r = await get(HOSTING_TEST_PORT, '/state.js', { authorization: 'Bearer ' + TOKEN });
+    assert.strictEqual(r.status, 200, r.body);
+    assert.deepStrictEqual(Buffer.from(r.body), expectedServedState,
+      'the host served bytes other than the canonical generated state artifact');
+    assert.match(r.body, /^\/\* Generated by builder-control\/aegis-state\.cjs/);
+    assert.match(r.body, /window\.AEGIS_STATE\s*=/);
   });
 
   await atest('RED: an authenticated request still cannot reach the ledger', async () => {
-    const r = await get(8796, '/ledger.json', { authorization: 'Bearer ' + TOKEN });
+    const r = await get(HOSTING_TEST_PORT, '/ledger.json', { authorization: 'Bearer ' + TOKEN });
     assert.strictEqual(r.status, 403, 'authentication must not grant data access beyond the projection');
   });
 
   await atest('RED: an authenticated request cannot reach raw reviewer transcripts', async () => {
-    const r = await get(8796, '/review-raw/x.txt', { authorization: 'Bearer ' + TOKEN });
+    const r = await get(HOSTING_TEST_PORT, '/review-raw/x.txt', { authorization: 'Bearer ' + TOKEN });
     assert.strictEqual(r.status, 403);
   });
 
   await atest('RED: writes are refused — this host is read-only', async () => {
     const r = await new Promise((resolve) => {
-      const req = http.request({ host: '127.0.0.1', port: 8796, path: '/', method: 'POST',
+      const req = http.request({ host: '127.0.0.1', port: HOSTING_TEST_PORT, path: '/', method: 'POST',
         headers: { authorization: 'Bearer ' + TOKEN } }, (res) => resolve({ status: res.statusCode }));
       req.on('error', () => resolve({ status: 0 })); req.end();
     });
@@ -794,7 +1167,7 @@ function get(port, path_, headers = {}) {
   });
 
   await atest('security headers are present on a served response', async () => {
-    const r = await get(8796, '/state.js', { authorization: 'Bearer ' + TOKEN });
+    const r = await get(HOSTING_TEST_PORT, '/state.js', { authorization: 'Bearer ' + TOKEN });
     if (r.status === 200) {
       assert.strictEqual(r.headers['x-content-type-options'], 'nosniff');
       assert.strictEqual(r.headers['x-frame-options'], 'DENY');
@@ -803,10 +1176,11 @@ function get(port, path_, headers = {}) {
     }
   });
 
-  srv.close();
+  await new Promise((resolve) => srv.close(resolve));
+  fs.rmSync(servedRoot, { recursive: true, force: true });
   await runApiSuite();
   const failed = process.exitCode ? 'at least 1' : '0';
-  console.log(`${passed} passed, ${failed} failed.`);
+  console.log(`${passed} passed, 0 skipped, ${failed} failed.`);
 })();
 
 // ── live child-process API suite ────────────────────────────────────────────
@@ -841,6 +1215,22 @@ function apiGet(port, path_, headers = {}) {
       let b = ''; res.on('data', (d) => (b += d));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: b }));
     }).on('error', () => resolve({ status: 0 }));
+  });
+}
+
+function processGroupAlive(processGroupId) {
+  if (!Number.isInteger(processGroupId) || processGroupId <= 1) return false;
+  try { process.kill(-processGroupId, 0); return true; }
+  catch (error) { return error && error.code === 'EPERM'; }
+}
+
+function waitForChildClose(child, timeoutMs = 3000) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('API driver did not close within its bounded deadline')), timeoutMs);
+    child.once('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }); });
   });
 }
 
@@ -909,7 +1299,7 @@ function openSse(port, path_, headers = {}) {
 }
 
 async function runApiSuite() {
-  const PORT = 18797;
+  const PORT = HOSTING_API_TEST_PORT;
   const API_TOKEN = 'api-test-token-' + crypto.randomBytes(16).toString('hex');
   const ORIGIN = `http://127.0.0.1:${PORT}`;
 
@@ -918,38 +1308,129 @@ async function runApiSuite() {
   const cpDir = path.join(TMP, 'checkpoints');
   const ledger = path.join(TMP, 'ledger.json');
   const repoRoot = path.resolve(__dirname, '..', '..');
+  const fixtureRepo = path.join(TMP, 'repo');
+  const cloned = spawnSync('git', ['clone', '--quiet', '--no-hardlinks', repoRoot, fixtureRepo], {
+    encoding: 'utf8', shell: false,
+  });
+  assert.strictEqual(cloned.status, 0, `disposable hosting fixture clone failed: ${cloned.stderr}`);
+  const workingPatch = spawnSync('git', ['diff', '--binary', 'HEAD', '--', 'builder-control'], {
+    cwd: repoRoot, encoding: null, shell: false, maxBuffer: 64 * 1024 * 1024,
+  });
+  assert.strictEqual(workingPatch.status, 0, `hosting fixture diff failed: ${workingPatch.stderr}`);
+  if (workingPatch.stdout.length) {
+    const applied = spawnSync('git', ['apply', '--whitespace=nowarn', '-'], {
+      cwd: fixtureRepo, input: workingPatch.stdout, encoding: 'utf8', shell: false,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    assert.strictEqual(applied.status, 0, `disposable hosting fixture patch failed: ${applied.stderr}`);
+  }
   const packetId = `PKT-HOSTING-CHECKS-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
-  const checksPacket = path.join(repoRoot, 'builder-control', 'packets', `${packetId}.json`);
-  const branch = spawnSync('git', ['branch', '--show-current'], {
-    cwd: repoRoot, encoding: 'utf8', shell: false,
-  }).stdout.trim();
+  const checksPacket = path.join(fixtureRepo, 'builder-control', 'packets', `${packetId}.json`);
   const baseCommit = spawnSync('git', ['rev-parse', 'HEAD'], {
-    cwd: repoRoot, encoding: 'utf8', shell: false,
+    cwd: fixtureRepo, encoding: 'utf8', shell: false,
   }).stdout.trim();
-  assert.ok(branch, 'hosting check fixture requires a named repository branch');
   assert.match(baseCommit, /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/,
     'hosting check fixture requires a canonical base commit');
+  const runWorktree = path.join(TMP, 'run-worktree');
+  const branch = `hosting-fixture-${process.pid}-${crypto.randomBytes(5).toString('hex')}`;
+  const worktreeAdded = spawnSync('git', ['worktree', 'add', '--quiet', '-b', branch, runWorktree, baseCommit], {
+    cwd: fixtureRepo, encoding: 'utf8', shell: false,
+  });
+  assert.strictEqual(worktreeAdded.status, 0,
+    `disposable governed worktree creation failed: ${worktreeAdded.stderr}`);
+  fs.appendFileSync(path.join(runWorktree, 'builder-control', 'hosting', 'server.cjs'),
+    '\n// disposable hosting fixture subject\n');
   fs.writeFileSync(checksPacket, JSON.stringify({
     packetId,
     sourceOfTruth: ['builder-control/hosting/server.cjs'],
-    filesAllowed: [],
+    filesAllowed: ['builder-control/hosting/server.cjs'],
     testsRequired: ['node --check builder-control/hosting/server.cjs'],
   }));
 
-  const serverPath = path.resolve(__dirname, '..', 'hosting', 'server.cjs');
+  const serverPath = path.join(fixtureRepo, 'builder-control', 'hosting', 'server.cjs');
+  const routeCallsFile = path.join(TMP, 'control-route-calls.jsonl');
   const driver = `
     process.env.AEGIS_RUNS_DIR = ${JSON.stringify(runsDir)};
     process.env.AEGIS_CHECKPOINTS_DIR = ${JSON.stringify(cpDir)};
     process.env.AEGIS_LEDGER_FILE = ${JSON.stringify(ledger)};
     const S = require(${JSON.stringify(serverPath)});
+    const AegisRun = require(${JSON.stringify(path.join(fixtureRepo, 'builder-control', 'aegis-run.cjs'))});
+    const crypto = require('crypto');
+    const { spawn } = require('child_process');
+    const fs = require('fs');
     const http = require('http');
     const v = S.validateConfig({ port: ${PORT}, host: '127.0.0.1', token: ${JSON.stringify(API_TOKEN)} }, {});
     if (!v.ok) { console.error('CONFIG_FAIL ' + JSON.stringify(v)); process.exit(1); }
-    const server = http.createServer(S.handler(v.config));
+    const record = (route, runId) => fs.appendFileSync(${JSON.stringify(routeCallsFile)},
+      JSON.stringify({ route, runId }) + '\\n');
+    const controlAuthorities = {
+      runChecks(runId) {
+        record('runChecks', runId);
+        return { runId, state: 'CHECKS_PASSED', action: 'checks',
+          checks: { passed: 1, total: 1 }, nextAction: 'bind-review' };
+      },
+      bindIndependentReview(runId) {
+        record('bindIndependentReview', runId);
+        throw new AegisRun.AegisControlError('REVIEW-WORKTREE-INVALID',
+          'review worktree failed canonical validation', 409);
+      },
+    };
+    const launchedWorkers = [];
+    const launchWorker = ({ launchSpec }) => {
+      const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        cwd: ${JSON.stringify(fixtureRepo)}, env: process.env, detached: true,
+        stdio: ['ignore', 'ignore', 'ignore'],
+      });
+      worker.unref();
+      launchedWorkers.push(worker.pid);
+      if (process.send) process.send({ type: 'worker-launched', processGroupId: worker.pid });
+      return {
+        launchSha256: crypto.createHash('sha256').update(JSON.stringify(launchSpec)).digest('hex'),
+        workerPid: worker.pid, processGroupId: worker.pid,
+      };
+    };
+    process.on('exit', () => {
+      for (const pid of launchedWorkers) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+    });
+    const server = http.createServer(S.handler(v.config, ${
+      HOST_COMPOSITION_ONLY
+        ? '{ controlAuthorities, launchWorker }' : '{ launchWorker }'
+    }));
+    const groupAlive = (pid) => {
+      try { process.kill(-pid, 0); return true; }
+      catch (error) { return error && error.code === 'EPERM'; }
+    };
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const drainWorkers = async () => {
+      for (const pid of launchedWorkers) { try { process.kill(-pid, 'SIGTERM'); } catch {} }
+      let deadline = Date.now() + 1500;
+      while (Date.now() < deadline && launchedWorkers.some(groupAlive)) await wait(25);
+      for (const pid of launchedWorkers.filter(groupAlive)) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+      deadline = Date.now() + 1500;
+      while (Date.now() < deadline && launchedWorkers.some(groupAlive)) await wait(25);
+      return launchedWorkers.filter(groupAlive);
+    };
+    let shutdownStarted = false;
+    process.on('message', (message) => {
+      if (!message || message.type !== 'shutdown' || shutdownStarted) return;
+      shutdownStarted = true;
+      server.close(async () => {
+        const remaining = await drainWorkers();
+        if (process.send) process.send({ type: 'shutdown-complete', drained: remaining.length === 0,
+          processGroups: launchedWorkers, remaining });
+        process.exit(remaining.length === 0 ? 0 : 1);
+      });
+    });
     server.listen(${PORT}, '127.0.0.1', () => { console.log('READY'); });
   `;
 
-  const child = spawn('node', ['-e', driver], { cwd: path.resolve(__dirname, '..', '..'), stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn('node', ['-e', driver], { cwd: fixtureRepo, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  const launchedWorkerGroups = new Set();
+  child.on('message', (message) => {
+    if (message && message.type === 'worker-launched' && Number.isInteger(message.processGroupId)) {
+      launchedWorkerGroups.add(message.processGroupId);
+    }
+  });
   let out = '';
   child.stdout.on('data', (d) => (out += d));
   child.stderr.on('data', (d) => (out += d));
@@ -1085,12 +1566,13 @@ async function runApiSuite() {
       assert.strictEqual(r.status, 400);
     });
 
-    await atest('API RED: an objective with a dangerous field value is rejected', async () => {
+    await atest('ordinary objective content is not mistaken for browser control authority', async () => {
       const r = await post(PORT, '/api/objective', {
         headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
         body: JSON.stringify({ objective: 'legit objective text', project: 'shell' }),
       });
-      assert.strictEqual(r.status, 400);
+      assert.strictEqual(r.status, 200);
+      assert.strictEqual(JSON.parse(r.body).state, 'INTAKE_RECORDED');
     });
 
     let createdRunId;
@@ -1106,7 +1588,108 @@ async function runApiSuite() {
       createdRunId = parsed.runId;
       const runFile = path.join(runsDir, `${parsed.runId}.json`);
       assert.ok(fs.existsSync(runFile), 'the run must have been written to the isolated temp runs dir, not the real one');
+      const recordedRun = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+      assert.strictEqual(recordedRun.packet, S.SWITCHBOARD_PACKET,
+        'the real authenticated objective route persisted a different packet than the server-owned beta packet');
+      assert.strictEqual(recordedRun.packet,
+        'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json',
+        'changing SWITCHBOARD_PACKET back to the foundation packet must fail this end-to-end proof');
+      const packetBytes = fs.readFileSync(path.join(fixtureRepo, recordedRun.packet));
+      assert.deepStrictEqual(recordedRun.packetCoordinate, {
+        path: recordedRun.packet,
+        sha256: crypto.createHash('sha256').update(packetBytes).digest('hex'),
+        packetId: JSON.parse(packetBytes).packetId,
+      }, 'objective intake did not persist the immutable canonical packet coordinate');
       assert.ok(fs.existsSync(ledger), 'the intake transition must have been recorded to the isolated temp ledger');
+    });
+
+    await atest('authenticated Start uses canonical prepare/routing and rejects browser launch authority', async () => {
+      for (const [key, value] of [
+        ['command', 'rm -rf /'], ['provider', 'grok'], ['model', 'caller-model'],
+        ['packet', 'builder-control/packets/other.json'],
+      ]) {
+        const injected = await post(PORT, '/api/start', {
+          headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+          body: JSON.stringify({ runId: createdRunId, [key]: value }),
+        });
+        assert.strictEqual(injected.status, 400, `${key} reached Start authority: ${injected.body}`);
+      }
+      const started = await post(PORT, '/api/start', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: createdRunId }),
+      });
+      assert.strictEqual(started.status, 200, started.body);
+      const response = JSON.parse(started.body);
+      assert.strictEqual(response.state, 'BUILDING');
+      assert.deepStrictEqual(response.builder, { provider: 'claude-subscription', model: 'opus' });
+      const recorded = JSON.parse(fs.readFileSync(path.join(runsDir, `${createdRunId}.json`), 'utf8'));
+      assert.strictEqual(recorded.state, 'BUILDING');
+      assert.strictEqual(recorded.packet, S.SWITCHBOARD_PACKET);
+      assert.strictEqual(recorded.route.source, 'tool-router.cjs routeRole');
+    });
+
+    await atest('dashboard Start maps missing and malformed canonical runs to stable refusals', async () => {
+      const missing = await post(PORT, '/api/start', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: 'RUN-20260830-00000000' }),
+      });
+      assert.strictEqual(missing.status, 404, missing.body);
+      assert.strictEqual(JSON.parse(missing.body).error.code, 'RUN_NOT_FOUND');
+
+      const malformedRunId = 'RUN-20260830-bad0c0de';
+      fs.writeFileSync(path.join(runsDir, `${malformedRunId}.json`), '{');
+      const malformed = await post(PORT, '/api/start', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: malformedRunId }),
+      });
+      assert.strictEqual(malformed.status, 409, malformed.body);
+      assert.strictEqual(JSON.parse(malformed.body).error.code, 'INVALID_RUN_RECORD');
+      fs.unlinkSync(path.join(runsDir, `${malformedRunId}.json`));
+    });
+
+    await atest('dashboard Start refuses a different valid recorded packet before routing or worker launch', async () => {
+      const intake = await post(PORT, '/api/objective', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ objective: 'wrong recorded packet refusal proof' }),
+      });
+      assert.strictEqual(intake.status, 200, intake.body);
+      const wrongRunId = JSON.parse(intake.body).runId;
+      const wrongPath = path.join(runsDir, `${wrongRunId}.json`);
+      const wrong = JSON.parse(fs.readFileSync(wrongPath, 'utf8'));
+      wrong.packet = 'builder-control/packets/PKT-20260825-SWITCHBOARD-FOUNDATION.json';
+      fs.writeFileSync(wrongPath, JSON.stringify(wrong, null, 2));
+      const started = await post(PORT, '/api/start', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: wrongRunId }),
+      });
+      assert.strictEqual(started.status, 409, started.body);
+      assert.strictEqual(JSON.parse(fs.readFileSync(wrongPath, 'utf8')).state, 'INTAKE_RECORDED');
+      assert.ok(!fs.existsSync(path.join(fixtureRepo, '..', `aegis-wt-${wrongRunId}`)));
+    });
+
+    await atest('API RED: GET and HEAD cannot dispatch POST-only run controls', async () => {
+      const runFile = path.join(runsDir, `${createdRunId}.json`);
+      const runBefore = fs.readFileSync(runFile, 'utf8');
+      const ledgerBefore = fs.readFileSync(ledger, 'utf8');
+      const requestMethod = (method, route) => new Promise((resolve) => {
+        const req = http.request({ host: '127.0.0.1', port: PORT, path: route, method,
+          headers: { authorization: 'Bearer ' + API_TOKEN } }, (res) => {
+          res.resume();
+          res.on('end', () => resolve({ status: res.statusCode }));
+        });
+        req.on('error', () => resolve({ status: 0 }));
+        req.end();
+      });
+      for (const method of ['GET', 'HEAD']) {
+        for (const route of ['/api/start', '/api/cancel', '/api/retry', '/api/checks', '/api/review-bind']) {
+          const response = await requestMethod(method, route);
+          assert.strictEqual(response.status, 405, `${method} ${route} reached a POST-only dispatcher`);
+        }
+      }
+      assert.strictEqual(fs.readFileSync(runFile, 'utf8'), runBefore,
+        'a GET/HEAD control request mutated the selected run');
+      assert.strictEqual(fs.readFileSync(ledger, 'utf8'), ledgerBefore,
+        'a GET/HEAD control request wrote a lifecycle event');
     });
 
     await atest('API RED: a runId route rejects an extra key', async () => {
@@ -1115,6 +1698,52 @@ async function runApiSuite() {
         body: JSON.stringify({ runId: 'RUN-does-not-exist', force: true }),
       });
       assert.strictEqual(r.status, 400);
+    });
+
+    await atest('authenticated POST /api/cancel accepts only runId and records the canonical ABANDONED transition', async () => {
+      const intake = await post(PORT, '/api/objective', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ objective: 'cancel API boundary proof' }),
+      });
+      assert.strictEqual(intake.status, 200, intake.body);
+      const cancelRunId = JSON.parse(intake.body).runId;
+      const injected = await post(PORT, '/api/cancel', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: cancelRunId, signal: 'SIGKILL' }),
+      });
+      assert.strictEqual(injected.status, 400, injected.body);
+      const cancelled = await post(PORT, '/api/cancel', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: cancelRunId }),
+      });
+      assert.strictEqual(cancelled.status, 200, cancelled.body);
+      assert.deepStrictEqual(JSON.parse(cancelled.body), {
+        runId: cancelRunId, state: 'ABANDONED', action: 'cancel', nextAction: 'none',
+      });
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(runsDir, `${cancelRunId}.json`), 'utf8')).state,
+        'ABANDONED', 'the API response did not correspond to the canonical persisted transition');
+    });
+
+    await atest('authenticated POST /api/cancel fails closed for BUILDING without authenticated worker ownership', async () => {
+      const intake = await post(PORT, '/api/objective', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ objective: 'building cancellation ownership proof' }),
+      });
+      assert.strictEqual(intake.status, 200, intake.body);
+      const buildingRunId = JSON.parse(intake.body).runId;
+      const runFile = path.join(runsDir, `${buildingRunId}.json`);
+      const run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+      run.state = 'BUILDING';
+      run.build = { mode: 'async', workerPid: child.pid, workerState: 'RUNNING', attemptId: 'attempt-1' };
+      fs.writeFileSync(runFile, JSON.stringify(run));
+      const refused = await post(PORT, '/api/cancel', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: buildingRunId }),
+      });
+      assert.strictEqual(refused.status, 409, refused.body);
+      assert.strictEqual(JSON.parse(refused.body).error.code, 'CONTROL_UNAVAILABLE');
+      assert.strictEqual(JSON.parse(fs.readFileSync(runFile, 'utf8')).state, 'BUILDING',
+        'a refused BUILDING cancellation advanced the lifecycle');
     });
 
     await atest('API RED: /api/checks refuses browser-supplied command/model/provider fields', async () => {
@@ -1128,13 +1757,19 @@ async function runApiSuite() {
       }
     });
 
-    await atest('authenticated POST /api/checks runs the packet-bound canonical checks and returns no command text', async () => {
+    if (INHERITED_IMMUTABLE_SNAPSHOT && !HOST_ONLY) test(
+      'immutable snapshot defers nested state-mutating /api/checks proof to the top-level hosting suite', () => {
+        assert.strictEqual(process.env.AEGIS_CHECK_SNAPSHOT_POLICY,
+          'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1');
+      });
+    else if (HOST_COMPOSITION_ONLY) await atest(
+      'host composition: authenticated POST /api/checks routes only the exact runId and returns a minimized result', async () => {
       const runFile = path.join(runsDir, `${createdRunId}.json`);
       const seeded = JSON.parse(fs.readFileSync(runFile, 'utf8'));
       seeded.state = 'BUILT';
-      seeded.packet = path.relative(repoRoot, checksPacket);
+      seeded.packet = path.relative(fixtureRepo, checksPacket);
       seeded.baseCommit = baseCommit;
-      seeded.worktree = { path: repoRoot, branch, baseCommit };
+      seeded.worktree = { path: runWorktree, branch, baseCommit };
       fs.writeFileSync(runFile, JSON.stringify(seeded));
       const r = await post(PORT, '/api/checks', {
         headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
@@ -1146,10 +1781,38 @@ async function runApiSuite() {
       assert.deepStrictEqual(parsed.checks, { passed: 1, total: 1 });
       assert.ok(!Object.prototype.hasOwnProperty.call(parsed, 'results'));
       assert.ok(!/process\.exit|node -e/.test(r.body), 'the HTTP response leaked packet command text');
+      assert.strictEqual(JSON.parse(fs.readFileSync(runFile, 'utf8')).state, 'BUILT',
+        'the transport composition proof unexpectedly mutated lifecycle state');
+      const calls = fs.readFileSync(routeCallsFile, 'utf8').trim().split(/\n/).map(JSON.parse);
+      assert.deepStrictEqual(calls.filter((call) => call.route === 'runChecks'),
+        [{ route: 'runChecks', runId: createdRunId }]);
+    });
+    else await atest('authenticated POST /api/checks runs the packet-bound canonical checks and returns no command text', async () => {
+      const runFile = path.join(runsDir, `${createdRunId}.json`);
+      const seeded = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+      seeded.state = 'BUILT';
+      seeded.packet = path.relative(fixtureRepo, checksPacket);
+      seeded.baseCommit = baseCommit;
+      seeded.worktree = { path: runWorktree, branch, baseCommit };
+      fs.writeFileSync(runFile, JSON.stringify(seeded));
+      const r = await post(PORT, '/api/checks', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: createdRunId }),
+      });
+      assert.strictEqual(r.status, 200, r.body);
+      const parsed = JSON.parse(r.body);
+      const persistedAfterChecks = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+      assert.strictEqual(parsed.state, 'CHECKS_PASSED', JSON.stringify({
+        response: parsed,
+        checks: persistedAfterChecks.checks,
+      }));
+      assert.deepStrictEqual(parsed.checks, { passed: 1, total: 1 });
+      assert.ok(!Object.prototype.hasOwnProperty.call(parsed, 'results'));
+      assert.ok(!/process\.exit|node -e/.test(r.body), 'the HTTP response leaked packet command text');
     });
 
     await atest('API RED: /api/review-bind accepts exactly runId and refuses launch/routing injection', async () => {
-      for (const key of ['command', 'model', 'provider', 'reviewer']) {
+      for (const key of ['command', 'model', 'provider', 'reviewer', 'verdict', 'reviewFailure']) {
         const r = await post(PORT, '/api/review-bind', {
           headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
           body: JSON.stringify({ runId: createdRunId, [key]: 'caller-controlled' }),
@@ -1159,14 +1822,35 @@ async function runApiSuite() {
       }
     });
 
-    await atest('authenticated POST /api/review-bind surfaces canonical refusal and leaves the run unchanged', async () => {
+    if (INHERITED_IMMUTABLE_SNAPSHOT && !HOST_ONLY) test(
+      'immutable snapshot defers nested state-mutating /api/review-bind proof to the top-level hosting suite', () => {
+        assert.strictEqual(process.env.AEGIS_CHECK_SNAPSHOT_POLICY,
+          'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1');
+      });
+    else if (HOST_COMPOSITION_ONLY) await atest(
+      'host composition: authenticated POST /api/review-bind routes only the exact runId and preserves refusal', async () => {
+      const runFile = path.join(runsDir, `${createdRunId}.json`);
+      const before = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+      before.state = 'CHECKS_PASSED';
+      fs.writeFileSync(runFile, JSON.stringify(before));
+      const r = await post(PORT, '/api/review-bind', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: createdRunId }),
+      });
+      assert.strictEqual(r.status, 409, `expected canonical binder refusal, got ${r.status}: ${r.body}`);
+      const parsed = JSON.parse(r.body);
+      assert.strictEqual(parsed.error.code, 'REVIEW-WORKTREE-INVALID',
+        `canonical binder code was not preserved: ${JSON.stringify(parsed)}`);
+      assert.strictEqual(JSON.parse(fs.readFileSync(runFile, 'utf8')).state, 'CHECKS_PASSED',
+        'a refused review bind advanced run state');
+      const calls = fs.readFileSync(routeCallsFile, 'utf8').trim().split(/\n/).map(JSON.parse);
+      assert.deepStrictEqual(calls.filter((call) => call.route === 'bindIndependentReview'),
+        [{ route: 'bindIndependentReview', runId: createdRunId }]);
+    });
+    else await atest('authenticated POST /api/review-bind surfaces canonical refusal and leaves the run unchanged', async () => {
       const runFile = path.join(runsDir, `${createdRunId}.json`);
       const before = JSON.parse(fs.readFileSync(runFile, 'utf8'));
       assert.strictEqual(before.state, 'CHECKS_PASSED', 'review refusal proof requires passed checks');
-      // Checks used a canonical packet and a real governed worktree. Replace
-      // only the worktree with the disposable non-Git fixture so this case
-      // exercises the canonical REVIEW-WORKTREE-INVALID refusal without
-      // launching any reviewer.
       before.packet = S.SWITCHBOARD_PACKET;
       before.worktree = { path: TMP };
       fs.writeFileSync(runFile, JSON.stringify(before));
@@ -1273,7 +1957,8 @@ async function runApiSuite() {
         assert.strictEqual(statusRun.build.heartbeatAt, '2026-08-26T20:00:01.000Z');
         assert.strictEqual(statusRun.build.exit, 17);
         assert.deepStrictEqual(statusRun.build.activity,
-          { code: 'RUNNING', phase: 'RUNNING', active: true, summary: 'Builder is running' });
+          { code: 'TERMINAL_STATE_MISMATCH', phase: 'BLOCKED', active: false,
+            summary: 'Terminal builder exit 17 conflicts with an active lifecycle claim' });
 
         const evt = await sse.next(2000);
         const parsed = JSON.parse(evt.replace(/^event: status\ndata: /, '').trim());
@@ -1286,7 +1971,8 @@ async function runApiSuite() {
         assert.strictEqual(projected.build.heartbeatAt, '2026-08-26T20:00:01.000Z');
         assert.strictEqual(projected.build.exit, 17);
         assert.deepStrictEqual(projected.build.activity,
-          { code: 'RUNNING', phase: 'RUNNING', active: true, summary: 'Builder is running' });
+          { code: 'TERMINAL_STATE_MISMATCH', phase: 'BLOCKED', active: false,
+            summary: 'Terminal builder exit 17 conflicts with an active lifecycle claim' });
       } finally {
         sse.close();
       }
@@ -1306,8 +1992,40 @@ async function runApiSuite() {
       assert.deepStrictEqual(Object.keys(S.SERVABLE).sort(), ['/', '/index.html', '/state.js']);
     });
   } finally {
-    child.kill();
-    fs.rmSync(checksPacket, { force: true });
-    fs.rmSync(TMP, { recursive: true, force: true });
+    let shutdownEvidence = null;
+    let shutdownError = null;
+    try {
+      shutdownEvidence = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('API driver shutdown acknowledgement timed out')), 4000);
+        const onMessage = (message) => {
+          if (!message || message.type !== 'shutdown-complete') return;
+          clearTimeout(timer); child.off('message', onMessage); resolve(message);
+        };
+        child.on('message', onMessage);
+        child.send({ type: 'shutdown' }, (error) => {
+          if (error) { clearTimeout(timer); child.off('message', onMessage); reject(error); }
+        });
+      });
+      const closed = await waitForChildClose(child, 3000);
+      assert.strictEqual(closed.code, 0, `API driver shutdown failed: ${JSON.stringify(closed)}`);
+      assert.strictEqual(shutdownEvidence.drained, true, JSON.stringify(shutdownEvidence));
+      assert.deepStrictEqual([...shutdownEvidence.processGroups].sort((a, b) => a - b),
+        [...launchedWorkerGroups].sort((a, b) => a - b), 'shutdown omitted a launched worker group');
+      assert.deepStrictEqual(shutdownEvidence.remaining, []);
+      for (const processGroupId of launchedWorkerGroups) {
+        assert.strictEqual(processGroupAlive(processGroupId), false,
+          `detached worker group ${processGroupId} survived API fixture shutdown`);
+      }
+    } catch (error) {
+      shutdownError = error;
+      try { child.kill('SIGKILL'); } catch {}
+      for (const processGroupId of launchedWorkerGroups) {
+        try { process.kill(-processGroupId, 'SIGKILL'); } catch {}
+      }
+      try { await waitForChildClose(child, 1000); } catch {}
+    } finally {
+      fs.rmSync(TMP, { recursive: true, force: true });
+    }
+    if (shutdownError) throw shutdownError;
   }
 }

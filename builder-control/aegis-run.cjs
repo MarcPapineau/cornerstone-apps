@@ -37,9 +37,12 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const { Worker } = require('worker_threads');
+const CheckContainment = require('./sandbox-containment.cjs');
 
 const HERE = __dirname;
 const ROOT = path.resolve(HERE, '..');
@@ -67,6 +70,8 @@ const RUNS_DIR = resolveDir('AEGIS_RUNS_DIR', path.join(HERE, 'runs'));
 const CHECKPOINTS_DIR = resolveDir('AEGIS_CHECKPOINTS_DIR', path.join(HERE, 'checkpoints'));
 const LEDGER_WRITER = path.join(HERE, 'ledger-writer.cjs');
 const ENGOS = path.join(HERE, 'engineering-os.cjs');
+const PACKET_TOOLS = path.join(HERE, 'packet-tools.cjs');
+const MODEL_ROUTING_POLICY = path.join(HERE, 'MODEL-ROUTING-POLICY.json');
 
 const EXIT_PASS = 0;
 const EXIT_USAGE = 2;
@@ -84,8 +89,9 @@ const STATES = {
   WORKTREE_READY:   { step: 4,  next: ['BUILDING', 'ABANDONED'] },
   BUILDING:         { step: 5,  next: ['BUILT', 'BUILD_FAILED', 'ABANDONED'] },
   BUILT:            { step: 5,  next: ['CHECKS_PASSED', 'CHECKS_FAILED'] },
-  CHECKS_PASSED:    { step: 6,  next: ['REVIEW_BOUND', 'ABANDONED'] },
+  CHECKS_PASSED:    { step: 6,  next: ['REVIEW_BOUND', 'REVIEW_FAILED', 'CHECKS_FAILED', 'ABANDONED'] },
   REVIEW_BOUND:     { step: 7,  next: ['CHECKPOINTED', 'CORRECTING', 'ABANDONED'] },
+  REVIEW_FAILED:    { step: 7,  next: ['CORRECTING', 'ABANDONED'], failure: true },
   CORRECTING:       { step: 8,  next: ['BUILDING', 'ABANDONED'] },
   CHECKPOINTED:     { step: 10, next: ['ROLLED_BACK'] },
   // Terminal-ish failure states. Each can only go somewhere honest.
@@ -99,9 +105,226 @@ const MAX_CORRECTIONS = 3;
 const WORKER_LAUNCH_GRACE_MS = 5000;
 const CHECK_FAILURE_TAIL_LINES = 80;
 const CHECK_FAILURE_TAIL_BYTES = 16 * 1024;
+const CHECK_RECEIPT_NOTE_PREFIX = 'AEGIS_CHECK_RECEIPT_V1:';
+const PRE_HOST_CHECK_RECEIPT_TYPE = 'AEGIS_PRE_HOST_CHECK_RECEIPT_V1';
+const PRE_HOST_CHECK_RECEIPT_NOTE_PREFIX = `${PRE_HOST_CHECK_RECEIPT_TYPE}:`;
+const HOST_CONTAINMENT_BOUNDARY = 'AEGIS_TOP_LEVEL_HOST_CONTAINMENT_V1';
+const HOST_CONTAINMENT_AUTHORITY = 'aegis-run.cjs runHostContainmentCheck';
+const HOST_PROOF_CONTEXT_TYPE = 'AEGIS_HOST_PROOF_CONTEXT_V1';
+const HOST_PROOF_EVIDENCE_TYPE = 'AEGIS_HOST_PROOF_EVIDENCE_V1';
+const HOST_PROOF_EVIDENCE_PREFIX = `${HOST_PROOF_EVIDENCE_TYPE}:`;
+const HOST_CONTAINMENT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
+const HOST_CONTAINMENT_ALLOWED_COMMANDS = new Set([
+  'node builder-control/test/host-containment.test.cjs',
+]);
+const HOST_CONTAINMENT_REQUIRED_PACKET_IDS = new Set([
+  'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA',
+]);
+const HOST_PRE_HOST_COVERAGE_COMMANDS = Object.freeze([
+  'node builder-control/test/functional-beta-snapshot.test.cjs',
+  'node builder-control/test/dashboard-slice.test.cjs',
+]);
+const HOST_FIXED_PROBE_NAMES = Object.freeze([
+  'deny-default-environment-self-test',
+  'governed-worker-lifecycle',
+  'governed-run-host-authority',
+  'governed-review-adapter-boundary',
+  'governed-http-control-path',
+  'outer-boundary-fixed-probe',
+]);
 
 const nowIso = () => new Date().toISOString();
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+  }
+  return value;
+}
+const stableJson = (value) => JSON.stringify(stableValue(value));
+
+function checkReceiptDigest(receiptWithoutDigest) {
+  if (!receiptWithoutDigest || typeof receiptWithoutDigest !== 'object' || Array.isArray(receiptWithoutDigest)) return null;
+  const body = { ...receiptWithoutDigest };
+  delete body.receiptSha256;
+  return sha256(stableJson(body));
+}
+
+function hostContainmentReceiptDigest(receiptWithoutDigest) {
+  if (!receiptWithoutDigest || typeof receiptWithoutDigest !== 'object' || Array.isArray(receiptWithoutDigest)) return null;
+  const body = { ...receiptWithoutDigest };
+  delete body.receiptSha256;
+  return sha256(stableJson(body));
+}
+
+function validSubjectCoordinate(subject) {
+  return Boolean(subject && /^[0-9a-f]{64}$/.test(subject.subjectSha256 || '') &&
+    Array.isArray(subject.subjectPaths) && subject.subjectPaths.length > 0 &&
+    subject.subjectPaths.every((p) => typeof p === 'string' && p.length > 0) &&
+    JSON.stringify(subject.subjectPaths) === JSON.stringify([...subject.subjectPaths].sort()) &&
+    Number.isInteger(subject.diffBytes) && subject.diffBytes > 0 &&
+    (typeof subject.range === 'string' || subject.range === null));
+}
+
+function validateCompleteHostContainmentReceipt(receipt, expected = {}) {
+  const result = receipt && receipt.result;
+  if (!receipt || receipt.schemaVersion !== 1 || receipt.authority !== HOST_CONTAINMENT_AUTHORITY ||
+      receipt.executionBoundary !== HOST_CONTAINMENT_BOUNDARY || typeof receipt.runId !== 'string' ||
+      !receipt.packet || !receipt.subject || typeof receipt.command !== 'string' || !receipt.command.trim() ||
+      !HOST_CONTAINMENT_ALLOWED_COMMANDS.has(receipt.command) || typeof receipt.platform !== 'string' ||
+      receipt.complete !== true || !['PASS', 'FAIL'].includes(receipt.outcome) ||
+      !Number.isFinite(Date.parse(receipt.startedAt || '')) || !Number.isFinite(Date.parse(receipt.completedAt || '')) ||
+      !/^[0-9a-f]{64}$/.test(receipt.packet.sha256 || '') || typeof receipt.packet.path !== 'string' ||
+      !receipt.snapshot || receipt.snapshot.policy !== CHECK_SNAPSHOT_POLICY ||
+      !/^[0-9a-f]{64}$/.test(receipt.snapshot.captureSha256 || '') ||
+      !validSubjectCoordinate(receipt.subject) || !result ||
+      !['EXECUTED', 'REFUSED', 'SKIPPED'].includes(result.status) ||
+      !(Number.isInteger(result.exit) || result.exit === null) ||
+      !Number.isInteger(result.passed) || result.passed < 0 ||
+      !Number.isInteger(result.skipped) || result.skipped < 0 ||
+      !Number.isInteger(result.failed) || result.failed < 0 ||
+      (result.covered !== undefined && (!Number.isInteger(result.covered) || result.covered < 0)) ||
+      !Number.isInteger(result.total) || result.total !== result.passed + (result.covered || 0) + result.skipped + result.failed ||
+      !Number.isInteger(result.outputBytes) || result.outputBytes < 0 ||
+      typeof result.outputTruncated !== 'boolean' || typeof result.summaryParsed !== 'boolean' ||
+      typeof result.groupDrained !== 'boolean' || typeof result.ownedGroupDrainageProven !== 'boolean' ||
+      !/^[0-9a-f]{64}$/.test(result.outputSha256 || '') ||
+      !/^[0-9a-f]{64}$/.test(receipt.receiptSha256 || '') ||
+      hostContainmentReceiptDigest(receipt) !== receipt.receiptSha256) return false;
+  if (receipt.outcome === 'PASS' && (receipt.platform !== 'darwin' || result.status !== 'EXECUTED' ||
+      result.exit !== 0 || result.outputTruncated || !result.summaryParsed || result.passed <= 0 ||
+      result.skipped !== 0 || result.failed !== 0 || result.groupDrained !== true ||
+      result.ownedGroupDrainageProven !== true)) return false;
+  if (receipt.outcome === 'PASS' && (!receipt.preHostReceiptRef ||
+      !/^LED-CHECK-[0-9a-f]{32}$/.test(receipt.preHostReceiptRef.entryId || '') ||
+      !/^[0-9a-f]{64}$/.test(receipt.preHostReceiptRef.receiptSha256 || '') ||
+      !Array.isArray(receipt.coverage) ||
+      receipt.coverage.length !== HOST_PRE_HOST_COVERAGE_COMMANDS.length ||
+      result.covered !== HOST_PRE_HOST_COVERAGE_COMMANDS.length ||
+      receipt.coverage.some((item, index) => !item || item.suite !== 'pre-host-command' ||
+        item.command !== HOST_PRE_HOST_COVERAGE_COMMANDS[index] ||
+        item.coverage !== 'COVERED_BY_EXACT_PREHOST_COMMAND' ||
+        !/^[0-9a-f]{64}$/.test(item.evidenceSha256 || '')))) return false;
+  if (expected.runId && receipt.runId !== expected.runId) return false;
+  if (expected.packetPath && receipt.packet.path !== expected.packetPath) return false;
+  if (expected.packetSha256 && receipt.packet.sha256 !== expected.packetSha256) return false;
+  if (expected.subject && !sameCanonicalSubject(receipt.subject, expected.subject)) return false;
+  if (expected.command && receipt.command !== expected.command) return false;
+  if (expected.platform && receipt.platform !== expected.platform) return false;
+  if (expected.preHostReceiptRef && stableJson(receipt.preHostReceiptRef) !== stableJson(expected.preHostReceiptRef)) return false;
+  return true;
+}
+
+function validateHostContainmentReceipt(receipt, expected = {}) {
+  return validateCompleteHostContainmentReceipt(receipt, expected) && receipt.outcome === 'PASS';
+}
+
+function validateCheckReceipt(receipt, expected = {}) {
+  if (!receipt || receipt.receiptType === PRE_HOST_CHECK_RECEIPT_TYPE ||
+      receipt.schemaVersion !== 1 || receipt.authority !== 'aegis-run.cjs runChecks' ||
+      typeof receipt.runId !== 'string' || !receipt.packet || !receipt.subject ||
+      receipt.complete !== true || receipt.outcome !== 'PASS' ||
+      !Number.isInteger(receipt.total) || receipt.total <= 0 || receipt.passed !== receipt.total ||
+      !Array.isArray(receipt.results) || receipt.results.length !== receipt.total ||
+      !Number.isFinite(Date.parse(receipt.startedAt || '')) || !Number.isFinite(Date.parse(receipt.completedAt || '')) ||
+      !/^[0-9a-f]{64}$/.test(receipt.packet.sha256 || '') || typeof receipt.packet.path !== 'string' ||
+      !validSubjectCoordinate(receipt.subject) || !/^[0-9a-f]{64}$/.test(receipt.receiptSha256 || '') ||
+      checkReceiptDigest(receipt) !== receipt.receiptSha256 ||
+      !receipt.results.every((r) => r && typeof r.cmd === 'string' && r.cmd.trim() &&
+        r.status === 'EXECUTED' && r.exit === 0 && Number.isFinite(Date.parse(r.ranAt || '')))) return false;
+  const hostCommands = Array.isArray(expected.hostCommands) ? expected.hostCommands : null;
+  if (hostCommands && hostCommands.length > 0 &&
+      (hostCommands.length !== 1 || !validateHostContainmentReceipt(receipt.hostContainment, {
+    runId: receipt.runId,
+    packetPath: receipt.packet.path,
+    packetSha256: receipt.packet.sha256,
+    subject: receipt.subject,
+    command: hostCommands[0],
+    platform: 'darwin',
+  }))) return false;
+  if ((!hostCommands || hostCommands.length === 0) && receipt.hostContainment &&
+      !validateHostContainmentReceipt(receipt.hostContainment, {
+    runId: receipt.runId,
+    packetPath: receipt.packet.path,
+    packetSha256: receipt.packet.sha256,
+    subject: receipt.subject,
+  })) return false;
+  if (expected.runId && receipt.runId !== expected.runId) return false;
+  if (expected.packetPath && receipt.packet.path !== expected.packetPath) return false;
+  if (expected.packetSha256 && receipt.packet.sha256 !== expected.packetSha256) return false;
+  if (expected.subject && !sameCanonicalSubject(receipt.subject, expected.subject)) return false;
+  if (expected.commands && JSON.stringify(receipt.results.map((r) => r.cmd)) !== JSON.stringify(expected.commands)) return false;
+  return true;
+}
+
+function validatePreHostCheckReceipt(receipt, expected = {}) {
+  if (!receipt || receipt.schemaVersion !== 1 ||
+      receipt.receiptType !== PRE_HOST_CHECK_RECEIPT_TYPE ||
+      receipt.authority !== 'aegis-run.cjs runChecks' || typeof receipt.runId !== 'string' ||
+      !receipt.packet || !receipt.subject || !receipt.snapshot ||
+      receipt.snapshot.policy !== CHECK_SNAPSHOT_POLICY ||
+      !/^[0-9a-f]{64}$/.test(receipt.snapshot.captureSha256 || '') ||
+      receipt.complete !== true || receipt.outcome !== 'PASS' ||
+      !Number.isInteger(receipt.total) || receipt.total <= 0 || receipt.passed !== receipt.total ||
+      !Array.isArray(receipt.results) || receipt.results.length !== receipt.total ||
+      !Number.isFinite(Date.parse(receipt.startedAt || '')) ||
+      !Number.isFinite(Date.parse(receipt.completedAt || '')) ||
+      !/^[0-9a-f]{64}$/.test(receipt.packet.sha256 || '') ||
+      typeof receipt.packet.path !== 'string' || !validSubjectCoordinate(receipt.subject) ||
+      !receipt.hostContainment || receipt.hostContainment.state !== 'PENDING' ||
+      !Array.isArray(receipt.hostContainment.commands) ||
+      receipt.hostContainment.commands.length !== 1 ||
+      !HOST_CONTAINMENT_ALLOWED_COMMANDS.has(receipt.hostContainment.commands[0]) ||
+      !/^[0-9a-f]{64}$/.test(receipt.receiptSha256 || '') ||
+      checkReceiptDigest(receipt) !== receipt.receiptSha256 ||
+      !receipt.results.every((result) => result && typeof result.cmd === 'string' && result.cmd.trim() &&
+        result.status === 'EXECUTED' && result.exit === 0 &&
+        Number.isFinite(Date.parse(result.ranAt || '')))) return false;
+  if (expected.runId && receipt.runId !== expected.runId) return false;
+  if (expected.packetPath && receipt.packet.path !== expected.packetPath) return false;
+  if (expected.packetSha256 && receipt.packet.sha256 !== expected.packetSha256) return false;
+  if (expected.subject && !sameCanonicalSubject(receipt.subject, expected.subject)) return false;
+  if (expected.captureSha256 && receipt.snapshot.captureSha256 !== expected.captureSha256) return false;
+  if (expected.commands && JSON.stringify(receipt.results.map((result) => result.cmd)) !==
+      JSON.stringify(expected.commands)) return false;
+  if (expected.hostCommands && JSON.stringify(receipt.hostContainment.commands) !==
+      JSON.stringify(expected.hostCommands)) return false;
+  return true;
+}
+
+function validateCompleteCheckReceipt(receipt, expected = {}) {
+  if (!receipt || receipt.receiptType === PRE_HOST_CHECK_RECEIPT_TYPE ||
+      receipt.schemaVersion !== 1 || receipt.authority !== 'aegis-run.cjs runChecks' ||
+      typeof receipt.runId !== 'string' || !receipt.packet || !receipt.subject || receipt.complete !== true ||
+      !['PASS', 'FAIL'].includes(receipt.outcome) || !Number.isInteger(receipt.total) || receipt.total <= 0 ||
+      !Number.isInteger(receipt.passed) || receipt.passed < 0 || receipt.passed > receipt.total ||
+      !Array.isArray(receipt.results) || receipt.results.length !== receipt.total ||
+      !Number.isFinite(Date.parse(receipt.startedAt || '')) || !Number.isFinite(Date.parse(receipt.completedAt || '')) ||
+      !/^[0-9a-f]{64}$/.test(receipt.packet.sha256 || '') || typeof receipt.packet.path !== 'string' ||
+      !validSubjectCoordinate(receipt.subject) || !/^[0-9a-f]{64}$/.test(receipt.receiptSha256 || '') ||
+      checkReceiptDigest(receipt) !== receipt.receiptSha256 ||
+      !receipt.results.every((r) => r && typeof r.cmd === 'string' && r.cmd.trim() &&
+        typeof r.status === 'string' && (Number.isInteger(r.exit) || r.exit === null))) return false;
+  if (receipt.hostContainment && !validateCompleteHostContainmentReceipt(receipt.hostContainment, {
+    runId: receipt.runId,
+    packetPath: receipt.packet.path,
+    packetSha256: receipt.packet.sha256,
+    subject: receipt.subject,
+  })) return false;
+  if (Array.isArray(expected.hostCommands) && expected.hostCommands.length > 0 &&
+      (!receipt.hostContainment || expected.hostCommands.length !== 1 ||
+       receipt.hostContainment.command !== expected.hostCommands[0])) return false;
+  if (receipt.outcome === 'PASS' && !validateCheckReceipt(receipt, expected)) return false;
+  if (receipt.outcome === 'FAIL' && receipt.passed !== receipt.results.filter((r) => r.exit === 0).length) return false;
+  if (expected.runId && receipt.runId !== expected.runId) return false;
+  if (expected.packetPath && receipt.packet.path !== expected.packetPath) return false;
+  if (expected.packetSha256 && receipt.packet.sha256 !== expected.packetSha256) return false;
+  if (expected.subject && !sameCanonicalSubject(receipt.subject, expected.subject)) return false;
+  if (expected.commands && JSON.stringify(receipt.results.map((r) => r.cmd)) !== JSON.stringify(expected.commands)) return false;
+  return true;
+}
 
 /**
  * Keep failed check diagnostics useful without turning arbitrary process output
@@ -196,6 +419,30 @@ function processExistence(pid) {
   return 'unknown';
 }
 
+function processGroupExistence(processGroupId) {
+  if (!Number.isInteger(processGroupId) || processGroupId <= 1) return 'unknown';
+  try { process.kill(-processGroupId, 0); return 'present'; }
+  catch (error) {
+    if (error && error.code === 'ESRCH') return 'absent';
+    if (error && error.code === 'EPERM') return 'present';
+    return 'unknown';
+  }
+}
+
+function processGroupMembers(processGroupId, timeoutMs = 500) {
+  if (!Number.isInteger(processGroupId) || processGroupId <= 1) return null;
+  const observed = spawnSync('ps', ['-axo', 'pid=,pgid='], {
+    encoding: 'utf8', timeout: timeoutMs,
+  });
+  if (observed.error || observed.signal || observed.status !== 0) return null;
+  const members = [];
+  for (const line of String(observed.stdout || '').split('\n')) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (match && Number(match[2]) === processGroupId) members.push(Number(match[1]));
+  }
+  return members;
+}
+
 function sameProcessIdentity(recorded, observed) {
   return Boolean(recorded && observed &&
     recorded.pid === observed.pid &&
@@ -203,6 +450,19 @@ function sameProcessIdentity(recorded, observed) {
     recorded.startMarker === observed.startMarker &&
     recorded.executable === observed.executable &&
     recorded.source === observed.source);
+}
+
+function workerLeaseRunBindingMatches(claim) {
+  if (!claim || claim.holder !== 'WORKER_LEASE') return false;
+  let run;
+  try { run = loadRun(claim.runId); } catch { return false; }
+  const lease = run && run.build && run.build.globalLease;
+  return Boolean(lease && run.build.attemptId === claim.attemptId &&
+    lease.claimId === claim.claimId && lease.holder === 'WORKER_LEASE' &&
+    lease.transferFrom === claim.transferFrom && lease.runId === claim.runId &&
+    lease.attemptId === claim.attemptId && lease.pid === claim.pid &&
+    lease.processGroupId === claim.processGroupId &&
+    sameProcessIdentity(lease.processIdentity, claim.processIdentity));
 }
 
 function workerOwnershipProof(initialBuild, freshBuild) {
@@ -263,9 +523,6 @@ function isPlainObject(v) {
 }
 
 function containsDangerousField(value, path) {
-  if (typeof value === 'string' && OBJECTIVE_DANGEROUS_FIELDS.has(value.trim().toLowerCase())) {
-    return `${path} contains a control field value ("${value.trim()}")`;
-  }
   if (Array.isArray(value)) {
     for (const v of value) {
       const hit = containsDangerousField(v, path);
@@ -387,6 +644,128 @@ function resolvePacketOption(packetOption) {
   return path.relative(ROOT, real);
 }
 
+function packetCoordinate(packet) {
+  const packetReal = fs.realpathSync(path.resolve(ROOT, packet));
+  const bytes = fs.readFileSync(packetReal);
+  return Object.freeze({
+    path: path.relative(ROOT, packetReal),
+    sha256: sha256(bytes),
+    real: packetReal,
+    // The packet is executable authority. Retain the exact bytes whose digest
+    // and parsed commands were accepted so snapshot establishment cannot
+    // re-open the path and silently execute a different packet generation.
+    bytes,
+    parsed: JSON.parse(bytes.toString('utf8')),
+  });
+}
+
+/**
+ * Validate the exact packet generation whose digest is retained by intake.
+ * packet-tools.cjs remains the sole schema/registry authority; the private
+ * snapshot prevents its validation read from racing a replacement of the
+ * canonical path. A second coordinate read proves the path still contains
+ * the validated generation before it can be recorded or launched.
+ */
+function validatedPacketCoordinate(packet) {
+  const before = packetCoordinate(packet);
+  const validationDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-packet-validation-'));
+  const validationPath = path.join(validationDir, 'packet.json');
+  let validation;
+  try {
+    fs.writeFileSync(validationPath, before.bytes, { flag: 'wx', mode: 0o600 });
+    validation = spawnSync(process.execPath, [PACKET_TOOLS, '--validate', validationPath], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 1024 * 1024,
+    });
+  } finally {
+    fs.rmSync(validationDir, { recursive: true, force: true });
+  }
+  if (!validation || validation.status !== 0) {
+    const detail = boundedCheckFailureTail(
+      `${validation && validation.stderr ? validation.stderr : ''}\n${validation && validation.stdout ? validation.stdout : ''}`
+    ).tail;
+    throw new Error(`canonical packet validation failed${detail ? `: ${detail}` : ''}`);
+  }
+  const after = packetCoordinate(packet);
+  if (before.path !== after.path || before.sha256 !== after.sha256) {
+    throw new Error('packet bytes changed while canonical validation was in progress');
+  }
+  const packetId = before.parsed && before.parsed.packetId;
+  if (typeof packetId !== 'string' || !packetId.trim() || packetId !== after.parsed.packetId) {
+    throw new Error('canonical packetId is missing or changed');
+  }
+  return Object.freeze({
+    path: before.path,
+    sha256: before.sha256,
+    packetId,
+    // The launch-spec factory consumes this exact validated generation. It
+    // must never reopen the mutable canonical path between validation reads.
+    parsed: before.parsed,
+  });
+}
+
+function samePacketCoordinate(left, right) {
+  return Boolean(left && right &&
+    left.path === right.path && left.sha256 === right.sha256 && left.packetId === right.packetId);
+}
+
+function currentRunPacketCoordinate(run) {
+  if (!run || !run.packetCoordinate ||
+      typeof run.packetCoordinate.path !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(run.packetCoordinate.sha256 || '') ||
+      typeof run.packetCoordinate.packetId !== 'string' || !run.packetCoordinate.packetId.trim() ||
+      run.packetCoordinate.path !== run.packet) {
+    throw new Error('run has no complete immutable intake packet coordinate');
+  }
+  const recordedPacket = resolvePacketOption(run.packet);
+  if (!recordedPacket) throw new Error('packet is absent');
+  const current = validatedPacketCoordinate(recordedPacket);
+  if (!samePacketCoordinate(run.packetCoordinate, current)) {
+    throw new Error('packet path, sha256, or packetId changed after objective intake');
+  }
+  return current;
+}
+
+function runnableCheckCommands(packet) {
+  return (packet.testsRequired || []).filter((command) => {
+    if (typeof command !== 'string') return false;
+    const tokens = command.trim().split(/\s+/);
+    const entrypoint = tokens[1] && tokens[1].replace(/^\.\//, '');
+    return !(tokens[0] === 'node' && entrypoint === 'builder-control/engineering-os.cjs' &&
+      tokens.includes('--gate-done'));
+  });
+}
+
+function runnableHostContainmentCommands(packet) {
+  const declared = packet && packet.hostContainmentRequired;
+  const required = Boolean(packet && HOST_CONTAINMENT_REQUIRED_PACKET_IDS.has(packet.packetId));
+  if (declared === undefined && !required) return [];
+  if (!Array.isArray(declared) || declared.length !== 1 ||
+      declared.some((command) => typeof command !== 'string' || !HOST_CONTAINMENT_ALLOWED_COMMANDS.has(command)) ||
+      (required && (!Array.isArray(packet.filesAllowed) ||
+        ![
+          'builder-control/test/host-containment.test.cjs',
+          'builder-control/test/aegis-worker.test.cjs',
+          'builder-control/test/review-adapters.test.cjs',
+          'builder-control/test/aegis-run.test.cjs',
+          'builder-control/test/hosting.test.cjs',
+        ].every((entrypoint) => packet.filesAllowed.includes(entrypoint)) ||
+        !packet.authorization || !Array.isArray(packet.authorization.allowsProtectedPaths) ||
+        ![
+          'builder-control/test/host-containment.test.cjs',
+          'builder-control/test/aegis-worker.test.cjs',
+          'builder-control/test/review-adapters.test.cjs',
+          'builder-control/test/aegis-run.test.cjs',
+          'builder-control/test/hosting.test.cjs',
+        ].every((entrypoint) => packet.authorization.allowsProtectedPaths.includes(entrypoint))))) {
+    throw new RunError('HOST-CONTAINMENT-PACKET-INVALID',
+      'hostContainmentRequired must declare the one canonical aggregate host containment suite and authorize each exact suite it executes');
+  }
+  return declared.slice();
+}
+
 // ── git, argument-array only ────────────────────────────────────────────────
 function git(args, opts = {}) {
   const r = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
@@ -420,6 +799,7 @@ function saveRun(run) {
 }
 
 function runLockPath(runId) { return `${runPath(runId)}.launch.lock`; }
+function globalWorkerLockPath() { return path.join(RUNS_DIR, '.global-worker.launch.lock'); }
 
 function readRunLaunchClaim(lockPath) {
   let stat;
@@ -431,20 +811,41 @@ function readRunLaunchClaim(lockPath) {
   // that an unreadable owner is stale would turn uncertainty into authority.
   if (!stat.isDirectory()) return Object.freeze({ blocked: true, reason: 'LEGACY_OR_MALFORMED_CLAIM' });
   let ownerNames;
-  try { ownerNames = fs.readdirSync(lockPath).filter((name) => name.endsWith('.json')); }
+  try { ownerNames = fs.readdirSync(lockPath); }
   catch { return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' }); }
-  if (ownerNames.length !== 1) return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' });
-  const ownerName = ownerNames[0];
-  const ownerPath = path.join(lockPath, ownerName);
-  let claim;
-  try { claim = JSON.parse(fs.readFileSync(ownerPath, 'utf8')); }
-  catch { return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' }); }
-  if (!claim || claim.claimId !== ownerName.slice(0, -'.json'.length) ||
-      typeof claim.claimId !== 'string' || !claim.claimId ||
-      !Number.isInteger(claim.pid) || claim.pid <= 1 || !claim.processIdentity) {
+  if (ownerNames.length === 0) return Object.freeze({ blocked: true, reason: 'EMPTY_CLAIM' });
+  if (ownerNames.some((name) => !name.endsWith('.json')) || ownerNames.length > 2) {
     return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' });
   }
-  return Object.freeze({ claim, ownerPath });
+  const owners = [];
+  for (const ownerName of ownerNames) {
+    const ownerPath = path.join(lockPath, ownerName);
+    let claim;
+    try { claim = JSON.parse(fs.readFileSync(ownerPath, 'utf8')); }
+    catch { return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' }); }
+    if (!claim || claim.claimId !== ownerName.slice(0, -'.json'.length) ||
+        typeof claim.claimId !== 'string' || !claim.claimId ||
+        !Number.isInteger(claim.pid) || claim.pid <= 1 || !claim.processIdentity ||
+        (claim.holder === 'WORKER_LEASE' &&
+          (!RUN_ID_RE.test(claim.runId || '') || typeof claim.attemptId !== 'string' ||
+           !Number.isInteger(claim.processGroupId) || claim.processGroupId <= 1))) {
+      return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' });
+    }
+    owners.push({ claim, ownerPath });
+  }
+  if (owners.length === 1) return Object.freeze(owners[0]);
+  // Transfer publishes a new immutable generation before removing the exact
+  // launcher generation. Only that unambiguous two-record relationship is
+  // resolvable; every other multi-owner shape fails closed.
+  const worker = owners.find(({ claim }) => claim.holder === 'WORKER_LEASE');
+  const launcher = owners.find(({ claim }) => worker && claim.claimId === worker.claim.transferFrom);
+  if (!worker || !launcher || worker === launcher ||
+      owners.filter(({ claim }) => claim.holder === 'WORKER_LEASE').length !== 1) {
+    return Object.freeze({ blocked: true, reason: 'AMBIGUOUS_CLAIM' });
+  }
+  try { fs.unlinkSync(launcher.ownerPath); }
+  catch (error) { if (error.code !== 'ENOENT') return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' }); }
+  return Object.freeze(worker);
 }
 
 function publishRunLaunchClaim(lockPath, claim) {
@@ -473,6 +874,15 @@ function cleanupOrphanClaimPublications(lockPath) {
   let names;
   try { names = fs.readdirSync(parent); } catch { return; }
   for (const name of names) {
+    const transferPrefix = `${path.basename(lockPath)}.transfer-`;
+    if (name.startsWith(transferPrefix) && name.endsWith('.tmp')) {
+      const transferMatch = name.slice(transferPrefix.length, -'.tmp'.length)
+        .match(/^(\d+)-([0-9a-f]{8}-[0-9a-f-]{27})$/);
+      if (transferMatch && processExistence(Number(transferMatch[1])) === 'absent') {
+        try { fs.unlinkSync(path.join(parent, name)); } catch {}
+      }
+      continue;
+    }
     if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
     const match = name.slice(prefix.length, -'.tmp'.length)
       .match(/^(\d+)-([0-9a-f]{8}-[0-9a-f-]{27})$/);
@@ -499,16 +909,16 @@ function cleanupOrphanClaimPublications(lockPath) {
   }
 }
 
-function acquireRunLaunchClaim(runId, waitMs = 0) {
-  const lockPath = runLockPath(runId);
+function acquireLaunchClaim(lockPath, scope, waitMs = 0, metadata = {}) {
   fs.mkdirSync(RUNS_DIR, { recursive: true });
   const claimId = crypto.randomUUID();
   const claimantIdentity = processIdentity(process.pid);
   if (!claimantIdentity) {
     throw new AegisControlError('CLAIM_IDENTITY_UNAVAILABLE',
-      `cannot prove the process lifetime claiming run ${runId}`, 409);
+      `cannot prove the process lifetime claiming ${scope}`, 409);
   }
-  const claim = { claimId, runId, pid: process.pid, processIdentity: claimantIdentity, claimedAt: nowIso() };
+  const claim = { claimId, scope, ...metadata, holder: 'LAUNCHER', pid: process.pid,
+    processIdentity: claimantIdentity, claimedAt: nowIso() };
   cleanupOrphanClaimPublications(lockPath);
   const deadline = Date.now() + waitMs;
   for (;;) {
@@ -517,27 +927,45 @@ function acquireRunLaunchClaim(runId, waitMs = 0) {
     } catch (e) {
       if (!['EEXIST', 'ENOTEMPTY'].includes(e.code)) throw e;
       const existing = readRunLaunchClaim(lockPath);
+      if (existing && existing.blocked && existing.reason === 'EMPTY_CLAIM') {
+        try { fs.rmdirSync(lockPath); }
+        catch (removeError) {
+          if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(removeError.code)) throw removeError;
+        }
+        continue;
+      }
       if (!existing || existing.blocked) {
         if (Date.now() < deadline) {
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(20, deadline - Date.now()));
           continue;
         }
-        throw new AegisControlError('LAUNCH_IN_PROGRESS', `run ${runId} already has an atomic launch claim`, 409);
+        throw new AegisControlError('LAUNCH_IN_PROGRESS', `${scope} already has an atomic launch claim`, 409);
       }
       const existence = processExistence(existing.claim.pid);
       const observedOwner = existence === 'present' ? processIdentity(existing.claim.pid) : null;
       // Positive absence is sufficient to reclaim a crashed owner. Unknown
       // existence, or a live owner whose immutable identity is unavailable,
       // fails closed. A positive different identity means the PID was reused.
-      const reclaimable = existence === 'absent' ||
+      let reclaimable = existence === 'absent' ||
         (existence === 'present' && observedOwner &&
           !sameProcessIdentity(existing.claim.processIdentity, observedOwner));
+      if (existing.claim.holder === 'WORKER_LEASE') {
+        // A dead supervisor is not a drained build: its child and descendants
+        // remain in the worker-owned process group after the leader exits.
+        // Admission is recoverable only when BOTH the exact owner lifetime is
+        // gone/reused and the complete group is positively absent. Run-file
+        // publication is deliberately not required here: the launcher can die
+        // after lease transfer but before publishing worker metadata, and that
+        // crash must not create an unreclaimable global lock.
+        reclaimable = reclaimable &&
+          processGroupExistence(existing.claim.processGroupId) === 'absent';
+      }
       if (!reclaimable) {
         if (Date.now() < deadline) {
           Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(20, deadline - Date.now()));
           continue;
         }
-        throw new AegisControlError('LAUNCH_IN_PROGRESS', `run ${runId} already has an atomic launch claim`, 409);
+        throw new AegisControlError('LAUNCH_IN_PROGRESS', `${scope} already has an atomic launch claim`, 409);
       }
       // The owner filename is claim-specific. If another reclaimer already
       // removed this stale owner and installed a new claim directory, this
@@ -556,13 +984,128 @@ function acquireRunLaunchClaim(runId, waitMs = 0) {
   }
 }
 
+function acquireRunLaunchClaim(runId, waitMs = 0) {
+  return acquireLaunchClaim(runLockPath(runId), `run ${runId}`, waitMs, { runId });
+}
+
+function acquireGlobalWorkerClaim(waitMs = 0) {
+  return acquireLaunchClaim(globalWorkerLockPath(), 'global worker admission', waitMs,
+    { lease: 'GLOBAL_SINGLE_WORKER' });
+}
+
 function releaseRunLaunchClaim(claim) {
   let current = null;
   try { current = JSON.parse(fs.readFileSync(claim.ownerPath, 'utf8')); } catch {}
-  if (current && current.claimId === claim.claimId) {
+  if (current && current.claimId === claim.claimId && current.pid === claim.pid &&
+      current.holder === claim.holder && current.runId === claim.runId &&
+      current.attemptId === claim.attemptId &&
+      sameProcessIdentity(current.processIdentity, claim.processIdentity)) {
     try { fs.unlinkSync(claim.ownerPath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     try { fs.rmdirSync(claim.lockPath); }
     catch (e) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(e.code)) throw e; }
+    return true;
+  }
+  return false;
+}
+
+function transferGlobalWorkerClaim(claim, runId, attemptId, workerPid, workerIdentity) {
+  if (!claim || claim.lockPath !== globalWorkerLockPath() || claim.holder !== 'LAUNCHER' ||
+      claim.pid !== process.pid || !sameProcessIdentity(claim.processIdentity, processIdentity(process.pid))) {
+    throw new AegisControlError('GLOBAL_LEASE_TRANSFER_REFUSED',
+      'the launcher no longer owns the global worker admission claim', 409);
+  }
+  if (!RUN_ID_RE.test(runId) || typeof attemptId !== 'string' ||
+      !Number.isInteger(workerPid) || workerPid <= 1 ||
+      !sameProcessIdentity(workerIdentity, processIdentity(workerPid))) {
+    throw new AegisControlError('WORKER_IDENTITY_UNAVAILABLE',
+      'the detached worker process lifetime could not be proven before lease transfer', 409);
+  }
+  let current;
+  try { current = JSON.parse(fs.readFileSync(claim.ownerPath, 'utf8')); }
+  catch {
+    throw new AegisControlError('GLOBAL_LEASE_TRANSFER_REFUSED',
+      'the global worker admission owner record disappeared before transfer', 409);
+  }
+  if (current.claimId !== claim.claimId || current.pid !== claim.pid ||
+      current.holder !== 'LAUNCHER' || current.runId !== claim.runId ||
+      current.attemptId !== claim.attemptId ||
+      !sameProcessIdentity(current.processIdentity, claim.processIdentity)) {
+    throw new AegisControlError('GLOBAL_LEASE_TRANSFER_REFUSED',
+      'the global worker admission owner changed before transfer', 409);
+  }
+  const transferredClaimId = crypto.randomUUID();
+  const transferredOwnerPath = path.join(claim.lockPath, `${transferredClaimId}.json`);
+  const transferred = Object.freeze({
+    claimId: transferredClaimId, scope: current.scope, lease: current.lease,
+    holder: 'WORKER_LEASE', transferFrom: current.claimId,
+    runId, attemptId, pid: workerPid, processGroupId: workerPid,
+    processIdentity: workerIdentity, claimedAt: current.claimedAt, transferredAt: nowIso(),
+    lockPath: claim.lockPath, ownerPath: transferredOwnerPath,
+  });
+  const persisted = { ...transferred };
+  delete persisted.lockPath;
+  delete persisted.ownerPath;
+  const temporary = `${claim.lockPath}.transfer-${process.pid}-${transferredClaimId}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(persisted), { flag: 'wx', mode: 0o600 });
+    fs.renameSync(temporary, transferredOwnerPath);
+    try { fs.unlinkSync(claim.ownerPath); }
+    catch { /* the two-owner reader resolves only this exact transferFrom pair */ }
+  } finally { try { fs.unlinkSync(temporary); } catch {} }
+  return transferred;
+}
+
+function verifyGlobalWorkerLease(runId, attemptId, workerPid) {
+  const existing = readRunLaunchClaim(globalWorkerLockPath());
+  const claim = existing && !existing.blocked ? existing.claim : null;
+  const observed = processIdentity(workerPid);
+  if (!claim || claim.holder !== 'WORKER_LEASE' || claim.runId !== runId ||
+      claim.attemptId !== attemptId || claim.pid !== workerPid ||
+      claim.processGroupId !== workerPid ||
+      !sameProcessIdentity(claim.processIdentity, observed) ||
+      !workerLeaseRunBindingMatches(claim)) {
+    throw new RunError('GLOBAL-WORKER-LEASE-MISMATCH',
+      `worker attempt ${attemptId} does not own the exact transferred global lease`);
+  }
+  return Object.freeze({ ...claim, lockPath: globalWorkerLockPath(), ownerPath: existing.ownerPath });
+}
+
+function releaseGlobalWorkerLease(lease) {
+  if (!lease || lease.holder !== 'WORKER_LEASE') return false;
+  const existing = readRunLaunchClaim(globalWorkerLockPath());
+  const current = existing && !existing.blocked ? existing.claim : null;
+  if (!current || current.claimId !== lease.claimId ||
+      current.transferFrom !== lease.transferFrom || current.runId !== lease.runId ||
+      current.attemptId !== lease.attemptId || current.pid !== lease.pid ||
+      current.processGroupId !== lease.processGroupId ||
+      !sameProcessIdentity(current.processIdentity, lease.processIdentity)) return false;
+  // The worker itself is necessarily still a member while executing this
+  // synchronous finally block. Any other member means a builder child or
+  // descendant is still alive, so the lease must survive the wrapper exit and
+  // be reclaimed only after the OS proves the whole group absent.
+  const members = processGroupMembers(lease.processGroupId);
+  if (!Array.isArray(members) || members.some((pid) => pid !== lease.pid)) return false;
+  return releaseRunLaunchClaim(lease);
+}
+
+function assertGlobalWorkerAvailable(runId) {
+  let active = listRuns().find((candidate) => candidate && candidate.runId !== runId &&
+    candidate.state === 'BUILDING');
+  if (active && active.build && active.build.mode === 'async') {
+    const observed = Number.isInteger(active.build.workerPid)
+      ? processIdentity(active.build.workerPid) : null;
+    const existence = Number.isInteger(active.build.workerPid)
+      ? processExistence(active.build.workerPid) : 'absent';
+    if (existence === 'absent' || (observed &&
+        !sameProcessIdentity(active.build.processIdentity, observed))) {
+      reconcileWorkerRun(active.runId);
+      active = listRuns().find((candidate) => candidate && candidate.runId !== runId &&
+        candidate.state === 'BUILDING');
+    }
+  }
+  if (active) {
+    throw new AegisControlError('GLOBAL_WORKER_ACTIVE',
+      `run ${active.runId} already owns the single governed worker slot`, 409);
   }
 }
 
@@ -662,15 +1205,16 @@ function reconcileWorkerRun(runId, options = {}) {
     }
 
     const observed = processIdentity(build.workerPid);
-    if (observed && sameProcessIdentity(build.processIdentity, observed)) {
-      return Object.freeze({ runId, action: 'ACTIVE', state: run.state });
-    }
-    // If the PID is live but its recorded lifetime cannot be proved, leave the
-    // run untouched. Mutating would falsely claim the live worker is gone;
-    // signalling it would be worse. A later observation can reconcile after
-    // the unverified process exits.
     if (observed) {
-      return Object.freeze({ runId, action: 'IDENTITY_UNVERIFIED', state: run.state });
+      if (sameProcessIdentity(build.processIdentity, observed)) {
+        return Object.freeze({ runId, action: 'ACTIVE', state: run.state });
+      }
+      // A complete, positively different immutable identity proves PID reuse.
+      // Do not signal the unrelated process; close only the stale run record.
+      patchOwnedWorkerAttempt(run, build.attemptId, buildRevision(build),
+        unsafeRecoveryPatch(build, 'ORPHANED', observedAt));
+      transition(run, 'BUILD_FAILED', 'detached worker PID was reused after its process lifetime ended');
+      return Object.freeze({ runId, action: 'RECOVERED_UNSAFE', state: 'BUILD_FAILED', reason: 'PID_REUSED' });
     }
 
     // An unavailable identity observation is not evidence of death. Consult a
@@ -711,6 +1255,14 @@ function reconcileBuildingRuns(options = {}) {
  */
 function recordTransition(run, from, to, notes) {
   const stamp = nowIso();
+  // Correction cycles legally repeat transitions such as CORRECTING ->
+  // BUILDING. The first occurrence retains the historical operation id; each
+  // later occurrence is distinct evidence. If a process crashes after the
+  // ledger append but before saveRun(), the unchanged occurrence count
+  // recreates the same operation id and recovers that exact entry.
+  const occurrence = (run.transitions || []).filter((t) => t.from === from && t.to === to).length + 1;
+  const transitionBase = `${run.runId}:${from}->${to}`;
+  const operationId = occurrence === 1 ? transitionBase : `${transitionBase}:occurrence:${occurrence}`;
   const entry = {
     entryId: `LED-RUN-${stamp.replace(/[^0-9]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`,
     ts: stamp,
@@ -718,23 +1270,213 @@ function recordTransition(run, from, to, notes) {
     gate: 'aegis-run',
     status: STATES[to] && STATES[to].failure ? 'FAILED' : 'PASS',
     plane: 'CONTROL',
-    operationId: `${run.runId}:${from}->${to}`,
+    operationId,
     correlationId: run.runId,
-    attempt: (run.transitions || []).filter((t) => t.to === to).length + 1,
+    attempt: occurrence,
     result: notes || `${from} -> ${to}`,
     notes: `run ${run.runId}: ${from} -> ${to}${notes ? ` (${notes})` : ''}`,
   };
   const f = path.join(require('os').tmpdir(), `aegis-run-${crypto.randomBytes(4).toString('hex')}.json`);
   fs.writeFileSync(f, JSON.stringify(entry));
   try {
-    const r = spawnSync('node', [LEDGER_WRITER, '--append', f], { cwd: ROOT, encoding: 'utf8' });
+    const args = [LEDGER_WRITER, '--append', f];
+    if (process.env.AEGIS_LEDGER_FILE) args.push('--ledger', canonicalLedgerFile());
+    const r = spawnSync(process.execPath, args, { cwd: ROOT, encoding: 'utf8' });
     if (r.status !== 0 && !/NO-OP/.test(r.stdout || '')) {
       throw new RunError('LEDGER-REFUSED',
         `the canonical ledger refused this transition: ${(r.stderr || r.stdout || '').trim().slice(0, 200)}. ` +
         'A transition that cannot be recorded did not happen.');
     }
   } finally { try { fs.unlinkSync(f); } catch {} }
-  return entry;
+  let ledger;
+  try { ledger = JSON.parse(fs.readFileSync(canonicalLedgerFile(), 'utf8')); }
+  catch {
+    throw new RunError('LEDGER-REFUSED', 'the canonical ledger could not be re-read after transition append');
+  }
+  const persisted = Array.isArray(ledger) ? ledger.filter((candidate) =>
+    candidate && candidate.correlationId === run.runId && candidate.operationId === operationId) : [];
+  if (persisted.length !== 1 || typeof persisted[0].entryId !== 'string') {
+    throw new RunError('LEDGER-REFUSED',
+      `the canonical ledger did not retain exactly one entry for ${operationId}`);
+  }
+  return persisted[0];
+}
+
+function canonicalLedgerFile() {
+  return process.env.AEGIS_LEDGER_FILE
+    ? path.resolve(process.env.AEGIS_LEDGER_FILE)
+    : path.join(HERE, 'ledger.json');
+}
+
+function appendCanonicalLedgerEntry(entry) {
+  const f = path.join(os.tmpdir(), `aegis-evidence-${crypto.randomBytes(4).toString('hex')}.json`);
+  fs.writeFileSync(f, JSON.stringify(entry), { mode: 0o600 });
+  try {
+    const args = [LEDGER_WRITER, '--append', f];
+    if (process.env.AEGIS_LEDGER_FILE) args.push('--ledger', canonicalLedgerFile());
+    const result = spawnSync(process.execPath, args, { cwd: ROOT, encoding: 'utf8' });
+    if (result.status !== 0 && !/NO-OP/.test(result.stdout || '')) {
+      throw new RunError('CHECK-RECEIPT-LEDGER-REFUSED',
+        `the canonical ledger refused the deterministic receipt: ${(result.stderr || result.stdout || '').trim().slice(0, 240)}`);
+    }
+  } finally { try { fs.unlinkSync(f); } catch {} }
+}
+
+function canonicalReceiptCommands(receipt) {
+  const commands = receipt.results.filter(({ exit }) => Number.isInteger(exit))
+    .map(({ cmd, exit }) => ({ cmd, exit }));
+  if (receipt.hostContainment && receipt.hostContainment.result &&
+      Number.isInteger(receipt.hostContainment.result.exit)) {
+    commands.push({ cmd: receipt.hostContainment.command, exit: receipt.hostContainment.result.exit });
+  }
+  return commands;
+}
+
+function canonicalReceiptTests(receipt) {
+  const tests = receipt.results.map(({ cmd }) => cmd);
+  if (receipt.hostContainment) tests.push(receipt.hostContainment.command);
+  return tests;
+}
+
+/**
+ * Persist the complete deterministic receipt outside mutable run state. The
+ * canonical ledger is already the append-only evidence authority for this
+ * runtime; this is a new entry type in that authority, not a second store.
+ */
+function persistCanonicalCheckReceipt(run, receipt) {
+  if (!run || !validateCompleteCheckReceipt(receipt, { runId: run.runId })) {
+    throw new RunError('CHECK-RECEIPT-INVALID', 'refusing to persist a malformed deterministic check receipt');
+  }
+  const entryId = `LED-CHECK-${receipt.receiptSha256.slice(0, 32)}`;
+  appendCanonicalLedgerEntry({
+    entryId,
+    ts: receipt.completedAt,
+    // The retained receipt proves the packet by path + digest. Do not put that
+    // path in the schema's packetId field and mislabel it as a parsed ID.
+    packetId: null,
+    agentId: 'claude-code',
+    gate: 'aegis-check-receipt',
+    status: receipt.outcome === 'PASS' ? 'PASS' : 'FAILED',
+    plane: 'CONTROL',
+    operationId: `${run.runId}:check-receipt:${receipt.receiptSha256}`,
+    correlationId: run.runId,
+    attempt: 1,
+    operation: `deterministic checks for ${receipt.subject.subjectSha256}`,
+    result: receipt.outcome,
+    changed: [...receipt.subject.subjectPaths],
+    commandsRun: canonicalReceiptCommands(receipt),
+    testsRun: canonicalReceiptTests(receipt),
+    screenshots: [],
+    commitSha: null,
+    bundleHash: receipt.receiptSha256,
+    evidencePaths: [
+      `packet:${receipt.packet.path}#${receipt.packet.sha256}`,
+      `subject:${receipt.subject.subjectSha256}`,
+      ...(receipt.hostContainment
+        ? [`host-containment:${receipt.hostContainment.receiptSha256}`] : []),
+    ],
+    driftChecks: [],
+    notes: CHECK_RECEIPT_NOTE_PREFIX + Buffer.from(JSON.stringify(receipt), 'utf8').toString('base64url'),
+  });
+  return Object.freeze({ entryId, receiptSha256: receipt.receiptSha256 });
+}
+
+function persistCanonicalPreHostCheckReceipt(run, receipt) {
+  if (!run || !validatePreHostCheckReceipt(receipt, { runId: run.runId })) {
+    throw new RunError('CHECK-RECEIPT-INVALID',
+      'refusing to persist a malformed pre-host deterministic check receipt');
+  }
+  const entryId = `LED-CHECK-${receipt.receiptSha256.slice(0, 32)}`;
+  const commands = receipt.results.map(({ cmd, exit }) => ({ cmd, exit }));
+  const tests = receipt.results.map(({ cmd }) => cmd);
+  appendCanonicalLedgerEntry({
+    entryId,
+    ts: receipt.completedAt,
+    packetId: null,
+    agentId: 'claude-code',
+    gate: 'aegis-pre-host-check-receipt',
+    status: 'PASS',
+    plane: 'CONTROL',
+    operationId: `${run.runId}:pre-host-check-receipt:${receipt.receiptSha256}`,
+    correlationId: run.runId,
+    attempt: 1,
+    operation: `pre-host deterministic checks for ${receipt.subject.subjectSha256}`,
+    result: receipt.outcome,
+    changed: [...receipt.subject.subjectPaths],
+    commandsRun: commands,
+    testsRun: tests,
+    screenshots: [],
+    commitSha: null,
+    bundleHash: receipt.receiptSha256,
+    evidencePaths: [
+      `packet:${receipt.packet.path}#${receipt.packet.sha256}`,
+      `subject:${receipt.subject.subjectSha256}`,
+      `snapshot:${receipt.snapshot.captureSha256}`,
+      `host-containment:pending:${receipt.hostContainment.commands[0]}`,
+    ],
+    driftChecks: [],
+    notes: PRE_HOST_CHECK_RECEIPT_NOTE_PREFIX +
+      Buffer.from(JSON.stringify(receipt), 'utf8').toString('base64url'),
+  });
+  return Object.freeze({ entryId, receiptSha256: receipt.receiptSha256 });
+}
+
+function loadCanonicalCheckReceipt(checks, expected = {}) {
+  const ref = checks && checks.receiptRef;
+  if (!ref || !/^LED-CHECK-[0-9a-f]{32}$/.test(ref.entryId || '') ||
+      !/^[0-9a-f]{64}$/.test(ref.receiptSha256 || '')) return null;
+  let ledger;
+  try { ledger = JSON.parse(fs.readFileSync(canonicalLedgerFile(), 'utf8')); }
+  catch { return null; }
+  if (!Array.isArray(ledger)) return null;
+  const matches = ledger.filter((entry) => entry && entry.entryId === ref.entryId);
+  if (matches.length !== 1) return null;
+  const entry = matches[0];
+  if (entry.gate !== 'aegis-check-receipt' || entry.plane !== 'CONTROL' ||
+      entry.correlationId !== (expected.runId || entry.correlationId) ||
+      entry.bundleHash !== ref.receiptSha256 || typeof entry.notes !== 'string' ||
+      !entry.notes.startsWith(CHECK_RECEIPT_NOTE_PREFIX)) return null;
+  let receipt;
+  try {
+    receipt = JSON.parse(Buffer.from(entry.notes.slice(CHECK_RECEIPT_NOTE_PREFIX.length), 'base64url').toString('utf8'));
+  } catch { return null; }
+  if (!validateCompleteCheckReceipt(receipt, expected) || receipt.receiptSha256 !== ref.receiptSha256 ||
+      entry.status !== (receipt.outcome === 'PASS' ? 'PASS' : 'FAILED') ||
+      JSON.stringify(entry.changed || []) !== JSON.stringify(receipt.subject.subjectPaths) ||
+      JSON.stringify((entry.commandsRun || []).map(({ cmd, exit }) => ({ cmd, exit }))) !==
+        JSON.stringify(canonicalReceiptCommands(receipt)) ||
+      JSON.stringify(entry.testsRun || []) !== JSON.stringify(canonicalReceiptTests(receipt))) return null;
+  return receipt;
+}
+
+function loadCanonicalPreHostCheckReceipt(checks, expected = {}) {
+  const ref = checks && checks.preHostReceiptRef;
+  if (!ref || !/^LED-CHECK-[0-9a-f]{32}$/.test(ref.entryId || '') ||
+      !/^[0-9a-f]{64}$/.test(ref.receiptSha256 || '')) return null;
+  let ledger;
+  try { ledger = JSON.parse(fs.readFileSync(canonicalLedgerFile(), 'utf8')); }
+  catch { return null; }
+  if (!Array.isArray(ledger)) return null;
+  const matches = ledger.filter((entry) => entry && entry.entryId === ref.entryId);
+  if (matches.length !== 1) return null;
+  const entry = matches[0];
+  if (entry.gate !== 'aegis-pre-host-check-receipt' || entry.plane !== 'CONTROL' ||
+      entry.correlationId !== (expected.runId || entry.correlationId) || entry.status !== 'PASS' ||
+      entry.bundleHash !== ref.receiptSha256 || typeof entry.notes !== 'string' ||
+      !entry.notes.startsWith(PRE_HOST_CHECK_RECEIPT_NOTE_PREFIX)) return null;
+  let receipt;
+  try {
+    receipt = JSON.parse(Buffer.from(
+      entry.notes.slice(PRE_HOST_CHECK_RECEIPT_NOTE_PREFIX.length), 'base64url').toString('utf8'));
+  } catch { return null; }
+  const commands = receipt.results.map(({ cmd, exit }) => ({ cmd, exit }));
+  const tests = receipt.results.map(({ cmd }) => cmd);
+  if (!validatePreHostCheckReceipt(receipt, expected) ||
+      receipt.receiptSha256 !== ref.receiptSha256 ||
+      JSON.stringify(entry.changed || []) !== JSON.stringify(receipt.subject.subjectPaths) ||
+      JSON.stringify(entry.commandsRun || []) !== JSON.stringify(commands) ||
+      JSON.stringify(entry.testsRun || []) !== JSON.stringify(tests)) return null;
+  return receipt;
 }
 
 const BUILDING_ABANDON_CAPABILITY = Symbol('authenticated BUILDING abandonment');
@@ -773,7 +1515,8 @@ function transition(run, to, notes, authority) {
   const entry = recordTransition(run, from, to, notes);
   run.state = to;
   run.transitions = run.transitions || [];
-  run.transitions.push({ from, to, ts: entry.ts, ledgerEntryId: entry.entryId, notes: notes || null });
+  run.transitions.push({ from, to, ts: entry.ts, ledgerEntryId: entry.entryId,
+    operationId: entry.operationId, notes: notes || null });
   run.updatedAt = entry.ts;
   return saveRun(run);
 }
@@ -788,6 +1531,21 @@ function transition(run, to, notes, authority) {
 function createRunFromObjective(input, options = {}) {
   const normalized = normalizeObjective(input);
   const packet = resolvePacketOption(options.packet);
+  let immutablePacketCoordinate = null;
+  if (packet) {
+    try {
+      const validated = validatedPacketCoordinate(packet);
+      immutablePacketCoordinate = Object.freeze({
+        path: validated.path,
+        sha256: validated.sha256,
+        packetId: validated.packetId,
+      });
+    }
+    catch (error) {
+      throw new AegisControlError('INVALID_PACKET',
+        `objective intake requires a canonically valid stable packet: ${error.message}`, 400);
+    }
+  }
 
   const stamp = nowIso();
   const runId = `RUN-${stamp.slice(0, 10).replace(/-/g, '')}-${crypto.randomBytes(4).toString('hex')}`;
@@ -802,6 +1560,7 @@ function createRunFromObjective(input, options = {}) {
     acceptanceCriteria: normalized.acceptance,
     dataClass: normalized.dataClass,
     packet,
+    packetCoordinate: immutablePacketCoordinate,
     baseCommit: git(['rev-parse', 'HEAD']).stdout.trim() || null,
     worktree: null,
     build: null,
@@ -888,7 +1647,7 @@ function prepareRunClaimed(run) {
   let route;
   try {
     const R = require('./tool-router.cjs');
-    const r = R.routeRole('orchestrator', {});
+    const r = R.routeRole('orchestrator', { dataClass: run.dataClass });
     route = r && r.ok === true
       ? { model: r.model, execution: r.execution, source: 'tool-router.cjs routeRole' }
       : { state: 'REFUSED', code: (r && r.code) || 'ROUTE_REFUSED', reason: (r && r.reason) || 'router did not return ok' };
@@ -902,10 +1661,10 @@ function prepareRunClaimed(run) {
     throw new AegisControlError('ROUTE_REFUSED',
       `routing refused: ${route.reason}. No worktree was created.`, 409);
   }
-  transition(run, 'ROUTED', `orchestrator route: ${route.model}`);
-
   // Step 4: create the isolated worktree, argument-array git only. Never
-  // reuse an existing path or the primary tree.
+  // reuse an existing path or the primary tree. ROUTED is published only
+  // after worktree creation succeeds, so an operational git failure leaves
+  // the run at INTAKE_RECORDED and a later Start can safely retry it.
   const wt = path.join(ROOT, '..', `aegis-wt-${run.runId}`);
   if (fs.existsSync(wt)) {
     throw new AegisControlError('WORKTREE_EXISTS',
@@ -917,6 +1676,7 @@ function prepareRunClaimed(run) {
     throw new AegisControlError('WORKTREE_FAILED',
       `git worktree add failed: ${(r.stderr || '').trim().slice(0, 200)}`, 409);
   }
+  transition(run, 'ROUTED', `orchestrator route: ${route.model}`);
   run.worktree = { path: wt, branch, createdAt: nowIso(), baseCommit: run.baseCommit };
   saveRun(run);
   transition(run, 'WORKTREE_READY', `isolated worktree at ${path.basename(wt)}`);
@@ -990,11 +1750,80 @@ function pauseRun(runId) {
 }
 
 /**
+ * A recorded correction cycle is a usable build allowance. Retry records
+ * cycles 1..MAX_CORRECTIONS before launch, so both synchronous and detached
+ * builders must accept that inclusive range and refuse only malformed state or
+ * a value beyond the advertised cap.
+ */
+function correctionBuildProblem(run) {
+  if (!run || run.state !== 'CORRECTING') return null;
+  if (!Number.isInteger(run.corrections) || run.corrections < 1) {
+    return `run ${run.runId} has CORRECTING state without a valid recorded correction cycle`;
+  }
+  if (run.corrections > MAX_CORRECTIONS) {
+    return `${run.corrections} correction cycles already used (max ${MAX_CORRECTIONS}). Escalate rather than build again.`;
+  }
+  return null;
+}
+
+/**
+ * A numeric PID is never worker ownership evidence.  A prior async attempt
+ * blocks a new launch only when its recorded immutable process identity still
+ * matches the currently observed process lifetime.  A positively different
+ * identity proves PID reuse and is safe to ignore; an existing/unknown PID
+ * whose identity cannot be inspected fails closed rather than guessing.
+ */
+function priorWorkerLaunchProblem(build) {
+  if (!build || !Number.isInteger(build.workerPid) || build.workerPid <= 1) return null;
+  const observed = processIdentity(build.workerPid);
+  if (observed) {
+    return sameProcessIdentity(build.processIdentity, observed)
+      ? { code: 'WORKER_ALREADY_ACTIVE', reason: 'MATCHING_PROCESS_IDENTITY' }
+      : null;
+  }
+  const existence = processExistence(build.workerPid);
+  if (existence === 'absent') return null;
+  return { code: 'WORKER_IDENTITY_UNVERIFIED', reason: existence === 'present'
+    ? 'IDENTITY_INSPECTION_UNAVAILABLE' : 'PROCESS_EXISTENCE_UNKNOWN' };
+}
+
+function assertPriorWorkerLaunchSafe(run) {
+  const problem = priorWorkerLaunchProblem(run && run.build);
+  if (!problem) return;
+  if (problem.code === 'WORKER_ALREADY_ACTIVE') {
+    throw new AegisControlError(problem.code,
+      `run ${run.runId} already has the identity-bound active worker ${run.build.workerPid}`, 409);
+  }
+  throw new AegisControlError(problem.code,
+    `run ${run.runId} cannot prove whether recorded worker ${run.build.workerPid} is the same process lifetime (${problem.reason}); refusing an overlapping launch.`, 409);
+}
+
+function terminateFailedWorkerLaunch(launch, identity, waitMs = 3500) {
+  if (!launch || !Number.isInteger(launch.workerPid) || launch.workerPid <= 1) return true;
+  const deadline = Date.now() + waitMs;
+  if (identity && launch.processGroupId === launch.workerPid) {
+    const observed = processIdentity(launch.workerPid);
+    if (sameProcessIdentity(identity, observed)) {
+      try { process.kill(-launch.processGroupId, 'SIGKILL'); }
+      catch (error) { if (error.code !== 'ESRCH') return false; }
+    }
+  }
+  while (Date.now() < deadline) {
+    const observed = processIdentity(launch.workerPid);
+    const ownerGone = Boolean(observed && identity && !sameProcessIdentity(identity, observed)) ||
+      (!observed && processExistence(launch.workerPid) === 'absent');
+    if (ownerGone && processGroupExistence(launch.processGroupId) === 'absent') return true;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  return false;
+}
+
+/**
  * Claim-aware worker launch. The caller must already own the per-run claim;
  * keeping this operation non-reentrant lets retry serialize its correction
  * decision and attempt reservation without releasing ownership in between.
  */
-function startWorkerClaimed(run, launchSpec, options = {}) {
+function validateWorkerLaunch(run, launchSpec, options = {}) {
   if (run.state !== 'WORKTREE_READY' && run.state !== 'CORRECTING') {
     throw new AegisControlError('ILLEGAL_TRANSITION',
       `asynchronous build requires WORKTREE_READY or CORRECTING, run is ${run.state}`, 409);
@@ -1003,17 +1832,32 @@ function startWorkerClaimed(run, launchSpec, options = {}) {
     throw new AegisControlError('NO_WORKTREE',
       'the run has no existing isolated worktree; refusing to launch a builder', 409);
   }
-  if (run.build && run.build.workerPid && require('./aegis-worker.cjs').processAlive(run.build.workerPid)) {
-    throw new AegisControlError('WORKER_ALREADY_ACTIVE',
-      `run ${run.runId} already has active worker ${run.build.workerPid}`, 409);
+  const correctionProblem = correctionBuildProblem(run);
+  if (correctionProblem) {
+    throw new AegisControlError('CORRECTION_LIMIT', correctionProblem, 409);
   }
+  assertPriorWorkerLaunchSafe(run);
   let normalized;
   try { normalized = require('./aegis-worker.cjs').normalizeLaunchSpec(launchSpec); }
   catch (e) { throw new AegisControlError(e.code || 'INVALID_LAUNCH_SPEC', e.message, 400); }
   let timeoutSec;
   try { timeoutSec = require('./aegis-worker.cjs').normalizeTimeoutSec(options.timeoutSec); }
   catch (e) { throw new AegisControlError(e.code || 'INVALID_LAUNCH_SPEC', e.message, 400); }
+  const launchAuthority = options.launchWorker === undefined
+    ? require('./aegis-worker.cjs').launchWorker : options.launchWorker;
+  if (typeof launchAuthority !== 'function') {
+    throw new AegisControlError('INVALID_LAUNCH_SPEC',
+      'the trusted worker launch authority must be a function', 400);
+  }
+  return Object.freeze({ normalized, timeoutSec, launchAuthority });
+}
 
+function startValidatedWorkerClaimed(run, validated, globalClaim) {
+  const { normalized, timeoutSec, launchAuthority } = validated;
+  if (!globalClaim || globalClaim.lockPath !== globalWorkerLockPath()) {
+    throw new AegisControlError('GLOBAL_LEASE_REQUIRED',
+      'asynchronous worker launch requires the owned global admission claim', 409);
+  }
   const attempt = ((run.build && run.build.attempt) || 0) + 1;
   const attemptId = crypto.randomUUID();
   run.build = {
@@ -1024,42 +1868,91 @@ function startWorkerClaimed(run, launchSpec, options = {}) {
   };
   transition(run, 'BUILDING', `asynchronous builder attempt ${attempt} starting`);
   let launch;
+  let workerIdentity = null;
+  let transferredLease = null;
   try {
-    launch = require('./aegis-worker.cjs').launchWorker({
+    launch = launchAuthority({
       runId: run.runId,
       attemptId,
       launchSpec: normalized,
       timeoutSec,
     });
-  } catch (e) {
-    const failed = loadOwnedWorkerAttempt(run.runId, attemptId);
-    failed.build = { ...failed.build, endedAt: nowIso(), exit: 127,
-      workerState: 'SPAWN_FAILED', stderrTail: String(e.message || e).slice(0, 1000) };
-    saveRun(failed);
-    transition(failed, 'BUILD_FAILED', 'asynchronous worker spawn failed');
-    throw new AegisControlError('WORKER_SPAWN_FAILED', 'the asynchronous worker could not be launched', 409);
-  }
+    workerIdentity = processIdentity(launch.workerPid);
+    if (!workerIdentity || launch.processGroupId !== launch.workerPid ||
+        workerIdentity.processGroupId !== launch.processGroupId) {
+      throw new AegisControlError('WORKER_IDENTITY_UNAVAILABLE',
+        'the detached worker process lifetime could not be proven before lease transfer', 409);
+    }
+    transferredLease = transferGlobalWorkerClaim(globalClaim, run.runId, attemptId,
+      launch.workerPid, workerIdentity);
 
-  const building = loadRun(run.runId);
-  if (!building.build || building.build.attemptId !== attemptId) {
-    // Never signal a numeric PID after ownership changes. The worker's
-    // immutable launch-record check fails and it exits without build authority.
-    throw new AegisControlError('STALE_WORKER_ATTEMPT', 'worker launch ownership changed before metadata was persisted', 409);
+    const building = loadRun(run.runId);
+    if (!building.build || building.build.attemptId !== attemptId) {
+      throw new AegisControlError('STALE_WORKER_ATTEMPT',
+        'worker launch ownership changed before metadata was persisted', 409);
+    }
+    building.build = {
+      ...building.build, launchSha256: launch.launchSha256,
+      workerPid: launch.workerPid, processGroupId: launch.processGroupId,
+      control: launch.control,
+      processIdentity: workerIdentity,
+      globalLease: {
+        claimId: transferredLease.claimId, holder: 'WORKER_LEASE',
+        transferFrom: transferredLease.transferFrom,
+        runId: run.runId, attemptId, pid: launch.workerPid,
+        processGroupId: launch.processGroupId, processIdentity: workerIdentity,
+        transferredAt: transferredLease.transferredAt,
+      },
+      workerState: 'STARTING', startedAt: nowIso(), heartbeatAt: null,
+      exit: null, stdoutTail: '', stderrTail: '',
+      revision: buildRevision(building.build) + 1,
+    };
+    saveRun(building);
+    return Object.freeze({
+      runId: building.runId, state: building.state, action: 'start',
+      workerPid: launch.workerPid, attempt, attemptId, nextAction: 'monitor',
+    });
+  } catch (e) {
+    const terminationVerified = terminateFailedWorkerLaunch(launch, workerIdentity);
+    const failed = loadOwnedWorkerAttempt(run.runId, attemptId);
+    failed.build = { ...failed.build,
+      ...(launch ? {
+        workerPid: launch.workerPid, processGroupId: launch.processGroupId,
+        processIdentity: workerIdentity,
+      } : {}),
+      ...(transferredLease ? {
+        globalLease: {
+          claimId: transferredLease.claimId, holder: 'WORKER_LEASE',
+          transferFrom: transferredLease.transferFrom,
+          runId: run.runId, attemptId, pid: launch.workerPid,
+          processGroupId: launch.processGroupId, processIdentity: workerIdentity,
+          transferredAt: transferredLease.transferredAt,
+        },
+      } : {}),
+      endedAt: nowIso(), exit: 127,
+      workerState: launch
+        ? (terminationVerified ? 'LEASE_TRANSFER_FAILED' : 'TERMINATION_UNVERIFIED')
+        : 'SPAWN_FAILED',
+      stderrTail: String(e.message || e).slice(0, 1000),
+      ...(!terminationVerified ? {
+        recovery: {
+          reason: 'TERMINATION_UNVERIFIED', observedAt: nowIso(), terminationVerified: false,
+          retrySafe: false, abandonmentAllowed: true, attemptId,
+        },
+      } : {}),
+    };
+    saveRun(failed);
+    transition(failed, 'BUILD_FAILED', launch
+      ? 'asynchronous worker lease transfer or metadata publication failed'
+      : 'asynchronous worker spawn failed');
+    throw new AegisControlError(launch ? (e.code || 'GLOBAL_LEASE_TRANSFER_FAILED') : 'WORKER_SPAWN_FAILED',
+      launch ? 'the asynchronous worker lease could not be transferred safely'
+        : 'the asynchronous worker could not be launched', 409);
   }
-  building.build = {
-    ...building.build, launchSha256: launch.launchSha256,
-    workerPid: launch.workerPid, processGroupId: launch.processGroupId,
-    control: launch.control,
-    processIdentity: processIdentity(launch.workerPid),
-    workerState: 'STARTING', startedAt: nowIso(), heartbeatAt: null,
-    exit: null, stdoutTail: '', stderrTail: '',
-    revision: buildRevision(building.build) + 1,
-  };
-  saveRun(building);
-  return Object.freeze({
-    runId: building.runId, state: building.state, action: 'start',
-    workerPid: launch.workerPid, attempt, attemptId, nextAction: 'monitor',
-  });
+}
+
+function startWorkerClaimed(run, launchSpec, options = {}, globalClaim) {
+  return startValidatedWorkerClaimed(run, validateWorkerLaunch(run, launchSpec, options), globalClaim);
 }
 
 /**
@@ -1068,9 +1961,14 @@ function startWorkerClaimed(run, launchSpec, options = {}) {
  * existing transition() remains the single lifecycle/ledger authority.
  */
 function startWorker(runId, launchSpec, options = {}) {
+  let globalClaim;
   let claim;
-  try { claim = acquireRunLaunchClaim(runId, 1000); }
+  try {
+    globalClaim = acquireGlobalWorkerClaim(1000);
+    claim = acquireRunLaunchClaim(runId, 1000);
+  }
   catch (e) {
+    if (globalClaim) releaseRunLaunchClaim(globalClaim);
     if (e instanceof RunError) {
       if (e.code === 'BAD-RUN-ID') throw new AegisControlError('INVALID_RUN_ID', e.message, 400);
       if (e.code === 'NO-SUCH-RUN') throw new AegisControlError('RUN_NOT_FOUND', e.message, 404);
@@ -1078,8 +1976,12 @@ function startWorker(runId, launchSpec, options = {}) {
     throw e;
   }
   try {
-    return startWorkerClaimed(loadRunForControl(runId), launchSpec, options);
-  } finally { releaseRunLaunchClaim(claim); }
+    assertGlobalWorkerAvailable(runId);
+    return startWorkerClaimed(loadRunForControl(runId), launchSpec, options, globalClaim);
+  } finally {
+    if (claim) releaseRunLaunchClaim(claim);
+    if (globalClaim) releaseRunLaunchClaim(globalClaim);
+  }
 }
 
 /**
@@ -1089,9 +1991,14 @@ function startWorker(runId, launchSpec, options = {}) {
  * fresh WORKTREE_READY record has been loaded while the claim is still held.
  */
 function startGovernedWorker(runId, launchSpecForRun, options = {}) {
+  let globalClaim;
   let claim;
-  try { claim = acquireRunLaunchClaim(runId, 1000); }
+  try {
+    globalClaim = acquireGlobalWorkerClaim(1000);
+    claim = acquireRunLaunchClaim(runId, 1000);
+  }
   catch (e) {
+    if (globalClaim) releaseRunLaunchClaim(globalClaim);
     if (e instanceof RunError) {
       if (e.code === 'BAD-RUN-ID') throw new AegisControlError('INVALID_RUN_ID', e.message, 400);
       if (e.code === 'NO-SUCH-RUN') throw new AegisControlError('RUN_NOT_FOUND', e.message, 404);
@@ -1099,7 +2006,15 @@ function startGovernedWorker(runId, launchSpecForRun, options = {}) {
     throw e;
   }
   try {
+    assertGlobalWorkerAvailable(runId);
     let run = loadRunForControl(runId);
+    try {
+      currentRunPacketCoordinate(run);
+    } catch (error) {
+      const code = run.packet && run.packetCoordinate ? 'PACKET_CHANGED' : 'INVALID_PACKET';
+      throw new AegisControlError(code,
+        `start requires the exact canonically valid packet recorded at intake before routing or worker launch: ${error.message}`, 409);
+    }
     if (run.state === 'INTAKE_RECORDED') {
       prepareRunClaimed(run);
       run = loadRunForControl(runId);
@@ -1112,9 +2027,23 @@ function startGovernedWorker(runId, launchSpecForRun, options = {}) {
       throw new AegisControlError('INVALID_LAUNCH_SPEC',
         'dashboard start requires a trusted server launch-spec factory', 400);
     }
-    const launchSpec = launchSpecForRun(run);
-    return startWorkerClaimed(run, launchSpec, options);
-  } finally { releaseRunLaunchClaim(claim); }
+    let validatedPacket;
+    try { validatedPacket = currentRunPacketCoordinate(run); }
+    catch (error) {
+      throw new AegisControlError('PACKET_CHANGED',
+        `start refused a packet change during worktree preparation: ${error.message}`, 409);
+    }
+    const launchSpec = launchSpecForRun(run, validatedPacket);
+    try { currentRunPacketCoordinate(run); }
+    catch (error) {
+      throw new AegisControlError('PACKET_CHANGED',
+        `start refused a packet change during launch composition: ${error.message}`, 409);
+    }
+    return startWorkerClaimed(run, launchSpec, options, globalClaim);
+  } finally {
+    if (claim) releaseRunLaunchClaim(claim);
+    if (globalClaim) releaseRunLaunchClaim(globalClaim);
+  }
 }
 
 function controlMac(secret, value) {
@@ -1235,6 +2164,21 @@ function requestWorkerCancellation(build, cancellationId, timeoutMs = 2750) {
   return { terminated: false, reason: 'CONTROL_RESPONSE_TIMEOUT', observedAt: nowIso() };
 }
 
+/**
+ * One canonical predicate owns whether a BUILDING run retains the authenticated,
+ * attempt-bound capability required by cancelRun. A PID alone is deliberately
+ * insufficient: the worker must have published both its control mailbox and
+ * verified child identity. Public display readiness is narrower and remains a
+ * server projection so a timed-out first request can be retried without making
+ * a non-RUNNING worker look safely cancellable in the dashboard.
+ */
+function workerCancellationCapability(run) {
+  return !!(run && run.state === 'BUILDING' && run.build &&
+    run.build.mode === 'async' &&
+    Number.isInteger(run.build.workerPid) && run.build.workerPid > 0 &&
+    run.build.control && run.build.childProcessIdentity);
+}
+
 /** Cancel BUILDING only through its per-attempt authenticated worker mailbox. */
 function cancelRun(runId, testDependencies) {
   let dependencies = { requestCancellation: requestWorkerCancellation, beforeClaim: null };
@@ -1268,12 +2212,7 @@ function cancelRun(runId, testDependencies) {
       // released before signalling so a heartbeat or child-close finalizer can
       // acquire the same claim rather than deadlocking behind cancellation.
       cancellationId = crypto.randomUUID();
-      if (owned.state !== 'BUILDING' || !owned.build || owned.build.mode !== 'async' ||
-          !Number.isInteger(owned.build.workerPid)) {
-        throw new AegisControlError('CONTROL_UNAVAILABLE',
-          `run ${owned.runId} has no verified active asynchronous worker to cancel.`, 409);
-      }
-      if (!owned.build.control || !owned.build.childProcessIdentity) {
+      if (!workerCancellationCapability(owned)) {
         throw new AegisControlError('CONTROL_UNAVAILABLE',
           `run ${owned.runId} has no authenticated worker cancellation capability.`, 409);
       }
@@ -1379,14 +2318,68 @@ function cancelRun(runId, testDependencies) {
  * incremented exactly once and only after the MAX_CORRECTIONS check passes,
  * matching the CLI's own correction bound.
  */
+function canonicalRetryLaunchSpec(run, recordedLaunchSpec) {
+  let packet;
+  try { packet = currentRunPacketCoordinate(run); }
+  catch (error) {
+    throw new AegisControlError('PACKET_CHANGED',
+      `retry requires the exact packet generation recorded at intake: ${error.message}`, 409);
+  }
+
+  let routed;
+  try { routed = require('./tool-router.cjs').routeRole('orchestrator', { dataClass: run.dataClass }); }
+  catch (error) {
+    throw new AegisControlError('ROUTE_POLICY_UNAVAILABLE',
+      `retry could not load the canonical model route: ${error.message}`, 409);
+  }
+  if (!routed || routed.ok !== true) {
+    throw new AegisControlError((routed && routed.code) || 'ROUTE_REFUSED',
+      `retry routing refused: ${(routed && routed.reason) || 'router did not return ok'}`, 409);
+  }
+  const recordedRoute = run.route;
+  if (!recordedRoute || recordedRoute.source !== 'tool-router.cjs routeRole' ||
+      recordedRoute.model !== routed.model || recordedRoute.execution !== routed.execution) {
+    throw new AegisControlError('ROUTE_STALE',
+      'retry refused because the recorded run route no longer matches the canonical orchestrator route', 409);
+  }
+
+  let policy;
+  try { policy = JSON.parse(fs.readFileSync(MODEL_ROUTING_POLICY, 'utf8')); }
+  catch {
+    throw new AegisControlError('ROUTE_POLICY_UNAVAILABLE',
+      'retry could not read the canonical model-routing policy', 409);
+  }
+  const declared = policy && policy.models && policy.models[routed.model];
+  const workerRoute = declared && declared.workerRoute;
+  if (!workerRoute || typeof workerRoute.provider !== 'string' || typeof workerRoute.model !== 'string') {
+    throw new AegisControlError('ROUTE_UNSUPPORTED',
+      'retry canonical route has no bounded worker declaration', 409);
+  }
+  let normalized;
+  try { normalized = require('./aegis-worker.cjs').normalizeLaunchSpec(recordedLaunchSpec); }
+  catch (error) {
+    throw new AegisControlError(error.code || 'INVALID_LAUNCH_SPEC', error.message, 400);
+  }
+  if (normalized.provider !== workerRoute.provider || normalized.model !== workerRoute.model) {
+    throw new AegisControlError('ROUTE_STALE',
+      'retry refused because the recorded worker identity no longer matches the canonical route', 409);
+  }
+  return Object.freeze({ launchSpec: normalized, packet });
+}
+
 function retryRun(runId) {
   // Preserve the stable control-surface id/not-found errors before the claim
   // path creates or inspects a lock. All retry decisions are still made only
   // after a fresh load while the claim is held below.
   loadRunForControl(runId);
+  let globalClaim;
   let claim;
-  try { claim = acquireRunLaunchClaim(runId, 3000); }
+  try {
+    globalClaim = acquireGlobalWorkerClaim(3000);
+    claim = acquireRunLaunchClaim(runId, 3000);
+  }
   catch (e) {
+    if (globalClaim) releaseRunLaunchClaim(globalClaim);
     if (e instanceof RunError) {
       if (e.code === 'BAD-RUN-ID') throw new AegisControlError('INVALID_RUN_ID', e.message, 400);
       if (e.code === 'NO-SUCH-RUN') throw new AegisControlError('RUN_NOT_FOUND', e.message, 404);
@@ -1395,9 +2388,10 @@ function retryRun(runId) {
   }
   try {
     const run = loadRunForControl(runId);
-    if (run.state !== 'BUILD_FAILED' && run.state !== 'CHECKS_FAILED') {
+    assertGlobalWorkerAvailable(runId);
+    if (run.state !== 'BUILD_FAILED' && run.state !== 'CHECKS_FAILED' && run.state !== 'REVIEW_FAILED') {
       throw new AegisControlError('INVALID_RETRY',
-        `run ${run.runId} is ${run.state}; retry requires BUILD_FAILED or CHECKS_FAILED.`, 409);
+        `run ${run.runId} is ${run.state}; retry requires BUILD_FAILED, CHECKS_FAILED, or REVIEW_FAILED.`, 409);
     }
     if (run.state === 'BUILD_FAILED' && run.build && run.build.recovery &&
         run.build.recovery.retrySafe === false) {
@@ -1411,9 +2405,25 @@ function retryRun(runId) {
     }
     const retryLaunchSpec = run.build && run.build.mode === 'async' && run.build.launchSpec
       ? run.build.launchSpec : null;
+    if (run.build && run.build.mode === 'async') assertPriorWorkerLaunchSafe(run);
+    let validatedLaunch = null;
+    if (retryLaunchSpec) {
+      const governedRetry = canonicalRetryLaunchSpec(run, retryLaunchSpec);
+      // Validate every pre-BUILDING refusal while the prior failure state and
+      // correction budget are still untouched. The synthetic state grants no
+      // authority; it only exercises the same validator the launch consumes.
+      validatedLaunch = validateWorkerLaunch({ ...run, state: 'CORRECTING', corrections: run.corrections + 1 }, governedRetry.launchSpec, {
+        timeoutSec: 900,
+      });
+      try { currentRunPacketCoordinate(run); }
+      catch (error) {
+        throw new AegisControlError('PACKET_CHANGED',
+          `retry refused a packet change during launch validation: ${error.message}`, 409);
+      }
+    }
     run.corrections += 1;
     transition(run, 'CORRECTING', `correction cycle ${run.corrections} of ${MAX_CORRECTIONS} via control surface`);
-    if (retryLaunchSpec) return startWorkerClaimed(run, retryLaunchSpec);
+    if (validatedLaunch) return startValidatedWorkerClaimed(run, validatedLaunch, globalClaim);
     const fresh = loadRun(run.runId);
     return Object.freeze({
       runId: fresh.runId,
@@ -1422,12 +2432,14 @@ function retryRun(runId) {
       correction: fresh.corrections,
       nextAction: `--build ${fresh.runId} --cmd "<command>"`,
     });
-  } finally { releaseRunLaunchClaim(claim); }
+  } finally {
+    if (claim) releaseRunLaunchClaim(claim);
+    if (globalClaim) releaseRunLaunchClaim(globalClaim);
+  }
 }
 
 // ── step 5: builder execution ───────────────────────────────────────────────
-function cmdBuild(args) {
-  const run = loadRun(args.runId);
+function cmdBuildClaimed(run, args) {
   if (!args.cmd) throw new RunError('NO-COMMAND', '--cmd is required');
   if (run.state !== 'WORKTREE_READY' && run.state !== 'CORRECTING') {
     throw new RunError('ILLEGAL-TRANSITION',
@@ -1436,10 +2448,8 @@ function cmdBuild(args) {
   if (!run.worktree || !fs.existsSync(run.worktree.path)) {
     throw new RunError('NO-WORKTREE', 'the run has no existing worktree; refusing to build in the primary tree');
   }
-  if (run.state === 'CORRECTING' && run.corrections >= MAX_CORRECTIONS) {
-    throw new RunError('CORRECTION-LIMIT',
-      `${run.corrections} correction cycles already used (max ${MAX_CORRECTIONS}). Escalate to the Product Owner rather than looping.`);
-  }
+  const correctionProblem = correctionBuildProblem(run);
+  if (correctionProblem) throw new RunError('CORRECTION-LIMIT', correctionProblem);
   transition(run, 'BUILDING', 'builder started');
 
   const started = nowIso();
@@ -1465,24 +2475,1123 @@ function cmdBuild(args) {
   return EXIT_PASS;
 }
 
+function cmdBuild(args) {
+  const globalClaim = acquireGlobalWorkerClaim(3000);
+  let claim;
+  try {
+    claim = acquireRunLaunchClaim(args.runId, 3000);
+    assertGlobalWorkerAvailable(args.runId);
+    return cmdBuildClaimed(loadRun(args.runId), args);
+  } finally {
+    if (claim) releaseRunLaunchClaim(claim);
+    releaseRunLaunchClaim(globalClaim);
+  }
+}
+
 // ── step 6: deterministic checks ────────────────────────────────────────────
 // This is the one canonical check executor. Both the CLI and the authenticated
 // dashboard control surface enter through runChecks(), which owns the same
 // per-run claim used by every other mutating control. The browser never supplies
 // a command: commands come only from the packet already bound to the run.
 const SWITCHBOARD_PACKET_ID = 'PKT-20260825-SWITCHBOARD-FOUNDATION';
-const SWITCHBOARD_PACKET_FILE = path.join(PACKETS_DIR, `${SWITCHBOARD_PACKET_ID}.json`);
+const DASHBOARD_STATE_PACKET_IDS = new Set([
+  SWITCHBOARD_PACKET_ID,
+  'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA',
+]);
 const DASHBOARD_STATE_GENERATOR_REL = path.join('builder-control', 'aegis-state.cjs');
 const DASHBOARD_STATE_OUTPUT_REL = path.join('builder-control', 'dashboard', 'state.js');
 
-function prepareCanonicalDashboardState(run, pkt, packetReal) {
-  let canonicalPacketReal;
-  try { canonicalPacketReal = fs.realpathSync(SWITCHBOARD_PACKET_FILE); }
-  catch (e) {
-    return { ok: false, code: 'STATE_PACKET_UNAVAILABLE', reason: `canonical switchboard packet is unavailable: ${e.message}` };
+const CHECK_SNAPSHOT_POLICY = 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1';
+
+function checkSnapshotFailure(message) {
+  const bounded = boundedCheckFailureTail(message);
+  return {
+    stdoutTail: '',
+    stderrTail: bounded.tail,
+    stdoutTruncated: false,
+    stderrTruncated: bounded.truncated,
+  };
+}
+
+function checkExecutionEvidence(stdout = '', stderr = '') {
+  const stdoutBounded = boundedCheckFailureTail(stdout);
+  const stderrBounded = boundedCheckFailureTail(stderr);
+  return {
+    stdoutTail: stdoutBounded.tail,
+    stderrTail: stderrBounded.tail,
+    stdoutTruncated: stdoutBounded.truncated,
+    stderrTruncated: stderrBounded.truncated,
+  };
+}
+
+function nonExecutedCheckResult(cmd, status, skipped, reason) {
+  const executionEvidence = checkSnapshotFailure(reason);
+  return {
+    cmd,
+    exit: null,
+    status,
+    skipped,
+    executionEvidence,
+    failureEvidence: executionEvidence,
+  };
+}
+
+const CHECK_SETUP_TIMEOUT_MS = 60_000;
+
+function checkedSpawn(label, command, args, options = {}) {
+  const requestedTimeout = Number.isInteger(options.timeout) && options.timeout > 0
+    ? options.timeout : CHECK_SETUP_TIMEOUT_MS;
+  const timeout = Math.min(requestedTimeout, CHECK_SETUP_TIMEOUT_MS);
+  const result = spawnSync(command, args, {
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...options,
+    timeout,
+    killSignal: 'SIGKILL',
+  });
+  if (result.error || result.status !== 0) {
+    const rawDetail = result.error && result.error.code === 'ETIMEDOUT'
+      ? `timed out after ${timeout} ms; SIGKILL termination requested; ${result.error.message}`
+      : result.error ? result.error.message
+        : (result.stderr || result.stdout || `exit ${result.status}`).trim();
+    const detail = boundedCheckFailureTail(rawDetail).tail;
+    throw new RunError('CHECKS-CONTAINMENT-FAILED', `${label}: ${detail}`);
   }
-  if (packetReal !== canonicalPacketReal || pkt.packetId !== SWITCHBOARD_PACKET_ID) {
+  return result;
+}
+
+const MAX_SUPPLEMENTAL_SUBJECT_BYTES = 64 * 1024 * 1024;
+
+function canonicalSubjectFilePath(worktreeReal, relativePath) {
+  if (typeof relativePath !== 'string' || !relativePath || relativePath.includes('\0') ||
+      path.posix.isAbsolute(relativePath) || path.posix.normalize(relativePath) !== relativePath ||
+      relativePath === '..' || relativePath.startsWith('../')) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      `canonical subject path is not a safe repository-relative path: ${String(relativePath)}`);
+  }
+  const expected = path.resolve(worktreeReal, ...relativePath.split('/'));
+  if (expected === worktreeReal || !expected.startsWith(worktreeReal + path.sep)) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      `canonical subject path escapes the governed worktree: ${relativePath}`);
+  }
+  return expected;
+}
+
+function readCanonicalUntrackedSubjectFile(worktreeReal, relativePath) {
+  const expected = canonicalSubjectFilePath(worktreeReal, relativePath);
+  let current = worktreeReal;
+  for (const component of relativePath.split('/').slice(0, -1)) {
+    current = path.join(current, component);
+    const parent = fs.lstatSync(current);
+    if (parent.isSymbolicLink() || !parent.isDirectory()) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        `canonical untracked subject path crosses an unsafe parent: ${relativePath}`);
+    }
+  }
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(expected, fs.constants.O_RDONLY | noFollow);
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || (before.mode & 0o7000) !== 0) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        `canonical untracked subject is not a safe regular file: ${relativePath}`);
+    }
+    if (before.size > MAX_SUPPLEMENTAL_SUBJECT_BYTES) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        `canonical untracked subject exceeds the snapshot byte limit: ${relativePath}`);
+    }
+    const bytes = fs.readFileSync(descriptor);
+    const after = fs.fstatSync(descriptor);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs || bytes.length !== after.size) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        `canonical untracked subject changed while it was captured: ${relativePath}`);
+    }
+    return Object.freeze({
+      path: relativePath,
+      contentBase64: bytes.toString('base64'),
+      mode: before.mode & 0o777,
+    });
+  } catch (error) {
+    if (error instanceof RunError) throw error;
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      `canonical untracked subject is unavailable or unsafe (${relativePath}): ${error.message}`);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function captureCanonicalUntrackedSubjectFiles(worktreeReal, head, subjectPaths) {
+  const indexed = new Set(checkedSpawn('identify indexed canonical subject files', 'git',
+    ['-C', worktreeReal, 'ls-files', '--cached', '-z', '--', ...subjectPaths]).stdout
+    .split('\0').filter(Boolean));
+  const atHead = new Set(checkedSpawn('identify canonical subject files at captured HEAD', 'git',
+    ['-C', worktreeReal, 'ls-tree', '-r', '-z', '--name-only', head, '--', ...subjectPaths]).stdout
+    .split('\0').filter(Boolean));
+  const supplemental = [];
+  let totalBytes = 0;
+  for (const relativePath of subjectPaths) {
+    if (indexed.has(relativePath) || atHead.has(relativePath)) continue;
+    const entry = readCanonicalUntrackedSubjectFile(worktreeReal, relativePath);
+    totalBytes += Buffer.byteLength(entry.contentBase64, 'base64');
+    if (totalBytes > MAX_SUPPLEMENTAL_SUBJECT_BYTES) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        'canonical untracked subjects exceed the aggregate snapshot byte limit');
+    }
+    supplemental.push(entry);
+  }
+  return Object.freeze(supplemental);
+}
+
+function captureCheckExecutionSource(worktreeReal, packetBefore, subjectBefore, statePreparation) {
+  const head = checkedSpawn('capture check HEAD', 'git',
+    ['-C', worktreeReal, 'rev-parse', '--verify', 'HEAD^{commit}']).stdout.trim();
+  if (!/^[0-9a-f]{40,64}$/.test(head)) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED', 'captured check HEAD is not a commit');
+  }
+  const patch = checkedSpawn('capture exact working-tree bytes', 'git',
+    ['-C', worktreeReal, 'diff', '--binary', '--full-index', 'HEAD', '--']).stdout;
+  const packetBytes = Buffer.from(packetBefore.bytes);
+  const supplementalSubjectFiles = captureCanonicalUntrackedSubjectFiles(
+    worktreeReal, head, subjectBefore.subjectPaths);
+  const capture = {
+    head,
+    patch,
+    packetBytes,
+    packetPath: packetBefore.path,
+    stateGenerator: statePreparation.required ? statePreparation.generator : null,
+    statePath: statePreparation.required ? statePreparation.output : null,
+    supplementalSubjectFiles,
+    subject: Object.freeze({
+      subjectSha256: subjectBefore.subjectSha256,
+      subjectPaths: Object.freeze([...subjectBefore.subjectPaths]),
+      diffBytes: subjectBefore.diffBytes,
+      range: subjectBefore.range,
+    }),
+  };
+  const captureSha256 = sha256(stableJson({
+    head,
+    patchSha256: sha256(patch),
+    packetSha256: sha256(packetBytes),
+    packetPath: packetBefore.path,
+    stateGenerator: capture.stateGenerator,
+    statePath: capture.statePath,
+    supplementalSubjectFiles,
+    subject: capture.subject,
+  }));
+  return Object.freeze({ ...capture, captureSha256 });
+}
+
+function writeSupplementalSubjectFiles(snapshotRoot, files) {
+  for (const entry of files || []) {
+    const target = canonicalSubjectFilePath(snapshotRoot, entry.path);
+    let parent = snapshotRoot;
+    for (const component of entry.path.split('/').slice(0, -1)) {
+      parent = path.join(parent, component);
+      if (fs.existsSync(parent)) {
+        const parentStat = fs.lstatSync(parent);
+        if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) {
+          throw new RunError('CHECKS-CONTAINMENT-FAILED',
+            `snapshot target crosses an unsafe parent: ${entry.path}`);
+        }
+      } else {
+        fs.mkdirSync(parent, { mode: 0o700 });
+      }
+    }
+    if (fs.existsSync(target)) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        `snapshot target unexpectedly collides with tracked content: ${entry.path}`);
+    }
+    fs.writeFileSync(target, Buffer.from(entry.contentBase64, 'base64'), {
+      flag: 'wx', mode: entry.mode,
+    });
+    fs.chmodSync(target, entry.mode);
+  }
+}
+
+function annotateBoundaryFailure(error, stage, priorFailure = null) {
+  const source = error instanceof Error ? error : new Error(String(error));
+  const reasonParts = [
+    `${stage}: ${boundedCheckFailureTail(source.message || source).tail}`,
+  ];
+  if (priorFailure && priorFailure.executionBoundaryFailure) {
+    reasonParts.push(`prior ${priorFailure.executionBoundaryFailure.reason}`);
+  }
+  source.executionBoundaryFailure = {
+    state: 'FAILED',
+    reason: boundedCheckFailureTail(reasonParts.join('; ')).tail,
+  };
+  return source;
+}
+
+const CONTAINED_CHECK_TIMEOUT_MS = 15 * 60 * 1000;
+const CONTAINED_CHECK_TERM_GRACE_MS = 1000;
+const CONTAINED_CHECK_DRAIN_TIMEOUT_MS = 2000;
+
+function assertSnapshotPlatformSupported() {
+  // V1 containment is implemented with macOS sandbox-exec and a disposable
+  // libproc inspector. Refuse before snapshot creation on every other host;
+  // naming Linux here without a Linux sandbox/inspector would be false support.
+  if (process.platform !== 'darwin') {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      `immutable check snapshots are unavailable on ${process.platform}; V1 supports darwin only`);
+  }
+}
+
+function containedCheckTimeoutMs() {
+  const raw = process.env.AEGIS_TEST_CHECK_TIMEOUT_MS;
+  if (!raw) return CONTAINED_CHECK_TIMEOUT_MS;
+  let runsReal;
+  let tmpReal;
+  try {
+    runsReal = fs.realpathSync(RUNS_DIR);
+    tmpReal = fs.realpathSync(os.tmpdir());
+  } catch { return CONTAINED_CHECK_TIMEOUT_MS; }
+  const parsed = Number(raw);
+  if (!runsReal.startsWith(tmpReal + path.sep) || !Number.isInteger(parsed) || parsed < 50 || parsed > 5000) {
+    return CONTAINED_CHECK_TIMEOUT_MS;
+  }
+  return parsed;
+}
+
+function containedCheckTestPort() {
+  const raw = process.env.AEGIS_TEST_CHECK_PORT;
+  if (!raw) return null;
+  let runsReal;
+  let tmpReal;
+  try {
+    runsReal = fs.realpathSync(RUNS_DIR);
+    tmpReal = fs.realpathSync(os.tmpdir());
+  } catch { return null; }
+  const port = Number(raw);
+  if (!runsReal.startsWith(tmpReal + path.sep) || !Number.isInteger(port) ||
+      port < 1024 || port > 65535) return null;
+  return port;
+}
+
+function nodeRuntimeReadRoots() {
+  const executable = fs.realpathSync(process.execPath);
+  const nodeRoot = path.dirname(path.dirname(executable));
+  const roots = new Set([path.dirname(executable), path.join(nodeRoot, 'lib')]);
+  const linked = spawnSync('/usr/bin/otool', ['-L', executable], {
+    encoding: 'utf8', timeout: 5_000, killSignal: 'SIGKILL',
+  });
+  if (linked.error || linked.status !== 0) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      `could not resolve the pinned Node runtime libraries: ${linked.error ? linked.error.message : `otool exit ${linked.status}`}`);
+  }
+  for (const line of String(linked.stdout || '').split('\n').slice(1)) {
+    const candidate = line.trim().split(/\s+/)[0];
+    if (!candidate || !path.isAbsolute(candidate) ||
+        candidate.startsWith('/System/') || candidate.startsWith('/usr/lib/')) continue;
+    let real;
+    try { real = fs.realpathSync(candidate); }
+    catch (error) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        `pinned Node runtime library is unavailable: ${path.basename(candidate)} (${error.code || error.message})`);
+    }
+    if (!fs.statSync(real).isFile()) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        `pinned Node runtime dependency is not a regular file: ${path.basename(candidate)}`);
+    }
+    roots.add(path.dirname(candidate));
+    roots.add(path.dirname(real));
+  }
+  return Object.freeze([...roots].sort());
+}
+
+function reserveContainedCheckPorts(count) {
+  if (!Number.isInteger(count) || count < 1 || count > 4) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED', 'invalid contained check port reservation count');
+  }
+  const shared = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * (count + 1));
+  const state = new Int32Array(shared);
+  const worker = new Worker(`
+    const net = require('net');
+    const { workerData } = require('worker_threads');
+    const state = new Int32Array(workerData.shared);
+    const servers = [];
+    let ready = 0;
+    for (let i = 0; i < workerData.count; i += 1) {
+      const server = net.createServer();
+      servers.push(server);
+      server.once('error', () => {
+        Atomics.store(state, i, -1);
+        Atomics.notify(state, i);
+      });
+      server.listen(0, '127.0.0.1', () => {
+        Atomics.store(state, i, server.address().port);
+        Atomics.notify(state, i);
+        ready += 1;
+        if (ready === workerData.count) {
+          Atomics.wait(state, workerData.count, 0);
+          let pending = servers.length;
+          for (const open of servers) open.close(() => {
+            pending -= 1;
+            if (pending === 0) {
+              Atomics.store(state, workerData.count, 2);
+              Atomics.notify(state, workerData.count);
+            }
+          });
+        }
+      });
+    }
+  `, { eval: true, workerData: { shared, count } });
+  const ports = [];
+  try {
+    for (let index = 0; index < count; index += 1) {
+      const wait = Atomics.wait(state, index, 0, 3000);
+      const port = Atomics.load(state, index);
+      if (wait === 'timed-out' || !Number.isInteger(port) || port < 1024 || port > 65535) {
+        throw new RunError('CHECKS-CONTAINMENT-FAILED', 'could not reserve a per-execution loopback port');
+      }
+      ports.push(port);
+    }
+  } catch (error) {
+    worker.terminate();
+    throw error;
+  }
+  let released = false;
+  return Object.freeze({
+    ports: Object.freeze(ports),
+    release() {
+      if (released) return;
+      released = true;
+      Atomics.store(state, count, 1);
+      Atomics.notify(state, count);
+      if (Atomics.wait(state, count, 1, 3000) === 'timed-out') {
+        worker.terminate();
+        throw new RunError('CHECKS-CONTAINMENT-FAILED', 'timed out releasing per-execution loopback ports');
+      }
+      worker.unref();
+    },
+  });
+}
+
+function containedCheckSupervisorMain() {
+  'use strict';
+  const fs = require('fs');
+  const path = require('path');
+  const childProcess = require('child_process');
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const MAX_TAIL_BYTES = 64 * 1024;
+
+  function appendTail(state, chunk) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    const combined = Buffer.concat([state.bytes, bytes]);
+    if (combined.length > MAX_TAIL_BYTES) {
+      state.bytes = combined.subarray(combined.length - MAX_TAIL_BYTES);
+      state.truncated = true;
+    } else state.bytes = combined;
+  }
+
+  function processMarker(pid) {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const close = stat.lastIndexOf(')');
+      const fields = stat.slice(close + 2).trim().split(/\s+/);
+      if (fields[19]) return `proc:${fields[19]}`;
+    } catch { /* macOS or exited process */ }
+    const ps = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
+    try {
+      const observed = childProcess.spawnSync(ps, ['-p', String(pid), '-o', 'lstart='], {
+        encoding: 'utf8', timeout: 1000, killSignal: 'SIGKILL',
+      });
+      const marker = (observed.stdout || '').trim();
+      return observed.status === 0 && marker ? `ps:${marker}` : null;
+    } catch { return null; }
+  }
+
+  function observedProcessGroup(pid) {
+    const ps = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
+    try {
+      const observed = childProcess.spawnSync(ps, ['-p', String(pid), '-o', 'pgid='], {
+        encoding: 'utf8', timeout: 1000, killSignal: 'SIGKILL',
+      });
+      const value = Number((observed.stdout || '').trim());
+      return observed.status === 0 && Number.isInteger(value) && value > 1 ? value : null;
+    } catch { return null; }
+  }
+
+  function groupAlive(groupId) {
+    const ps = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
+    try {
+      const observed = childProcess.spawnSync(ps, ['-axo', 'pgid=,stat='], {
+        encoding: 'utf8', timeout: 1000, killSignal: 'SIGKILL',
+      });
+      if (observed.status === 0) {
+        const members = String(observed.stdout || '').split(/\r?\n/).map((line) => line.trim())
+          .filter(Boolean).map((line) => {
+            const match = /^(\d+)\s+(\S+)/.exec(line);
+            return match ? { pgid: Number(match[1]), state: match[2] } : null;
+          }).filter(Boolean).filter((entry) => entry.pgid === groupId);
+        // A dead child can remain briefly as a zombie until this supervisor
+        // exits and its parent reaps it. Zombies cannot execute or retain the
+        // disposable boundary, so only a non-zombie member blocks cleanup.
+        return members.some((entry) => !/^Z/.test(entry.state));
+      }
+    } catch { /* fail closed through the kernel probe below */ }
+    try { process.kill(-groupId, 0); return true; }
+    catch (error) {
+      if (error && error.code === 'ESRCH') return false;
+      return true;
+    }
+  }
+
+  function signalGroup(groupId, signal) {
+    try { process.kill(-groupId, signal); return true; }
+    catch (error) {
+      if (error && error.code === 'ESRCH') return false;
+      throw error;
+    }
+  }
+
+  async function waitForDrain(groupId, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      if (!groupAlive(groupId)) return true;
+      await sleep(25);
+    } while (Date.now() < deadline);
+    return !groupAlive(groupId);
+  }
+
+  async function terminateAndDrain(groupId, leaderPid, leaderMarker, graceMs, drainMs) {
+    const currentMarker = processMarker(leaderPid);
+    if (leaderMarker && currentMarker && leaderMarker !== currentMarker) {
+      return { drained: false, reason: 'process-group leader identity changed before termination', signals: [] };
+    }
+    const signals = [];
+    if (!groupAlive(groupId)) return { drained: true, reason: null, signals };
+    if (signalGroup(groupId, 'SIGTERM')) signals.push('SIGTERM');
+    if (await waitForDrain(groupId, graceMs)) return { drained: true, reason: null, signals };
+    if (signalGroup(groupId, 'SIGKILL')) signals.push('SIGKILL');
+    const drained = await waitForDrain(groupId, drainMs);
+    return {
+      drained,
+      reason: drained ? null : 'dedicated process group remained after TERM/grace/KILL drainage',
+      signals,
+    };
+  }
+
+  async function readConfiguration() {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  }
+
+  async function main() {
+    const config = await readConfiguration();
+    if (process.platform !== 'darwin') {
+      throw new Error(`dedicated process-group supervision is unavailable on ${process.platform}`);
+    }
+    const stdout = { bytes: Buffer.alloc(0), truncated: false };
+    const stderr = { bytes: Buffer.alloc(0), truncated: false };
+    let child;
+    try {
+      child = childProcess.spawn(config.bin, config.argv, {
+        cwd: config.cwd,
+        env: config.env,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      process.stdout.write(JSON.stringify({
+        status: null, signal: null, stdout: '', stderr: '',
+        error: { code: 'CHECK_PROCESS_SPAWN_FAILED', message: error.message },
+        executionBoundary: { state: 'FAILED', drained: true, reason: 'contained process could not be spawned' },
+      }));
+      return;
+    }
+    const outcomePromise = new Promise((resolve) => {
+      child.once('error', (error) => resolve({ type: 'error', error }));
+      child.once('exit', (code, signal) => resolve({ type: 'exit', code, signal }));
+    });
+    child.stdout.on('data', (chunk) => appendTail(stdout, chunk));
+    child.stderr.on('data', (chunk) => appendTail(stderr, chunk));
+    const leaderPid = child.pid;
+    const leaderMarker = processMarker(leaderPid);
+    const observedGroup = observedProcessGroup(leaderPid);
+    const groupId = leaderPid;
+    const groupMismatch = observedGroup !== null && observedGroup !== groupId;
+    const outcome = await new Promise((resolve) => {
+      const timeoutHandle = setTimeout(() => resolve({ type: 'timeout' }), config.timeoutMs);
+      outcomePromise.then((value) => {
+        clearTimeout(timeoutHandle);
+        resolve(value);
+      });
+    });
+    let boundaryReason = groupMismatch
+      ? `detached child did not own its dedicated process group (${observedGroup} != ${groupId})` : null;
+    if (outcome.type === 'timeout') boundaryReason = `contained check exceeded ${config.timeoutMs} ms`;
+    else if (outcome.type === 'error') boundaryReason = `contained check process error: ${outcome.error.message}`;
+    else if (outcome.signal) boundaryReason = `contained check terminated abnormally by ${outcome.signal}`;
+    else if (groupAlive(groupId)) boundaryReason = 'contained check left a live descendant process group';
+
+    let drainage = { drained: !groupAlive(groupId), reason: null, signals: [] };
+    if (!drainage.drained || boundaryReason) {
+      drainage = await terminateAndDrain(groupId, leaderPid, leaderMarker,
+        config.termGraceMs, config.drainTimeoutMs);
+    }
+    if (!drainage.drained) {
+      boundaryReason = [boundaryReason, drainage.reason].filter(Boolean).join('; ');
+    }
+    await sleep(25);
+    const failedBoundary = Boolean(boundaryReason) || !drainage.drained;
+    const result = {
+      status: outcome.type === 'exit' ? outcome.code : null,
+      signal: outcome.type === 'exit' ? outcome.signal : outcome.type === 'timeout' ? 'SIGKILL' : null,
+      stdout: stdout.bytes.toString('utf8'),
+      stderr: stderr.bytes.toString('utf8'),
+      outputTruncated: stdout.truncated || stderr.truncated,
+      error: failedBoundary ? {
+        code: outcome.type === 'timeout' ? 'CHECK_PROCESS_TIMEOUT' : 'CHECK_PROCESS_GROUP_FAILED',
+        message: [boundaryReason, drainage.signals.length ?
+          `termination sequence ${drainage.signals.join('->')}` : null].filter(Boolean).join('; '),
+      } : null,
+      executionBoundary: {
+        state: failedBoundary ? 'FAILED' : 'PASSED',
+        drained: drainage.drained,
+        reason: boundaryReason,
+        processGroupId: groupId,
+        leaderIdentity: leaderMarker ? 'CAPTURED' : 'UNAVAILABLE',
+      },
+    };
+    process.stdout.write(JSON.stringify(result));
+  }
+
+  main().catch((error) => {
+    process.stdout.write(JSON.stringify({
+      status: null, signal: null, stdout: '', stderr: '',
+      error: { code: 'CHECK_SUPERVISOR_FAILED', message: error.message },
+      executionBoundary: { state: 'FAILED', drained: false, reason: error.message },
+    }));
+  });
+}
+
+const CONTAINED_CHECK_SUPERVISOR_SOURCE = `(${containedCheckSupervisorMain.toString()})()`;
+
+function runContainedCheckProcess(command, cwd, env) {
+  const timeoutMs = containedCheckTimeoutMs();
+  const input = JSON.stringify({
+    bin: command.bin,
+    argv: command.argv,
+    cwd,
+    env,
+    timeoutMs,
+    termGraceMs: CONTAINED_CHECK_TERM_GRACE_MS,
+    drainTimeoutMs: CONTAINED_CHECK_DRAIN_TIMEOUT_MS,
+  });
+  const supervisor = spawnSync(process.execPath, ['-e', CONTAINED_CHECK_SUPERVISOR_SOURCE], {
+    input,
+    encoding: 'utf8',
+    maxBuffer: 2 * 1024 * 1024,
+    timeout: timeoutMs + CONTAINED_CHECK_TERM_GRACE_MS + CONTAINED_CHECK_DRAIN_TIMEOUT_MS + 10_000,
+    killSignal: 'SIGKILL',
+  });
+  if (supervisor.error || supervisor.status !== 0) {
+    const raw = supervisor.error ? supervisor.error.message
+      : (supervisor.stderr || supervisor.stdout || `supervisor exit ${supervisor.status}`);
+    const error = new RunError('CHECKS-CONTAINMENT-FAILED',
+      `contained check supervisor failed: ${boundedCheckFailureTail(raw).tail}`);
+    error.executionBoundaryFailure = {
+      state: 'FAILED',
+      reason: boundedCheckFailureTail(error.message).tail,
+    };
+    error.checkGroupDrained = false;
+    throw error;
+  }
+  let parsed;
+  try { parsed = JSON.parse(supervisor.stdout); }
+  catch (error) {
+    const failure = new RunError('CHECKS-CONTAINMENT-FAILED',
+      `contained check supervisor returned invalid evidence: ${error.message}`);
+    failure.executionBoundaryFailure = { state: 'FAILED', reason: boundedCheckFailureTail(failure.message).tail };
+    failure.checkGroupDrained = false;
+    throw failure;
+  }
+  if (!parsed.executionBoundary || typeof parsed.executionBoundary.drained !== 'boolean') {
+    const failure = new RunError('CHECKS-CONTAINMENT-FAILED',
+      'contained check supervisor omitted process-group drainage evidence');
+    failure.executionBoundaryFailure = { state: 'FAILED', reason: failure.message };
+    failure.checkGroupDrained = false;
+    throw failure;
+  }
+  if (parsed.error) {
+    const failure = new RunError(parsed.error.code || 'CHECKS-CONTAINMENT-FAILED',
+      boundedCheckFailureTail(parsed.error.message || parsed.executionBoundary.reason || 'contained check failed').tail);
+    failure.executionBoundaryFailure = {
+      state: 'FAILED',
+      reason: boundedCheckFailureTail(parsed.executionBoundary.reason || failure.message).tail,
+    };
+    failure.checkGroupDrained = parsed.executionBoundary.drained;
+    failure.checkStdout = parsed.stdout || '';
+    failure.checkStderr = parsed.stderr || '';
+    throw failure;
+  }
+  return {
+    status: parsed.status,
+    signal: parsed.signal,
+    stdout: parsed.stdout || '',
+    stderr: parsed.stderr || '',
+    outputTruncated: parsed.outputTruncated === true,
+    executionBoundary: parsed.executionBoundary,
+  };
+}
+
+function proveOwnedProcessGroupDrainage(profile, cwd, env) {
+  const source = [
+    "const { spawn } = require('child_process');",
+    "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+    "child.once('error', (error) => { console.error(error.message); process.exit(1); });",
+    "child.once('spawn', () => { child.unref(); process.exit(0); });",
+    "setTimeout(() => process.exit(2), 1000).unref();",
+  ].join(' ');
+  const contained = CheckContainment.sandboxedCommand(profile, ['-e', source]);
+  try {
+    runContainedCheckProcess(contained, cwd, env);
+    return false;
+  } catch (error) {
+    return error && error.code === 'CHECK_PROCESS_GROUP_FAILED' &&
+      error.checkGroupDrained === true && error.executionBoundaryFailure &&
+      /left a live descendant process group/.test(error.executionBoundaryFailure.reason || '');
+  }
+}
+
+function snapshotGitEnvironment(home, scratch, bin) {
+  const env = {};
+  for (const key of ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM']) {
+    if (typeof process.env[key] === 'string' && process.env[key]) env[key] = process.env[key];
+  }
+  env.HOME = home;
+  env.USER = 'aegis-check';
+  env.LOGNAME = 'aegis-check';
+  env.TMPDIR = scratch.endsWith(path.sep) ? scratch : scratch + path.sep;
+  env.PATH = [
+    bin,
+    path.dirname(process.execPath),
+    '/Library/Developer/CommandLineTools/usr/bin',
+    '/usr/bin', '/bin', '/usr/sbin', '/sbin',
+  ].join(':');
+  env.GIT_OPTIONAL_LOCKS = '0';
+  env.AEGIS_CHECK_SNAPSHOT_POLICY = 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1';
+  return env;
+}
+
+function writeSnapshotProcessInspector(bin) {
+  assertSnapshotPlatformSupported();
+  const source = path.join(bin, 'ps.c');
+  const target = path.join(bin, 'ps');
+  const body = [
+    '#include <errno.h>',
+    '#include <libproc.h>',
+    '#include <stdio.h>',
+    '#include <stdlib.h>',
+    '#include <string.h>',
+    'int main(int argc, char **argv) {',
+    '  if (argc != 5 || strcmp(argv[1], "-p") || strcmp(argv[3], "-o")) return 2;',
+    '  char *end = NULL; long parsed = strtol(argv[2], &end, 10);',
+    '  if (!end || *end || parsed <= 1) return 2;',
+    '  struct proc_bsdinfo info;',
+    '  int got = proc_pidinfo((int)parsed, PROC_PIDTBSDINFO, 0, &info, sizeof(info));',
+    '  if (got != sizeof(info)) return 1;',
+    '  if (!strcmp(argv[4], "pid=")) printf("%d\\n", info.pbi_pid);',
+    '  else if (!strcmp(argv[4], "pgid=")) printf("%d\\n", info.pbi_pgid);',
+    '  else if (!strcmp(argv[4], "lstart=")) printf("%llu.%llu\\n", info.pbi_start_tvsec, info.pbi_start_tvusec);',
+    '  else if (!strcmp(argv[4], "comm=")) printf("%s\\n", info.pbi_comm);',
+    '  else return 2;',
+    '  return 0;',
+    '}',
+  ].join('\n') + '\n';
+  fs.writeFileSync(source, body, { mode: 0o600 });
+  checkedSpawn('compile unprivileged snapshot process inspector', '/usr/bin/clang',
+    ['-Wall', '-Wextra', '-O2', source, '-o', target]);
+  fs.chmodSync(target, 0o700);
+  const observed = checkedSpawn('verify snapshot process inspector', target,
+    ['-p', String(process.pid), '-o', 'pid=']).stdout.trim();
+  if (observed !== String(process.pid)) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      'snapshot process inspector did not report its real host PID');
+  }
+}
+
+function validateGeneratedDashboardState(snapshotRoot, statePath) {
+  const outputExpected = path.join(snapshotRoot, statePath);
+  const outputDirExpected = path.dirname(outputExpected);
+  let body;
+  try {
+    const outputStat = fs.lstatSync(outputExpected);
+    const outputReal = fs.realpathSync(outputExpected);
+    const outputDirReal = fs.realpathSync(outputDirExpected);
+    if (outputStat.isSymbolicLink() || !outputStat.isFile() || outputReal !== outputExpected ||
+        outputDirReal !== outputDirExpected || !outputReal.startsWith(outputDirReal + path.sep)) {
+      throw new Error('output escaped the disposable dashboard directory or is not a regular file');
+    }
+    body = fs.readFileSync(outputReal, 'utf8');
+    if (Buffer.byteLength(body, 'utf8') > 32 * 1024 * 1024) throw new Error('output exceeds 32 MiB');
+  } catch (error) {
+    throw new RunError('STATE_OUTPUT_INVALID', `generated dashboard state is unavailable: ${error.message}`);
+  }
+  const marker = 'window.AEGIS_STATE = ';
+  const markerAt = body.indexOf(marker);
+  if (!body.startsWith('/* Generated by builder-control/aegis-state.cjs') || markerAt === -1) {
+    throw new RunError('STATE_OUTPUT_INVALID',
+      'generated dashboard state lacks its canonical generator header or assignment');
+  }
+  try {
+    const value = JSON.parse(body.slice(markerAt + marker.length).trim().replace(/;\s*$/, ''));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('state root is not an object');
+  } catch (error) {
+    throw new RunError('STATE_OUTPUT_INVALID', `generated dashboard state is invalid: ${error.message}`);
+  }
+}
+
+function removeCheckBoundary(boundaryRoot, namespace = 'aegis-check-boundary-') {
+  if (!['aegis-check-boundary-', 'aegis-host-check-boundary-'].includes(namespace)) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      'refused cleanup for an unknown disposable boundary namespace');
+  }
+  const tmpReal = fs.realpathSync(os.tmpdir());
+  const expectedPrefix = path.join(tmpReal, namespace);
+  const resolved = path.resolve(boundaryRoot);
+  if (!resolved.startsWith(expectedPrefix) || path.dirname(resolved) !== tmpReal) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      'refused cleanup outside the exact disposable check-boundary namespace');
+  }
+  if (!fs.existsSync(resolved)) return;
+
+  // A contained command may remove permissions or set the user immutable bit
+  // on files inside its disposable boundary. Cleanup runs outside containment:
+  // clear recoverable flags, restore traversal permissions without following
+  // symlinks, then prove the exact boundary is gone.
+  spawnSync('/usr/bin/chflags', ['-R', 'nouchg', resolved], {
+    encoding: 'utf8', timeout: 30_000,
+  });
+  const pending = [resolved];
+  while (pending.length) {
+    const current = pending.pop();
+    let stat;
+    try { stat = fs.lstatSync(current); }
+    catch (error) { if (error.code === 'ENOENT') continue; else throw error; }
+    if (stat.isSymbolicLink()) continue;
+    try { fs.chmodSync(current, stat.isDirectory() ? 0o700 : 0o600); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (!stat.isDirectory()) continue;
+    for (const entry of fs.readdirSync(current)) pending.push(path.join(current, entry));
+  }
+  fs.rmSync(resolved, { recursive: true, force: true });
+  if (fs.existsSync(resolved)) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      'disposable check boundary remained after trusted cleanup');
+  }
+}
+
+function inheritedImmutableCheckBoundary(worktreeReal) {
+  if (process.env.AEGIS_CHECK_SNAPSHOT_POLICY !== CHECK_SNAPSHOT_POLICY) return null;
+  let cwd;
+  let common;
+  try {
+    cwd = fs.realpathSync(process.cwd());
+    const boundaryRoot = path.dirname(cwd);
+    if (path.basename(cwd) !== 'worktree' ||
+        !path.basename(boundaryRoot).startsWith('aegis-check-boundary-') ||
+        fs.realpathSync(worktreeReal) !== cwd) {
+      throw new Error('the asserted inherited snapshot is not the governed canonical worktree');
+    }
+    common = checkedSpawn('prove inherited snapshot repository ownership', 'git', [
+      '-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir',
+    ]).stdout.trim();
+    if (fs.realpathSync(common) !== fs.realpathSync(path.join(cwd, '.git'))) {
+      throw new Error('the asserted inherited snapshot is not an independent repository');
+    }
+    try {
+      fs.readFileSync('/private/etc/hosts');
+      throw new Error('the asserted inherited snapshot can still read a non-allowlisted host file');
+    } catch (error) {
+      if (!error || !['EPERM', 'EACCES'].includes(error.code)) throw error;
+    }
+    return Object.freeze({ cwd, boundaryRoot });
+  } catch (error) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      `inherited immutable snapshot proof failed: ${error.message}`);
+  }
+}
+
+function executeCheckInInheritedSnapshot(cmd, inherited, capture) {
+  let nestedRoot = null;
+  let failure = null;
+  let result;
+  try {
+    // The inherited sandbox authorizes writes only beneath its already-proven
+    // boundary. Allocating a sibling in the ambient OS temp directory was both
+    // denied in real containment and escaped cleanup if mkdir itself threw.
+    nestedRoot = fs.mkdtempSync(path.join(inherited.boundaryRoot, 'aegis-inherited-check-'));
+    const snapshotRoot = path.join(nestedRoot, 'worktree');
+    checkedSpawn('create inherited independent check repository', 'git',
+      ['clone', '--no-hardlinks', '--no-checkout', '--quiet', inherited.cwd, snapshotRoot]);
+    checkedSpawn('checkout inherited captured check HEAD', 'git',
+      ['-C', snapshotRoot, 'checkout', '-B', 'aegis/inherited-check-snapshot', '--quiet', capture.head]);
+    if (capture.patch) {
+      checkedSpawn('apply inherited captured working-tree bytes', 'git',
+        ['-C', snapshotRoot, 'apply', '--index', '--binary', '--whitespace=nowarn', '-'],
+        { input: capture.patch });
+    }
+    writeSupplementalSubjectFiles(snapshotRoot, capture.supplementalSubjectFiles);
+    const packetTarget = path.join(snapshotRoot, capture.packetPath);
+    fs.mkdirSync(path.dirname(packetTarget), { recursive: true });
+    fs.writeFileSync(packetTarget, capture.packetBytes);
+    const home = path.join(nestedRoot, 'home');
+    const scratch = path.join(nestedRoot, 'tmp');
+    const bin = path.join(nestedRoot, 'bin');
+    fs.mkdirSync(home, { mode: 0o700 });
+    fs.mkdirSync(scratch, { mode: 0o700 });
+    fs.mkdirSync(bin, { mode: 0o700 });
+    writeSnapshotProcessInspector(bin);
+    const env = snapshotGitEnvironment(home, scratch, bin);
+    const snapshotSubject = runCanonicalEngineeringOs([
+      '--subject', '--packet', path.join(snapshotRoot, capture.packetPath), '--json'], {
+      ...env,
+      GIT_DIR: path.join(snapshotRoot, '.git'),
+      GIT_WORK_TREE: snapshotRoot,
+    });
+    if (snapshotSubject.status !== 0 || !sameCanonicalSubject(capture.subject, snapshotSubject.parsed)) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        'inherited disposable snapshot does not reproduce the captured canonical subject');
+    }
+    if (capture.stateGenerator && capture.statePath) {
+      const generator = path.join(snapshotRoot, capture.stateGenerator);
+      const output = path.join(snapshotRoot, capture.statePath);
+      const generated = spawnSync(process.execPath, [generator, '--out', output], {
+        cwd: snapshotRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+        timeout: 60_000, killSignal: 'SIGKILL',
+      });
+      const generatedExit = generated.status === null ? 124 : generated.status;
+      if (generated.error || generatedExit !== 0) {
+        throw new RunError('STATE_GENERATION_FAILED',
+          `canonical dashboard state generation failed in inherited snapshot${generated.error ?
+            `: ${generated.error.message}` : ` (exit ${generatedExit})`}`);
+      }
+      validateGeneratedDashboardState(snapshotRoot, capture.statePath);
+      const generatedSubject = runCanonicalEngineeringOs([
+        '--subject', '--packet', path.join(snapshotRoot, capture.packetPath), '--json'], {
+        ...env,
+        GIT_DIR: path.join(snapshotRoot, '.git'),
+        GIT_WORK_TREE: snapshotRoot,
+      });
+      if (generatedSubject.status !== 0 || !sameCanonicalSubject(capture.subject, generatedSubject.parsed)) {
+        throw new RunError('CHECKS-CONTAINMENT-FAILED',
+          'inherited dashboard state generation changed the captured exact subject');
+      }
+    }
+    const hostingCheckCommands = new Set([
+      'node builder-control/test/hosting.test.cjs',
+      'node builder-control/test/hosting.test.cjs --host-only',
+      'node --test builder-control/test/hosting.test.cjs',
+    ]);
+    if (hostingCheckCommands.has(cmd.trim())) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        'recursive hosting checks cannot acquire new network authority inside an inherited snapshot');
+    }
+    result = runContainedCheckProcess({ bin: '/bin/bash', argv: ['-c', cmd] }, snapshotRoot, env);
+  } catch (error) {
+    failure = annotateBoundaryFailure(error, 'inherited immutable check execution');
+    if (error && error.checkStdout) failure.checkStdout = error.checkStdout;
+    if (error && error.checkStderr) failure.checkStderr = error.checkStderr;
+  }
+  if (nestedRoot) {
+    try {
+      fs.rmSync(nestedRoot, { recursive: true, force: true });
+      if (fs.existsSync(nestedRoot)) {
+        throw new Error('inherited disposable check directory remained after cleanup');
+      }
+    } catch (error) {
+      failure = annotateBoundaryFailure(error, 'inherited disposable cleanup', failure);
+    }
+  }
+  if (failure) throw failure;
+  return result;
+}
+
+function executeCheckInSnapshot(cmd, worktreeReal, capture) {
+  const inherited = inheritedImmutableCheckBoundary(worktreeReal);
+  if (inherited) return executeCheckInInheritedSnapshot(cmd, inherited, capture);
+  let boundaryRoot = null;
+  let networkReservation = null;
+  let stage = 'sandbox preflight';
+  let result;
+  let failure = null;
+  let cleanupSafe = true;
+  try {
+    assertSnapshotPlatformSupported();
+    CheckContainment.assertSandboxOperational();
+    stage = 'snapshot establishment';
+    boundaryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-check-boundary-'));
+    const snapshotRoot = path.join(boundaryRoot, 'worktree');
+    checkedSpawn('create independent check repository', 'git',
+      ['clone', '--no-hardlinks', '--no-checkout', '--quiet', worktreeReal, snapshotRoot]);
+    checkedSpawn('checkout captured check HEAD', 'git',
+      ['-C', snapshotRoot, 'checkout', '-B', 'aegis/check-snapshot', '--quiet', capture.head]);
+    if (capture.patch) {
+      checkedSpawn('apply captured working-tree bytes', 'git',
+        ['-C', snapshotRoot, 'apply', '--index', '--binary', '--whitespace=nowarn', '-'],
+        { input: capture.patch });
+    }
+    writeSupplementalSubjectFiles(snapshotRoot, capture.supplementalSubjectFiles);
+
+    const packetTarget = path.join(snapshotRoot, capture.packetPath);
+    fs.mkdirSync(path.dirname(packetTarget), { recursive: true });
+    fs.writeFileSync(packetTarget, capture.packetBytes);
+    const home = path.join(boundaryRoot, 'home');
+    const scratch = path.join(boundaryRoot, 'tmp');
+    const bin = path.join(boundaryRoot, 'bin');
+    fs.mkdirSync(home, { mode: 0o700 });
+    fs.mkdirSync(scratch, { mode: 0o700 });
+    fs.mkdirSync(bin, { mode: 0o700 });
+    // sandbox-exec refuses the setuid system /bin/ps even under an allow-all
+    // profile. Compile a disposable, unprivileged libproc reader that reports
+    // the real kernel PID/group/start/executable fields required by lifecycle
+    // tests. This preserves real identity evidence; it does not synthesize it.
+    writeSnapshotProcessInspector(bin);
+    const env = snapshotGitEnvironment(home, scratch, bin);
+    stage = 'snapshot subject preflight';
+    const snapshotSubject = runCanonicalEngineeringOs([
+      '--subject', '--packet', packetTarget, '--json'], {
+      ...env,
+      GIT_DIR: path.join(snapshotRoot, '.git'),
+      GIT_WORK_TREE: snapshotRoot,
+    });
+    if (snapshotSubject.status !== 0 || !sameCanonicalSubject(capture.subject, snapshotSubject.parsed)) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        'disposable check snapshot does not reproduce the captured canonical subject');
+    }
+
+    // Reads are explicit: the immutable snapshot, its disposable runtime, the
+    // pinned Node/Homebrew runtime libraries, and the macOS toolchain. There is
+    // no blanket file-read authority over the operator machine. Writes remain
+    // deny-by-default and confined to this new boundary plus /dev/null.
+    //
+    // Network is normally absent. The one checked-in hosting suite receives
+    // two freshly reserved loopback ports for this execution only; no fixed
+    // ambient port can become an unauthenticated exfiltration receiver.
+    const allowedLoopbackPorts = [];
+    const checkCommand = cmd.trim();
+    const hostingCheckCommands = new Set([
+      'node builder-control/test/hosting.test.cjs',
+      'node builder-control/test/hosting.test.cjs --host-only',
+      'node --test builder-control/test/hosting.test.cjs',
+    ]);
+    if (hostingCheckCommands.has(checkCommand)) {
+      networkReservation = reserveContainedCheckPorts(2);
+      const [projectionPort, apiPort] = networkReservation.ports;
+      env.AEGIS_TEST_HOSTING_PORT = String(projectionPort);
+      env.AEGIS_TEST_HOSTING_API_PORT = String(apiPort);
+      allowedLoopbackPorts.push(projectionPort, apiPort);
+    }
+    const testPort = containedCheckTestPort();
+    if (testPort && !allowedLoopbackPorts.includes(testPort)) allowedLoopbackPorts.push(testPort);
+    const loopbackRules = allowedLoopbackPorts.flatMap((port) => [
+      `(allow network-inbound (local ip "localhost:${port}"))`,
+      `(allow network-outbound (remote ip "localhost:${port}"))`,
+    ]);
+    const runtimeReadRules = nodeRuntimeReadRoots()
+      .map((root) => `(subpath ${JSON.stringify(root)})`).join(' ');
+    const profile = {
+      bin: CheckContainment.SANDBOX_EXEC,
+      executable: '/bin/bash',
+      root: boundaryRoot,
+      writeAuthorities: CheckContainment.resolveWriteAuthorities(
+        [boundaryRoot], boundaryRoot, 'check boundary write path'),
+      profile: [
+        '(version 1)',
+        '(deny default)',
+        '(allow process*)',
+        '(allow signal (target self))',
+        '(allow signal (target children))',
+        '(allow sysctl-read)',
+        '(allow mach-lookup)',
+        '(allow ipc-posix-shm)',
+        '(allow system-socket)',
+        '(allow user-preference-read)',
+        '(allow file-read-metadata)',
+        '(allow file-read-data (literal "/"))',
+        '(allow file-read* (subpath "/System") (subpath "/usr/lib") (subpath "/usr/bin") (subpath "/bin") (subpath "/usr/sbin") (subpath "/sbin") (subpath "/Library/Developer/CommandLineTools") (subpath "/private/var/db/dyld") (subpath "/private/var/db/timezone") (literal "/private/etc/ssl/cert.pem") (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))',
+        `(allow file-read* (subpath ${JSON.stringify(boundaryRoot)}))`,
+        `(allow file-read* ${runtimeReadRules} (literal "/opt/homebrew/etc/openssl@3/openssl.cnf"))`,
+        `(deny file-write-mode ${[boundaryRoot, snapshotRoot, home, scratch, bin]
+          .map((anchor) => `(literal ${JSON.stringify(anchor)})`).join(' ')})`,
+        `(deny file-write-flags ${[boundaryRoot, snapshotRoot, home, scratch, bin]
+          .map((anchor) => `(literal ${JSON.stringify(anchor)})`).join(' ')})`,
+        `(allow file-write* (subpath ${JSON.stringify(boundaryRoot)}) (literal "/dev/null"))`,
+        ...loopbackRules,
+      ].join('\n') + '\n',
+    };
+    if (capture.stateGenerator && capture.statePath) {
+      stage = 'dashboard state preflight';
+      const generator = path.join(snapshotRoot, capture.stateGenerator);
+      const output = path.join(snapshotRoot, capture.statePath);
+      const generatedCommand = CheckContainment.sandboxedCommand(
+        { ...profile, executable: process.execPath }, [generator, '--out', output]);
+      const generated = spawnSync(generatedCommand.bin, generatedCommand.argv, {
+        cwd: snapshotRoot, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000,
+      });
+      const generatedExit = generated.status === null ? 124 : generated.status;
+      if (generated.error || generatedExit !== 0) {
+        throw new RunError('STATE_GENERATION_FAILED',
+          `canonical dashboard state generation failed${generated.error ? `: ${generated.error.message}` :
+            ` (exit ${generatedExit}${generated.signal ? `, signal ${generated.signal}` : ''}${generated.stderr ? `: ${boundedCheckFailureTail(generated.stderr).tail}` : ''})`}`);
+      }
+      validateGeneratedDashboardState(snapshotRoot, capture.statePath);
+      const generatedSubject = runCanonicalEngineeringOs([
+        '--subject', '--packet', packetTarget, '--json'], {
+        ...env,
+        GIT_DIR: path.join(snapshotRoot, '.git'),
+        GIT_WORK_TREE: snapshotRoot,
+      });
+      if (generatedSubject.status !== 0 || !sameCanonicalSubject(capture.subject, generatedSubject.parsed)) {
+        throw new RunError('CHECKS-CONTAINMENT-FAILED',
+          'dashboard state generation changed the captured exact subject');
+      }
+    }
+    stage = 'contained check execution';
+    const contained = CheckContainment.sandboxedCommand(profile, ['-c', cmd]);
+    if (networkReservation) {
+      networkReservation.release();
+      networkReservation = null;
+    }
+    result = runContainedCheckProcess(contained, snapshotRoot, env);
+  } catch (error) {
+    if (error && error.checkGroupDrained === false) cleanupSafe = false;
+    failure = annotateBoundaryFailure(error, stage);
+    if (error && error.checkStdout) failure.checkStdout = error.checkStdout;
+    if (error && error.checkStderr) failure.checkStderr = error.checkStderr;
+  }
+  if (networkReservation) {
+    try { networkReservation.release(); }
+    catch (error) { failure = annotateBoundaryFailure(error, 'network reservation cleanup', failure); }
+  }
+  if (boundaryRoot && cleanupSafe) {
+    try { removeCheckBoundary(boundaryRoot); }
+    catch (error) { failure = annotateBoundaryFailure(error, 'trusted cleanup', failure); }
+  } else if (boundaryRoot && !cleanupSafe) {
+    failure = annotateBoundaryFailure(
+      new RunError('CHECKS-CONTAINMENT-FAILED',
+        'trusted cleanup deferred because process-group drainage was not proven'),
+      'trusted cleanup', failure);
+  }
+  if (failure) throw failure;
+  return result;
+}
+
+function prepareCanonicalDashboardState(run, pkt, packetReal) {
+  if (!DASHBOARD_STATE_PACKET_IDS.has(pkt.packetId)) {
     return { ok: true, required: false };
+  }
+  const expectedPacket = path.join(PACKETS_DIR, `${pkt.packetId}.json`);
+  let canonicalPacketReal;
+  try { canonicalPacketReal = fs.realpathSync(expectedPacket); }
+  catch (e) {
+    return { ok: false, code: 'STATE_PACKET_UNAVAILABLE', reason: `canonical dashboard packet is unavailable: ${e.message}` };
+  }
+  if (packetReal !== canonicalPacketReal) {
+    return { ok: false, code: 'STATE_PACKET_INVALID', reason: 'dashboard state preflight requires the canonical active packet file' };
   }
 
   let env;
@@ -1513,44 +3622,333 @@ function prepareCanonicalDashboardState(run, pkt, packetReal) {
     }
   }
 
-  const generated = spawnSync(process.execPath, [generatorReal, '--out', outputExpected], {
-    cwd: worktreeReal, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000,
+  return { ok: true, required: true, generator: DASHBOARD_STATE_GENERATOR_REL, output: DASHBOARD_STATE_OUTPUT_REL };
+}
+
+function buildHostProofContext(preHostReceipt, preHostReceiptRef) {
+  if (!validatePreHostCheckReceipt(preHostReceipt) || !preHostReceiptRef ||
+      preHostReceiptRef.receiptSha256 !== preHostReceipt.receiptSha256 ||
+      !/^LED-CHECK-[0-9a-f]{32}$/.test(preHostReceiptRef.entryId || '')) {
+    throw new RunError('HOST-PROOF-CONTEXT-INVALID',
+      'post-review host proof requires the validated canonical pre-host receipt and its exact ledger reference');
+  }
+  const results = new Map(preHostReceipt.results.map((result) => [result.cmd, result]));
+  const preHostCommandCoverage = HOST_PRE_HOST_COVERAGE_COMMANDS.map((command) => {
+    const result = results.get(command);
+    if (!result || result.status !== 'EXECUTED' || result.exit !== 0) {
+      throw new RunError('HOST-PROOF-CONTEXT-INVALID',
+        `host proof has no exact PRE_HOST PASS command evidence (${command})`);
+    }
+    return Object.freeze({
+      suite: 'pre-host-command', command,
+      coverage: 'COVERED_BY_EXACT_PREHOST_COMMAND',
+      evidenceSha256: sha256(stableJson(result)),
+    });
   });
-  const exit = generated.status === null ? 124 : generated.status;
-  if (generated.error || exit !== 0) {
+  const body = {
+    schemaVersion: 1,
+    contextType: HOST_PROOF_CONTEXT_TYPE,
+    boundary: HOST_CONTAINMENT_BOUNDARY,
+    subject: preHostReceipt.subject,
+    preHostReceipt,
+    preHostReceiptRef,
+    preHostCommandCoverage,
+    fixedProbeNames: [...HOST_FIXED_PROBE_NAMES],
+  };
+  return Object.freeze({ ...body, contextSha256: sha256(stableJson(body)) });
+}
+
+function validateHostProofEvidence(evidence, context) {
+  if (!evidence || evidence.schemaVersion !== 1 || evidence.evidenceType !== HOST_PROOF_EVIDENCE_TYPE ||
+      evidence.boundary !== HOST_CONTAINMENT_BOUNDARY || evidence.contextSha256 !== context.contextSha256 ||
+      evidence.subjectSha256 !== context.subject.subjectSha256 ||
+      stableJson(evidence.preHostReceiptRef) !== stableJson(context.preHostReceiptRef) ||
+      !Array.isArray(evidence.executedSuites) ||
+      stableJson(evidence.executedSuites) !== stableJson(HOST_FIXED_PROBE_NAMES) ||
+      stableJson(context.fixedProbeNames) !== stableJson(HOST_FIXED_PROBE_NAMES) ||
+      !Array.isArray(evidence.coverage) || !Array.isArray(context.preHostCommandCoverage)) return false;
+  const expected = context.preHostCommandCoverage
+    .map(({ suite, command, coverage, evidenceSha256 }) => ({
+      suite, command, coverage, evidenceSha256,
+    }));
+  return stableJson(evidence.coverage) === stableJson(expected);
+}
+
+function topLevelHostCheckEnvironment(boundaryRoot = null, proof = null) {
+  if (!boundaryRoot) {
     return {
-      ok: false,
-      code: 'STATE_GENERATION_FAILED',
-      exit,
-      reason: `canonical dashboard state generation failed${generated.error ? `: ${generated.error.message}` : ` (exit ${exit})`}`,
+      PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      LANG: 'en_CA.UTF-8', LC_ALL: 'en_CA.UTF-8',
+      USER: 'aegis-host-check', LOGNAME: 'aegis-host-check',
     };
   }
+  const home = path.join(boundaryRoot, 'home');
+  const scratch = path.join(boundaryRoot, 'tmp');
+  const bin = path.join(boundaryRoot, 'bin');
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  // The system ps binary is setuid and cannot execute inside sandbox-exec.
+  // Reuse the narrow libproc reader already used by immutable check snapshots
+  // so public lifecycle controls retain real PID-lifetime evidence.
+  writeSnapshotProcessInspector(bin);
+  return {
+    HOME: home, TMPDIR: scratch,
+    PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+    LANG: 'en_CA.UTF-8', LC_ALL: 'en_CA.UTF-8',
+    USER: 'aegis-host-check', LOGNAME: 'aegis-host-check',
+    AEGIS_HOST_OUTER_CONTAINMENT: HOST_CONTAINMENT_BOUNDARY,
+    ...(proof ? {
+      AEGIS_HOST_PROOF_CONTEXT: proof.path,
+      AEGIS_HOST_PROOF_CONTEXT_SHA256: proof.context.contextSha256,
+    } : {}),
+  };
+}
 
-  let body;
+function outerHostContainmentProfile(boundaryRoot, loopbackPorts = []) {
+  const home = path.join(boundaryRoot, 'home');
+  const scratch = path.join(boundaryRoot, 'tmp');
+  const runtimeReadRules = nodeRuntimeReadRoots()
+    .map((root) => `(subpath ${JSON.stringify(root)})`).join(' ');
+  const loopbackRules = loopbackPorts.flatMap((port) => [
+    `(allow network-inbound (local ip "localhost:${port}"))`,
+    `(allow network-outbound (remote ip "localhost:${port}"))`,
+  ]);
+  return {
+    bin: CheckContainment.SANDBOX_EXEC,
+    executable: process.execPath,
+    root: boundaryRoot,
+    writeAuthorities: CheckContainment.resolveWriteAuthorities(
+      [home, scratch], boundaryRoot, 'host containment boundary write path'),
+    profile: [
+      '(version 1)',
+      '(deny default)',
+      '(allow process*)',
+      '(allow signal (target self))',
+      '(allow signal (target children))',
+      '(allow sysctl-read)',
+      '(allow mach-lookup)',
+      '(allow ipc-posix-shm)',
+      '(allow system-socket)',
+      '(allow user-preference-read)',
+      '(allow file-read-metadata)',
+      '(allow file-read-data (literal "/"))',
+      '(allow file-read* (subpath "/System") (subpath "/usr/lib") (subpath "/usr/bin") (subpath "/bin") (subpath "/usr/sbin") (subpath "/sbin") (subpath "/Library/Developer/CommandLineTools") (subpath "/private/var/db/dyld") (subpath "/private/var/db/timezone") (literal "/private/etc/ssl/cert.pem") (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))',
+      `(allow file-read* (subpath ${JSON.stringify(boundaryRoot)}))`,
+      `(allow file-read* ${runtimeReadRules} (literal "/opt/homebrew/etc/openssl@3/openssl.cnf"))`,
+      `(allow file-read* (literal ${JSON.stringify(require('./aegis-worker.cjs').CLAUDE_EXECUTABLE)}))`,
+      `(deny file-write-mode (literal ${JSON.stringify(boundaryRoot)}))`,
+      `(deny file-write-flags (literal ${JSON.stringify(boundaryRoot)}))`,
+      `(allow file-write* (subpath ${JSON.stringify(home)}) (subpath ${JSON.stringify(scratch)}) (literal "/dev/null"))`,
+      // The authenticated hosting proof receives only supervisor-reserved,
+      // exact loopback ports. Ambient and external routes remain denied.
+      ...loopbackRules,
+    ].join('\n') + '\n',
+  };
+}
+
+function hostContainmentReceiptBody(run, packetBefore, subjectBefore, command, capture, execution) {
+  return {
+    schemaVersion: 1,
+    authority: HOST_CONTAINMENT_AUTHORITY,
+    executionBoundary: HOST_CONTAINMENT_BOUNDARY,
+    runId: run.runId,
+    packet: { path: packetBefore.path, sha256: packetBefore.sha256 },
+    subject: {
+      subjectSha256: subjectBefore.subjectSha256,
+      subjectPaths: [...subjectBefore.subjectPaths],
+      diffBytes: subjectBefore.diffBytes,
+      range: subjectBefore.range,
+    },
+    snapshot: {
+      policy: CHECK_SNAPSHOT_POLICY,
+      captureSha256: capture.captureSha256,
+    },
+    command,
+    platform: process.platform,
+    startedAt: execution.startedAt,
+    completedAt: execution.completedAt,
+    complete: true,
+    outcome: execution.outcome,
+    result: execution.result,
+    ...(execution.preHostReceiptRef ? { preHostReceiptRef: execution.preHostReceiptRef } : {}),
+    ...(execution.coverage ? { coverage: execution.coverage } : {}),
+    ...(execution.reason ? { reason: boundedCheckFailureTail(execution.reason).tail } : {}),
+  };
+}
+
+function establishHostContainmentSnapshot(worktreeReal, capture) {
+  const boundaryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-host-check-boundary-'));
   try {
-    const outputStat = fs.lstatSync(outputExpected);
-    const outputReal = fs.realpathSync(outputExpected);
-    if (outputStat.isSymbolicLink() || !outputStat.isFile() || outputReal !== outputExpected ||
-        !outputReal.startsWith(outputDirReal + path.sep)) {
-      throw new Error('output escaped the canonical dashboard directory or is not a regular file');
+    const repositoryRoot = path.join(boundaryRoot, 'repository');
+    const snapshotRoot = path.join(boundaryRoot, 'worktree');
+    checkedSpawn('create independent host-containment repository', 'git',
+      ['clone', '--no-hardlinks', '--no-checkout', '--quiet', worktreeReal, repositoryRoot]);
+    checkedSpawn('create independent host-containment worktree', 'git',
+      ['-C', repositoryRoot, 'worktree', 'add', '--detach', '--quiet', snapshotRoot, capture.head]);
+    checkedSpawn('name captured host-containment worktree', 'git',
+      ['-C', snapshotRoot, 'switch', '-c', 'aegis/host-check-snapshot', '--quiet']);
+    if (capture.patch) {
+      checkedSpawn('apply captured host-containment working-tree bytes', 'git',
+        ['-C', snapshotRoot, 'apply', '--index', '--binary', '--whitespace=nowarn', '-'],
+        { input: capture.patch });
     }
-    body = fs.readFileSync(outputReal, 'utf8');
-    if (Buffer.byteLength(body, 'utf8') > 32 * 1024 * 1024) throw new Error('output exceeds 32 MiB');
-  } catch (e) {
-    return { ok: false, code: 'STATE_OUTPUT_INVALID', reason: `generated dashboard state is unavailable: ${e.message}` };
+    writeSupplementalSubjectFiles(snapshotRoot, capture.supplementalSubjectFiles);
+    const packetTarget = path.join(snapshotRoot, capture.packetPath);
+    fs.mkdirSync(path.dirname(packetTarget), { recursive: true });
+    fs.writeFileSync(packetTarget, capture.packetBytes);
+    const gitDir = checkedSpawn('resolve host-containment worktree Git directory', 'git',
+      ['-C', snapshotRoot, 'rev-parse', '--absolute-git-dir']).stdout.trim();
+    const snapshotSubject = runCanonicalEngineeringOs([
+      '--subject', '--packet', packetTarget, '--json'], {
+      ...topLevelHostCheckEnvironment(),
+      GIT_DIR: gitDir,
+      GIT_WORK_TREE: snapshotRoot,
+    });
+    if (snapshotSubject.status !== 0 || !sameCanonicalSubject(capture.subject, snapshotSubject.parsed)) {
+      throw new RunError('CHECKS-CONTAINMENT-FAILED',
+        'host-containment snapshot does not reproduce the captured canonical subject');
+    }
+    return Object.freeze({ boundaryRoot, snapshotRoot });
+  } catch (error) {
+    fs.rmSync(boundaryRoot, { recursive: true, force: true });
+    throw error;
   }
-  const marker = 'window.AEGIS_STATE = ';
-  const markerAt = body.indexOf(marker);
-  if (!body.startsWith('/* Generated by builder-control/aegis-state.cjs') || markerAt === -1) {
-    return { ok: false, code: 'STATE_OUTPUT_INVALID', reason: 'generated dashboard state lacks its canonical generator header or assignment' };
+}
+
+function runTopLevelHostContainmentCheck(run, worktreeReal, packetBefore, subjectBefore, command, capture, options = {}) {
+  const startedAt = nowIso();
+  let execution;
+  if (options.skipReason) {
+    execution = {
+      startedAt,
+      completedAt: nowIso(),
+      outcome: 'FAIL',
+      reason: options.skipReason,
+      result: {
+        status: 'SKIPPED', exit: null, passed: 0, skipped: 1, failed: 0, total: 1,
+        groupDrained: false, ownedGroupDrainageProven: false,
+        summaryParsed: false, outputBytes: 0, outputSha256: sha256(''), outputTruncated: false,
+      },
+    };
+  } else if (process.platform !== 'darwin') {
+    execution = {
+      startedAt,
+      completedAt: nowIso(),
+      outcome: 'FAIL',
+      reason: `top-level reviewer containment proof requires darwin, observed ${process.platform}`,
+      result: {
+        status: 'REFUSED', exit: null, passed: 0, skipped: 0, failed: 1, total: 1,
+        groupDrained: false, ownedGroupDrainageProven: false,
+        summaryParsed: false, outputBytes: 0, outputSha256: sha256(''), outputTruncated: false,
+      },
+    };
+  } else {
+    let snapshot = null;
+    let networkReservation = null;
+    let result;
+    let boundaryFailure = null;
+    let proofContext = null;
+    let proofEvidence = null;
+    try {
+      CheckContainment.assertSandboxOperational();
+      snapshot = establishHostContainmentSnapshot(worktreeReal, capture);
+      if (typeof options.afterSnapshotEstablished === 'function') {
+        options.afterSnapshotEstablished(snapshot);
+      }
+      const script = command.slice('node '.length);
+      proofContext = buildHostProofContext(options.preHostReceipt, options.preHostReceiptRef);
+      const proofPath = path.join(snapshot.boundaryRoot, 'host-proof-context.json');
+      fs.writeFileSync(proofPath, JSON.stringify(proofContext), { mode: 0o400, flag: 'wx' });
+      networkReservation = reserveContainedCheckPorts(2);
+      const [hostingPort, hostingApiPort] = networkReservation.ports;
+      const containedEnv = {
+        ...topLevelHostCheckEnvironment(snapshot.boundaryRoot, {
+        path: proofPath, context: proofContext,
+        }),
+        AEGIS_TEST_HOSTING_PORT: String(hostingPort),
+        AEGIS_TEST_HOSTING_API_PORT: String(hostingApiPort),
+      };
+      const profile = outerHostContainmentProfile(snapshot.boundaryRoot,
+        [hostingPort, hostingApiPort]);
+      const ownedGroupDrainageProven = proveOwnedProcessGroupDrainage(
+        profile, snapshot.snapshotRoot, containedEnv);
+      if (!ownedGroupDrainageProven) {
+        throw new RunError('CHECKS-CONTAINMENT-FAILED',
+          'trusted supervisor did not behaviorally prove owned process-group drainage');
+      }
+      const contained = CheckContainment.sandboxedCommand(profile, [script]);
+      networkReservation.release();
+      networkReservation = null;
+      result = runContainedCheckProcess(contained, snapshot.snapshotRoot, containedEnv);
+      result.ownedGroupDrainageProven = true;
+    } catch (error) {
+      boundaryFailure = error;
+      result = { status: null, stdout: '', stderr: '', error };
+    } finally {
+      if (networkReservation) {
+        try { networkReservation.release(); }
+        catch (error) { boundaryFailure = boundaryFailure || error; }
+      }
+      if (snapshot) {
+        try { removeCheckBoundary(snapshot.boundaryRoot, 'aegis-host-check-boundary-'); }
+        catch (error) { boundaryFailure = boundaryFailure || error; }
+      }
+    }
+    const stdout = String(result.stdout || '');
+    const stderr = String(result.stderr || '');
+    const output = `${stdout}\n--- STDERR ---\n${stderr}`;
+    const outputBytes = Buffer.byteLength(output, 'utf8');
+    const outputTruncated = result.outputTruncated === true ||
+      Boolean(result.error && result.error.code === 'ENOBUFS') ||
+      outputBytes >= HOST_CONTAINMENT_MAX_OUTPUT_BYTES;
+    const summaryLines = stdout.split(/\r?\n/).map((line) => line.trim())
+      .filter((line) => /^\d+ passed, \d+ skipped, (?:\d+|at least \d+) failed\.$/.test(line));
+    const summary = summaryLines.length === 1
+      ? /^(\d+) passed, (\d+) skipped, (\d+) failed\.$/.exec(summaryLines[0]) : null;
+    const passed = summary ? Number(summary[1]) : 0;
+    const skipped = summary ? Number(summary[2]) : 0;
+    const failed = summary ? Number(summary[3]) : 1;
+    const evidenceLines = stdout.split(/\r?\n/)
+      .filter((line) => line.startsWith(HOST_PROOF_EVIDENCE_PREFIX));
+    if (evidenceLines.length === 1) {
+      try {
+        proofEvidence = JSON.parse(Buffer.from(
+          evidenceLines[0].slice(HOST_PROOF_EVIDENCE_PREFIX.length), 'base64url').toString('utf8'));
+      } catch { proofEvidence = null; }
+    }
+    const proofValid = Boolean(proofContext && validateHostProofEvidence(proofEvidence, proofContext));
+    const covered = proofValid ? proofEvidence.coverage.length : 0;
+    const exit = result.status === null ? (result.error && result.error.code === 'ETIMEDOUT' ? 124 : null) : result.status;
+    const groupDrained = Boolean(result.executionBoundary &&
+      result.executionBoundary.state === 'PASSED' && result.executionBoundary.drained === true);
+    const ok = !boundaryFailure && !result.error && exit === 0 && groupDrained && !outputTruncated &&
+      summaryLines.length === 1 && Boolean(summary) && proofValid && passed > 0 && skipped === 0 && failed === 0;
+    const failureReason = ok ? null : boundedCheckFailureTail([
+      boundaryFailure ? boundaryFailure.message : result.error ? result.error.message :
+        `host containment suite did not prove a zero-skip pass (exit ${exit === null ? 'unknown' : exit})`,
+      stdout,
+      stderr,
+    ].filter(Boolean).join('\n')).tail;
+    execution = {
+      startedAt,
+      completedAt: nowIso(),
+      outcome: ok ? 'PASS' : 'FAIL',
+      ...(failureReason ? { reason: failureReason } : {}),
+      result: {
+        status: 'EXECUTED', exit, passed, covered, skipped, failed, groupDrained,
+        ownedGroupDrainageProven: result.ownedGroupDrainageProven === true,
+        total: passed + covered + skipped + failed,
+        summaryParsed: Boolean(summary) && proofValid, outputBytes,
+        outputSha256: sha256(output), outputTruncated,
+      },
+      ...(proofContext ? { preHostReceiptRef: proofContext.preHostReceiptRef } : {}),
+      ...(proofValid ? { coverage: proofEvidence.coverage } : {}),
+    };
   }
-  try {
-    const value = JSON.parse(body.slice(markerAt + marker.length).trim().replace(/;\s*$/, ''));
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('state root is not an object');
-  } catch (e) {
-    return { ok: false, code: 'STATE_OUTPUT_INVALID', reason: `generated dashboard state is invalid: ${e.message}` };
-  }
-  return { ok: true, required: true, generator: DASHBOARD_STATE_GENERATOR_REL, output: DASHBOARD_STATE_OUTPUT_REL };
+  const body = hostContainmentReceiptBody(
+    run, packetBefore, subjectBefore, command, capture, execution);
+  return Object.freeze({ ...body, receiptSha256: hostContainmentReceiptDigest(body) });
 }
 
 function runChecksClaimed(run) {
@@ -1567,27 +3965,38 @@ function runChecksClaimed(run) {
   // or spawning a shell. Refusal happens before any run or ledger mutation.
   const gitEnv = canonicalGitEnvironment(run);
   const worktreeReal = gitEnv.GIT_WORK_TREE;
-  const packetReal = fs.realpathSync(path.resolve(ROOT, packet));
-  const pkt = JSON.parse(fs.readFileSync(packetReal, 'utf8'));
-  const cmds = (pkt.testsRequired || []).filter((command) => {
-    if (typeof command !== 'string') return false;
-    const tokens = command.trim().split(/\s+/);
-    const entrypoint = tokens[1] && tokens[1].replace(/^\.\//, '');
-    return !(tokens[0] === 'node' && entrypoint === 'builder-control/engineering-os.cjs' &&
-      tokens.includes('--gate-done'));
-  });
+  const packetBefore = packetCoordinate(packet);
+  const packetReal = packetBefore.real;
+  const pkt = packetBefore.parsed;
+  const cmds = runnableCheckCommands(pkt);
+  const hostCommands = runnableHostContainmentCommands(pkt);
   if (!cmds.length) {
     transition(run, 'CHECKS_FAILED', 'the packet declares no runnable testsRequired');
     throw new RunError('NO-CHECKS', 'the packet declares no runnable checks. Zero checks passing is the absence of evidence, not evidence.');
   }
+  const startedAt = nowIso();
+  const subjectBeforeResult = runCanonicalEngineeringOs([
+    '--subject', '--packet', packetBefore.path, '--json'], gitEnv);
+  const subjectBefore = subjectBeforeResult.parsed;
+  if (subjectBeforeResult.status !== 0 || !validSubjectCoordinate(subjectBefore)) {
+    transition(run, 'CHECKS_FAILED', 'canonical subject was empty, malformed, or unavailable before checks');
+    throw new RunError('CHECKS-SUBJECT-INVALID',
+      'deterministic checks require a non-empty canonical subject before execution');
+  }
   const statePreparation = prepareCanonicalDashboardState(run, pkt, packetReal);
   if (!statePreparation.ok) {
+    const boundaryReason = boundedCheckFailureTail(
+      `dashboard state preflight: ${statePreparation.reason}`).tail;
     run.checks = {
       ranAt: nowIso(), total: cmds.length, passed: 0,
-      results: cmds.map((cmd) => ({ cmd, exit: null, skipped: 'canonical dashboard state generation failed' })),
+      results: cmds.map((cmd) => nonExecutedCheckResult(
+        cmd, 'SKIPPED', 'canonical dashboard state generation failed', statePreparation.reason)),
       precondition: {
         state: 'FAILED', code: statePreparation.code,
         reason: statePreparation.reason, exit: Number.isInteger(statePreparation.exit) ? statePreparation.exit : null,
+      },
+      executionBoundary: {
+        policy: CHECK_SNAPSHOT_POLICY, state: 'FAILED', reason: boundaryReason,
       },
     };
     saveRun(run);
@@ -1601,40 +4010,228 @@ function runChecksClaimed(run) {
       nextAction: 'retry',
     });
   }
+  let checkCapture;
+  try {
+    checkCapture = captureCheckExecutionSource(
+      worktreeReal, packetBefore, subjectBefore, statePreparation);
+  } catch (error) {
+    const failure = checkSnapshotFailure(error && error.message ? error.message : error);
+    run.checks = {
+      ranAt: nowIso(), total: cmds.length, passed: 0,
+      results: cmds.map((cmd) => ({
+        ...nonExecutedCheckResult(cmd, 'REFUSED', 'immutable check snapshot unavailable',
+          error && error.message ? error.message : error),
+        failureEvidence: failure,
+        executionEvidence: failure,
+      })),
+      integrity: {
+        state: 'FAILED',
+        gaps: ['immutable check execution boundary could not be established'],
+      },
+      executionBoundary: {
+        policy: CHECK_SNAPSHOT_POLICY,
+        state: 'FAILED',
+        reason: boundedCheckFailureTail(error && error.message ? error.message : error).tail,
+      },
+    };
+    saveRun(run);
+    transition(run, 'CHECKS_FAILED', '0 checks ran; immutable check execution boundary unavailable');
+    const fresh = loadRun(run.runId);
+    return Object.freeze({
+      runId: fresh.runId,
+      state: fresh.state,
+      action: 'checks',
+      checks: Object.freeze({ passed: fresh.checks.passed, total: fresh.checks.total }),
+      nextAction: 'retry',
+    });
+  }
   const results = [];
+  const boundaryFailures = [];
   for (const cmd of cmds) {
-    const r = spawnSync('bash', ['-lc', cmd], { cwd: worktreeReal, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-    const exit = r.status === null ? 124 : r.status;
-    const result = { cmd, exit };
-    if (exit !== 0 || r.error) {
-      const stdout = boundedCheckFailureTail(r.stdout);
-      const stderr = boundedCheckFailureTail(r.error ? `${r.stderr || ''}\n${r.error.message || ''}` : r.stderr);
-      result.failureEvidence = {
-        stdoutTail: stdout.tail,
-        stderrTail: stderr.tail,
-        stdoutTruncated: stdout.truncated,
-        stderrTruncated: stderr.truncated,
+    const ranAt = nowIso();
+    if (boundaryFailures.length) {
+      results.push({
+        ...nonExecutedCheckResult(cmd, 'SKIPPED',
+          'an earlier check lost its execution boundary', boundaryFailures[0]),
+        ranAt,
+      });
+      continue;
+    }
+    let r;
+    let executionStatus = 'EXECUTED';
+    try {
+      r = executeCheckInSnapshot(cmd, worktreeReal, checkCapture);
+      if (r.error) executionStatus = 'REFUSED';
+    } catch (error) {
+      executionStatus = 'REFUSED';
+      r = {
+        status: null,
+        stdout: error && error.checkStdout ? error.checkStdout : '',
+        stderr: error && error.checkStderr ? error.checkStderr : '',
+        error,
       };
+    }
+    if (r.error && r.error.executionBoundaryFailure) {
+      boundaryFailures.push(r.error.executionBoundaryFailure.reason);
+    }
+    const preconditionFailure = statePreparation.required && r.error &&
+      ['STATE_GENERATION_FAILED', 'STATE_OUTPUT_INVALID'].includes(r.error.code);
+    const exit = preconditionFailure ? null
+      : executionStatus === 'REFUSED' ? 125 : (r.status === null ? 124 : r.status);
+    const result = { cmd, exit, ranAt, status: executionStatus };
+    result.executionEvidence = checkExecutionEvidence(
+      r.stdout, r.error ? `${r.stderr || ''}\n${r.error.message || ''}` : r.stderr);
+    if (preconditionFailure) {
+      result.skipped = 'canonical dashboard state generation failed';
+      result.preconditionFailure = {
+        code: r.error.code,
+        reason: boundedCheckFailureTail(r.error.message || r.error).tail,
+      };
+    } else if (exit !== 0 || r.error) {
+      result.failureEvidence = result.executionEvidence;
     }
     results.push(result);
   }
+  const snapshotCommandsPassed = boundaryFailures.length === 0 &&
+    results.every((result) => result.status === 'EXECUTED' && result.exit === 0 && !result.preconditionFailure);
+  const completedAt = nowIso();
+  const coordinateGaps = [];
+  let packetStable = false;
+  try {
+    const packetAfter = packetCoordinate(packet);
+    packetStable = packetBefore.path === packetAfter.path && packetBefore.sha256 === packetAfter.sha256;
+  } catch (error) {
+    coordinateGaps.push(`post-check packet coordinate unavailable: ${boundedCheckFailureTail(error && error.message ? error.message : error).tail}`);
+  }
+  let subjectStable = false;
+  try {
+    const subjectAfterResult = runCanonicalEngineeringOs([
+      '--subject', '--packet', packetBefore.path, '--json'], gitEnv);
+    subjectStable = subjectAfterResult.status === 0 && sameCanonicalSubject(subjectBefore, subjectAfterResult.parsed);
+    if (subjectAfterResult.status !== 0) coordinateGaps.push(`post-check subject authority exited ${subjectAfterResult.status}`);
+  } catch (error) {
+    coordinateGaps.push(`post-check subject coordinate unavailable: ${boundedCheckFailureTail(error && error.message ? error.message : error).tail}`);
+  }
+  const stateFailure = results.find((result) => result.preconditionFailure);
+  const statePreconditionPassed = !statePreparation.required || !stateFailure;
+  const executionBoundaryPassed = boundaryFailures.length === 0;
+  const commandsPassed = statePreconditionPassed && executionBoundaryPassed &&
+    results.every((x) => x.status === 'EXECUTED' && x.exit === 0);
+  const snapshotPassed = commandsPassed && subjectStable && packetStable;
+  const commonReceiptBody = {
+    schemaVersion: 1,
+    authority: 'aegis-run.cjs runChecks',
+    runId: run.runId,
+    packet: { path: packetBefore.path, sha256: packetBefore.sha256 },
+    subject: {
+      subjectSha256: subjectBefore.subjectSha256,
+      subjectPaths: [...subjectBefore.subjectPaths],
+      diffBytes: subjectBefore.diffBytes,
+      range: subjectBefore.range,
+    },
+    startedAt,
+    completedAt,
+    complete: true,
+    total: results.length,
+    passed: results.filter((x) => x.exit === 0).length,
+    results: results.map((r) => ({ cmd: r.cmd, status: r.status, exit: r.exit, ranAt: r.ranAt })),
+  };
+  let receipt = null;
+  let receiptRef = null;
+  let preHostReceipt = null;
+  let preHostReceiptRef = null;
+  let hostContainment = null;
+  let hostContainmentState = null;
+  if (hostCommands.length && snapshotPassed) {
+    const preHostBody = {
+      ...commonReceiptBody,
+      receiptType: PRE_HOST_CHECK_RECEIPT_TYPE,
+      snapshot: { policy: CHECK_SNAPSHOT_POLICY, captureSha256: checkCapture.captureSha256 },
+      outcome: 'PASS',
+      hostContainment: { state: 'PENDING', commands: [...hostCommands] },
+    };
+    preHostReceipt = { ...preHostBody, receiptSha256: checkReceiptDigest(preHostBody) };
+    preHostReceiptRef = persistCanonicalPreHostCheckReceipt(run, preHostReceipt);
+    hostContainmentState = 'PENDING';
+  } else {
+    if (hostCommands.length) {
+      hostContainment = runTopLevelHostContainmentCheck(
+        run, worktreeReal, packetBefore, subjectBefore, hostCommands[0], checkCapture,
+        { skipReason: 'immutable packet checks did not all pass or their exact coordinate moved' });
+      hostContainmentState = 'FAILED';
+    }
+    const receiptBody = {
+      ...commonReceiptBody,
+      outcome: snapshotPassed && hostCommands.length === 0 ? 'PASS' : 'FAIL',
+      ...(hostContainment ? { hostContainment } : {}),
+    };
+    receipt = { ...receiptBody, receiptSha256: checkReceiptDigest(receiptBody) };
+    receiptRef = persistCanonicalCheckReceipt(run, receipt);
+    if (hostCommands.length === 0) hostContainmentState = null;
+  }
   run.checks = {
-    ranAt: nowIso(), total: results.length, passed: results.filter((x) => x.exit === 0).length, results,
-    ...(statePreparation.required ? { precondition: {
+    ranAt: completedAt, total: results.length, passed: results.filter((x) => x.exit === 0).length, results,
+    ...(receiptRef ? { receiptRef } : {}),
+    ...(preHostReceiptRef ? { preHostReceiptRef } : {}),
+    integrity: {
+      state: subjectStable && packetStable ? 'PASSED' : 'FAILED',
+      gaps: [
+        ...(!subjectStable ? ['canonical subject changed during checks'] : []),
+        ...(!packetStable ? ['packet changed during checks'] : []),
+        ...coordinateGaps,
+      ],
+    },
+    executionBoundary: executionBoundaryPassed
+      ? { policy: CHECK_SNAPSHOT_POLICY, state: 'PASSED' }
+      : {
+          policy: CHECK_SNAPSHOT_POLICY,
+          state: 'FAILED',
+          reason: boundedCheckFailureTail([...new Set(boundaryFailures)].join('; ')).tail,
+        },
+    ...(hostContainmentState === 'PENDING' ? { hostContainment: {
+      state: 'PENDING', executionBoundary: HOST_CONTAINMENT_BOUNDARY,
+      command: hostCommands[0], passed: 0, skipped: 0, failed: 0,
+      reason: 'awaiting exact-subject independent review before host execution',
+    } } : hostContainment ? { hostContainment: {
+      state: 'FAILED', executionBoundary: hostContainment.executionBoundary,
+      platform: hostContainment.platform, command: hostContainment.command,
+      passed: hostContainment.result.passed, skipped: hostContainment.result.skipped,
+      covered: hostContainment.result.covered || 0,
+      failed: hostContainment.result.failed, receiptSha256: hostContainment.receiptSha256,
+      ...(hostContainment.reason ? { reason: hostContainment.reason } : {}),
+    } } : {}),
+    ...(statePreparation.required ? { precondition: stateFailure ? {
+      state: 'FAILED', code: stateFailure.preconditionFailure.code,
+      reason: stateFailure.preconditionFailure.reason,
+    } : {
       state: 'PASSED', generator: statePreparation.generator, output: statePreparation.output,
     } } : {}),
   };
+  // A prior review refusal belongs to the earlier checked subject. Preserve
+  // its minimized audit record in reviewFailures, but stop presenting it as
+  // the active refusal once a new deterministic receipt has been produced.
+  run.reviewFailure = null;
   saveRun(run);
-  const allPassed = results.every((x) => x.exit === 0);
-  transition(run, allPassed ? 'CHECKS_PASSED' : 'CHECKS_FAILED',
-    `${run.checks.passed}/${run.checks.total} checks passed`);
+  const readyForReview = hostCommands.length
+    ? snapshotPassed && validatePreHostCheckReceipt(preHostReceipt, {
+      runId: run.runId, packetPath: packetBefore.path, packetSha256: packetBefore.sha256,
+      subject: subjectBefore, commands: cmds, hostCommands, captureSha256: checkCapture.captureSha256,
+    })
+    : snapshotPassed && validateCheckReceipt(receipt, {
+      runId: run.runId, packetPath: packetBefore.path, packetSha256: packetBefore.sha256,
+      subject: subjectBefore, commands: cmds, hostCommands,
+    });
+  transition(run, readyForReview ? 'CHECKS_PASSED' : 'CHECKS_FAILED',
+    `${run.checks.passed}/${run.checks.total} snapshot checks passed` +
+      `${hostCommands.length ? `; host containment ${readyForReview ? 'pending review' : 'not run'}` : ''}` +
+      `${subjectStable && packetStable ? '' : '; integrity moved'}`);
   const fresh = loadRun(run.runId);
   return Object.freeze({
     runId: fresh.runId,
     state: fresh.state,
     action: 'checks',
     checks: Object.freeze({ passed: fresh.checks.passed, total: fresh.checks.total }),
-    nextAction: allPassed ? 'independent review required' : 'retry',
+    nextAction: readyForReview ? 'independent review required' : 'retry',
   });
 }
 
@@ -1663,6 +4260,9 @@ function runChecks(runId) {
         }
         if (e.code === 'NO-CHECKS') {
           throw new AegisControlError('NO_CHECKS', e.message, 409);
+        }
+        if (e.code === 'CHECKS-SUBJECT-INVALID') {
+          throw new AegisControlError('CHECKS_SUBJECT_INVALID', e.message, 409);
         }
         if (e.code === 'REVIEW-RUN-INVALID' || e.code === 'REVIEW-WORKTREE-INVALID' ||
             e.code === 'REVIEW-WORKTREE-FOREIGN') {
@@ -1711,6 +4311,15 @@ function canonicalGitEnvironment(run) {
   if (topReal !== worktreeReal) {
     throw new RunError('REVIEW-WORKTREE-FOREIGN',
       `recorded worktree is not its Git top level (${worktreeReal} != ${topReal})`);
+  }
+  let runtimeRootReal;
+  try { runtimeRootReal = fs.realpathSync(ROOT); }
+  catch (e) {
+    throw new RunError('REVIEW-WORKTREE-INVALID', `cannot resolve the control runtime checkout: ${e.message}`);
+  }
+  if (worktreeReal === runtimeRootReal) {
+    throw new RunError('REVIEW-WORKTREE-INVALID',
+      'the control runtime checkout is not a governed run worktree');
   }
 
   const commonFor = (cwd) => {
@@ -1768,13 +4377,15 @@ function runCanonicalEngineeringOs(args, env) {
   return { status: r.status === null ? 124 : r.status, parsed };
 }
 
-function validPassedChecks(checks) {
+function validPassedChecks(checks, expected = {}) {
+  const receipt = loadCanonicalCheckReceipt(checks, expected);
   return Boolean(checks && Number.isInteger(checks.total) && checks.total > 0 &&
     checks.passed === checks.total && Array.isArray(checks.results) &&
     checks.results.length === checks.total &&
     checks.results.every((result) => result && typeof result.cmd === 'string' &&
       result.cmd.trim() && result.exit === 0) &&
-    typeof checks.ranAt === 'string' && Number.isFinite(Date.parse(checks.ranAt)));
+    typeof checks.ranAt === 'string' && Number.isFinite(Date.parse(checks.ranAt)) &&
+    receipt && receipt.outcome === 'PASS');
 }
 
 function sameCanonicalSubject(a, b) {
@@ -1784,23 +4395,265 @@ function sameCanonicalSubject(a, b) {
     a.diffBytes === b.diffBytes && a.range === b.range);
 }
 
+function sameSubjectContent(a, b) {
+  return Boolean(validSubjectCoordinate(a) && validSubjectCoordinate(b) &&
+    a.subjectSha256 === b.subjectSha256 &&
+    JSON.stringify(a.subjectPaths) === JSON.stringify(b.subjectPaths) &&
+    a.diffBytes === b.diffBytes);
+}
+
+const REVIEW_REFUSAL_RULES = new Set([
+  'ENGOS-REVIEW-REJECTED',
+  'ENGOS-OPEN-BLOCKING-FINDING',
+]);
+
+function attributableReviewRefusal(gate, subject) {
+  if (!gate || gate.ok !== false || gate.state !== 'BLOCKED' ||
+      !gate.subject || !sameCanonicalSubject(subject, gate.subject) ||
+      !Array.isArray(gate.problems) || !gate.reviewerCompleteness ||
+      gate.reviewerCompleteness.subjectSha256 !== subject.subjectSha256 ||
+      gate.reviewerCompleteness.complete !== true ||
+      !Array.isArray(gate.reviewerCompleteness.rows)) return null;
+
+  const completeness = gate.reviewerCompleteness;
+  const uncovered = completeness.pathCoverage &&
+    completeness.pathCoverage.notCoveredByEveryRequiredReviewer;
+  const requiredRows = completeness.rows.filter((row) => row && row.required === 'REQUIRED');
+  if (!Array.isArray(uncovered) || uncovered.length !== 0 || requiredRows.length === 0 ||
+      requiredRows.some((row) => row.executed !== 'EXECUTED' ||
+        typeof row.reviewer !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(row.reviewer) ||
+        typeof row.reviewId !== 'string' || !/^REV-[A-Za-z0-9._-]{1,127}$/.test(row.reviewId) ||
+        (Array.isArray(row.missingPaths) && row.missingPaths.length !== 0) ||
+        (Array.isArray(row.stalePaths) && row.stalePaths.length !== 0))) return null;
+
+  const refusalProblems = gate.problems.filter((problem) => problem &&
+    REVIEW_REFUSAL_RULES.has(problem.rule));
+  if (refusalProblems.length === 0) return null;
+  const openBlockingReviewers = new Set();
+  for (const problem of refusalProblems) {
+    if (problem.rule !== 'ENGOS-OPEN-BLOCKING-FINDING') continue;
+    const match = /^(?:CRITICAL|HIGH) from ([a-z0-9][a-z0-9._-]{0,63}) in /i.exec(
+      String(problem.detail || ''));
+    if (!match) return null;
+    openBlockingReviewers.add(match[1].toLowerCase());
+  }
+
+  // Identities still come only from exact-subject completeness rows. The
+  // canonical gate's bounded "SEVERITY from reviewer in path" prefix is used
+  // solely to correlate an OPEN blocker with that row; arbitrary prose after
+  // the path is never persisted.
+  const rejectedReviewers = gate.reviewerCompleteness.rows.flatMap((row) => {
+    // `rejectedReviewers` is the established minimized projection field. For
+    // an OPEN CRITICAL/HIGH finding the canonical gate has refused the exact
+    // subject even when the record's overall disposition was not REJECT, so
+    // retain the executed record identity without inventing a disposition.
+    if (!row || row.executed !== 'EXECUTED' ||
+        (row.disposition !== 'REJECT' &&
+          !openBlockingReviewers.has(String(row.reviewer || '').toLowerCase())) ||
+        typeof row.reviewer !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(row.reviewer) ||
+        typeof row.reviewId !== 'string' || !/^REV-[A-Za-z0-9._-]{1,127}$/.test(row.reviewId)) return [];
+    return [{ reviewer: row.reviewer, reviewId: row.reviewId }];
+  });
+  if (rejectedReviewers.length === 0) return null;
+
+  return {
+    rejectedReviewers,
+    blockingFindingCount: refusalProblems.filter((problem) =>
+      problem.rule === 'ENGOS-OPEN-BLOCKING-FINDING').length,
+    refusalRuleCount: refusalProblems.length,
+  };
+}
+
+function recordReviewFailure(run, subject, packetNow, refusal, checkReceipt) {
+  const refusedAt = nowIso();
+  const failure = {
+    schemaVersion: 1,
+    status: 'REFUSED',
+    reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+    subjectSha256: subject.subjectSha256,
+    checkReceiptSha256: checkReceipt.receiptSha256,
+    packet: { path: packetNow.path, sha256: packetNow.sha256 },
+    refusedAt,
+    authority: 'engineering-os.cjs --gate-done',
+    rejectedReviewers: refusal.rejectedReviewers,
+    blockingFindingCount: refusal.blockingFindingCount,
+    refusalRuleCount: refusal.refusalRuleCount,
+    summary: refusal.blockingFindingCount > 0
+      ? `Independent review found ${refusal.blockingFindingCount} blocking issue(s) on this exact checked version.`
+      : 'An independent reviewer rejected this exact checked version.',
+  };
+  run.reviewFailure = failure;
+  run.reviewFailures = [...(Array.isArray(run.reviewFailures) ? run.reviewFailures : []), failure]
+    .slice(-(MAX_CORRECTIONS + 1));
+  transition(run, 'REVIEW_FAILED',
+    `canonical exact-subject review refused ${subject.subjectSha256.slice(0, 16)}…`);
+  return Object.freeze({
+    runId: run.runId,
+    state: 'REVIEW_FAILED',
+    action: 'bind-independent-review',
+    outcome: 'REFUSED',
+    reasonCode: failure.reasonCode,
+    nextAction: 'retry',
+  });
+}
+
+function finalizeReviewedHostContainment(run, packetNow, subject, commands, hostCommands,
+    preHostReceipt, worktreeReal, gitEnv) {
+  const statePreparation = prepareCanonicalDashboardState(run, packetNow.parsed, packetNow.real);
+  if (!statePreparation.ok) {
+    throw new RunError('REVIEW-CHECKS-STALE',
+      `host containment preflight no longer matches the checked subject: ${statePreparation.reason}`);
+  }
+  const capture = captureCheckExecutionSource(
+    worktreeReal, packetNow, subject, statePreparation);
+  if (capture.captureSha256 !== preHostReceipt.snapshot.captureSha256) {
+    throw new RunError('REVIEW-CHECKS-STALE',
+      'the exact source capture changed after snapshot checks and before host containment');
+  }
+
+  // This is deliberately after the canonical exact-subject review gate. The
+  // host suite is subject-controlled code and therefore must never execute on
+  // the operator host merely because snapshot checks passed.
+  const hostContainment = runTopLevelHostContainmentCheck(
+    run, worktreeReal, packetNow, subject, hostCommands[0], capture, {
+      preHostReceipt,
+      preHostReceiptRef: run.checks.preHostReceiptRef,
+    });
+  let packetStable = false;
+  let subjectStable = false;
+  try {
+    const packetAfter = packetCoordinate(packetNow.path);
+    packetStable = packetAfter.path === packetNow.path && packetAfter.sha256 === packetNow.sha256;
+  } catch { packetStable = false; }
+  try {
+    const subjectAfter = runCanonicalEngineeringOs([
+      '--subject', '--packet', packetNow.path, '--json'], gitEnv);
+    subjectStable = subjectAfter.status === 0 && sameCanonicalSubject(subject, subjectAfter.parsed);
+  } catch { subjectStable = false; }
+  const hostPassed = packetStable && subjectStable && validateHostContainmentReceipt(hostContainment, {
+    runId: run.runId, packetPath: packetNow.path, packetSha256: packetNow.sha256,
+    subject, command: hostCommands[0], platform: 'darwin',
+    preHostReceiptRef: run.checks.preHostReceiptRef,
+  });
+  const completedAt = nowIso();
+  const finalBody = {
+    schemaVersion: 1,
+    authority: 'aegis-run.cjs runChecks',
+    runId: run.runId,
+    packet: { path: packetNow.path, sha256: packetNow.sha256 },
+    subject: {
+      subjectSha256: subject.subjectSha256, subjectPaths: [...subject.subjectPaths],
+      diffBytes: subject.diffBytes, range: subject.range,
+    },
+    startedAt: preHostReceipt.startedAt,
+    completedAt,
+    complete: true,
+    outcome: hostPassed ? 'PASS' : 'FAIL',
+    total: preHostReceipt.total,
+    passed: preHostReceipt.passed,
+    results: preHostReceipt.results.map((result) => ({ ...result })),
+    hostContainment,
+  };
+  const finalReceipt = { ...finalBody, receiptSha256: checkReceiptDigest(finalBody) };
+  const receiptRef = persistCanonicalCheckReceipt(run, finalReceipt);
+  run.checks = {
+    ...run.checks,
+    ranAt: completedAt,
+    receiptRef,
+    integrity: {
+      state: packetStable && subjectStable ? 'PASSED' : 'FAILED',
+      gaps: [
+        ...(!subjectStable ? ['canonical subject changed during host containment'] : []),
+        ...(!packetStable ? ['packet changed during host containment'] : []),
+      ],
+    },
+    hostContainment: {
+      state: hostPassed ? 'PASSED' : 'FAILED',
+      executionBoundary: hostContainment.executionBoundary,
+      platform: hostContainment.platform,
+      command: hostContainment.command,
+      passed: hostContainment.result.passed,
+      covered: hostContainment.result.covered || 0,
+      skipped: hostContainment.result.skipped,
+      failed: hostContainment.result.failed,
+      receiptSha256: hostContainment.receiptSha256,
+      ...(hostContainment.reason ? { reason: hostContainment.reason } : {}),
+    },
+  };
+  saveRun(run);
+  if (!hostPassed || !validateCheckReceipt(finalReceipt, {
+    runId: run.runId, packetPath: packetNow.path, packetSha256: packetNow.sha256,
+    subject, commands, hostCommands,
+  })) {
+    transition(run, 'CHECKS_FAILED',
+      'post-review host containment did not prove a zero-skip exact-subject pass');
+    return Object.freeze({ ok: false, receipt: finalReceipt });
+  }
+  return Object.freeze({ ok: true, receipt: finalReceipt });
+}
+
+function checkpointCandidateProblem(candidate) {
+  if (!candidate || candidate.clean !== true) return 'CHECKPOINT-DIRTY-TREE';
+  if (!Object.prototype.hasOwnProperty.call(candidate, 'reviewedBase')) return null;
+  if (!/^[0-9a-f]{40,64}$/.test(candidate.reviewedBase || '') ||
+      !/^[0-9a-f]{40,64}$/.test(candidate.head || '') ||
+      candidate.reviewedBase === candidate.head || candidate.ancestor !== true) {
+    return 'CHECKPOINT-HEAD-UNRELATED';
+  }
+  if (!Object.prototype.hasOwnProperty.call(candidate, 'committedSubject')) return null;
+  if (!sameSubjectContent(candidate.reviewedSubject, candidate.committedSubject) ||
+      candidate.committedSubject.range !== `${candidate.reviewedBase}..${candidate.head}`) {
+    return 'CHECKPOINT-SUBJECT-MISMATCH';
+  }
+  return null;
+}
+
 function bindIndependentReviewClaimed(run) {
   if (run.state !== 'CHECKS_PASSED') {
     throw new RunError('ILLEGAL-TRANSITION', `review binding requires CHECKS_PASSED, run is ${run.state}`);
   }
-  if (!validPassedChecks(run.checks)) {
-    throw new RunError('REVIEW-CHECKS-INVALID', 'run has no complete, real all-passed deterministic check record');
+  if (!run.checks || !Number.isInteger(run.checks.total) || run.checks.total <= 0 ||
+      run.checks.passed !== run.checks.total || !Array.isArray(run.checks.results) ||
+      run.checks.results.length !== run.checks.total ||
+      !run.checks.results.every((result) => result && typeof result.cmd === 'string' &&
+        result.cmd.trim() && result.exit === 0) ||
+      (!run.checks.receiptRef && !run.checks.preHostReceiptRef)) {
+    throw new RunError('REVIEW-CHECKS-INVALID',
+      'run has no complete, real all-passed deterministic snapshot-check record');
+  }
+  const locallyAuthenticatedFinalReceipt = validPassedChecks(run.checks, { runId: run.runId });
+  const locallyAuthenticatedPreHostReceipt = loadCanonicalPreHostCheckReceipt(
+    run.checks, { runId: run.runId });
+  if (!locallyAuthenticatedFinalReceipt && !locallyAuthenticatedPreHostReceipt) {
+    throw new RunError('REVIEW-CHECKS-INVALID',
+      'run check projection does not resolve to canonical append-only check evidence');
   }
   const packet = resolvePacketOption(run.packet);
   if (!packet) throw new RunError('REVIEW-PACKET-INVALID', 'review binding requires the packet already bound to the run');
   const env = canonicalGitEnvironment(run);
+  const packetNow = packetCoordinate(packet);
+  const commands = runnableCheckCommands(packetNow.parsed);
+  const hostCommands = runnableHostContainmentCommands(packetNow.parsed);
 
-  const first = runCanonicalEngineeringOs(['--subject', '--json'], env);
+  const first = runCanonicalEngineeringOs([
+    '--subject', '--packet', packetNow.path, '--json'], env);
   const subject = first.parsed;
   if (first.status !== 0 || !/^[0-9a-f]{64}$/.test(subject.subjectSha256 || '') ||
       !Array.isArray(subject.subjectPaths) || subject.subjectPaths.length === 0 ||
       !Number.isInteger(subject.diffBytes) || subject.diffBytes <= 0) {
     throw new RunError('REVIEW-SUBJECT-INVALID', 'canonical subject is empty, malformed, or unavailable');
+  }
+  let checkReceipt = loadCanonicalCheckReceipt(run.checks, {
+    runId: run.runId, packetPath: packetNow.path, packetSha256: packetNow.sha256,
+    subject, commands, hostCommands,
+  });
+  const preHostReceipt = hostCommands.length ? loadCanonicalPreHostCheckReceipt(run.checks, {
+    runId: run.runId, packetPath: packetNow.path, packetSha256: packetNow.sha256,
+    subject, commands, hostCommands,
+  }) : null;
+  if (!checkReceipt && !preHostReceipt) {
+    throw new RunError('REVIEW-CHECKS-STALE',
+      'deterministic check evidence is missing, partial, stale, or bound to a different packet or subject');
   }
 
   const gateResult = runCanonicalEngineeringOs([
@@ -1815,6 +4668,17 @@ function bindIndependentReviewClaimed(run) {
       !completeness.pathCoverage ||
       !Array.isArray(completeness.pathCoverage.notCoveredByEveryRequiredReviewer) ||
       completeness.pathCoverage.notCoveredByEveryRequiredReviewer.length !== 0) {
+    const refusal = gateResult.status === EXIT_REFUSED
+      ? attributableReviewRefusal(gate, subject) : null;
+    if (refusal) {
+      const refusalSubject = runCanonicalEngineeringOs([
+        '--subject', '--packet', packetNow.path, '--json'], env);
+      if (refusalSubject.status !== 0 || !sameCanonicalSubject(subject, refusalSubject.parsed)) {
+        throw new RunError('REVIEW-SUBJECT-MOVED',
+          'the canonical subject changed while its review refusal was being attributed');
+      }
+      return recordReviewFailure(run, subject, packetNow, refusal, checkReceipt || preHostReceipt);
+    }
     const rules = Array.isArray(gate && gate.problems)
       ? gate.problems.map((problem) => problem && problem.rule).filter(Boolean).join(', ')
       : '';
@@ -1824,12 +4688,32 @@ function bindIndependentReviewClaimed(run) {
 
   // The subject is recomputed after the gate and immediately before the sole
   // persistence point.  A moving tree can neither borrow nor retain approval.
-  const secondResult = runCanonicalEngineeringOs(['--subject', '--json'], env);
+  const secondResult = runCanonicalEngineeringOs([
+    '--subject', '--packet', packetNow.path, '--json'], env);
   if (secondResult.status !== 0 || !sameCanonicalSubject(subject, secondResult.parsed)) {
     throw new RunError('REVIEW-SUBJECT-MOVED', 'the canonical subject changed while its reviews were being bound');
   }
 
+  if (!checkReceipt) {
+    const finalized = finalizeReviewedHostContainment(
+      run, packetNow, subject, commands, hostCommands, preHostReceipt,
+      env.GIT_WORK_TREE, env);
+    if (!finalized.ok) {
+      const fresh = loadRun(run.runId);
+      return Object.freeze({
+        runId: fresh.runId, state: fresh.state, action: 'bind-independent-review',
+        outcome: 'HOST_CONTAINMENT_FAILED', reasonCode: 'HOST_CONTAINMENT_FAILED',
+        nextAction: 'retry',
+      });
+    }
+    checkReceipt = finalized.receipt;
+  }
+
   const boundAt = nowIso();
+  const headCommit = (git(['-C', env.GIT_WORK_TREE, 'rev-parse', 'HEAD']).stdout || '').trim();
+  if (!/^[0-9a-f]{40,64}$/.test(headCommit)) {
+    throw new RunError('REVIEW-RUN-INVALID', 'the reviewed worktree has no canonical HEAD commit');
+  }
   run.subject = {
     subjectSha256: subject.subjectSha256,
     pathCount: subject.subjectPaths.length,
@@ -1844,6 +4728,9 @@ function bindIndependentReviewClaimed(run) {
     subjectSha256: subject.subjectSha256,
     verifiedAt: boundAt,
     authority: 'engineering-os.cjs --gate-done',
+    packet: { path: packetNow.path, sha256: packetNow.sha256 },
+    checkReceiptSha256: checkReceipt.receiptSha256,
+    headCommit,
     state: gate.state,
     lane: classification.lane || null,
     requiredReviewers: Array.isArray(classification.requiredReviewers)
@@ -1895,6 +4782,7 @@ function cmdChecks(args) {
         INVALID_RUN_ID: 'BAD-RUN-ID', RUN_NOT_FOUND: 'NO-SUCH-RUN',
         INVALID_CHECKS: 'ILLEGAL-TRANSITION', CHECKS_UNAVAILABLE: 'NO-PACKET',
         NO_CHECKS: 'NO-CHECKS',
+        CHECKS_SUBJECT_INVALID: 'CHECKS-SUBJECT-INVALID',
       }[e.code] || e.code;
       throw new RunError(cliCode, e.message);
     }
@@ -1914,34 +4802,40 @@ function cmdChecks(args) {
 // indefinitely if allowed to, and the failure mode is not a crash: it is quiet,
 // expensive, converging on nothing.
 function cmdAuto(args) {
-  const run = loadRun(args.runId);
   if (!args.cmd) throw new RunError('NO-COMMAND', '--cmd is required');
   const history = [];
 
   for (let cycle = 0; ; cycle++) {
-    if (run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED') {
-      if (run.corrections >= MAX_CORRECTIONS) {
-        transition(run, 'ABANDONED', `escalating after ${run.corrections} correction cycles`);
-        console.error(
-          `\nESCALATION REQUIRED — ${run.corrections} correction cycles did not resolve.\n` +
-          'Stopping rather than looping. The Product Owner decides what happens next; ' +
-          'a fourth attempt is a fourth guess, not a fix.');
-        return EXIT_REFUSED;
+    let run = loadRun(args.runId);
+    if (run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED' || run.state === 'REVIEW_FAILED') {
+      const claim = acquireRunLaunchClaim(args.runId, 3000);
+      try {
+        run = loadRun(args.runId);
+        if (!['BUILD_FAILED', 'CHECKS_FAILED', 'REVIEW_FAILED'].includes(run.state)) continue;
+        if (run.corrections >= MAX_CORRECTIONS) {
+          transition(run, 'ABANDONED', `escalating after ${run.corrections} correction cycles`);
+          console.error(
+            `\nESCALATION REQUIRED — ${run.corrections} correction cycles did not resolve.\n` +
+            'Stopping rather than looping. The Product Owner decides what happens next; ' +
+            'a fourth attempt is a fourth guess, not a fix.');
+          return EXIT_REFUSED;
+        }
+        run.corrections += 1;
+        transition(run, 'CORRECTING', `correction cycle ${run.corrections} of ${MAX_CORRECTIONS}`);
+      } finally {
+        releaseRunLaunchClaim(claim);
       }
-      run.corrections += 1;
-      saveRun(run);
-      transition(run, 'CORRECTING', `correction cycle ${run.corrections} of ${MAX_CORRECTIONS}`);
     }
 
-    const b = cmdBuild({ ...args, runId: run.runId });
-    Object.assign(run, loadRun(run.runId));
+    const b = cmdBuild({ ...args, runId: args.runId });
+    run = loadRun(args.runId);
     history.push({ cycle, phase: 'build', state: run.state });
     if (b !== EXIT_PASS) { if (run.corrections >= MAX_CORRECTIONS) continue; else continue; }
 
     let c;
-    try { c = cmdChecks({ runId: run.runId }); }
+    try { c = cmdChecks({ runId: args.runId }); }
     catch (e) { if (e instanceof RunError) { c = EXIT_REFUSED; } else throw e; }
-    Object.assign(run, loadRun(run.runId));
+    run = loadRun(args.runId);
     history.push({ cycle, phase: 'checks', state: run.state });
     if (c === EXIT_PASS) {
       console.log(`\nconverged after ${run.corrections} correction cycle(s)`);
@@ -1962,13 +4856,17 @@ const REQUIRED_SEQUENCE = [
 function watchdog(run) {
   const reached = (run.transitions || []).map((t) => t.to);
   const problems = [];
+  const ledgerCorroboratedIndexes = new Set();
   let cursor = -1;
   for (const stage of REQUIRED_SEQUENCE) {
     const at = reached.indexOf(stage, cursor + 1);
     if (at === -1) {
-      problems.push({ rule: 'WATCHDOG-STAGE-MISSING', detail: `required stage ${stage} never occurred in this run` });
-    } else if (at < cursor) {
-      problems.push({ rule: 'WATCHDOG-OUT-OF-ORDER', detail: `${stage} occurred before a stage that must precede it` });
+      const anywhere = reached.indexOf(stage);
+      if (anywhere !== -1) {
+        problems.push({ rule: 'WATCHDOG-OUT-OF-ORDER', detail: `${stage} occurred before a stage that must precede it` });
+      } else {
+        problems.push({ rule: 'WATCHDOG-STAGE-MISSING', detail: `required stage ${stage} never occurred in this run` });
+      }
     } else {
       cursor = at;
     }
@@ -1985,17 +4883,59 @@ function watchdog(run) {
     : path.join(HERE, 'ledger.json');
   let ledger = [];
   try { ledger = JSON.parse(fs.readFileSync(ledgerFile, 'utf8')); } catch { /* absent */ }
-  const ledgerOps = new Set(ledger.filter((e) => e.correlationId === run.runId).map((e) => e.operationId));
-  for (const t of run.transitions || []) {
-    const op = `${run.runId}:${t.from}->${t.to}`;
-    if (!ledgerOps.has(op)) {
+  for (const [index, t] of (run.transitions || []).entries()) {
+    const op = typeof t.operationId === 'string' && t.operationId
+      ? t.operationId : `${run.runId}:${t.from}->${t.to}`;
+    const matches = ledger.filter((entry) => entry && entry.correlationId === run.runId &&
+      entry.operationId === op && entry.entryId === t.ledgerEntryId);
+    if (matches.length !== 1) {
       problems.push({
         rule: 'WATCHDOG-UNRECORDED-TRANSITION',
-        detail: `the run claims ${t.from} -> ${t.to} but the canonical ledger has no such entry. The run file is not evidence; the ledger is.`,
+        detail: `the run claims ${t.from} -> ${t.to} at ${t.ledgerEntryId || 'an unnamed entry'} ` +
+          'but the canonical ledger does not contain that one exact transition entry. The run file is not evidence; the ledger is.',
       });
+    } else {
+      ledgerCorroboratedIndexes.add(index);
     }
   }
-  return { ok: problems.length === 0, problems, reached, required: REQUIRED_SEQUENCE };
+
+  // Publish only the longest correctly ordered prefix whose individual
+  // transitions are each present exactly once in the canonical ledger. This
+  // lets the dashboard show truthful in-progress state without requiring the
+  // entire future sequence to have completed, while preventing mutable run
+  // JSON from lighting a lifecycle stage by itself.
+  const corroboratedStages = [];
+  let corroboratedCursor = -1;
+  for (const stage of REQUIRED_SEQUENCE) {
+    const at = reached.indexOf(stage, corroboratedCursor + 1);
+    if (at === -1 || !ledgerCorroboratedIndexes.has(at)) break;
+    corroboratedStages.push(stage);
+    corroboratedCursor = at;
+  }
+  const checkReceipt = corroboratedStages.includes('CHECKS_PASSED')
+    ? loadCanonicalCheckReceipt(run.checks, { runId: run.runId }) : null;
+  const preHostReceipt = corroboratedStages.includes('CHECKS_PASSED') && !checkReceipt
+    ? loadCanonicalPreHostCheckReceipt(run.checks, { runId: run.runId }) : null;
+  const checkReceiptValid = Boolean(
+    (checkReceipt && checkReceipt.outcome === 'PASS') ||
+    (preHostReceipt && preHostReceipt.outcome === 'PASS' &&
+      preHostReceipt.hostContainment && preHostReceipt.hostContainment.state === 'PENDING'));
+  const checkReceiptStage = checkReceiptValid
+    ? (checkReceipt ? 'COMPLETE' : 'PRE_HOST') : null;
+  const hostContainmentState = checkReceipt
+    ? (checkReceipt.hostContainment && checkReceipt.hostContainment.outcome === 'PASS' ? 'PASSED' : null)
+    : (preHostReceipt ? 'PENDING' : null);
+
+  return {
+    ok: problems.length === 0,
+    problems,
+    reached,
+    required: REQUIRED_SEQUENCE,
+    corroboratedStages,
+    checkReceiptValid,
+    checkReceiptStage,
+    hostContainmentState,
+  };
 }
 
 function cmdWatchdog(args) {
@@ -2012,8 +4952,7 @@ function cmdWatchdog(args) {
 }
 
 // ── step 10: checkpoint + rollback ──────────────────────────────────────────
-function cmdCheckpoint(args) {
-  const run = loadRun(args.runId);
+function cmdCheckpointClaimed(run, args) {
   // The guard used to also accept CHECKS_PASSED, which contradicted the
   // transition table (CHECKS_PASSED -> CHECKPOINTED is not legal) and would have
   // let a checkpoint skip step 7 entirely. The table is right: review binds
@@ -2023,7 +4962,7 @@ function cmdCheckpoint(args) {
     throw new RunError('ILLEGAL-TRANSITION',
       `checkpoint requires REVIEW_BOUND, run is ${run.state}. A checkpoint before independent review records a point only the builder believes in.`);
   }
-  if (!run.checks || run.checks.total === 0 || run.checks.passed !== run.checks.total) {
+  if (!validPassedChecks(run.checks, { runId: run.runId })) {
     throw new RunError('NO-PASSING-CHECKS',
       'a checkpoint requires deterministic checks that actually ran and passed. A known-good point that was never known to be good is a label, not a checkpoint.');
   }
@@ -2036,28 +4975,91 @@ function cmdCheckpoint(args) {
       w.problems[0].detail);
   }
 
-  const rollbackPoint = run.worktree
-    ? (git(['rev-parse', 'HEAD'], { cwd: run.worktree.path }).stdout || '').trim()
-    : null;
+  const env = canonicalGitEnvironment(run);
+  const packet = resolvePacketOption(run.packet);
+  if (!packet) throw new RunError('CHECKPOINT-EVIDENCE-INVALID', 'checkpoint packet is unavailable');
+  const packetNow = packetCoordinate(packet);
+  const receipt = loadCanonicalCheckReceipt(run.checks, {
+    runId: run.runId, packetPath: packetNow.path, packetSha256: packetNow.sha256,
+    commands: runnableCheckCommands(packetNow.parsed),
+    hostCommands: runnableHostContainmentCommands(packetNow.parsed),
+  });
+  if (!receipt || !run.reviewGate || run.reviewGate.subjectSha256 !== receipt.subject.subjectSha256 ||
+      run.reviewGate.checkReceiptSha256 !== receipt.receiptSha256 ||
+      !run.reviewGate.packet || run.reviewGate.packet.path !== packetNow.path ||
+      run.reviewGate.packet.sha256 !== packetNow.sha256 || !run.subject ||
+      run.subject.subjectSha256 !== receipt.subject.subjectSha256 ||
+      run.subject.pathCount !== receipt.subject.subjectPaths.length ||
+      run.subject.diffBytes !== receipt.subject.diffBytes || run.subject.range !== receipt.subject.range) {
+    throw new RunError('CHECKPOINT-EVIDENCE-INVALID',
+      'review, deterministic checks, packet, and subject do not form one exact evidence chain');
+  }
+  const status = git(['-C', env.GIT_WORK_TREE, 'status', '--porcelain=v1', '--untracked-files=all']);
+  const clean = status.status === 0 && !(status.stdout || '').trim();
+  if (checkpointCandidateProblem({ clean })) {
+    throw new RunError('CHECKPOINT-DIRTY-TREE',
+      'checkpoint requires the already checked and reviewed subject to be committed by the approved external narrow-commit path; commit exactly that subject, then retry checkpoint without changing its bytes');
+  }
+  const rollbackPoint = (git(['-C', env.GIT_WORK_TREE, 'rev-parse', 'HEAD']).stdout || '').trim();
   if (!rollbackPoint) {
     throw new RunError('NO-ROLLBACK-POINT',
       'no commit could be resolved as a rollback point. A checkpoint that cannot name where to return to is refused.');
   }
+  const reviewedBase = run.reviewGate.headCommit;
+  const ancestor = /^[0-9a-f]{40,64}$/.test(reviewedBase || '') && reviewedBase !== rollbackPoint &&
+    git(['-C', env.GIT_WORK_TREE, 'merge-base', '--is-ancestor', reviewedBase, rollbackPoint]).status === 0;
+  if (checkpointCandidateProblem({ clean, reviewedBase, head: rollbackPoint, ancestor })) {
+    throw new RunError('CHECKPOINT-HEAD-UNRELATED',
+      'current HEAD is not a descendant commit containing the reviewed working-tree subject');
+  }
+  const committedResult = runCanonicalEngineeringOs([
+    '--subject', '--packet', packetNow.path,
+    '--base', reviewedBase, '--head', rollbackPoint, '--json',
+  ], env);
+  const committedSubject = committedResult.parsed;
+  if (committedResult.status !== 0 || checkpointCandidateProblem({
+    clean, reviewedBase, head: rollbackPoint, ancestor,
+    reviewedSubject: receipt.subject, committedSubject,
+  })) {
+    throw new RunError('CHECKPOINT-SUBJECT-MISMATCH',
+      'current clean HEAD does not contain exactly the checked and reviewed subject');
+  }
+  const tree = (git(['-C', env.GIT_WORK_TREE, 'rev-parse', 'HEAD^{tree}']).stdout || '').trim();
+  if (!/^[0-9a-f]{40,64}$/.test(tree)) {
+    throw new RunError('CHECKPOINT-TREE-INVALID', 'current commit tree could not be resolved');
+  }
   fs.mkdirSync(CHECKPOINTS_DIR, { recursive: true });
-  const cp = {
+  const cpBody = {
     checkpointId: `CP-${nowIso().replace(/[^0-9]/g, '').slice(0, 14)}-${run.runId.slice(-8)}`,
     runId: run.runId, createdAt: nowIso(),
     rollbackPoint, baseCommit: run.baseCommit,
+    tree,
+    reviewedBase,
+    packet: { path: packetNow.path, sha256: packetNow.sha256 },
+    subject: {
+      subjectSha256: receipt.subject.subjectSha256,
+      subjectPaths: [...receipt.subject.subjectPaths],
+      diffBytes: receipt.subject.diffBytes,
+      reviewedRange: receipt.subject.range,
+      committedRange: committedSubject.range,
+    },
+    checkReceiptSha256: receipt.receiptSha256,
     checks: { passed: run.checks.passed, total: run.checks.total },
     objective: run.objective,
-    digest: sha256(`${run.runId}|${rollbackPoint}|${run.checks.passed}/${run.checks.total}`),
   };
+  const cp = { ...cpBody, digest: sha256(stableJson(cpBody)) };
   fs.writeFileSync(path.join(CHECKPOINTS_DIR, `${cp.checkpointId}.json`), JSON.stringify(cp, null, 2) + '\n');
   run.checkpoint = cp;
   saveRun(run);
   transition(run, 'CHECKPOINTED', `checkpoint ${cp.checkpointId} at ${rollbackPoint.slice(0, 12)}`);
   console.log(`checkpoint ${cp.checkpointId}\n  rollback point: ${rollbackPoint.slice(0, 12)}\n  checks: ${cp.checks.passed}/${cp.checks.total}`);
   return EXIT_PASS;
+}
+
+function cmdCheckpoint(args) {
+  const claim = acquireRunLaunchClaim(args.runId, 3000);
+  try { return cmdCheckpointClaimed(loadRun(args.runId), args); }
+  finally { releaseRunLaunchClaim(claim); }
 }
 
 function cmdRollback(args) {
@@ -2067,19 +5069,8 @@ function cmdRollback(args) {
     throw new RunError('NO-ROLLBACK-POINT',
       'this run has no recorded rollback point. Rollback restores a RECORDED point; it never guesses one.');
   }
-  if (!run.worktree || !fs.existsSync(run.worktree.path)) {
-    throw new RunError('NO-WORKTREE', 'the run has no existing worktree to roll back');
-  }
-  const r = git(['reset', '--hard', cp.rollbackPoint], { cwd: run.worktree.path });
-  if (r.status !== 0) {
-    throw new RunError('ROLLBACK-FAILED', `git reset failed: ${(r.stderr || '').trim().slice(0, 200)}`);
-  }
-  const at = (git(['rev-parse', 'HEAD'], { cwd: run.worktree.path }).stdout || '').trim();
-  run.rollback = { toCommit: cp.rollbackPoint, at: nowIso(), verifiedHead: at, ok: at === cp.rollbackPoint };
-  saveRun(run);
-  transition(run, 'ROLLED_BACK', `restored ${cp.rollbackPoint.slice(0, 12)}`);
-  console.log(`rolled back to ${cp.rollbackPoint.slice(0, 12)} (verified head ${at.slice(0, 12)})`);
-  return run.rollback.ok ? EXIT_PASS : EXIT_REFUSED;
+  throw new RunError('ROLLBACK-DEFERRED',
+    'destructive rollback is disabled for the functional beta. The authenticated checkpoint and rollback point remain visible, but restoring them requires the dedicated post-beta rollback-control packet.');
 }
 
 // ── status / list ───────────────────────────────────────────────────────────
@@ -2185,4 +5176,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, pauseRun, cancelRun, retryRun, runChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, sameProcessIdentity, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };

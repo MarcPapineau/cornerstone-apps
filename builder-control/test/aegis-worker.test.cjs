@@ -2,6 +2,7 @@
 'use strict';
 
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -13,6 +14,7 @@ const WORKER = require('../aegis-worker.cjs');
 const CONTAINMENT = require('../sandbox-containment.cjs');
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
+const skip = (reason) => ({ skipped: String(reason || 'not applicable') });
 function waitFor(read, pred, timeoutMs = 8000) {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {
@@ -46,6 +48,15 @@ function writePacketFixture(worktree, packetPath, packet) {
   fs.writeFileSync(packetPath, JSON.stringify({
     sourceOfTruth: [source], testsRequired: [`node ${check}`], ...packet,
   }));
+}
+
+function frozenPacketCoordinate(packetName, packetPath) {
+  const bytes = fs.readFileSync(packetPath);
+  return {
+    path: packetName,
+    sha256: crypto.createHash('sha256').update(String(bytes)).digest('hex'),
+    packetId: JSON.parse(bytes.toString('utf8')).packetId,
+  };
 }
 
 function fixture(prompt, extraEnv = {}, timeoutSec = 30, options = {}) {
@@ -111,7 +122,9 @@ if (delay) setTimeout(() => process.exit(0), delay); else { console.log('ok'); p
   const runFile = path.join(runs, `${runId}.json`);
   fs.writeFileSync(runFile, JSON.stringify({
     runId, objective: prompt, state: 'WORKTREE_READY', worktree: { path: worktree },
-    packet: packetRelative || packetPath, build: null,
+    packet: packetRelative || packetPath,
+    ...(packetRelative ? { packetCoordinate: frozenPacketCoordinate(packetRelative, packetPath) } : {}),
+    build: null,
     corrections: 0, transitions: [], updatedAt: new Date().toISOString(),
   }, null, 2));
   const env = {
@@ -140,7 +153,7 @@ function reconcile(f) {
   return JSON.parse(result.stdout.trim().split('\n').pop());
 }
 
-function assertUnsafeRecoveryBlocked(f, expectedWorkerState) {
+function assertUnsafeRecoveryBlocked(f, expectedWorkerState, expectedRetryCode = 'RECOVERY_UNSAFE') {
   const failed = f.read();
   assert.strictEqual(failed.state, 'BUILD_FAILED');
   assert.strictEqual(failed.build.workerState, expectedWorkerState);
@@ -149,7 +162,7 @@ function assertUnsafeRecoveryBlocked(f, expectedWorkerState) {
   assert.strictEqual(failed.transitions.filter((t) => t.from === 'BUILDING' && t.to === 'BUILD_FAILED').length, 1);
   const retry = control(f, `try{R.retryRun(${JSON.stringify(f.runId)});process.exit(9)}catch(e){console.log(e.code)}`);
   assert.strictEqual(retry.status, 0, retry.stderr);
-  assert.match(retry.stdout, /RECOVERY_UNSAFE/);
+  assert.match(retry.stdout, new RegExp(expectedRetryCode));
   const terminationEvidence = JSON.stringify(failed.build.terminationEvidence);
   const cancel = control(f, `console.log(JSON.stringify(R.cancelRun(${JSON.stringify(f.runId)})))`);
   assert.strictEqual(cancel.status, 0, cancel.stderr);
@@ -169,7 +182,8 @@ function assertUnsafeRecoveryBlocked(f, expectedWorkerState) {
   const terminalRetry = control(f,
     `try{R.retryRun(${JSON.stringify(f.runId)});process.exit(9)}catch(e){console.log(e.code)}`);
   assert.strictEqual(terminalRetry.status, 0, terminalRetry.stderr);
-  assert.match(terminalRetry.stdout, /INVALID_RETRY/);
+  assert.match(terminalRetry.stdout,
+    new RegExp(expectedRetryCode === 'LAUNCH_IN_PROGRESS' ? 'LAUNCH_IN_PROGRESS' : 'INVALID_RETRY'));
 }
 
 test('async worker returns immediately and records BUILDING process evidence', () => {
@@ -231,13 +245,13 @@ test('duplicate active launch is refused', () => {
   const driver = `const R=require(${JSON.stringify(RUNTIME)}); try{R.startWorker(${JSON.stringify(f.runId)},${JSON.stringify(spec)});process.exit(9)}catch(e){console.log(e.code)}`;
   const r = spawnSync('node', ['-e', driver], { cwd: ROOT, env: f.env, encoding: 'utf8' });
   assert.strictEqual(r.status, 0);
-  assert.match(r.stdout, /ILLEGAL_TRANSITION|WORKER_ALREADY_ACTIVE/);
+  assert.match(r.stdout, /ILLEGAL_TRANSITION|WORKER_ALREADY_ACTIVE|LAUNCH_IN_PROGRESS/);
   const cancel = spawnSync('node', ['-e', `const R=require(${JSON.stringify(RUNTIME)}); console.log(JSON.stringify(R.cancelRun(${JSON.stringify(f.runId)})))`], { cwd: ROOT, env: f.env, encoding: 'utf8' });
   assert.strictEqual(cancel.status, 0, cancel.stderr);
   fs.rmSync(f.tmp, { recursive: true, force: true });
 });
 
-test('simultaneous starts produce one atomic launch owner and one BUILDING transition', async () => {
+test('simultaneous cross-run starts admit exactly one worker lifetime', async () => {
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-worker-race-'));
   const runs = path.join(tmp, 'runs');
   const worktree = path.join(tmp, 'worktree');
@@ -248,33 +262,80 @@ test('simultaneous starts produce one atomic launch owner and one BUILDING trans
   const packetPath = path.join(worktree, 'packet.json');
   writePacketFixture(worktree, packetPath,
     { packetId: 'PKT-TEST-RACE', agentId: 'claude-code', filesAllowed: ['allowed.txt'] });
-  fs.writeFileSync(executable, '#!/usr/bin/env node\nsetTimeout(()=>process.exit(0),30000);\n', { mode: 0o755 });
-  const runId = 'RUN-20260827-deadbeef';
-  const runFile = path.join(runs, `${runId}.json`);
-  fs.writeFileSync(runFile, JSON.stringify({ runId, state: 'WORKTREE_READY', worktree: { path: worktree }, packet: packetPath,
-    build: null, corrections: 0, transitions: [] }, null, 2));
+  fs.writeFileSync(executable,
+    `#!${process.execPath}\nsetTimeout(()=>process.exit(0),30000);\n`, { mode: 0o755 });
+  const runIds = ['RUN-20260827-deadbeef', 'RUN-20260827-feedface'];
+  const runFiles = runIds.map((runId) => path.join(runs, `${runId}.json`));
+  for (let index = 0; index < runIds.length; index++) {
+    fs.writeFileSync(runFiles[index], JSON.stringify({ runId: runIds[index], state: 'WORKTREE_READY',
+      worktree: { path: worktree }, packet: packetPath,
+      build: null, corrections: 0, transitions: [] }, null, 2));
+  }
   const env = { ...process.env, NODE_ENV: 'test', AEGIS_TEST_CLAUDE_EXECUTABLE: executable,
     AEGIS_TEST_CONTAINMENT_MODE: 'DETERMINISTIC_PROFILE_ONLY',
     AEGIS_RUNS_DIR: runs, AEGIS_CHECKPOINTS_DIR: path.join(tmp, 'checkpoints'), AEGIS_LEDGER_FILE: ledger };
   const spec = { provider: 'claude-subscription', prompt: 'one owner only', model: 'opus' };
-  const driver = `const R=require(${JSON.stringify(RUNTIME)});try{const x=R.startWorker(${JSON.stringify(runId)},${JSON.stringify(spec)});console.log('STARTED '+x.attemptId)}catch(e){console.log('REFUSED '+e.code)}`;
-  const invoke = () => new Promise((resolve) => {
+  const invoke = (runId) => new Promise((resolve) => {
+    const driver = `const R=require(${JSON.stringify(RUNTIME)});try{const x=R.startWorker(${JSON.stringify(runId)},${JSON.stringify(spec)});console.log('STARTED '+x.attemptId)}catch(e){console.log('REFUSED '+e.code)}`;
     const child = spawn('node', ['-e', driver], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = '';
     child.stdout.on('data', (v) => { stdout += v; }); child.stderr.on('data', (v) => { stderr += v; });
     child.on('close', (status) => resolve({ status, stdout, stderr }));
   });
-  const results = await Promise.all([invoke(), invoke()]);
-  assert.strictEqual(results.filter((r) => /STARTED /.test(r.stdout)).length, 1, JSON.stringify(results));
-  assert.strictEqual(results.filter((r) => /REFUSED (ILLEGAL_TRANSITION|LAUNCH_IN_PROGRESS|WORKER_ALREADY_ACTIVE)/.test(r.stdout)).length, 1,
-    JSON.stringify(results));
-  const run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
-  assert.match(run.build.attemptId, /^[0-9a-f-]{36}$/);
-  assert.strictEqual(run.transitions.filter((t) => t.to === 'BUILDING').length, 1);
-  const cancel = spawnSync('node', ['-e', `require(${JSON.stringify(RUNTIME)}).cancelRun(${JSON.stringify(runId)})`],
-    { cwd: ROOT, env, encoding: 'utf8' });
-  assert.strictEqual(cancel.status, 0, cancel.stderr);
-  fs.rmSync(tmp, { recursive: true, force: true });
+  let cleanupRequired = true;
+  try {
+    const results = await Promise.all(runIds.map(invoke));
+    assert.strictEqual(results.filter((r) => /STARTED /.test(r.stdout)).length, 1, JSON.stringify(results));
+    assert.strictEqual(results.filter((r) => /REFUSED LAUNCH_IN_PROGRESS/.test(r.stdout)).length, 1,
+      JSON.stringify(results));
+    const runsAfterLaunch = runFiles.map((file) => JSON.parse(fs.readFileSync(file, 'utf8')));
+    const run = runsAfterLaunch.find((candidate) => candidate.state === 'BUILDING');
+    assert.ok(run, 'neither cross-run contender owns BUILDING');
+    const runFile = runFiles[runIds.indexOf(run.runId)];
+    assert.strictEqual(runsAfterLaunch.filter((candidate) => candidate.state === 'BUILDING').length, 1);
+    assert.strictEqual(runsAfterLaunch.filter((candidate) => candidate.state === 'WORKTREE_READY').length, 1);
+    assert.match(run.build.attemptId, /^[0-9a-f-]{36}$/);
+    assert.strictEqual(runsAfterLaunch.flatMap((candidate) => candidate.transitions)
+      .filter((t) => t.to === 'BUILDING').length, 1);
+
+    // startWorker returns after the atomic launch claim is published. The
+    // worker publishes its authenticated cancellation mailbox and verified
+    // child identity asynchronously, so cleanup must wait for that canonical
+    // RUNNING evidence rather than racing cancelRun's fail-closed guard.
+    let running;
+    try {
+      running = waitFor(() => JSON.parse(fs.readFileSync(runFile, 'utf8')),
+        (candidate) => candidate.state === 'BUILDING' && candidate.build &&
+          candidate.build.workerState === 'RUNNING' && candidate.build.control &&
+          candidate.build.childProcessIdentity);
+    } catch (error) {
+      throw new Error(`${error.message}; latest=${fs.readFileSync(runFile, 'utf8')}`);
+    }
+    assert.strictEqual(running.build.attemptId, run.build.attemptId);
+    assert.strictEqual(running.build.childProcessIdentity.processGroupId,
+      running.build.childProcessGroupId);
+
+    const cancel = spawnSync('node', ['-e', `require(${JSON.stringify(RUNTIME)}).cancelRun(${JSON.stringify(run.runId)})`],
+      { cwd: ROOT, env, encoding: 'utf8' });
+    assert.strictEqual(cancel.status, 0, cancel.stderr);
+    const abandoned = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+    assert.strictEqual(abandoned.state, 'ABANDONED');
+    assert.strictEqual(abandoned.build.cancellation.status, 'TERMINATED');
+    assert.strictEqual(abandoned.transitions.filter((t) => t.to === 'BUILDING').length, 1);
+    cleanupRequired = false;
+  } finally {
+    if (cleanupRequired) {
+      for (const runFile of runFiles) {
+        if (!fs.existsSync(runFile)) continue;
+        const latest = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+        const groups = [latest.build && latest.build.childProcessGroupId,
+          latest.build && latest.build.processGroupId]
+          .filter((value, index, values) => Number.isInteger(value) && values.indexOf(value) === index);
+        for (const processGroupId of groups) terminateFixtureGroup(processGroupId, 2000);
+      }
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('bootstrap failure reaches BUILD_FAILED with bounded evidence and no live worker', () => {
@@ -301,6 +362,8 @@ test('post-spawn process identity failure drains the owned child group before BU
   assert.strictEqual(failed.build.terminationEvidence.childCloseObserved, true);
   assert.strictEqual(failed.build.terminationEvidence.processGroupDrained, true);
   assert.strictEqual(failed.build.recovery, undefined);
+  waitFor(() => WORKER.processGroupAlive(failed.build.terminationEvidence.processGroupId),
+    (alive) => alive === false, 2000);
   assert.strictEqual(WORKER.processGroupAlive(failed.build.terminationEvidence.processGroupId), false);
   fs.rmSync(f.tmp, { recursive: true, force: true });
 });
@@ -317,6 +380,8 @@ test('post-spawn initial attempt update failure drains the owned child group bef
   assert.strictEqual(failed.build.terminationEvidence.childCloseObserved, true);
   assert.strictEqual(failed.build.terminationEvidence.processGroupDrained, true);
   assert.strictEqual(failed.build.recovery, undefined);
+  waitFor(() => WORKER.processGroupAlive(failed.build.terminationEvidence.processGroupId),
+    (alive) => alive === false, 2000);
   assert.strictEqual(WORKER.processGroupAlive(failed.build.terminationEvidence.processGroupId), false);
   fs.rmSync(f.tmp, { recursive: true, force: true });
 });
@@ -341,8 +406,20 @@ test('SIGKILL during RUNNING never signals the unverified child and blocks retry
   reconcile(f);
   assert.strictEqual(WORKER.processGroupAlive(childGroup), true,
     'reconciliation must not signal an unverified child process group');
-  assertUnsafeRecoveryBlocked(f, 'ORPHANED');
+  const blockedAdmission = control(f,
+    `try{R.acquireGlobalWorkerClaim(0);console.log('ACQUIRED')}catch(e){console.log(e.code)}`);
+  assert.strictEqual(blockedAdmission.status, 0, blockedAdmission.stderr);
+  assert.match(blockedAdmission.stdout, /LAUNCH_IN_PROGRESS/,
+    'wrapper death admitted another worker while its child process group remained live');
+  assertUnsafeRecoveryBlocked(f, 'ORPHANED', 'LAUNCH_IN_PROGRESS');
   terminateFixtureGroup(childGroup, 2000);
+  waitFor(() => WORKER.processGroupAlive(childGroup), (alive) => alive === false, 3000);
+  const reclaimed = control(f,
+    `const lease=R.acquireGlobalWorkerClaim(1000);const released=R.releaseRunLaunchClaim(lease);console.log(JSON.stringify({released,lockExists:require('fs').existsSync(R.globalWorkerLockPath())}))`);
+  assert.strictEqual(reclaimed.status, 0, reclaimed.stderr);
+  assert.deepStrictEqual(JSON.parse(reclaimed.stdout.trim().split('\n').pop()),
+    { released: true, lockExists: false },
+    'terminal global lease was not reclaimable after complete process-group drain');
   fs.rmSync(f.tmp, { recursive: true, force: true });
 });
 
@@ -370,7 +447,7 @@ test('timeout with unverified termination transitions directly to unsafe BUILD_F
   assert.strictEqual(failed.build.workerState, 'TERMINATION_UNVERIFIED');
   assert.strictEqual(failed.build.timeoutTerminationEvidence.childCloseObserved, false);
   const childGroup = failed.build.childProcessGroupId;
-  assertUnsafeRecoveryBlocked(f, 'TERMINATION_UNVERIFIED');
+  assertUnsafeRecoveryBlocked(f, 'TERMINATION_UNVERIFIED', 'LAUNCH_IN_PROGRESS');
   terminateFixtureGroup(childGroup, 2000);
   waitFor(() => WORKER.processGroupAlive(childGroup), (alive) => alive === false, 3000);
   fs.rmSync(f.tmp, { recursive: true, force: true });
@@ -535,9 +612,73 @@ test('packet allowlists permit an exact new leaf for write but not read', () => 
   }
 });
 
+test('packet * and ** globs resolve once to exact existing files without broad write authority', () => {
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-worker-globs-'));
+  const worktree = path.join(tmp, 'worktree');
+  fs.mkdirSync(path.join(worktree, 'approved', 'nested'), { recursive: true });
+  fs.mkdirSync(path.join(worktree, 'denied'));
+  fs.writeFileSync(path.join(worktree, 'approved', 'one.txt'), 'one\n');
+  fs.writeFileSync(path.join(worktree, 'approved', 'two.js'), 'two\n');
+  fs.writeFileSync(path.join(worktree, 'approved', 'nested', 'three.txt'), 'three\n');
+  fs.writeFileSync(path.join(worktree, 'denied', 'outside.txt'), 'outside\n');
+  const packetPath = path.join(worktree, 'packet.json');
+  writePacketFixture(worktree, packetPath, {
+    packetId: 'PKT-GLOB-EXACT-EXPANSION', agentId: 'claude-code',
+    filesAllowed: ['approved/*.txt', 'approved/**/*.txt', 'approved/two.js'],
+  });
+  const priorNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'test';
+  try {
+    const allowed = WORKER.derivePacketAllowlists(
+      { packet: packetPath, worktree: { path: worktree } }, worktree);
+    assert.deepStrictEqual(allowed.writePaths, [
+      'approved/nested/three.txt', 'approved/one.txt', 'approved/two.js',
+    ]);
+    assert.ok(!allowed.writePaths.includes('denied/outside.txt'));
+    assert.ok(!allowed.writePaths.includes('approved/new.txt'), 'a glob must not grant unbounded new-leaf creation');
+    const profile = CONTAINMENT.buildMacSandboxProfile({
+      root: worktree, executable: '/usr/bin/touch',
+      readPaths: allowed.readPaths.map((p) => path.join(worktree, p)),
+      writePaths: allowed.writePaths.map((p) => path.join(worktree, p)),
+    });
+    assert.ok(profile.profile.includes(`(allow file-write* (literal "${path.join(worktree, 'approved', 'one.txt')}"))`));
+    assert.ok(!profile.profile.includes(`(allow file-write* (subpath "${path.join(worktree, 'approved')}"))`));
+  } finally {
+    if (priorNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = priorNodeEnv;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('packet glob authority rejects traversal, unsupported operators, symlinks, and empty matches', () => {
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-worker-glob-deny-'));
+  const worktree = path.join(tmp, 'worktree');
+  fs.mkdirSync(path.join(worktree, 'approved'), { recursive: true });
+  fs.writeFileSync(path.join(worktree, 'approved', 'one.txt'), 'one\n');
+  fs.symlinkSync(path.join(worktree, 'approved', 'one.txt'), path.join(worktree, 'approved', 'link.txt'));
+  const packetPath = path.join(worktree, 'packet.json');
+  const run = { packet: packetPath, worktree: { path: worktree } };
+  const check = (pattern, expected) => {
+    writePacketFixture(worktree, packetPath, {
+      packetId: 'PKT-GLOB-DENY', agentId: 'claude-code', filesAllowed: [pattern],
+    });
+    assert.throws(() => WORKER.derivePacketAllowlists(run, worktree), expected);
+  };
+  const priorNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'test';
+  try {
+    check('../*.txt', /supported worktree-relative/);
+    check('approved/?.txt', /supported worktree-relative/);
+    check('approved/link*', /symbolic link/);
+    check('approved/*.missing', /matched no existing regular files/);
+  } finally {
+    if (priorNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = priorNodeEnv;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('packet write authority permits only exact atomic temp replacement leaves', () => {
   const capability = CONTAINMENT.sandboxCapability();
-  if (!capability.available) return;
+  if (!capability.available) return skip(`host sandbox unavailable: ${capability.reason || 'unknown reason'}`);
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-atomic-write-'));
   const worktree = path.join(tmp, 'worktree');
   fs.mkdirSync(worktree);
@@ -552,8 +693,9 @@ test('packet write authority permits only exact atomic temp replacement leaves',
     writePaths: [allowed],
     allowNetwork: false,
   });
+  const containedCommand = CONTAINMENT.sandboxedCommand(profile);
   const invoke = (script, ...args) => spawnSync(profile.bin,
-    [...CONTAINMENT.sandboxedCommand(profile).argv, '-c', script, 'aegis-atomic-test', ...args],
+    [...containedCommand.argv, '-c', script, 'aegis-atomic-test', ...args],
     { encoding: 'utf8' });
   const atomicTemp = `${allowed}.tmp.${process.pid}.aB_09-safe`;
   const replace = invoke('printf "after\\n" > "$1" && /bin/mv "$1" "$2"', atomicTemp, allowed);
@@ -614,7 +756,9 @@ test('repository-relative packet rejects a changed or symlinked worktree copy', 
   writePacketFixture(worktree, worktreePacket,
     { packetId: 'PKT-DASHBOARD-BINDING', agentId: 'claude-code', filesAllowed: ['allowed.txt'] });
   fs.copyFileSync(worktreePacket, canonicalPacket);
-  const run = { packet: relativePacket, worktree: { path: worktree } };
+  const run = { packet: relativePacket,
+    packetCoordinate: frozenPacketCoordinate(relativePacket, worktreePacket),
+    worktree: { path: worktree } };
   const priorNodeEnv = process.env.NODE_ENV;
   const priorCanonicalRoot = process.env.AEGIS_TEST_CANONICAL_ROOT;
   process.env.NODE_ENV = 'test'; process.env.AEGIS_TEST_CANONICAL_ROOT = canonicalRoot;
@@ -628,6 +772,44 @@ test('repository-relative packet rejects a changed or symlinked worktree copy', 
     fs.unlinkSync(worktreePacket);
     fs.symlinkSync(target, worktreePacket);
     assert.throws(() => WORKER.derivePacketAllowlists(run, worktree), /may not be a symbolic link/);
+  } finally {
+    if (priorNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = priorNodeEnv;
+    if (priorCanonicalRoot === undefined) delete process.env.AEGIS_TEST_CANONICAL_ROOT;
+    else process.env.AEGIS_TEST_CANONICAL_ROOT = priorCanonicalRoot;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('detached worker refuses a replacement packet even when canonical and worktree copies agree', () => {
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-worker-packet-freeze-'));
+  const canonicalRoot = path.join(tmp, 'canonical');
+  const worktree = path.join(tmp, 'worktree');
+  const relativePacket = 'builder-control/packets/PKT-PACKET-FREEZE.json';
+  const canonicalPacket = path.join(canonicalRoot, relativePacket);
+  const worktreePacket = path.join(worktree, relativePacket);
+  fs.mkdirSync(path.dirname(canonicalPacket), { recursive: true });
+  fs.mkdirSync(path.dirname(worktreePacket), { recursive: true });
+  fs.writeFileSync(path.join(worktree, 'allowed-a.txt'), 'a\n');
+  fs.writeFileSync(path.join(worktree, 'allowed-b.txt'), 'b\n');
+  writePacketFixture(worktree, worktreePacket, {
+    packetId: 'PKT-PACKET-FREEZE', agentId: 'claude-code', filesAllowed: ['allowed-a.txt'],
+  });
+  fs.copyFileSync(worktreePacket, canonicalPacket);
+  const run = { packet: relativePacket,
+    packetCoordinate: frozenPacketCoordinate(relativePacket, worktreePacket),
+    worktree: { path: worktree } };
+  const priorNodeEnv = process.env.NODE_ENV;
+  const priorCanonicalRoot = process.env.AEGIS_TEST_CANONICAL_ROOT;
+  process.env.NODE_ENV = 'test'; process.env.AEGIS_TEST_CANONICAL_ROOT = canonicalRoot;
+  try {
+    assert.deepStrictEqual(WORKER.derivePacketAllowlists(run, worktree).writePaths, ['allowed-a.txt']);
+    writePacketFixture(worktree, worktreePacket, {
+      packetId: 'PKT-PACKET-FREEZE', agentId: 'claude-code',
+      filesAllowed: ['allowed-a.txt', 'allowed-b.txt'],
+    });
+    fs.copyFileSync(worktreePacket, canonicalPacket);
+    assert.throws(() => WORKER.derivePacketAllowlists(run, worktree),
+      /changed after objective intake/);
   } finally {
     if (priorNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = priorNodeEnv;
     if (priorCanonicalRoot === undefined) delete process.env.AEGIS_TEST_CANONICAL_ROOT;
@@ -665,7 +847,7 @@ test('packet allowlists are exact, worktree-scoped, and reject unsafe leaves', (
     assert.strictEqual(allowed.writePaths.includes('unauthorized-sibling.txt'), false);
     for (const rejected of [
       ['missing-parent/new.txt'], ['../sibling/outside.txt'], [path.join(os.homedir(), '.ssh')],
-      ['escape-link'], ['escape-parent/new.txt'], ['approved-dir'], ['*.txt'], ['allowed/../unauthorized-sibling.txt'],
+      ['escape-link'], ['escape-parent/new.txt'], ['approved-dir'], ['allowed/../unauthorized-sibling.txt'],
     ]) {
       writePacket(rejected);
       assert.throws(() => WORKER.derivePacketAllowlists(run, worktree),
@@ -718,7 +900,7 @@ test('deterministic containment argv grants only packet paths and denies default
 
 test('contained check authority reads packet, specification and dependency but writes only filesAllowed', () => {
   const capability = CONTAINMENT.sandboxCapability();
-  if (!capability.available) return;
+  if (!capability.available) return skip(`host sandbox unavailable: ${capability.reason || 'unknown reason'}`);
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-worker-authority-'));
   const worktree = path.join(tmp, 'worktree');
   fs.mkdirSync(worktree);
@@ -793,12 +975,15 @@ test('packet authority rejects unsafe specifications, checks and dependency esca
   }
 });
 
-test('declared deterministic checks accept the exact single-file node test form and preserve existing forms', () => {
+test('declared deterministic checks accept exact single-file test modes and preserve existing forms', () => {
   assert.strictEqual(WORKER.declaredCheckEntrypoint(
     'node --test builder-control/test/aegis-run.test.cjs'),
   'builder-control/test/aegis-run.test.cjs');
   assert.strictEqual(WORKER.declaredCheckEntrypoint('node builder-control/test/aegis-run.test.cjs'),
     'builder-control/test/aegis-run.test.cjs');
+  assert.strictEqual(WORKER.declaredCheckEntrypoint(
+    'node builder-control/test/hosting.test.cjs --host-only'),
+  'builder-control/test/hosting.test.cjs');
   assert.strictEqual(WORKER.declaredCheckEntrypoint('node --check builder-control/aegis-run.cjs'),
     'builder-control/aegis-run.cjs');
   assert.strictEqual(WORKER.declaredCheckEntrypoint('git diff --check'), null);
@@ -810,6 +995,9 @@ test('node test check declarations refuse extra authority and non-test targets',
     'node --test',
     'node --test --test-reporter tap builder-control/test/aegis-run.test.cjs',
     'node --test builder-control/test/aegis-run.test.cjs --test-reporter tap',
+    'node builder-control/test/hosting.test.cjs --host-only extra',
+    'node builder-control/test/hosting.test.cjs --host-only --inspect',
+    'node builder-control/hosting/server.cjs --host-only',
     'node --test builder-control/test/aegis-run.test.cjs builder-control/test/hosting.test.cjs',
     'node --test /tmp/outside.test.cjs',
     'node --test ../outside.test.cjs',
@@ -839,7 +1027,8 @@ test('node test check declarations refuse extra authority and non-test targets',
 test('canonical dashboard packet derives all declared single-file node tests into its read allowlist', () => {
   const packet = 'builder-control/packets/PKT-20260825-SWITCHBOARD-FOUNDATION.json';
   const allowed = WORKER.derivePacketAllowlists(
-    { packet, worktree: { path: ROOT } }, ROOT);
+    { packet, packetCoordinate: frozenPacketCoordinate(packet, path.join(ROOT, packet)),
+      worktree: { path: ROOT } }, ROOT);
   assert.strictEqual(allowed.packetId, 'PKT-20260825-SWITCHBOARD-FOUNDATION');
   for (const testPath of [
     'builder-control/test/aegis-run.test.cjs',
@@ -862,7 +1051,7 @@ test('worker fails closed when the OS sandbox is unavailable', () => {
 
 test('host sandbox allows the packet path and denies sibling, home, and non-allowlisted paths when operational', () => {
   const capability = CONTAINMENT.sandboxCapability();
-  if (!capability.available) return;
+  if (!capability.available) return skip(`host sandbox unavailable: ${capability.reason || 'unknown reason'}`);
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-worker-host-sandbox-'));
   const worktree = path.join(tmp, 'worktree'); const sibling = path.join(tmp, 'sibling');
   fs.mkdirSync(worktree); fs.mkdirSync(sibling);
@@ -968,7 +1157,7 @@ test('replaced cancellation mailbox fails closed without signalling the owned wo
   fs.rmSync(original, { recursive: true, force: true });
 });
 
-test('cancel refuses stale BUILDING ownership and never signals an unrelated reused PID', () => {
+test('cancel without authenticated control and child identity refuses before signalling an unrelated PID', () => {
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-stale-cancel-'));
   const runs = path.join(tmp, 'runs');
   const ledger = path.join(tmp, 'ledger.json');
@@ -1441,7 +1630,28 @@ test('production containment grants exact native runtime and process-bound read-
   assert.strictEqual(prepared.profile.claudeNativeRuntimePolicy, CONTAINMENT.CLAUDE_NATIVE_RUNTIME_POLICY);
   assert.strictEqual(prepared.profile.claudeKeychainHelperPolicy, CONTAINMENT.CLAUDE_KEYCHAIN_HELPER_POLICY);
   assert.strictEqual(prepared.env.GIT_OPTIONAL_LOCKS, '0');
-  assert.strictEqual(prepared.profile.profile.includes(`(subpath "${native.gitCommonDir}")`), true);
+  assert.strictEqual(prepared.profile.profile.includes(`(subpath "${native.gitCommonDir}")`), false);
+  assert.strictEqual(prepared.profile.profile.includes('(subpath "/usr/bin")'), false);
+  assert.strictEqual(prepared.profile.profile.includes('(literal "/usr/bin/git")'), true);
+  for (const literal of native.gitReadFiles) {
+    assert.strictEqual(prepared.profile.profile.includes(`(literal "${literal}")`), true, literal);
+  }
+  assert.strictEqual(prepared.profile.profile.includes(
+    `(literal "${path.join(native.gitCommonDir, 'config')}")`), false);
+  const capability = CONTAINMENT.sandboxCapability();
+  if (capability.available) {
+    const contained = CONTAINMENT.sandboxedCommand(prepared.profile);
+    const gitObjectEscape = spawnSync(contained.bin,
+      [...contained.argv, '/usr/bin/git', '-C', ROOT, 'show', 'HEAD:.gitignore'],
+      { encoding: 'utf8', env: prepared.env });
+    assert.notStrictEqual(gitObjectEscape.status, 0,
+      'shared Git objects exposed a committed path outside the packet read list');
+    const configEscape = spawnSync(contained.bin,
+      [...contained.argv, '/bin/cat', path.join(native.gitCommonDir, 'config')],
+      { encoding: 'utf8', env: prepared.env });
+    assert.notStrictEqual(configEscape.status, 0,
+      'shared Git config remained readable outside exact runtime literals');
+  }
   assert.strictEqual(prepared.profile.profile.includes(`(subpath "${native.claudeLocksDir}")`), true);
   const helperQualifier = `(process-path "${keychain.securityHelper}")`;
   assert.strictEqual(prepared.profile.profile.includes(
@@ -1515,8 +1725,8 @@ test('pinned Claude bootstraps auth status through the production containment bo
     CONTAINMENT.CLAUDE_DISPOSABLE_RUNTIME_POLICY);
   assert.strictEqual(prepared.profile.claudeNativeRuntimePolicy,
     CONTAINMENT.CLAUDE_NATIVE_RUNTIME_POLICY);
-  assert.strictEqual(prepared.profile.claudeKeychainHelperPolicy,
-    CONTAINMENT.CLAUDE_KEYCHAIN_HELPER_POLICY);
+  assert.strictEqual(prepared.profile.claudeKeychainHelperPolicy, null,
+    'the contained Claude process must receive no direct Keychain helper authority');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(prepared.env, 'ANTHROPIC_API_KEY'), false);
 
   const fdPrepared = WORKER.prepareRunContainment(run, executable, {
@@ -1526,7 +1736,11 @@ test('pinned Claude bootstraps auth status through the production containment bo
   assert.strictEqual(WORKER.CLAUDE_KEYCHAIN_SERVICE, 'Claude Code-credentials');
   assert.strictEqual(WORKER.CLAUDE_OAUTH_TOKEN_FILE_DESCRIPTOR, '3');
   assert.strictEqual(fdPrepared.env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR, '3');
-  assert.match(fdPrepared.profile.profile, /\(allow file-read-data \(literal "\/dev\/fd\/3"\)\)/);
+  assert.match(fdPrepared.profile.profile,
+    /\(allow file-read-data \(require-all \(literal "\/dev\/fd\/3"\) \(process-path "[^"]+"\)\)\)/);
+  assert.doesNotMatch(fdPrepared.profile.profile,
+    /\(allow file-read-data \(literal "\/dev\/fd\/3"\)\)/,
+    'descriptor 3 must never be readable by every model-launched descendant');
   assert.strictEqual(fdPrepared.profile.profile.includes('/dev/fd/4'), false);
   assert.strictEqual(Object.prototype.hasOwnProperty.call(fdPrepared.env, 'ANTHROPIC_API_KEY'), false);
 
@@ -1541,7 +1755,7 @@ test('pinned Claude bootstraps auth status through the production containment bo
     assert.strictEqual(error.code, 'CLAUDE_SUBSCRIPTION_REAUTH_REQUIRED');
     assert.match(error.message, /preflight blocked before model launch/);
     assert.match(error.operatorAction, /auth login --claudeai interactively/);
-    return;
+    return { skipped: 'local Claude OAuth is expired; fail-closed reauthentication path verified' };
   }
   assert.strictEqual(result.status, 0,
     `contained Claude auth bootstrap failed with exit ${result.status}`);
@@ -1615,7 +1829,7 @@ test('Claude expired OAuth is classified as MODEL_AUTH_FAILURE only on a termina
   assert.deepStrictEqual(failure, {
     code: 'MODEL_AUTH_FAILURE',
     provider: 'claude-subscription',
-    summary: 'Claude authentication expired. AEGIS marked Claude unavailable for this objective and will use the next eligible builder.',
+    summary: 'Claude authentication expired. AEGIS marked Claude unavailable and identified the next eligible builder, but governed failover execution is not activated for this beta.',
     retrySafe: true,
     failoverEligible: true,
   });
@@ -1623,7 +1837,7 @@ test('Claude expired OAuth is classified as MODEL_AUTH_FAILURE only on a termina
   assert.strictEqual(WORKER.classifyBuilderFailure('grok-subscription', 1, text, ''), null);
 });
 
-test('Claude auth failure records the canonical Grok handoff and blocks same-route retry', () => {
+test('Claude auth failure records a non-executable Grok candidate and blocks unsafe retry', () => {
   const f = fixture('Preserve this objective exactly across provider failover.',
     { FAKE_CLAUDE_MODE: 'auth-fail' });
   const failed = waitFor(f.read, (run) => run.state === 'BUILD_FAILED');
@@ -1634,7 +1848,10 @@ test('Claude auth failure records the canonical Grok handoff and blocks same-rou
     reason: failed.build.providerSelection.reason,
   });
   assert.match(failed.build.providerSelection.reason, /next eligible canonical subscription builder/);
-  assert.strictEqual(failed.build.handoff.state, 'READY_FOR_PROVIDER_HANDOFF');
+  assert.match(failed.build.providerSelection.reason, /failover execution is not activated/);
+  assert.strictEqual(failed.build.handoff.state, 'UNAVAILABLE');
+  assert.strictEqual(failed.build.handoff.executable, false);
+  assert.match(failed.build.handoff.reason, /not activated for this beta/);
   assert.strictEqual(failed.build.handoff.sameProviderRetryAllowed, false);
   assert.strictEqual(failed.build.handoff.unchangedObjective, true);
   assert.strictEqual(failed.build.recovery.retrySafe, false);
@@ -1658,6 +1875,8 @@ test('unchanged objective never reselects the unavailable Claude provider', () =
   assert.strictEqual(selected.launchSpec.provider, 'grok-subscription');
   assert.notStrictEqual(selected.launchSpec.provider, launch.provider);
   assert.strictEqual(selected.launchSpec.prompt, prompt);
+  assert.strictEqual(selected.handoff.state, 'UNAVAILABLE');
+  assert.strictEqual(selected.handoff.executable, false);
   assert.strictEqual(selected.handoff.sameProviderRetryAllowed, false);
   assert.strictEqual(selected.handoff.unchangedObjective, true);
 });
@@ -1673,6 +1892,9 @@ test('canonical policy selects Grok 4.6 as the next eligible subscription builde
     { objective: 'same objective' }, policy);
   assert.strictEqual(selected.launchSpec.model, 'grok-4.6');
   assert.match(selected.selectionReason, /next eligible canonical subscription builder/);
+  assert.match(selected.selectionReason, /failover execution is not activated/);
+  assert.strictEqual(selected.handoff.state, 'UNAVAILABLE');
+  assert.strictEqual(selected.handoff.executable, false);
   assert.match(selected.handoff.objectiveSha256, /^[0-9a-f]{64}$/);
   assert.match(selected.handoff.promptSha256, /^[0-9a-f]{64}$/);
 });
@@ -1761,10 +1983,24 @@ test('production Claude executable is an absolute approved version pin', () => {
 
 (async () => {
   let passed = 0;
+  let skipped = 0;
   for (const t of tests) {
-    try { await t.fn(); passed++; console.log(`PASS ${t.name}`); }
+    try {
+      const result = await t.fn();
+      if (result && result.skipped) {
+        skipped++;
+        console.log(`SKIP ${t.name} — ${result.skipped}`);
+      } else {
+        passed++;
+        console.log(`PASS ${t.name}`);
+      }
+    }
     catch (e) { console.error(`FAIL ${t.name}\n${e.stack || e}`); }
   }
-  console.log(`\n${passed}/${tests.length} passed`);
+  console.log(`\n${passed} passed, ${skipped} skipped, ${tests.length - passed - skipped} failed.`);
+  if (skipped > 0) {
+    console.error(`\nMANDATORY PROOFS NOT EXECUTED (${skipped}) — this suite is NOT green.`);
+  }
+  // Green requires every registered proof to have actually run and passed.
   process.exit(passed === tests.length ? 0 : 1);
 })();

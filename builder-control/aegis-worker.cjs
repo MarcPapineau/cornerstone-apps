@@ -7,6 +7,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const CONTAINMENT = require('./sandbox-containment.cjs');
+const PACKET_TOOLS = require('./packet-tools.cjs');
 
 const HERE = __dirname;
 const ROOT = path.resolve(HERE, '..');
@@ -258,7 +259,7 @@ function classifyBuilderFailure(provider, exit, stdout, stderr) {
       /(401[^\n]*(?:oauth|token)|oauth access token has expired|failed to authenticate)/i.test(output)) {
     return Object.freeze({
       code: 'MODEL_AUTH_FAILURE', provider,
-      summary: 'Claude authentication expired. AEGIS marked Claude unavailable for this objective and will use the next eligible builder.',
+      summary: 'Claude authentication expired. AEGIS marked Claude unavailable and identified the next eligible builder, but governed failover execution is not activated for this beta.',
       retrySafe: true, failoverEligible: true,
     });
   }
@@ -324,9 +325,11 @@ function selectFailoverBuilder(launchSpec, failure, run, policy = loadModelRouti
   const promptSha256 = sha256(current.prompt);
   return Object.freeze({
     launchSpec: selected,
-    selectionReason: `${failure.code}: ${currentModel[0]} is unavailable for the unchanged objective; selected ${selectedPolicyModel} as the next eligible canonical subscription builder`,
+    selectionReason: `${failure.code}: ${currentModel[0]} is unavailable for the unchanged objective; identified ${selectedPolicyModel} as the next eligible canonical subscription builder, but governed failover execution is not activated for this beta`,
     handoff: Object.freeze({
-      state: 'READY_FOR_PROVIDER_HANDOFF',
+      state: 'UNAVAILABLE',
+      executable: false,
+      reason: 'Governed Grok builder failover execution is not activated for this beta.',
       fromProvider: current.provider,
       toProvider: selected.provider,
       fromPolicyModel: currentModel[0],
@@ -549,6 +552,7 @@ function resolveApprovedPacket(run, worktree) {
   const tmpRoot = fs.realpathSync(os.tmpdir());
   let packetPath;
   let canonicalPacketPath;
+  let packetBytes;
   if (path.isAbsolute(run.packet)) {
     packetPath = fs.realpathSync(run.packet);
     const testPacket = process.env.NODE_ENV === 'test' &&
@@ -560,6 +564,7 @@ function resolveApprovedPacket(run, worktree) {
       }
     }
     canonicalPacketPath = packetPath;
+    packetBytes = fs.readFileSync(packetPath);
   } else {
     const relative = exactRelativePath(run.packet, 'run packet');
     const canonicalRoot = canonicalRepositoryRoot();
@@ -584,19 +589,39 @@ function resolveApprovedPacket(run, worktree) {
     if (!fs.statSync(canonicalPacketPath).isFile() || !fs.statSync(packetPath).isFile()) {
       throw new Error('approved packet must be a regular file');
     }
-    const canonicalDigest = sha256(fs.readFileSync(canonicalPacketPath));
-    const worktreeDigest = sha256(fs.readFileSync(packetPath));
+    const canonicalBytes = fs.readFileSync(canonicalPacketPath);
+    packetBytes = fs.readFileSync(packetPath);
+    const canonicalDigest = sha256(canonicalBytes);
+    const worktreeDigest = sha256(packetBytes);
     if (canonicalDigest !== worktreeDigest) {
       throw new Error('worktree approved packet digest does not match canonical approved packet');
     }
   }
   if (!fs.statSync(packetPath).isFile()) throw new Error('approved packet must be a file');
-  const packet = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
+  const packetSha256 = sha256(packetBytes);
+  const packet = JSON.parse(packetBytes.toString('utf8'));
   if (!packet || packet.agentId !== 'claude-code' || typeof packet.packetId !== 'string' || !packet.packetId ||
       !Array.isArray(packet.filesAllowed) || packet.filesAllowed.length === 0) {
     throw new Error('approved packet is malformed or does not authorize claude-code');
   }
-  return Object.freeze({ packetPath, canonicalPacketPath, packetSha256: sha256(fs.readFileSync(packetPath)), packet });
+  // Production runs carry the exact packet generation accepted at intake. The
+  // detached worker is the final process that turns packet bytes into OS write
+  // authority, so it must independently enforce that frozen coordinate rather
+  // than trusting the mutable path observed by the launcher.
+  const coordinate = run.packetCoordinate;
+  const coordinateRequired = !path.isAbsolute(run.packet);
+  if (coordinateRequired || coordinate !== undefined) {
+    if (!coordinate || coordinate.path !== run.packet ||
+        !/^[0-9a-f]{64}$/.test(coordinate.sha256 || '') ||
+        typeof coordinate.packetId !== 'string' || !coordinate.packetId) {
+      throw new Error('run has no complete immutable intake packet coordinate');
+    }
+    if (coordinate.sha256 !== packetSha256 || coordinate.packetId !== packet.packetId) {
+      throw new Error('approved packet path, sha256, or packetId changed after objective intake');
+    }
+  }
+  return Object.freeze({ packetPath, canonicalPacketPath, packetSha256, packet,
+    packetBytes: Buffer.from(packetBytes) });
 }
 
 function exactRelativePath(value, label) {
@@ -606,6 +631,54 @@ function exactRelativePath(value, label) {
     throw new Error(`${label} is not an exact worktree-relative path: ${String(value)}`);
   }
   return value;
+}
+
+function globRelativePath(value, label) {
+  if (typeof value !== 'string' || !value || value.includes('\0') || value.includes('\\') ||
+      path.isAbsolute(value) || /[?\[\]{}]/.test(value) || !value.includes('*') ||
+      path.posix.normalize(value) !== value || value === '.' || value.endsWith('/') ||
+      value.startsWith('../') || value.split('/').some((segment) => !segment || segment === '.' || segment === '..')) {
+    throw new Error(`${label} is not a supported worktree-relative * or ** glob: ${String(value)}`);
+  }
+  return value;
+}
+
+function expandExistingGlob(worktreeReal, pattern, label) {
+  globRelativePath(pattern, label);
+  const segments = pattern.split('/');
+  const firstGlob = segments.findIndex((segment) => segment.includes('*'));
+  const prefix = segments.slice(0, firstGlob).join('/');
+  const rootCandidate = path.resolve(worktreeReal, prefix || '.');
+  let rootReal;
+  try { rootReal = fs.realpathSync(rootCandidate); }
+  catch { throw new Error(`${label} static prefix is missing: ${pattern}`); }
+  if (rootReal !== worktreeReal && !rootReal.startsWith(worktreeReal + path.sep)) {
+    throw new Error(`${label} static prefix escapes the isolated worktree: ${pattern}`);
+  }
+  if (!fs.statSync(rootReal).isDirectory()) {
+    throw new Error(`${label} static prefix is not a directory: ${pattern}`);
+  }
+  const matches = [];
+  const pending = [rootReal];
+  let inspected = 0;
+  while (pending.length) {
+    const directory = pending.pop();
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (++inspected > 10000) throw new Error(`${label} expands beyond the 10000-entry safety bound: ${pattern}`);
+      const candidate = path.join(directory, entry.name);
+      const relative = path.relative(worktreeReal, candidate).split(path.sep).join('/');
+      if (entry.isSymbolicLink()) {
+        if (PACKET_TOOLS.globMatch(pattern, relative) || entry.isDirectory()) {
+          throw new Error(`${label} matched or traversed a symbolic link: ${relative}`);
+        }
+        continue;
+      }
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile() && PACKET_TOOLS.globMatch(pattern, relative)) matches.push(relative);
+    }
+  }
+  if (!matches.length) throw new Error(`${label} matched no existing regular files: ${pattern}`);
+  return matches.sort();
 }
 
 function existingWorktreeFile(worktreeReal, value, label) {
@@ -629,6 +702,13 @@ function declaredCheckEntrypoint(command) {
   if (normalized === 'git diff --check') return null;
   const testMatch = normalized.match(/^node --test ([A-Za-z0-9_./-]+\.test\.cjs)$/);
   if (testMatch) return exactRelativePath(testMatch[1], 'packet testsRequired input');
+  // `--host-only` is a fixed, test-owned mode used by the canonical hosting
+  // suite.  It is not caller-selected process authority: no other flag, value,
+  // or second entrypoint is accepted here.  Keep this parser aligned with the
+  // executable packet contract so deriving the worker's read allowlist cannot
+  // reject a packet that the check authority itself is required to execute.
+  const hostOnlyMatch = normalized.match(/^node ([A-Za-z0-9_./-]+\.test\.cjs) --host-only$/);
+  if (hostOnlyMatch) return exactRelativePath(hostOnlyMatch[1], 'packet testsRequired input');
   const match = normalized.match(/^node(?:\s+--check)?\s+([A-Za-z0-9_./-]+\.(?:cjs|mjs|js|json))$/);
   if (!match) {
     throw new Error(`packet testsRequired entry is not an approved deterministic check form: ${command}`);
@@ -761,6 +841,12 @@ function derivePacketAllowlists(run, worktree) {
     readPaths.push(...collectLocalDependencies(worktreeReal, entryRelative));
   }
   for (const value of packet.filesAllowed) {
+    if (/[*?\[\]{}]/.test(value)) {
+      const matches = expandExistingGlob(worktreeReal, value, 'packet filesAllowed entry');
+      readPaths.push(...matches);
+      writePaths.push(...matches);
+      continue;
+    }
     exactRelativePath(value, 'packet filesAllowed entry');
     const candidate = path.resolve(worktreeReal, value);
     try { fs.lstatSync(candidate); }
@@ -839,7 +925,10 @@ function prepareRunContainment(run, executable, env) {
     const disposableRuntimeDir = productionClaude ? CONTAINMENT.claudeDisposableRuntimeDir() : null;
     const claudeNativeRuntime = productionClaude
       ? CONTAINMENT.claudeNativeRuntimePaths(run.worktree.path) : null;
-    const claudeKeychainHelper = productionClaude ? CONTAINMENT.claudeKeychainHelperPaths() : null;
+    // The parent control process reads the one exact Claude credential before
+    // containment and hands it to the pinned client on descriptor 3. The
+    // contained model process therefore receives no Keychain helper authority.
+    const claudeKeychainHelper = null;
     prepared = CONTAINMENT.prepareWorkerContainment({
       worktree: run.worktree.path,
       executable,
@@ -1233,7 +1322,13 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   // Always locate the canonical attempt using only the immutable CLI
   // identities. Untrusted payload IDs must never strand the owned run or
   // redirect failure evidence to another run.
+  let globalLease = null;
+  try {
   const run = waitForLaunchRecord(R, expectedRunId, expectedAttemptId, process.pid);
+  // Launch metadata is not execution authority by itself. The launcher must
+  // also have transferred the one global lifetime lease to this exact process
+  // generation before the worker can spawn the governed builder.
+  globalLease = R.verifyGlobalWorkerLease(expectedRunId, expectedAttemptId, process.pid);
   if (identityError) return failOwnedAttempt(R, identity, identityError);
   if (!run.worktree || !fs.existsSync(run.worktree.path)) {
     return failOwnedAttempt(R, payload, new Error('isolated worktree unavailable'));
@@ -1312,7 +1407,7 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
       permissionMode: 'acceptEdits',
       modelTools: CLAUDE_FILE_TOOLS,
       modelShellAuthority: false,
-      nestedSandboxConfiguredAsDefenseInDepth: true,
+      nestedSandboxConfiguredAsDefenseInDepth: false,
       nestedSandboxRequired: false,
       subscriptionConfigPolicy: contained.profile.claudeSubscriptionConfigPolicy,
       subscriptionConfigFilesValidated: contained.profile.claudeSubscriptionConfigReadPaths.length === 2,
@@ -1320,7 +1415,7 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
       disposableRuntimeDirectoryValidated: Boolean(contained.profile.claudeDisposableRuntimeDirReadPath),
       nativeRuntimePolicy: contained.profile.claudeNativeRuntimePolicy,
       keychainHelperPolicy: contained.profile.claudeKeychainHelperPolicy,
-      modelIssuedKeychainAccessDenied: true,
+      modelIssuedKeychainAccessDenied: contained.profile.claudeKeychainHelperPolicy === null,
     },
   });
 
@@ -1450,6 +1545,15 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   return result.exit;
   } catch (error) {
     return failOwnedAttempt(R, payload, error, childOutcome, childIdentity);
+  }
+  } finally {
+    // A stale or replaced generation can never be removed. If a child or
+    // descendant remains in this worker-owned process group, release refuses;
+    // the durable lease then blocks admission until the complete group is
+    // positively absent and a later launcher safely reclaims it.
+    if (globalLease) {
+      try { R.releaseGlobalWorkerLease(globalLease); } catch { /* fail closed: retained lease */ }
+    }
   }
 }
 

@@ -11,8 +11,7 @@
  * No npm deps — only Node built-ins + hand-rolled JSON-Schema draft-07 subset.
  *
  * Registry-absent behaviour: if agent-registry.json does not yet exist (B1 writes it),
- * the validator degrades gracefully: schema-only validation passes with a warning
- * "registry not yet present — schema-only validation". It does NOT silently skip the
+ * governed validation fails closed when the registry is absent. It does NOT silently skip the
  * registry check when the registry IS present.
  */
 'use strict';
@@ -25,11 +24,13 @@ const WORKSPACE_ROOT   = path.resolve(__dirname, '..');
 const SCHEMA_DIR       = path.join(__dirname, 'schemas');
 const PACKET_SCHEMA    = path.join(SCHEMA_DIR, 'task-packet.schema.json');
 const REGISTRY_FILE    = path.join(__dirname, 'agent-registry.json');
+const PROTECTED_PATHS_FILE = path.join(__dirname, 'protected-paths.json');
 
 // ─── Minimal hand-rolled JSON-Schema draft-07 validator ──────────────────────
 // Covers the subset actually used in task-packet.schema.json:
 //   type, required, properties, additionalProperties, pattern, enum,
-//   minItems, items, $ref, $defs, format (ignored), examples (ignored).
+//   minItems, maxItems, uniqueItems, items, $ref, $defs, format (ignored),
+//   examples (ignored).
 function validateSchema(schema, data, ctx, defs) {
   ctx  = ctx  || '#';
   defs = defs || schema['$defs'] || schema['definitions'] || {};
@@ -109,6 +110,19 @@ function validateSchema(schema, data, ctx, defs) {
     }
   }
 
+  if (typeof schema.maxItems === 'number' && Array.isArray(data)) {
+    if (data.length > schema.maxItems) {
+      errors.push(`${ctx}: array has ${data.length} items, maximum is ${schema.maxItems}`);
+    }
+  }
+
+  if (schema.uniqueItems === true && Array.isArray(data)) {
+    const canonicalItems = data.map((item) => JSON.stringify(item));
+    if (new Set(canonicalItems).size !== canonicalItems.length) {
+      errors.push(`${ctx}: array items must be unique`);
+    }
+  }
+
   // items (array)
   if (schema.items && Array.isArray(data)) {
     data.forEach((item, idx) => {
@@ -157,6 +171,40 @@ function pathAllowedByGlobs(filePath, globs) {
   return globs.some(g => globMatch(g, filePath));
 }
 
+function repositoryPathProblem(value, { exact = false } = {}) {
+  if (typeof value !== 'string' || !value || value.includes('\0')) return 'must be a non-empty string';
+  if (value.includes('\\')) return 'must use POSIX separators';
+  if (path.posix.isAbsolute(value) || /^[A-Za-z]:/.test(value)) return 'must be repository-relative';
+  const segments = value.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+    return 'must not contain empty, current-directory, or parent-directory segments';
+  }
+  if (!exact && /[?\[\]{}]/.test(value)) return 'supports only * and ** glob operators';
+  if (exact && /[*?[\]{}]/.test(value)) return 'must be an exact path, not a glob';
+  return null;
+}
+
+function validateRepositoryPaths(packet) {
+  const errors = [];
+  for (const value of packet.filesAllowed || []) {
+    const problem = repositoryPathProblem(value);
+    if (problem) errors.push(`filesAllowed ${JSON.stringify(value)} ${problem}`);
+  }
+  const authorized = packet.authorization && Array.isArray(packet.authorization.allowsProtectedPaths)
+    ? packet.authorization.allowsProtectedPaths : [];
+  for (const value of authorized) {
+    const problem = repositoryPathProblem(value, { exact: true });
+    if (problem) errors.push(`authorization.allowsProtectedPaths ${JSON.stringify(value)} ${problem}`);
+  }
+  return errors;
+}
+
+function protectedOverrideAllowed(filePath, protectedPaths) {
+  return Object.values((protectedPaths && protectedPaths.categories) || {}).some((category) =>
+    category && category.overridable === true && Array.isArray(category.paths) &&
+      category.paths.some((pattern) => globMatch(pattern, filePath)));
+}
+
 // ─── Validate a packet against the schema + registry ─────────────────────────
 function validatePacket(packetPath) {
   // 1. Load schema
@@ -182,15 +230,53 @@ function validatePacket(packetPath) {
 
   console.log(`[packet-tools] Schema check: PASS  (${path.basename(packetPath)})`);
 
+  const pathErrors = validateRepositoryPaths(packet);
+  if (pathErrors.length) {
+    console.error('PACKET PATH VALIDATION FAILED:');
+    pathErrors.forEach((error) => console.error(`  • ${error}`));
+    process.exit(1);
+  }
+
+  // Host containment is a separate executable boundary, not an ordinary
+  // snapshot check.  The schema pins its one command; this semantic check
+  // proves the executable itself is inside both packet write scope and the
+  // explicit protected-path authorization.  The operator beta may never omit
+  // this evidence after declaring it part of its completion gate.
+  const hostCommands = packet.hostContainmentRequired;
+  const betaRequiresHost = packet.packetId === 'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA';
+  if (betaRequiresHost && (!Array.isArray(hostCommands) || hostCommands.length !== 1)) {
+    console.error('HOST CONTAINMENT VALIDATION FAILED: operator beta requires one pinned top-level host command');
+    process.exit(1);
+  }
+  if (Array.isArray(hostCommands)) {
+    const hostEntrypoints = hostCommands.map((command) => command.slice('node '.length));
+    const authorized = packet.authorization && Array.isArray(packet.authorization.allowsProtectedPaths)
+      ? packet.authorization.allowsProtectedPaths : [];
+    const missingScope = hostEntrypoints.filter((entrypoint) =>
+      !packet.filesAllowed.includes(entrypoint) || !authorized.includes(entrypoint));
+    if (missingScope.length) {
+      console.error('HOST CONTAINMENT VALIDATION FAILED: host command entrypoint lacks filesAllowed/protected-path authorization:');
+      missingScope.forEach((entrypoint) => console.error(`  • ${entrypoint}`));
+      process.exit(1);
+    }
+  }
+
   // 4. Registry validation
   const registryExists = fs.existsSync(REGISTRY_FILE);
   if (!registryExists) {
-    console.warn('[packet-tools] WARNING: registry not yet present — schema-only validation (B1 must write agent-registry.json first)');
-    console.log('[packet-tools] Result: VALID (schema-only)');
-    process.exit(0);
+    console.error('REGISTRY VALIDATION FAILED: canonical agent-registry.json is missing');
+    console.error('  Governed validation cannot downgrade to schema-only authorization.');
+    process.exit(1);
   }
 
-  const registry = loadJSON(REGISTRY_FILE);
+  let registry;
+  try {
+    registry = loadJSON(REGISTRY_FILE);
+  } catch (error) {
+    console.error('REGISTRY VALIDATION FAILED: canonical agent-registry.json is unreadable');
+    console.error(`  ${error.message}`);
+    process.exit(1);
+  }
   const agents   = (registry && registry.agents) ? registry.agents : {};
   const agentId  = packet.agentId;
 
@@ -203,22 +289,26 @@ function validatePacket(packetPath) {
 
   const record       = agents[agentId];
   const allowedGlobs = record.allowedPathGlobs || [];
+  const protectedPaths = loadJSON(PROTECTED_PATHS_FILE);
 
   // 4b. filesAllowed must not escape the agent's allowedPathGlobs unless packet.authorization.allowsProtectedPaths covers it
   const authPaths  = (packet.authorization && packet.authorization.allowsProtectedPaths) ? packet.authorization.allowsProtectedPaths : [];
   const violations = [];
 
   for (const filePath of (packet.filesAllowed || [])) {
-    // Exact match in authPaths is an explicit authorization — allow
-    if (authPaths.includes(filePath)) continue;
     // Glob match against allowedPathGlobs
     if (pathAllowedByGlobs(filePath, allowedGlobs)) continue;
+    // A human authorization is an override only when the exact path is also
+    // covered by an overridable canonical protected-path registry entry.
+    if (authPaths.includes(filePath) &&
+        packet.authorization.authorizedBy !== 'none' &&
+        protectedOverrideAllowed(filePath, protectedPaths)) continue;
     violations.push(filePath);
   }
 
   if (violations.length) {
-    console.error('REGISTRY VALIDATION FAILED: filesAllowed contains paths outside agent allowedPathGlobs without authorization:');
-    violations.forEach(v => console.error(`  • ${v}  (not covered by ${allowedGlobs.join(' | ')})`));
+    console.error('REGISTRY VALIDATION FAILED: filesAllowed contains paths outside agent allowedPathGlobs without canonical protected-path authorization:');
+    violations.forEach(v => console.error(`  • ${v}  (not covered by agent globs and an overridable protected-paths.json entry)`));
     process.exit(1);
   }
 
@@ -261,27 +351,29 @@ function newPacket(agentId, objective) {
 }
 
 // ─── CLI dispatch ─────────────────────────────────────────────────────────────
-const args    = process.argv.slice(2);
-const cmd     = args[0];
-
-if (cmd === '--validate') {
-  const packetPath = args[1];
-  if (!packetPath) {
-    console.error('Usage: node packet-tools.cjs --validate <packet.json>');
+function main(args = process.argv.slice(2)) {
+  const cmd = args[0];
+  if (cmd === '--validate') {
+    const packetPath = args[1];
+    if (!packetPath) {
+      console.error('Usage: node packet-tools.cjs --validate <packet.json>');
+      process.exit(2);
+    }
+    validatePacket(path.resolve(packetPath));
+  } else if (cmd === '--new') {
+    const agentIdx = args.indexOf('--agent');
+    const objIdx = args.indexOf('--objective');
+    const agentId = agentIdx >= 0 ? args[agentIdx + 1] : null;
+    const objective = objIdx >= 0 ? args[objIdx + 1] : null;
+    newPacket(agentId, objective);
+  } else {
+    console.error('Usage:');
+    console.error('  node packet-tools.cjs --validate <packet.json>');
+    console.error('  node packet-tools.cjs --new --agent <id> --objective "<objective>"');
     process.exit(2);
   }
-  validatePacket(path.resolve(packetPath));
-
-} else if (cmd === '--new') {
-  const agentIdx   = args.indexOf('--agent');
-  const objIdx     = args.indexOf('--objective');
-  const agentId    = agentIdx   >= 0 ? args[agentIdx + 1]   : null;
-  const objective  = objIdx     >= 0 ? args[objIdx + 1]     : null;
-  newPacket(agentId, objective);
-
-} else {
-  console.error('Usage:');
-  console.error('  node packet-tools.cjs --validate <packet.json>');
-  console.error('  node packet-tools.cjs --new --agent <id> --objective "<objective>"');
-  process.exit(2);
 }
+
+if (require.main === module) main();
+
+module.exports = Object.freeze({ globMatch, pathAllowedByGlobs, repositoryPathProblem });

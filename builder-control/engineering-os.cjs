@@ -51,6 +51,8 @@ const LEDGER_WRITER = path.join(HERE, 'ledger-writer.cjs');
 const EXIT_PASS = 0;
 const EXIT_USAGE = 2;
 const EXIT_BLOCK = 3;
+const MAX_UNTRACKED_SUBJECT_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_UNTRACKED_SUBJECT_TOTAL_BYTES = 64 * 1024 * 1024;
 
 // ── Risk taxonomy ───────────────────────────────────────────────────────────
 // Path-shaped, because a path is knowable before anything is read and cannot be
@@ -118,7 +120,7 @@ const LIGHT_MAX_FILES = 5;
 const LIGHT_MAX_LINES = 150;
 
 // ── who reviews a FULL lane ─────────────────────────────────────────────────
-// Two reviewers, two different jobs: Codex reads the change as an engineer,
+// Two reviewers, two different jobs: Codex reviews the change as an engineer,
 // Grok attacks it. One frozen list, so the set cannot be narrowed by a
 // conditional somewhere downstream. Copilot is advisory FOREVER — it may block
 // on a CRITICAL/HIGH finding, and it may never satisfy a required slot or
@@ -134,6 +136,13 @@ const REVIEWER_JOB = Object.freeze({
 // ── small helpers ───────────────────────────────────────────────────────────
 const readJSON = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+function gitBuffer(args) {
+  const r = spawnSync('git', args, { cwd: process.env.GIT_WORK_TREE || ROOT,
+    env: process.env, encoding: null, maxBuffer: 256 * 1024 * 1024 });
+  if (r.status !== 0) throw new PolicyError(`git ${args.join(' ')} failed: ${String(r.stderr || '').trim()}`);
+  return r.stdout;
+}
 
 function out(s) { process.stdout.write(s + '\n'); }
 
@@ -275,7 +284,9 @@ const EVIDENCE_EXCLUDE = [
   'builder-control/reviews/**',
   'builder-control/review-raw/**',
   'builder-control/packets/**',
+  'builder-control/runs/**',
   'builder-control/ledger.json',
+  'builder-control/**-BACKUP-*',
 ];
 
 function isEvidencePath(p) {
@@ -357,8 +368,110 @@ function gitChangedLines({ base, head, paths }) {
 // Compute subject paths + the hash reviewers bind to.
 // changedPaths come from git. They come from `changed` ONLY behind the
 // test-only boundary above, which the callers enforce before reaching here.
-function computeSubject({ base, head, changed }) {
+function packetAuthorizedExactNewLeaves(packetPath, worktreeRoot) {
+  if (!packetPath) return new Set();
+  const resolved = path.isAbsolute(packetPath)
+    ? packetPath
+    : path.resolve(worktreeRoot, packetPath);
+  let packet;
+  try { packet = readJSON(resolved); }
+  catch (error) {
+    throw new PolicyError(`canonical subject cannot read its authorizing packet: ${error.message}`);
+  }
+  if (!packet || !Array.isArray(packet.filesAllowed)) {
+    throw new PolicyError('canonical subject packet has no filesAllowed authority');
+  }
+  return new Set(packet.filesAllowed.filter((value) =>
+    typeof value === 'string' && value.length > 0 && !/[*?\[\]{}]/.test(value))
+    .map((value) => canonicalizePaths([value], 'packet exact new-leaf authority')[0]));
+}
+
+function newLeafFrame(relative, mode, body) {
+  return Buffer.concat([
+    Buffer.from(`\0AEGIS_NEW_LEAF_SUBJECT_V2\0${relative}\0${mode}\0${body.length}\0`, 'utf8'),
+    body,
+  ]);
+}
+
+function captureAuthorizedUntracked(untrackedPaths, packetPath) {
+  if (!untrackedPaths.length) return { paths: [], leaves: new Map(), lineCount: 0 };
+  const worktreeRoot = fs.realpathSync(process.env.GIT_WORK_TREE || ROOT);
+  const allowed = packetAuthorizedExactNewLeaves(packetPath, worktreeRoot);
+  const unauthorized = untrackedPaths.filter((value) => !allowed.has(value));
+  if (unauthorized.length) {
+    throw new PolicyError(
+      `canonical subject refuses ${unauthorized.length} unauthorized repository-relevant untracked file(s): ` +
+      `${unauthorized.slice(0, 8).join(', ')}${unauthorized.length > 8 ? ', …' : ''}. ` +
+      'Authorize each new leaf as an exact filesAllowed path or remove it.');
+  }
+
+  const chunks = [];
+  const leaves = new Map();
+  let total = 0;
+  let lineCount = 0;
+  for (const relative of untrackedPaths) {
+    const absolute = path.resolve(worktreeRoot, ...relative.split('/'));
+    if (absolute !== worktreeRoot && !absolute.startsWith(worktreeRoot + path.sep)) {
+      throw new PolicyError(`canonical untracked subject escapes the worktree: ${relative}`);
+    }
+    const before = fs.lstatSync(absolute);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
+      throw new PolicyError(`canonical untracked subject must be a regular single-link file: ${relative}`);
+    }
+    if (before.size > MAX_UNTRACKED_SUBJECT_FILE_BYTES || total + before.size > MAX_UNTRACKED_SUBJECT_TOTAL_BYTES) {
+      throw new PolicyError(`canonical untracked subject exceeds the bounded byte authority: ${relative}`);
+    }
+    const body = fs.readFileSync(absolute);
+    const after = fs.lstatSync(absolute);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs || !after.isFile() || after.isSymbolicLink() || after.nlink !== 1) {
+      throw new PolicyError(`canonical untracked subject changed while it was captured: ${relative}`);
+    }
+    const mode = before.mode & 0o777;
+    const frame = newLeafFrame(relative, mode.toString(8), body);
+    chunks.push(frame);
+    leaves.set(relative, frame);
+    total += body.length;
+    lineCount += body.length ? body.toString('utf8').split(/\r?\n/).length - 1 : 0;
+  }
+  return { paths: untrackedPaths.slice(), leaves, bytes: Buffer.concat(chunks), lineCount };
+}
+
+function committedNewLeafFrame(relative, ref) {
+  const record = gitBuffer(['ls-tree', '-z', ref, '--', relative]);
+  const tab = record.indexOf(0x09);
+  if (tab < 0 || record[record.length - 1] !== 0) {
+    throw new PolicyError(`cannot resolve committed new-leaf authority for ${relative} at ${ref}`);
+  }
+  const header = record.subarray(0, tab).toString('utf8').split(' ');
+  if (header.length !== 3 || header[1] !== 'blob' || !/^[0-9a-f]{40,64}$/.test(header[2])) {
+    throw new PolicyError(`committed new leaf is not one regular blob: ${relative}`);
+  }
+  const body = gitBuffer(['cat-file', 'blob', header[2]]);
+  if (body.length > MAX_UNTRACKED_SUBJECT_FILE_BYTES) {
+    throw new PolicyError(`canonical committed new leaf exceeds the bounded byte authority: ${relative}`);
+  }
+  return newLeafFrame(relative, header[0].slice(-3), body);
+}
+
+function worktreeNewLeafFrame(relative) {
+  const worktreeRoot = fs.realpathSync(process.env.GIT_WORK_TREE || ROOT);
+  const absolute = path.resolve(worktreeRoot, ...relative.split('/'));
+  const before = fs.lstatSync(absolute);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
+    throw new PolicyError(`canonical added subject must be a regular single-link file: ${relative}`);
+  }
+  const body = fs.readFileSync(absolute);
+  const after = fs.lstatSync(absolute);
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+    throw new PolicyError(`canonical added subject changed while it was captured: ${relative}`);
+  }
+  return newLeafFrame(relative, (before.mode & 0o777).toString(8), body);
+}
+
+function computeSubject({ base, head, changed, packet }) {
   let changedPaths;
+  let untrackedCapture = { paths: [], leaves: new Map(), bytes: Buffer.alloc(0), lineCount: 0 };
   if (Array.isArray(changed) && changed.length) {
     changedPaths = changed.slice();
   } else {
@@ -369,34 +482,51 @@ function computeSubject({ base, head, changed }) {
     } else {
       changedPaths = git(['diff', '--name-only', h]).split('\n').filter(Boolean);
     }
+
+    // `git diff` cannot see untracked files. Exact new-leaf authority is already
+    // part of the packet contract, so include those bytes directly instead of
+    // requiring an out-of-band `git add` that the contained worker cannot run.
+    // Any untracked path not named by one exact filesAllowed entry still blocks.
+    const untrackedPaths = canonicalizePaths(
+      git(['ls-files', '--others', '--exclude-standard']).split('\n').filter(Boolean),
+      'untracked path set');
+    const untrackedSubjectPaths = untrackedPaths.filter((p) => !isEvidencePath(p));
+    untrackedCapture = captureAuthorizedUntracked(untrackedSubjectPaths, packet);
+    changedPaths.push(...untrackedCapture.paths);
   }
   // One spelling per path, before anything downstream reads them as strings.
   // Applied to the git-derived set too: git output is already canonical, so
   // this costs nothing there and means no path reaches the hash or the
   // classifier without having passed the same reduction.
-  changedPaths = canonicalizePaths(changedPaths, 'changed path set');
+  changedPaths = canonicalizePaths([...new Set(changedPaths)], 'changed path set');
 
   const subjectPaths = changedPaths.filter((p) => !isEvidencePath(p));
   const excluded = changedPaths.filter(isEvidencePath);
 
-  // Hash ONLY the subject paths. `--` separates paths from refs so a path that
-  // looks like a ref cannot be reinterpreted as one.
-  let diff = '';
-  if (subjectPaths.length) {
-    const h = assertRef(head || 'HEAD', '--head');
-    const args = ['diff'];
-    if (base) args.push(`${assertRef(base, '--base')}..${h}`);
-    else args.push(h);
-    args.push('--', ...subjectPaths);
-    diff = git(args);
+  // Encode each new leaf identically before and after commit. A raw Git new-file
+  // patch is not byte-equivalent to the pre-commit untracked capture, which
+  // made an otherwise exact reviewed checkpoint impossible to establish.
+  const h = assertRef(head || 'HEAD', '--head');
+  const range = base ? `${assertRef(base, '--base')}..${h}` : h;
+  const added = new Set(subjectPaths.length
+    ? git(['diff', '--name-only', '--diff-filter=A', range, '--', ...subjectPaths]).split('\n').filter(Boolean)
+    : []);
+  const chunks = [];
+  for (const relative of subjectPaths.slice().sort()) {
+    if (untrackedCapture.leaves.has(relative)) chunks.push(untrackedCapture.leaves.get(relative));
+    else if (added.has(relative)) chunks.push(base
+      ? committedNewLeafFrame(relative, h) : worktreeNewLeafFrame(relative));
+    else chunks.push(gitBuffer(['diff', range, '--', relative]));
   }
-
+  const subjectBytes = Buffer.concat(chunks);
   return {
     changedPaths,
     subjectPaths,
     excludedAsEvidence: excluded,
-    subjectSha256: sha256(diff),
-    diffBytes: diff.length,
+    subjectSha256: sha256(subjectBytes),
+    diffBytes: subjectBytes.length,
+    untrackedSubjectPaths: untrackedCapture.paths,
+    untrackedLineCount: untrackedCapture.lineCount,
     range: base ? `${base}..${head || 'HEAD'}` : (head || 'HEAD'),
   };
 }
@@ -408,6 +538,7 @@ function parseArgs(argv) {
     if (t === '--changed') a.changed.push(argv[++i]);
     else if (t === '--review') a.review.push(argv[++i]);
     else if (t === '--packet') a.packet = argv[++i];
+    else if (t === '--run-id') a.runId = argv[++i];
     else if (t === '--diff-lines') a.diffLines = Number(argv[++i]);
     else if (t === '--subject-sha') a.subjectSha = argv[++i];
     else if (t === '--diff-sha') a.diffSha = argv[++i];
@@ -493,10 +624,11 @@ function isProtected(p, globs) {
 // one subject hash cannot produce a different lane the second time.
 function subjectAndLines(args, operation) {
   const si = resolveSubjectInputs(args, operation);
-  const subject = computeSubject({ base: args.base, head: args.head, changed: si.changed });
+  const subject = computeSubject({ base: args.base, head: args.head, changed: si.changed, packet: args.packet });
   const diffLines = si.synthetic
     ? si.diffLines
-    : gitChangedLines({ base: args.base, head: args.head, paths: subject.subjectPaths });
+    : gitChangedLines({ base: args.base, head: args.head, paths: subject.subjectPaths }) +
+      subject.untrackedLineCount;
   return { subject, diffLines };
 }
 
@@ -513,7 +645,7 @@ function cmdSubject(args) {
   out(`subjectSha256  : ${s.subjectSha256}`);
   out(`subject bytes  : ${s.diffBytes}`);
   out('');
-  out(`subject paths (${s.subjectPaths.length}) — what reviewers must read:`);
+  out(`subject paths (${s.subjectPaths.length}) — what review evidence must cover:`);
   for (const p of s.subjectPaths) out(`  ${p}`);
   if (s.excludedAsEvidence.length) {
     out('');
@@ -529,17 +661,6 @@ function cmdSubject(args) {
     out('There is nothing here for a reviewer to review.');
   }
 
-  // Untracked files are invisible to `git diff`. Say so rather than let a
-  // reviewer believe a brand-new unadded file was part of what they read.
-  let untracked = '';
-  try { untracked = git(['ls-files', '--others', '--exclude-standard']).trim(); } catch { /* non-fatal */ }
-  const n = untracked ? untracked.split('\n').filter(Boolean).length : 0;
-  if (n) {
-    out('');
-    out(`NOTE: ${n} untracked file(s) are NOT in this diff (git diff never shows them).`);
-    out('`git add` them before binding reviews, or reviewers are bound to a diff');
-    out('that omits the new code entirely.');
-  }
   return EXIT_PASS;
 }
 // ── COMMAND: --classify ─────────────────────────────────────────────────────
@@ -888,8 +1009,15 @@ function loadReview(p, opts = {}) {
   // defend against a process that can read the key.
   if (!opts.skipAttestation) {
     try {
-      const v = require('./review-sign.cjs').verify(rec, { packetPath: opts.packetPath });
-      if (!v.ok) errors.push(`${v.code}: ${v.reason}`);
+      const v = require('./review-sign.cjs').verify(rec, {
+        packetPath: opts.packetPath,
+        // A canonical aggregate and its active group records share one reviews
+        // root. Deriving the directory from the record path preserves that
+        // authority for production (`builder-control/reviews/groups`) while
+        // allowing isolated fixture roots to exercise the same end-to-end path.
+        groupsDir: path.join(path.dirname(path.resolve(p)), 'groups'),
+      });
+      if (!v.ok || v.gateable === false) errors.push(`${v.code}: ${v.reason}`);
     } catch (e) {
       errors.push(`ATTESTATION-UNVERIFIABLE: ${e.message}`);
     }
@@ -990,7 +1118,7 @@ const STATE_READY_PR = 'READY_FOR_PR';
 // from being read as "Codex reviewed this".
 //
 // `score` is COVERAGE over the exact current subject — how many subject paths
-// the record claims to have read, out of how many exist. It is UNAVAILABLE when
+// the record binds to its verdict, out of how many exist. It is UNAVAILABLE when
 // no record is bound to this subject, because nothing was measured. There is no
 // quality score here: no reviewer emits one, and inventing a number would be
 // exactly the fabricated-KPI failure this system exists to prevent.
@@ -1099,37 +1227,39 @@ function buildReviewerCompleteness({ cls, subject, active, foreign }) {
       : (rec.disposition === 'APPROVE_WITH_NOTES' ? 'and approved it with notes' : 'and approved it');
     if (row.missingPaths.length) {
       row.reason =
-        `${name} reviewed this exact version ${verdictPlain}, but only read ${row.coveredPaths.length} of ${subjectPaths.length} changed file(s). ` +
-        `Not read: ${row.missingPaths.slice(0, 5).join(', ')}${row.missingPaths.length > 5 ? ' …' : ''}. ` +
-        'Reading part of a change is not approving all of it.' + selfNote;
+        `${name} reviewed this exact version ${verdictPlain}, but its bound evidence covers only ${row.coveredPaths.length} of ${subjectPaths.length} changed file(s). ` +
+        `Not covered: ${row.missingPaths.slice(0, 5).join(', ')}${row.missingPaths.length > 5 ? ' …' : ''}. ` +
+        'Partial evidence coverage is not approval of the whole change.' + selfNote;
     } else if (row.stalePaths.length) {
       row.reason =
-        `${name} reviewed this exact version ${verdictPlain}, but also claims to have read ${row.stalePaths.length} file(s) ` +
+        `${name} reviewed this exact version ${verdictPlain}, but its evidence also claims ${row.stalePaths.length} file(s) ` +
         `that are not part of this change: ${row.stalePaths.slice(0, 5).join(', ')}${row.stalePaths.length > 5 ? ' …' : ''}. ` +
         'The record does not describe this change, so it does not count as coverage of it. ' +
         `Re-run ${name} against this exact change.` + selfNote;
     } else {
-      row.reason = `${name} read all ${subjectPaths.length} changed file(s) of this exact version ${verdictPlain}.` + selfNote;
+      row.reason = `${name}'s bound review evidence covers all ${subjectPaths.length} changed file(s) of this exact version ${verdictPlain}. Coverage proves the subject bound to the verdict, not cognitive completeness.` + selfNote;
     }
     return row;
   });
 
-  // Which subject paths a REQUIRED reviewer actually read. A path only counts
-  // as covered when EVERY required reviewer read it — one reviewer seeing a
-  // file is not the lane's coverage.
+  // Which subject paths are bound to each REQUIRED review record. A path only
+  // counts as covered when EVERY required review record binds it; this is
+  // subject/verdict evidence, never a claim to measure cognition.
   const requiredRows = rows.filter((r) => r.required === 'REQUIRED');
   const coveredByAll = subjectPaths.filter((p) =>
     requiredRows.length > 0 && requiredRows.every((r) => r.executed === 'EXECUTED' && r.coveredPaths.includes(p)));
   const notCovered = subjectPaths.filter((p) => !coveredByAll.includes(p));
 
   // A required reviewer only counts when its record describes THIS change and
-  // nothing else: it ran, it read every changed file, and it claims no file
+  // nothing else: it ran, it covers every changed file, and it claims no file
   // outside the change. Extra paths are not a harmless surplus — a record that
   // covers a wider set than the subject is a record of some other change, and
   // counting it as complete is how a review of the wrong thing reads as done.
   const exactRows = requiredRows.filter((r) =>
     r.executed === 'EXECUTED' && r.missingPaths.length === 0 && r.stalePaths.length === 0);
   const rcComplete = requiredRows.length > 0 && exactRows.length === requiredRows.length;
+  const allRequiredApproved = rcComplete && requiredRows.every((row) =>
+    row.disposition === 'APPROVE' || row.disposition === 'APPROVE_WITH_NOTES');
 
   const notExecuted = requiredRows.filter((r) => r.executed !== 'EXECUTED');
   const shortRows = requiredRows.filter((r) => r.executed === 'EXECUTED' && r.missingPaths.length);
@@ -1137,15 +1267,15 @@ function buildReviewerCompleteness({ cls, subject, active, foreign }) {
   const why = [];
   if (!requiredRows.length) why.push('this lane requires no reviewer, so there is no review coverage to be complete');
   if (notExecuted.length) why.push(`${notExecuted.map((r) => r.reviewer).join(' and ')} did not review this exact version of the change`);
-  if (shortRows.length) why.push(`${shortRows.map((r) => r.reviewer).join(' and ')} read only part of the change`);
+  if (shortRows.length) why.push(`${shortRows.map((r) => r.reviewer).join(' and ')} has evidence for only part of the change`);
   if (extraRows.length) {
     why.push(
       `${extraRows.map((r) => r.reviewer).join(' and ')} claims file(s) that are not part of this change ` +
       `(${[...new Set(extraRows.flatMap((r) => r.stalePaths))].slice(0, 5).join(', ')}), so the record describes a different change`);
   }
   const rcCompleteReason = rcComplete
-    ? `Every required reviewer (${requiredRows.map((r) => r.reviewer).join(' and ')}) reviewed this exact change and read all ` +
-      `${subjectPaths.length} changed file(s), and no reviewer claims a file outside it.`
+    ? `Every required reviewer (${requiredRows.map((r) => r.reviewer).join(' and ')}) reviewed this exact change and has bound evidence covering all ` +
+      `${subjectPaths.length} changed file(s), and no record claims a file outside it. This proves subject coverage, not cognitive completeness.`
     : `Review coverage is INCOMPLETE: ${why.join('; ')}. Re-run the reviewer(s) named above against this exact change.`;
 
   return {
@@ -1158,6 +1288,10 @@ function buildReviewerCompleteness({ cls, subject, active, foreign }) {
     missing: rows.filter((r) => r.required === 'REQUIRED' && r.executed !== 'EXECUTED').map((r) => r.reviewer),
     complete: rcComplete,
     completeReason: rcCompleteReason,
+    allRequiredApproved,
+    approvalReason: allRequiredApproved
+      ? `Every required reviewer (${requiredRows.map((r) => r.reviewer).join(' and ')}) recorded APPROVE or APPROVE_WITH_NOTES for this exact change.`
+      : `Coverage may be complete, but required reviewer disposition is not unanimous approval (${requiredRows.map((r) => `${r.reviewer}:${r.disposition || r.executed}`).join(', ')}). Advisory REJECT remains visible while structured OPEN CRITICAL/HIGH findings remain the blocking authority.`,
     pathCoverage: {
       total: subjectPaths.length,
       coveredByEveryRequiredReviewer: coveredByAll,
@@ -1330,8 +1464,8 @@ function gateDone(args) {
     }
   }
 
-  // 8. Coverage: a record must have read the WHOLE subject. Subset coverage is
-  //    the quiet failure — a reviewer that saw 3 of 11 files reporting APPROVE
+  // 8. Coverage: a record must bind the WHOLE subject. Subset coverage is the
+  //    quiet failure — a verdict covering 3 of 11 files reporting APPROVE
   //    looks identical to one that saw everything.
   const subjectSet = new Set(subject.subjectPaths);
   for (const rec of active) {
@@ -1353,7 +1487,11 @@ function gateDone(args) {
     }
   }
 
-  // 9. Every required reviewer must have an APPROVE on this exact subject.
+  // 9. Every required reviewer must complete one exact-subject review. The
+  //    finding severity contract is the blocking authority: OPEN CRITICAL/HIGH
+  //    findings block in section 10, while MEDIUM/LOW/INFORMATIONAL findings
+  //    remain advisory. Treating a model's bare REJECT label as stronger than
+  //    its own finding severities created an unbounded review-correction loop.
   if (byReviewer['claude-self']) {
     observed.push('claude-self record present (recorded for traceability; it satisfies no required slot)');
   }
@@ -1369,14 +1507,23 @@ function gateDone(args) {
       continue;
     }
     const rejected = recs.find((r) => r.disposition === 'REJECT');
-    if (rejected) { problems.push({ rule: 'ENGOS-REVIEW-REJECTED', detail: `${need} returned REJECT (${rejected.reviewId})` }); continue; }
+    if (rejected) {
+      const hasOpenBlockingFinding = (rejected.findings || []).some((finding) =>
+        (finding.severity === 'CRITICAL' || finding.severity === 'HIGH') && finding.status === 'OPEN');
+      if (hasOpenBlockingFinding) {
+        problems.push({ rule: 'ENGOS-REVIEW-REJECTED', detail: `${need} returned REJECT with an OPEN CRITICAL/HIGH finding (${rejected.reviewId})` });
+        continue;
+      }
+      observed.push(`${need}: REJECT label recorded as nonblocking because it contains no OPEN CRITICAL/HIGH finding`);
+      continue;
+    }
     observed.push(`${need}: ${recs.map((r) => r.disposition).join(', ')}`);
   }
 
   // 10. Blocking findings — from ACTIVE, SUBJECT-BOUND records only.
   const blocking = [];
   for (const rec of active) {
-    for (const f of rec.findings || []) {
+    for (const [findingIndex, f] of (rec.findings || []).entries()) {
       if ((f.severity === 'CRITICAL' || f.severity === 'HIGH') && f.status === 'OPEN') {
         blocking.push({ reviewer: rec.reviewer, severity: f.severity, file: f.file || '(unspecified)', problem: f.problem });
       }
@@ -1388,6 +1535,25 @@ function gateDone(args) {
           problems.push({ rule: 'ENGOS-FIX-UNVERIFIED', detail: `${rec.reviewId}: finding marked FIXED cites verifiedByReviewId "${f.verifiedByReviewId}", which is not an active review record for this subject.` });
         } else if (v.reviewer === 'claude-self') {
           problems.push({ rule: 'ENGOS-FIX-SELF-VERIFIED', detail: `${rec.reviewId}: finding marked FIXED is verified only by claude-self (${v.reviewId}). The builder cannot verify its own fix.` });
+        } else if (v.reviewId === rec.reviewId || v.reviewer === rec.reviewer) {
+          problems.push({
+            rule: 'ENGOS-FIX-SELF-VERIFIED',
+            detail: `${rec.reviewId}: finding marked FIXED must be re-verified by a different active reviewId and a different reviewer; ${v.reviewId}/${v.reviewer} is not independent of ${rec.reviewId}/${rec.reviewer}.`,
+          });
+        } else {
+          const linked = (v.reverifiedFindings || []).find((proof) =>
+            proof.sourceReviewId === rec.reviewId
+              && proof.findingIndex === findingIndex
+              && proof.outcome === 'PASS'
+              && typeof proof.evidence === 'string'
+              && proof.evidence.trim() !== ''
+              && proof.verificationMethod === f.verificationMethod);
+          if (!linked) {
+            problems.push({
+              rule: 'ENGOS-FIX-VERIFICATION-LINK-MISSING',
+              detail: `${rec.reviewId}: finding ${findingIndex} cites ${v.reviewId}, but that verifier carries no signed PASS evidence linked to this exact finding and verification method.`,
+            });
+          }
         }
       }
     }
@@ -1407,6 +1573,11 @@ function gateDone(args) {
   if (args.runChecks) {
     if (!args.packet) {
       problems.push({ rule: 'ENGOS-CHECKS-NO-PACKET', detail: '--run-checks needs a packet to read testsRequired from' });
+    } else if (problems.some((p) => p.rule === 'ENGOS-PACKET-INVALID' || p.rule === 'ENGOS-PACKET-REQUIRED')) {
+      // Do not execute commands out of a packet that failed validation. The
+      // packet is the authorization record; if it is not valid, nothing it
+      // declares has been authorized to run.
+      problems.push({ rule: 'ENGOS-CHECKS-NOT-RUN', detail: 'deterministic checks were not executed: the packet failed validation, so its testsRequired carry no authority' });
     } else {
       checks = runDeterministicChecks(args.packet);
       for (const c of checks) if (c.exit !== 0) problems.push({ rule: 'ENGOS-DETERMINISTIC-FAILED', detail: `${c.cmd} exited ${c.exit}` });
@@ -1414,7 +1585,6 @@ function gateDone(args) {
     }
   }
 
-  const ok = problems.length === 0;
   // GROK G9 (surfaced inside finding #3's evidence): `checks ? …` treats an
   // EMPTY array as truthy, so a packet with testsRequired: [] reached
   // READY_FOR_PR having executed nothing at all — 0/0 passing read as complete.
@@ -1427,6 +1597,7 @@ function gateDone(args) {
       detail: 'the packet declares no runnable testsRequired, so --run-checks executed nothing. Zero checks passing is not evidence; it is the absence of evidence.',
     });
   }
+  const ok = problems.length === 0;
   const state = !ok ? 'BLOCKED' : (ranRealChecks ? STATE_READY_PR : STATE_READY_DET);
 
   // The gate's own decision, re-expressed as a readable completeness table.
@@ -1448,6 +1619,12 @@ function runDeterministicChecks(packetPath) {
   const cmds = (pkt.testsRequired || []).filter((c) => !/--gate-done/.test(c));
   const results = [];
   for (const cmd of cmds) {
+    // A blank/whitespace command is `bash -lc ""`, which exits 0 and would be
+    // recorded as a passing deterministic check having verified nothing.
+    if (typeof cmd !== 'string' || cmd.trim() === '') {
+      results.push({ cmd: JSON.stringify(cmd), exit: 1, tail: 'blank testsRequired entry: a whitespace-only command verifies nothing and cannot count as a passing check' });
+      continue;
+    }
     const r = spawnSync('bash', ['-lc', cmd], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     results.push({ cmd, exit: r.status === null ? 1 : r.status, tail: ((r.stdout || '') + (r.stderr || '')).trim().split('\n').slice(-3).join('\n') });
   }
@@ -1544,6 +1721,7 @@ function cmdStart(args) {
   const cls = classify(subject.subjectPaths, { milestone: args.milestone, novel: args.novel, diffLines });
   const sha = subject.subjectSha256;
   const pkt = args.packet || '<your-packet>.json';
+  const runCoordinate = ` --run-id ${args.runId || '<RUN-ID>'}`;
   const refs = (args.base ? ` --base ${args.base}` : '') + (args.head ? ` --head ${args.head}` : '');
 
   if (args.json) { out(JSON.stringify({ subject, classification: cls }, null, 2)); return EXIT_PASS; }
@@ -1575,7 +1753,9 @@ function cmdStart(args) {
     for (const r of cls.requiredReviewers) {
       out(`  ${step++}. Run the ${r} review (read-only, bound to this subject):`);
       out(`     node builder-control/review-adapters.cjs --run --reviewer ${r} \\`);
-      out(`       --packet ${pkt} --subject-sha ${sha}${refs}`);
+      out(`       --packet ${pkt}${runCoordinate} --subject-sha ${sha}${refs}${r === 'grok'
+        ? ' --allow-metered --approved-by "Marc Papineau" --cap-usd 5'
+        : ''}`);
     }
     out(`  ${step++}. Gate it:`);
     out(`     node builder-control/engineering-os.cjs --gate-done --packet ${pkt} \\`);

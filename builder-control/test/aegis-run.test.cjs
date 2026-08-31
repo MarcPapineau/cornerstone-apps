@@ -12,33 +12,347 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
+const { Worker } = require('worker_threads');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+
+function checkedTestCommand(label, command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    encoding: options.encoding === null ? null : 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 180_000,
+    killSignal: 'SIGKILL',
+    ...options,
+  });
+  if (result.error || result.status !== 0) {
+    const detail = result.error ? result.error.message :
+      String(result.stderr || result.stdout || `${command} exited ${result.status}`).trim();
+    throw new Error(`${label} failed: ${detail}`);
+  }
+  return result;
+}
+
+function outerSnapshotEvidence() {
+  if (process.env.AEGIS_CHECK_SNAPSHOT_POLICY !== 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1') return null;
+  const cwd = fs.realpathSync(process.cwd());
+  const boundaryRoot = path.dirname(cwd);
+  if (path.basename(cwd) !== 'worktree' ||
+      !path.basename(boundaryRoot).startsWith('aegis-check-boundary-')) {
+    throw new Error('AEGIS_CHECK_SNAPSHOT_POLICY was asserted outside the canonical immutable snapshot path');
+  }
+  try {
+    fs.readFileSync('/private/etc/hosts');
+    throw new Error('outer snapshot marker is untrusted because a non-allowlisted host file remained readable');
+  } catch (error) {
+    if (!['EPERM', 'EACCES'].includes(error && error.code)) throw error;
+  }
+  const outsideWrite = path.join(fs.realpathSync('/private/tmp'), `aegis-outer-write-${process.pid}`);
+  try {
+    fs.writeFileSync(outsideWrite, 'must not escape\n', { flag: 'wx' });
+    try { fs.unlinkSync(outsideWrite); } catch {}
+    throw new Error('outer snapshot marker is untrusted because an external write remained possible');
+  } catch (error) {
+    if (!['EPERM', 'EACCES'].includes(error && error.code)) throw error;
+  }
+  return Object.freeze({
+    policy: process.env.AEGIS_CHECK_SNAPSHOT_POLICY,
+    cwd,
+    boundaryRoot,
+    deniedHostRead: true,
+    deniedExternalWrite: true,
+  });
+}
+
+const OUTER_SNAPSHOT = outerSnapshotEvidence();
+const HOST_ONLY = process.argv.slice(2).includes('--host-only');
+const HOST_PROOF_ONLY = process.argv.slice(2).includes('--host-proof-only');
+
+function assertIsolatedRepositoryMarker() {
+  const marker = process.env.AEGIS_TEST_ISOLATED_REPOSITORY;
+  if (!marker) return false;
+  const isolatedRoot = fs.realpathSync(marker);
+  const tmpRoot = fs.realpathSync('/private/tmp');
+  if (!isolatedRoot.startsWith(path.join(tmpRoot, 'aegis-run-suite-')) ||
+      fs.realpathSync(ROOT) !== path.join(isolatedRoot, 'repo')) {
+    throw new Error('AEGIS_TEST_ISOLATED_REPOSITORY does not identify this disposable repository');
+  }
+  const common = checkedTestCommand('resolve isolated repository common dir', 'git',
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: ROOT }).stdout.trim();
+  if (fs.realpathSync(common) !== fs.realpathSync(path.join(ROOT, '.git'))) {
+    throw new Error('test repository is not an independent disposable clone');
+  }
+  return true;
+}
+
+function runInDisposableExactRepository() {
+  if (OUTER_SNAPSHOT || assertIsolatedRepositoryMarker()) return;
+  const isolatedRoot = fs.mkdtempSync(path.join(fs.realpathSync('/private/tmp'), 'aegis-run-suite-'));
+  const repo = path.join(isolatedRoot, 'repo');
+  let child;
+  try {
+    checkedTestCommand('clone exact test repository', 'git',
+      ['clone', '--no-hardlinks', '--quiet', ROOT, repo]);
+    const diff = checkedTestCommand('capture exact tracked source', 'git',
+      ['diff', 'HEAD', '--binary', '--no-ext-diff', '--'], { cwd: ROOT, encoding: null });
+    if (diff.stdout.length) {
+      checkedTestCommand('apply exact tracked source', 'git',
+        ['apply', '--index', '--binary', '--whitespace=nowarn', '-'],
+        { cwd: repo, input: diff.stdout, encoding: null });
+    }
+    const subject = JSON.parse(checkedTestCommand('resolve exact canonical subject', process.execPath,
+      [path.join(ROOT, 'builder-control', 'engineering-os.cjs'), '--subject', '--json'],
+      { cwd: ROOT }).stdout);
+    for (const relative of subject.subjectPaths || []) {
+      const tracked = spawnSync('git', ['ls-files', '--error-unmatch', '--', relative], {
+        cwd: ROOT, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL',
+      });
+      if (tracked.error) throw new Error(`canonical subject tracking inspection failed: ${tracked.error.message}`);
+      if (tracked.status === 0) continue;
+      const source = path.join(ROOT, relative);
+      const observed = fs.lstatSync(source);
+      if (observed.isSymbolicLink() || !observed.isFile() || observed.nlink !== 1) {
+        throw new Error(`canonical untracked subject is unsafe: ${relative}`);
+      }
+      const target = path.join(repo, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(target, observed.mode & 0o777);
+      checkedTestCommand('publish canonical untracked subject intent', 'git',
+        ['add', '-N', '--', relative], { cwd: repo });
+    }
+    const frozenReviewFixtures = HOST_ONLY ? [] : [
+      'builder-control/review-raw/20260828220306-grok.txt',
+      'builder-control/review-raw/20260829021134-grok.txt',
+    ];
+    for (const relative of frozenReviewFixtures) {
+      const source = path.join(ROOT, relative);
+      const observed = fs.lstatSync(source);
+      if (observed.isSymbolicLink() || !observed.isFile() || observed.size <= 0 || observed.size > 4 * 1024 * 1024) {
+        throw new Error(`required frozen host fixture is unsafe: ${relative}`);
+      }
+      const target = path.join(repo, relative);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, fs.readFileSync(source), { flag: 'wx', mode: observed.mode & 0o777 });
+    }
+    const copiedSubject = JSON.parse(checkedTestCommand('verify copied canonical subject', process.execPath,
+      [path.join(repo, 'builder-control', 'engineering-os.cjs'), '--subject', '--json'],
+      { cwd: repo }).stdout);
+    assert.deepStrictEqual(copiedSubject.subjectPaths, subject.subjectPaths,
+      'the disposable repository changed the canonical subject path set');
+    assert.strictEqual(copiedSubject.subjectSha256, subject.subjectSha256,
+      'the disposable repository changed canonical subject bytes');
+    assert.strictEqual(copiedSubject.diffBytes, subject.diffBytes,
+      'the disposable repository changed canonical diff byte count');
+    child = spawnSync(process.execPath, [
+      path.join(repo, 'builder-control', 'test', 'aegis-run.test.cjs'),
+      ...(HOST_ONLY ? ['--host-only'] : []),
+      ...(HOST_PROOF_ONLY ? ['--host-proof-only'] : []),
+    ], {
+      cwd: repo,
+      env: { ...process.env, AEGIS_TEST_ISOLATED_REPOSITORY: isolatedRoot },
+      encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      timeout: 15 * 60_000, killSignal: 'SIGKILL',
+    });
+    process.stdout.write(child.stdout || '');
+    process.stderr.write(child.stderr || '');
+  } finally {
+    fs.rmSync(isolatedRoot, { recursive: true, force: true });
+  }
+  if (!child || child.error || child.status !== 0) {
+    const detail = child && child.error ? child.error.message : `exit ${child && child.status}`;
+    throw new Error(`disposable exact-source suite failed: ${detail}`);
+  }
+  process.exit(0);
+}
+
+runInDisposableExactRepository();
+
+// These proofs intentionally create short-lived canonical packet fixtures in
+// the repository. Serialize the complete fixture lifecycle across concurrent
+// invocations so another test process cannot change the canonical subject
+// while this process is establishing or re-checking it.
+function acquireRepositoryFixtureLock() {
+  const lockName = `.aegis-run-fixtures-${crypto.createHash('sha256').update(ROOT).digest('hex').slice(0, 16)}.lock`;
+  const lockDir = path.join(fs.realpathSync(os.tmpdir()), lockName);
+  const deadline = Date.now() + 120_000;
+  const identity = fixtureProcessIdentity(process.pid);
+  if (!identity) throw new Error('cannot establish repository fixture lock process identity');
+  const owner = { pid: process.pid, root: ROOT, processIdentity: identity };
+  const ownerBytes = JSON.stringify(owner);
+  while (Date.now() < deadline) {
+    try {
+      // One O_EXCL write publishes the complete owner record. There is no
+      // observable directory-without-owner interval for another contender to
+      // mistake for a stale lock.
+      fs.writeFileSync(lockDir, ownerBytes, { flag: 'wx', mode: 0o600 });
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        try {
+          if (fs.readFileSync(lockDir, 'utf8') === ownerBytes) fs.unlinkSync(lockDir);
+        } catch { /* a missing or replaced claim is never removed by guess */ }
+      };
+      Object.defineProperty(release, 'lockPath', { value: lockDir });
+      Object.defineProperty(release, 'owner', { value: Object.freeze(owner) });
+      return release;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      let observed = null;
+      try { observed = JSON.parse(fs.readFileSync(lockDir, 'utf8')); }
+      catch { /* malformed or unreadable publication remains authoritative */ }
+      const ownerPid = observed && observed.pid;
+      let ownerAlive = false;
+      if (Number.isInteger(ownerPid) && ownerPid > 1) {
+        try { process.kill(ownerPid, 0); ownerAlive = true; }
+        catch (probeError) { ownerAlive = probeError.code !== 'ESRCH'; }
+      }
+      const currentIdentity = ownerAlive ? fixtureProcessIdentity(ownerPid) : null;
+      const sameLifetime = ownerAlive && observed && observed.processIdentity && currentIdentity &&
+        observed.processIdentity.pid === currentIdentity.pid &&
+        observed.processIdentity.startedAt === currentIdentity.startedAt &&
+        observed.processIdentity.command === currentIdentity.command;
+      // A live PID whose identity cannot be inspected is not stale evidence.
+      // Reclaim only on positive absence, or when a complete current identity
+      // positively proves this is a different process lifetime.
+      if (observed && (!ownerAlive || (currentIdentity && !sameLifetime))) {
+        const tombstone = `${lockDir}.stale-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+        try {
+          // Rename reclaims exactly the generation inspected above. A new
+          // claimant may publish only after this atomic move, and cannot be
+          // deleted by the stale owner's cleanup.
+          fs.renameSync(lockDir, tombstone);
+          fs.unlinkSync(tombstone);
+        } catch { /* another contender won; retry without broad deletion */ }
+        continue;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+  throw new Error(`timed out waiting for repository fixture lock ${lockDir}`);
+}
+
+function fixtureProcessIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  const probe = spawnSync('ps', ['-o', 'lstart=', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+  const line = (probe.stdout || '').trim();
+  if (probe.status !== 0 || !line) return null;
+  const match = line.match(/^(\S+\s+\S+\s+\d+\s+\d\d:\d\d:\d\d\s+\d{4})\s+(.+)$/);
+  return match ? { pid, startedAt: match[1], command: match[2] } : null;
+}
+
+const releaseRepositoryFixtureLock = OUTER_SNAPSHOT ? () => {} : acquireRepositoryFixtureLock();
+process.once('exit', releaseRepositoryFixtureLock);
+
+function removeStaleCanonicalCheckPackets() {
+  const packetsDir = path.join(ROOT, 'builder-control', 'packets');
+  for (const name of fs.readdirSync(packetsDir)) {
+    const match = name.match(/^PKT-TEST-CHECKS-(\d+)-[0-9a-f]+\.json$/);
+    if (!match) continue;
+    const ownerPid = Number(match[1]);
+    let ownerAlive = false;
+    try { process.kill(ownerPid, 0); ownerAlive = true; }
+    catch (error) { ownerAlive = error.code !== 'ESRCH'; }
+    if (!ownerAlive) fs.rmSync(path.join(packetsDir, name), { force: true });
+  }
+}
+
+if (!OUTER_SNAPSHOT) removeStaleCanonicalCheckPackets();
+
 const CLI = path.join(ROOT, 'builder-control', 'aegis-run.cjs');
 const SERVER = path.join(ROOT, 'builder-control', 'hosting', 'server.cjs');
 const R = require('../aegis-run.cjs');
 const STATE = require('../aegis-state.cjs');
 
 let passed = 0;
-function test(n, fn) {
-  try { fn(); passed++; console.log(`ok   ${n}`); }
+let skipped = 0;
+const skip = (reason) => ({ skipped: String(reason || 'not applicable') });
+function executeTest(n, fn) {
+  try {
+    const result = fn();
+    if (result && result.skipped) {
+      skipped++;
+      console.log(`skip ${n} — ${result.skipped}`);
+      return;
+    }
+    passed++; console.log(`ok   ${n}`);
+  }
   catch (e) { console.error(`FAIL ${n}: ${e.message}`); process.exitCode = 1; }
 }
+function test(n, fn) {
+  if (HOST_ONLY || HOST_PROOF_ONLY) return;
+  return executeTest(n, fn);
+}
+
+test('repository fixture lock preserves a live owner when identity inspection is unavailable', () => {
+  const source = fs.readFileSync(__filename, 'utf8');
+  const lockBody = source.slice(source.indexOf('function acquireRepositoryFixtureLock()'),
+    source.indexOf('function fixtureProcessIdentity(pid)'));
+  assert.match(lockBody, /!ownerAlive \|\| \(currentIdentity && !sameLifetime\)/,
+    'live owner with unavailable identity is still treated as stale');
+  assert.doesNotMatch(lockBody, /!ownerAlive \|\| !sameLifetime/,
+    'ambiguous identity still permits destructive lock reclamation');
+});
+function hostContainmentTest(n, fn) {
+  if (HOST_PROOF_ONLY) return;
+  return executeTest(n, () => OUTER_SNAPSHOT
+    ? skip('requires the separately bound top-level host-containment suite')
+    : fn());
+}
+function hostOrchestrationTest(n, fn) {
+  if (HOST_ONLY || HOST_PROOF_ONLY) return;
+  return executeTest(n, () => OUTER_SNAPSHOT
+    ? skip('requires the complete top-level runtime orchestration suite')
+    : fn());
+}
+function governedHostProofTest(n, fn) {
+  if (HOST_ONLY) return;
+  return executeTest(n, () => OUTER_SNAPSHOT
+    ? skip('requires the complete top-level runtime orchestration suite')
+    : fn());
+}
+function assertOuterSnapshotBehavior() {
+  assert.ok(OUTER_SNAPSHOT, 'outer immutable snapshot evidence is absent');
+  assert.strictEqual(OUTER_SNAPSHOT.policy, 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1');
+  assert.strictEqual(OUTER_SNAPSHOT.deniedHostRead, true);
+  assert.strictEqual(OUTER_SNAPSHOT.deniedExternalWrite, true);
+  assert.strictEqual(fs.realpathSync(process.cwd()), OUTER_SNAPSHOT.cwd);
+}
+
+hostContainmentTest('repository fixture lock publishes one complete atomic owner file', () => {
+  const stat = fs.lstatSync(releaseRepositoryFixtureLock.lockPath);
+  assert.ok(stat.isFile(), 'fixture lock must be one O_EXCL owner file, not a partially published directory');
+  const observed = JSON.parse(fs.readFileSync(releaseRepositoryFixtureLock.lockPath, 'utf8'));
+  assert.deepStrictEqual(observed, releaseRepositoryFixtureLock.owner);
+  assert.ok(observed.processIdentity && observed.processIdentity.startedAt && observed.processIdentity.command,
+    'fixture lock owner lacks immutable process-lifetime evidence');
+});
 const run = (args) => spawnSync('node', [CLI, ...args], { cwd: ROOT, encoding: 'utf8' });
 
 console.log('AEGIS runtime — red proofs');
 
+test('immutable outer check snapshot is structurally and behaviorally proven', () => {
+  if (!OUTER_SNAPSHOT) return skip('host execution validates the live sandbox paths directly');
+  assert.strictEqual(OUTER_SNAPSHOT.policy, 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1');
+  assert.strictEqual(path.basename(OUTER_SNAPSHOT.cwd), 'worktree');
+  assert.match(path.basename(path.dirname(OUTER_SNAPSHOT.cwd)), /^aegis-check-boundary-/);
+  assertOuterSnapshotBehavior();
+});
+
 // ── the contract is preserved, not shrunk ──────────────────────────────────
-test('every contract step 1-10 is represented by a state', () => {
+test('state-backed contract steps are represented and step 9 remains the separate watchdog gate', () => {
   const steps = new Set(Object.values(R.STATES).map((s) => s.step).filter((n) => n > 0));
   for (const required of [1, 2, 3, 4, 5, 6, 7, 8, 10]) {
     assert.ok(steps.has(required), `contract step ${required} has no state — the contract was shrunk to fit`);
   }
+  assert.strictEqual(steps.has(9), false, 'the watchdog gate must not masquerade as persisted lifecycle progress');
+  assert.strictEqual(typeof R.watchdog, 'function', 'contract step 9 must remain the executable watchdog gate');
 });
 
 test('failure states exist for the paths that can fail', () => {
-  for (const s of ['BUILD_FAILED', 'CHECKS_FAILED', 'ROLLED_BACK']) {
+  for (const s of ['BUILD_FAILED', 'CHECKS_FAILED', 'REVIEW_FAILED', 'ROLLED_BACK']) {
     assert.ok(R.STATES[s], `${s} is missing`);
     assert.strictEqual(R.STATES[s].failure, true, `${s} must be marked a failure state`);
   }
@@ -50,6 +364,7 @@ test('RED: a state cannot be reached by skipping an earlier one', () => {
   const illegal = [
     ['CREATED', 'CHECKPOINTED'], ['CREATED', 'BUILT'], ['INTAKE_RECORDED', 'BUILDING'],
     ['ROUTED', 'CHECKS_PASSED'], ['WORKTREE_READY', 'CHECKPOINTED'], ['BUILT', 'CHECKPOINTED'],
+    ['CREATED', 'REVIEW_FAILED'], ['BUILT', 'REVIEW_FAILED'],
   ];
   for (const [from, to] of illegal) {
     assert.ok(!R.STATES[from].next.includes(to),
@@ -111,35 +426,12 @@ test('RED: a malformed run id is rejected before any filesystem access', () => {
 test('RED: checkpoint requires checks that ACTUALLY passed', () => {
   const src = fs.readFileSync(CLI, 'utf8');
   assert.ok(/NO-PASSING-CHECKS/.test(src));
-  assert.ok(/run\.checks\.passed !== run\.checks\.total/.test(src),
-    'a checkpoint must require every check to have passed, not merely to exist');
-  assert.ok(/run\.checks\.total === 0/.test(src),
-    'zero checks must not satisfy a checkpoint — that is the absence of evidence');
+  assert.ok(/!validPassedChecks\(run\.checks,\s*\{\s*runId:\s*run\.runId\s*\}\)/.test(src),
+    'a checkpoint must require the complete subject-bound check receipt, not merely counts');
 });
 
-test('RED: checkpoint requires a resolvable rollback point', () => {
-  const src = fs.readFileSync(CLI, 'utf8');
-  assert.ok(/NO-ROLLBACK-POINT/.test(src));
-  assert.ok(/cannot name where to return to is refused/.test(src),
-    'a checkpoint that cannot name its rollback point is a label, not a checkpoint');
-});
-
-test('RED: rollback refuses when no point was recorded', () => {
-  const src = fs.readFileSync(CLI, 'utf8');
-  assert.ok(/Rollback restores a RECORDED point; it never guesses one/.test(src));
-});
-
-test('RED: a build outside an isolated worktree is refused', () => {
-  const src = fs.readFileSync(CLI, 'utf8');
-  assert.ok(/NO-WORKTREE/.test(src));
-  assert.ok(/refusing to build in the primary tree/.test(src),
-    'the runtime must never build in the primary worktree');
-});
-
-test('RED: correction cycles are capped', () => {
+test('the configured correction ceiling remains three', () => {
   assert.strictEqual(R.MAX_CORRECTIONS, 3);
-  const src = fs.readFileSync(CLI, 'utf8');
-  assert.ok(/CORRECTION-LIMIT/.test(src), 'an uncapped correction loop optimises reviewers against each other forever');
 });
 
 // ── no parallel authority ──────────────────────────────────────────────────
@@ -205,27 +497,41 @@ test('RED: absent transcripts render UNAVAILABLE, not zero cost', () => {
     'a missing directory must not read as "nothing was spent"');
 });
 
-// ── STEP 10: the checkpoint/rollback SUCCESS path, end to end ─────────────
-// Previously only the refusal paths were proven. The happy path could not run
+// ── STEP 10: checkpoint persistence and deferred rollback integration ─────
+// Check and review authorities are tested independently. This fixture starts
+// with authenticated synthetic prerequisites so it can isolate checkpoint
+// commit binding, receipt persistence, and deferred rollback policy.
+// Previously only the refusal paths were proven. The persistence path could not run
 // because an isolated worktree sits at the base commit and committing to the
-// product branch is forbidden. A disposable fixture repo removes that
-// constraint without touching anything real.
-test('STEP 10: checkpoint records a rollback point and rollback restores it', () => {
+// product branch is forbidden. A disposable linked worktree keeps the fixture
+// in the canonical repository while leaving the product branch untouched.
+test('STEP 10: checkpoint consumes authenticated prerequisites and records a real rollback point while restoration stays deferred', () => {
   const TMP = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-cp-'));
   const repo = path.join(TMP, 'repo');
   const runsDir = path.join(TMP, 'runs');
   const cpDir = path.join(TMP, 'checkpoints');
-  fs.mkdirSync(repo, { recursive: true });
   fs.mkdirSync(runsDir, { recursive: true });
 
   const g = (args, cwd = repo) => spawnSync('git', args, { cwd, encoding: 'utf8' });
-  g(['init', '-q', '-b', 'main']);
-  g(['config', 'user.email', 'fixture@example.invalid']);
-  g(['config', 'user.name', 'AEGIS Fixture']);
-  fs.writeFileSync(path.join(repo, 'app.txt'), 'good state\n');
-  g(['add', '-A']); g(['commit', '-q', '-m', 'good']);
-  const goodCommit = g(['rev-parse', 'HEAD']).stdout.trim();
-  assert.ok(/^[0-9a-f]{40}$/.test(goodCommit), 'fixture repo has no commit');
+  const rootHead = g(['-C', ROOT, 'rev-parse', 'HEAD'], ROOT).stdout.trim();
+  const branch = `aegis/test-checkpoint-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  const added = g(['-C', ROOT, 'worktree', 'add', '-q', '-b', branch, repo, rootHead], ROOT);
+  assert.strictEqual(added.status, 0, `could not create canonical linked worktree: ${added.stderr}`);
+  const cleanup = () => {
+    g(['-C', ROOT, 'worktree', 'remove', '--force', repo], ROOT);
+    g(['-C', ROOT, 'branch', '-D', branch], ROOT);
+    fs.rmSync(TMP, { recursive: true, force: true });
+  };
+  process.once('exit', cleanup);
+  const fixtureRel = `builder-control/.aegis-checkpoint-fixture-${process.pid}.txt`;
+  const fixtureFile = path.join(repo, fixtureRel);
+  fs.writeFileSync(fixtureFile, 'good state\n');
+  g(['add', '--', fixtureRel]);
+  g(['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=AEGIS Fixture',
+    'commit', '-q', '-m', 'fixture base']);
+  const reviewedBase = g(['rev-parse', 'HEAD']).stdout.trim();
+  assert.ok(/^[0-9a-f]{40}$/.test(reviewedBase), 'fixture repo has no commit');
+  fs.writeFileSync(fixtureFile, 'reviewed good state\n');
 
   // The run must reach CHECKS_PASSED through REAL transitions, because the
   // watchdog cross-checks every transition against the canonical ledger — a
@@ -243,9 +549,9 @@ test('STEP 10: checkpoint records a rollback point and rollback restores it', ()
   const seed = {
     runId, createdAt: '2026-08-25T06:00:00Z', updatedAt: '2026-08-25T06:00:00Z',
     state: 'CREATED', objective: 'fixture checkpoint/rollback',
-    packet: null, baseCommit: goodCommit,
-    worktree: { path: repo, branch: 'main', baseCommit: goodCommit },
-    build: { exit: 0 }, checks: { passed: 3, total: 3, results: [] },
+    packet: 'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json', baseCommit: reviewedBase,
+    worktree: { path: repo, branch, baseCommit: reviewedBase },
+    build: { exit: 0 }, checks: null,
     checkpoint: null, corrections: 0, transitions: [],
   };
   fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify(seed, null, 2));
@@ -267,6 +573,70 @@ test('STEP 10: checkpoint records a rollback point and rollback restores it', ()
   assert.strictEqual(ledgerEntries.length, 7, `expected 7 recorded transitions, got ${ledgerEntries.length}`);
   const exec = (args) => spawnSync('node', [CLI2, ...args], { cwd: ROOT, encoding: 'utf8', env });
 
+  const subjectRun = spawnSync('node', [path.join(ROOT, 'builder-control', 'engineering-os.cjs'), '--subject', '--json'],
+    { cwd: ROOT, encoding: 'utf8', env: { ...env, GIT_DIR: path.join(repo, '.git'), GIT_WORK_TREE: repo } });
+  assert.strictEqual(subjectRun.status, 0, subjectRun.stderr);
+  const subject = JSON.parse(subjectRun.stdout);
+  assert.ok(subject.subjectPaths.length > 0, 'fixture subject is empty');
+  const packetPath = path.join(ROOT, seed.packet);
+  const packet = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
+  const commands = (packet.testsRequired || []).filter((command) => {
+    const tokens = String(command).trim().split(/\s+/);
+    return !(tokens[0] === 'node' && (tokens[1] || '').replace(/^\.\//, '') === 'builder-control/engineering-os.cjs' && tokens.includes('--gate-done'));
+  });
+  const receiptBody = {
+    schemaVersion: 1, authority: 'aegis-run.cjs runChecks', runId,
+    packet: { path: seed.packet, sha256: crypto.createHash('sha256').update(fs.readFileSync(packetPath)).digest('hex') },
+    subject: { subjectSha256: subject.subjectSha256, subjectPaths: subject.subjectPaths, diffBytes: subject.diffBytes, range: subject.range },
+    startedAt: '2026-08-25T06:01:00Z', completedAt: '2026-08-25T06:02:00Z', complete: true, outcome: 'PASS',
+    total: commands.length, passed: commands.length,
+    results: commands.map((cmd) => ({ cmd, status: 'EXECUTED', exit: 0, ranAt: '2026-08-25T06:01:30Z' })),
+    ...(Array.isArray(packet.hostContainmentRequired) && packet.hostContainmentRequired.length ? {
+      hostContainment: passingHostContainmentReceipt(runId, {
+        path: seed.packet,
+        sha256: crypto.createHash('sha256').update(fs.readFileSync(packetPath)).digest('hex'),
+      }, {
+        subjectSha256: subject.subjectSha256,
+        subjectPaths: subject.subjectPaths,
+        diffBytes: subject.diffBytes,
+        range: subject.range,
+      }, packet.hostContainmentRequired[0]),
+    } : {}),
+  };
+  const receipt = { ...receiptBody, receiptSha256: R.checkReceiptDigest(receiptBody) };
+  let prepared = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  prepared.checks = { ranAt: receipt.completedAt, total: receipt.total, passed: receipt.passed,
+    results: receipt.results.map((r) => ({ cmd: r.cmd, exit: 0, ranAt: r.ranAt })), receipt };
+  prepared.subject = { subjectSha256: subject.subjectSha256, pathCount: subject.subjectPaths.length,
+    diffBytes: subject.diffBytes, range: subject.range };
+  prepared.reviewGate = { subjectSha256: subject.subjectSha256, checkReceiptSha256: receipt.receiptSha256,
+    packet: receipt.packet, headCommit: reviewedBase };
+  fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify(prepared, null, 2));
+  const persistReceipt = spawnSync('node', ['-e', `
+    const R = require(${JSON.stringify(path.join(ROOT, 'builder-control', 'aegis-run.cjs'))});
+    const run = R.loadRun(${JSON.stringify(runId)});
+    run.checks.receiptRef = R.persistCanonicalCheckReceipt(run, run.checks.receipt);
+    delete run.checks.receipt;
+    R.saveRun(run);
+  `], { cwd: ROOT, encoding: 'utf8', env });
+  assert.strictEqual(persistReceipt.status, 0, persistReceipt.stderr);
+
+  // The browser/run authority cannot manufacture a commit. The reviewed
+  // working-tree bytes must first be committed through the approved external
+  // narrow-commit path, and a premature checkpoint stays REVIEW_BOUND.
+  const precommit = exec(['--checkpoint', runId]);
+  assert.strictEqual(precommit.status, 3,
+    `dirty reviewed subject unexpectedly checkpointed: ${precommit.stderr || precommit.stdout}`);
+  assert.match(`${precommit.stderr}\n${precommit.stdout}`, /CHECKPOINT-DIRTY-TREE/);
+  assert.match(`${precommit.stderr}\n${precommit.stdout}`, /external narrow-commit path/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8')).state,
+    'REVIEW_BOUND');
+
+  g(['add', '--', fixtureRel]);
+  g(['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=AEGIS Fixture',
+    'commit', '-q', '-m', 'reviewed good']);
+  const goodCommit = g(['rev-parse', 'HEAD']).stdout.trim();
+
   // CHECKPOINT — must succeed and name the real commit.
   const cp = exec(['--checkpoint', runId]);
   assert.strictEqual(cp.status, 0, `checkpoint failed: ${cp.stderr || cp.stdout}`);
@@ -278,27 +648,32 @@ test('STEP 10: checkpoint records a rollback point and rollback restores it', ()
     'the checkpoint record must be written to disk');
 
   // Now diverge — the situation a rollback exists for.
-  fs.writeFileSync(path.join(repo, 'app.txt'), 'broken state\n');
-  g(['add', '-A']); g(['commit', '-q', '-m', 'broken']);
+  fs.writeFileSync(fixtureFile, 'broken state\n');
+  g(['add', '--', fixtureRel]);
+  g(['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=AEGIS Fixture',
+    'commit', '-q', '-m', 'broken']);
   const brokenCommit = g(['rev-parse', 'HEAD']).stdout.trim();
   assert.notStrictEqual(brokenCommit, goodCommit, 'the fixture did not actually diverge');
-  assert.strictEqual(fs.readFileSync(path.join(repo, 'app.txt'), 'utf8'), 'broken state\n');
+  assert.strictEqual(fs.readFileSync(fixtureFile, 'utf8'), 'broken state\n');
 
-  // ROLLBACK — must restore the recorded point, verified by re-reading git.
+  // ROLLBACK — the beta exposes the authenticated point but deliberately
+  // refuses destructive reset until the dedicated post-beta control packet.
   const rb = exec(['--rollback', runId]);
-  assert.strictEqual(rb.status, 0, `rollback failed: ${rb.stderr || rb.stdout}`);
+  assert.strictEqual(rb.status, 3, `rollback was not refused: ${rb.stderr || rb.stdout}`);
+  assert.match(rb.stderr, /ROLLBACK-DEFERRED/);
   const head = g(['rev-parse', 'HEAD']).stdout.trim();
-  assert.strictEqual(head, goodCommit, 'HEAD was not restored to the recorded rollback point');
-  assert.strictEqual(fs.readFileSync(path.join(repo, 'app.txt'), 'utf8'), 'good state\n',
-    'the working tree content was not restored');
+  assert.strictEqual(head, brokenCommit, 'a refused beta rollback mutated HEAD');
+  assert.strictEqual(fs.readFileSync(fixtureFile, 'utf8'), 'broken state\n',
+    'a refused beta rollback mutated working-tree content');
 
   const final = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
-  assert.strictEqual(final.state, 'ROLLED_BACK');
-  assert.strictEqual(final.rollback.ok, true);
-  assert.strictEqual(final.rollback.verifiedHead, goodCommit,
-    'rollback must VERIFY the head it landed on, not assume the reset worked');
+  assert.strictEqual(final.state, 'CHECKPOINTED');
+  assert.strictEqual(final.rollback, undefined);
+  assert.strictEqual(final.checkpoint.rollbackPoint, goodCommit,
+    'the recoverable point must remain visible even while restoration is deferred');
 
-  fs.rmSync(TMP, { recursive: true, force: true });
+  process.removeListener('exit', cleanup);
+  cleanup();
 });
 
 test('RED: the runs directory cannot be redirected outside a temp dir', () => {
@@ -475,9 +850,14 @@ test('normalizeObjective: rejects dangerous control fields as top-level keys', (
   }
 });
 
-test('normalizeObjective: rejects a dangerous field value inside an array', () => {
-  assert.throws(() => R.normalizeObjective({ objective: 'x', constraints: ['shell'] }),
-    (e) => e.code === 'INVALID_OBJECTIVE');
+test('normalizeObjective: ordinary words that resemble control-field names remain valid content', () => {
+  const out = R.normalizeObjective({
+    objective: 'Improve the operator shell',
+    constraints: ['preserve the existing shell'],
+    acceptance: ['model routing remains visible'],
+  });
+  assert.deepStrictEqual(out.constraints, ['preserve the existing shell']);
+  assert.deepStrictEqual(out.acceptance, ['model routing remains visible']);
 });
 
 test('normalizeObjective: throws AegisControlError with code INVALID_OBJECTIVE and httpStatus 400', () => {
@@ -592,6 +972,65 @@ test('createRunFromObjective: a missing packet fails before any run is created',
   assert.strictEqual(files.length, 0, 'a missing packet must not leave a run file behind');
 });
 
+test('createRunFromObjective: persists the exact canonically validated packet path, digest and packetId', () => {
+  const packet = 'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json';
+  const absolute = path.join(ROOT, packet);
+  const expectedBytes = fs.readFileSync(absolute);
+  const expectedPacket = JSON.parse(expectedBytes);
+  const { r, runsDir } = withIsolatedRuntime(`
+    const out = R.createRunFromObjective({ objective: 'bind packet coordinate' },
+      { packet: ${JSON.stringify(packet)} });
+    console.log(JSON.stringify(out));
+  `);
+  assert.strictEqual(r.status, 0, `driver failed: ${r.stderr}`);
+  const files = fs.readdirSync(runsDir).filter((file) => file.endsWith('.json'));
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, files[0]), 'utf8'));
+  assert.deepStrictEqual(saved.packetCoordinate, {
+    path: packet,
+    sha256: crypto.createHash('sha256').update(expectedBytes).digest('hex'),
+    packetId: expectedPacket.packetId,
+  });
+});
+
+hostContainmentTest('dashboard Start refuses changed packet bytes before routing, worktree creation or BUILDING', () => {
+  const source = path.join(ROOT, 'builder-control', 'packets',
+    'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json');
+  const relative = `builder-control/packets/PKT-START-COORDINATE-${process.pid}-${crypto.randomBytes(5).toString('hex')}.json`;
+  const disposable = path.join(ROOT, relative);
+  fs.copyFileSync(source, disposable, fs.constants.COPYFILE_EXCL);
+  const { r, runsDir, runId, TMP } = withIsolatedRuntime(`
+    const fs = require('fs');
+    const packetPath = ${JSON.stringify(disposable)};
+    const out = R.createRunFromObjective({ objective: 'refuse replaced authority' },
+      { packet: ${JSON.stringify(relative)} });
+    const changed = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
+    changed.objective = changed.objective + ' changed after intake';
+    fs.writeFileSync(packetPath, JSON.stringify(changed, null, 2) + '\\n');
+    let launched = false;
+    try {
+      R.startGovernedWorker(out.runId, () => { launched = true; return {}; });
+      console.log(JSON.stringify({ code: null, launched, runId: out.runId }));
+    } catch (error) {
+      console.log(JSON.stringify({ code: error.code, launched, runId: out.runId }));
+    }
+  `);
+  try {
+    assert.strictEqual(r.status, 0, `driver failed: ${r.stderr}`);
+    const result = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(result.code, 'PACKET_CHANGED');
+    assert.strictEqual(result.launched, false, 'launch factory ran for changed packet bytes');
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${result.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'INTAKE_RECORDED');
+    assert.strictEqual(saved.route, undefined);
+    assert.strictEqual(saved.worktree, null);
+    assert.strictEqual(saved.build, null);
+    assert.strictEqual(fs.existsSync(path.join(ROOT, '..', `aegis-wt-${result.runId}`)), false);
+  } finally {
+    fs.rmSync(TMP, { recursive: true, force: true });
+    fs.rmSync(disposable, { force: true });
+  }
+});
+
 test('createRunFromObjective: does not create a worktree, build, model record, or process', () => {
   const before = spawnSync('git', ['worktree', 'list'], { cwd: ROOT, encoding: 'utf8' }).stdout;
   const { r, runsDir } = withIsolatedRuntime(`
@@ -635,7 +1074,6 @@ test('createRunFromObjective: the response has exactly runId,state,risk,nextActi
 });
 
 // ── prepareRun — the single routing + worktree authority ───────────────────
-const crypto = require('crypto');
 
 // Sets up a temp git repo + isolated RUNS_DIR/ledger, seeds a run at
 // INTAKE_RECORDED via a real transition() call (so the ledger is genuine),
@@ -665,9 +1103,18 @@ function withIntakeRecordedRun(driverBody) {
   const env = { ...process.env, AEGIS_RUNS_DIR: runsDir, AEGIS_CHECKPOINTS_DIR: path.join(TMP, 'checkpoints'), AEGIS_LEDGER_FILE: ledger };
 
   const runId = `RUN-20260825-${crypto.randomBytes(4).toString('hex')}`;
+  const intakePacket = 'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json';
+  const intakePacketBytes = fs.readFileSync(path.join(ROOT, intakePacket));
   const seed = {
     runId, createdAt: '2026-08-25T06:00:00Z', updatedAt: '2026-08-25T06:00:00Z',
-    state: 'CREATED', objective: 'fixture prepareRun', packet: null, baseCommit,
+    state: 'CREATED', objective: 'fixture prepareRun',
+    packet: intakePacket,
+    packetCoordinate: {
+      path: intakePacket,
+      sha256: crypto.createHash('sha256').update(intakePacketBytes).digest('hex'),
+      packetId: JSON.parse(intakePacketBytes).packetId,
+    },
+    baseCommit,
     worktree: null, build: null, checks: null, checkpoint: null, corrections: 0, transitions: [],
   };
   fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify(seed, null, 2));
@@ -781,7 +1228,7 @@ test('prepareRun: route refusal creates no worktree and fails closed with ROUTE_
   }
 });
 
-test('prepareRun: an existing worktree path or failed git worktree add does not claim WORKTREE_READY', () => {
+test('prepareRun: an existing worktree path leaves INTAKE_RECORDED and can be retried after correction', () => {
   const { r, runId, runsDir, ledger, TMP } = withIntakeRecordedRun(`
     const fs = require('fs');
     const path = require('path');
@@ -792,7 +1239,11 @@ test('prepareRun: an existing worktree path or failed git worktree add does not 
       R.prepareRun(run.runId);
       console.log(JSON.stringify({ threw: false }));
     } catch (e) {
-      console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus }));
+      const stateAfterFailure = R.loadRun(run.runId).state;
+      fs.rmSync(wt, { recursive: true, force: true });
+      const retried = R.prepareRun(run.runId);
+      console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus,
+        stateAfterFailure, retried }));
     }
   `);
   try {
@@ -801,20 +1252,20 @@ test('prepareRun: an existing worktree path or failed git worktree add does not 
     assert.strictEqual(out.threw, true, 'an existing worktree path must be refused, not reused');
     assert.strictEqual(out.code, 'WORKTREE_EXISTS');
     assert.strictEqual(out.httpStatus, 409);
+    assert.strictEqual(out.stateAfterFailure, 'INTAKE_RECORDED');
+    assert.strictEqual(out.retried.state, 'WORKTREE_READY');
 
     const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
-    assert.notStrictEqual(saved.state, 'WORKTREE_READY', 'must not claim WORKTREE_READY over a dirty existing path');
+    assert.strictEqual(saved.state, 'WORKTREE_READY', 'a corrected preparation must be recoverable');
 
     const entries = JSON.parse(fs.readFileSync(ledger, 'utf8'));
-    const toReady = entries.find((e) => e.correlationId === runId && e.operationId === `${runId}:ROUTED->WORKTREE_READY`);
-    assert.ok(!toReady, 'the ledger must not record WORKTREE_READY when git worktree add never ran');
-
-    // The pre-existing dirty directory must be untouched, not silently reused.
+    const routed = entries.filter((e) => e.correlationId === runId &&
+      e.operationId === `${runId}:INTAKE_RECORDED->ROUTED`);
+    assert.strictEqual(routed.length, 1, 'the failed first attempt must not publish ROUTED');
     const wt = path.join(ROOT, '..', `aegis-wt-${runId}`);
-    assert.ok(fs.existsSync(path.join(wt, 'dirty.txt')), 'the pre-existing path must be left as-is, not overwritten');
+    assert.ok(!fs.existsSync(path.join(wt, 'dirty.txt')), 'retry reused the dirty pre-existing path');
   } finally {
-    const wt = path.join(ROOT, '..', `aegis-wt-${runId}`);
-    fs.rmSync(wt, { recursive: true, force: true });
+    cleanupWorktree(runId);
     fs.rmSync(TMP, { recursive: true, force: true });
   }
 });
@@ -989,6 +1440,28 @@ test('dashboard Start uses one claim-aware path and never re-enters public prepa
   assert.doesNotMatch(start, /\bstartWorker\(/);
 });
 
+test('dashboard Start refuses an absent recorded packet before routing, worktree or worker state', () => {
+  const { r, runsDir, runId, TMP } = withSeededRun('INTAKE_RECORDED', {
+    packet: null,
+  }, `
+    try {
+      R.startGovernedWorker(runId, () => { throw new Error('launch factory must not run'); });
+      console.log(JSON.stringify({ threw: false }));
+    } catch (error) {
+      console.log(JSON.stringify({ threw: true, code: error.code }));
+    }
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(JSON.parse(r.stdout.trim().split('\n').pop()),
+    { threw: true, code: 'INVALID_PACKET' });
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  assert.strictEqual(saved.state, 'INTAKE_RECORDED');
+  assert.strictEqual(saved.route, undefined);
+  assert.strictEqual(saved.worktree, null);
+  assert.strictEqual(saved.build, null);
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
 test('legacy --build-async cannot make a caller-selected model authoritative', () => {
   const result = spawnSync('node', [CLI, '--build-async', 'RUN-20260825-deadbeef',
     '--prompt', 'must not launch', '--model', 'opus'], { cwd: ROOT, encoding: 'utf8' });
@@ -1017,11 +1490,12 @@ function withSeededRun(state, extra, driverBody, beforeRequireBody = '') {
   fs.writeFileSync(ledger, '[]\n');
 
   const runId = `RUN-20260825-${crypto.randomBytes(4).toString('hex')}`;
+  const resolvedExtra = typeof extra === 'function' ? extra(runId) : extra;
   const seed = Object.assign({
     runId, createdAt: '2026-08-25T06:00:00Z', updatedAt: '2026-08-25T06:00:00Z',
     state, objective: 'fixture control-surface run', packet: null, baseCommit: null,
     worktree: null, build: null, checks: null, checkpoint: null, corrections: 0, transitions: [],
-  }, extra || {});
+  }, resolvedExtra || {});
   fs.writeFileSync(path.join(runsDir, `${runId}.json`), JSON.stringify(seed, null, 2));
 
   const env = { ...process.env, AEGIS_RUNS_DIR: runsDir, AEGIS_CHECKPOINTS_DIR: cpDir, AEGIS_LEDGER_FILE: ledger };
@@ -1029,15 +1503,171 @@ function withSeededRun(state, extra, driverBody, beforeRequireBody = '') {
     ${beforeRequireBody}
     const R = require(${JSON.stringify(CLI)});
     const runId = ${JSON.stringify(runId)};
+    const seededRun = R.loadRun(runId);
+    if (seededRun.checks && seededRun.checks.receipt) {
+      seededRun.checks.receiptRef = R.persistCanonicalCheckReceipt(seededRun, seededRun.checks.receipt);
+      delete seededRun.checks.receipt;
+      R.saveRun(seededRun);
+    }
+    if (seededRun.checks && seededRun.checks.preHostReceipt) {
+      seededRun.checks.preHostReceiptRef = R.persistCanonicalPreHostCheckReceipt(
+        seededRun, seededRun.checks.preHostReceipt);
+      delete seededRun.checks.preHostReceipt;
+      R.saveRun(seededRun);
+    }
     ${driverBody}
   `;
   const r = spawnSync('node', ['-e', driver], { cwd: ROOT, encoding: 'utf8', env });
   return { r, TMP, runId, runsDir, ledger, env };
 }
 
+function canonicalRetrySeed(overrides = {}) {
+  const packet = 'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json';
+  const bytes = fs.readFileSync(path.join(ROOT, packet));
+  return {
+    packet,
+    packetCoordinate: {
+      path: packet,
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      packetId: JSON.parse(bytes).packetId,
+    },
+    dataClass: 'INTERNAL',
+    route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+    worktree: { path: fs.realpathSync(os.tmpdir()) },
+    build: {
+      mode: 'async', attempt: 1, attemptId: '55555555-5555-4555-8555-555555555555',
+      launchSpec: { provider: 'claude-subscription', prompt: 'bounded fixture retry', model: 'opus' },
+      workerPid: null, workerState: 'BUILD_FAILED', revision: 2,
+    },
+    ...overrides,
+  };
+}
+
+hostContainmentTest('global worker admission refuses a second run before BUILDING mutation', () => {
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('WORKTREE_READY', {
+    worktree: { path: fs.realpathSync(os.tmpdir()) },
+  }, `
+    const fs = require('fs'); const path = require('path');
+    const otherId = 'RUN-20260825-aaaaaaaa';
+    const activeIdentity = R.processIdentity(_activeWorker.pid);
+    fs.writeFileSync(path.join(process.env.AEGIS_RUNS_DIR, otherId + '.json'), JSON.stringify({
+      runId: otherId, state: 'BUILDING', objective: 'already active',
+      build: { mode: 'async', attempt: 1,
+        attemptId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        workerPid: _activeWorker.pid, processGroupId: activeIdentity.processGroupId,
+        processIdentity: activeIdentity, workerState: 'RUNNING' },
+      transitions: [], corrections: 0
+    }));
+    let out; try {
+      R.startWorker(runId, { provider: 'claude-subscription', prompt: 'must not launch', model: 'opus' },
+        { launchWorker() { throw new Error('launcher must not run'); } });
+      out = { threw: false };
+    } catch (error) { out = { threw: true, code: error.code }; }
+    finally { try { _activeWorker.kill('SIGKILL'); } catch {} }
+    console.log(JSON.stringify(out));
+  `, `
+    const { spawn: _spawn } = require('child_process');
+    const _activeWorker = _spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'],
+      { stdio: 'ignore' });
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(JSON.parse(r.stdout.trim().split('\n').pop()),
+    { threw: true, code: 'GLOBAL_WORKER_ACTIVE' });
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  assert.strictEqual(saved.state, 'WORKTREE_READY');
+  assert.strictEqual(saved.build, null);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 0);
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+hostContainmentTest('run routing passes the canonical data class without lossy remapping', () => {
+  const source = fs.readFileSync(CLI, 'utf8');
+  const prepare = source.slice(source.indexOf('function prepareRunClaimed'),
+    source.indexOf('function prepareRun(', source.indexOf('function prepareRunClaimed')));
+  assert.match(prepare, /routeRole\('orchestrator', \{ dataClass: run\.dataClass \}\)/);
+  assert.doesNotMatch(source, /function routingDataClass/);
+  assert.doesNotMatch(prepare, /SENSITIVE/);
+});
+
+hostContainmentTest('async Retry prevalidation preserves failure state and correction budget', () => {
+  for (const [label, override, code] of [
+    ['missing worktree', { worktree: { path: path.join(os.tmpdir(), 'aegis-missing-worktree') } }, 'NO_WORKTREE'],
+    ['changed packet', { packetCoordinate: { ...canonicalRetrySeed().packetCoordinate,
+      sha256: '0'.repeat(64) } }, 'PACKET_CHANGED'],
+    ['stale worker route', { build: { ...canonicalRetrySeed().build,
+      launchSpec: { provider: 'grok-subscription', prompt: 'mutated', model: 'grok-4.6' } } }, 'ROUTE_STALE'],
+  ]) {
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('BUILD_FAILED',
+      canonicalRetrySeed(override), `
+        let out; try { R.retryRun(runId); out = { threw: false }; }
+        catch (error) { out = { threw: true, code: error.code }; }
+        console.log(JSON.stringify(out));
+      `);
+    assert.strictEqual(r.status, 0, `${label}: ${r.stderr}`);
+    assert.deepStrictEqual(JSON.parse(r.stdout.trim().split('\n').pop()), { threw: true, code }, label);
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILD_FAILED', label);
+    assert.strictEqual(saved.corrections, 0, label);
+    assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 0, label);
+    fs.rmSync(TMP, { recursive: true, force: true });
+  }
+});
+
+test('RED: rollback without a recorded point is refused with no run or ledger mutation', () => {
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKPOINTED', { checkpoint: null }, `
+    const child = require('child_process').spawnSync(process.execPath,
+      [${JSON.stringify(CLI)}, '--rollback', runId],
+      { cwd: ${JSON.stringify(ROOT)}, env: process.env, encoding: 'utf8' });
+    console.log(JSON.stringify({ status: child.status, stderr: child.stderr }));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.strictEqual(out.status, 3);
+  assert.match(out.stderr, /NO-ROLLBACK-POINT/);
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  assert.strictEqual(saved.state, 'CHECKPOINTED');
+  assert.strictEqual(saved.checkpoint, null);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 0);
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+test('RED: a build without an isolated worktree is refused before command execution with no mutation', () => {
+  const marker = path.join(fs.realpathSync(os.tmpdir()),
+    `aegis-no-worktree-marker-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('WORKTREE_READY', { worktree: null }, `
+    const child = require('child_process').spawnSync(process.execPath,
+      [${JSON.stringify(CLI)}, '--build', runId, '--cmd', ${JSON.stringify(`touch `)} + ${JSON.stringify(marker)}],
+      { cwd: ${JSON.stringify(ROOT)}, env: process.env, encoding: 'utf8' });
+    console.log(JSON.stringify({ status: child.status, stderr: child.stderr,
+      markerExists: require('fs').existsSync(${JSON.stringify(marker)}) }));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.strictEqual(out.status, 3);
+  assert.match(out.stderr, /NO-WORKTREE/);
+  assert.strictEqual(out.markerExists, false);
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  assert.strictEqual(saved.state, 'WORKTREE_READY');
+  assert.strictEqual(saved.worktree, null);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 0);
+  fs.rmSync(marker, { force: true });
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
 function ledgerEntriesFor(ledgerFile, runId) {
   const entries = JSON.parse(fs.readFileSync(ledgerFile, 'utf8'));
   return entries.filter((e) => e.correlationId === runId);
+}
+
+function receiptFromLedger(ledgerFile, checks) {
+  const entries = JSON.parse(fs.readFileSync(ledgerFile, 'utf8'));
+  const ref = checks && checks.receiptRef;
+  const entry = entries.find((candidate) => candidate.entryId === (ref && ref.entryId));
+  assert.ok(entry, 'canonical check receipt ledger entry is missing');
+  assert.match(entry.notes || '', /^AEGIS_CHECK_RECEIPT_V1:/);
+  const receipt = JSON.parse(Buffer.from(entry.notes.slice('AEGIS_CHECK_RECEIPT_V1:'.length), 'base64url').toString('utf8'));
+  assert.strictEqual(receipt.receiptSha256, ref.receiptSha256);
+  return receipt;
 }
 
 function reviewSubject(overrides = {}) {
@@ -1075,16 +1705,16 @@ function reviewGate(subject, overrides = {}) {
 
 function engineeringOsMock(responses) {
   const engos = path.join(ROOT, 'builder-control', 'engineering-os.cjs');
-  const expectedGitDir = spawnSync('git', ['-C', ROOT, 'rev-parse', '--absolute-git-dir'],
+  const expectedGitDir = spawnSync('git', ['-C', REVIEW_WORKTREE.path, 'rev-parse', '--absolute-git-dir'],
     { encoding: 'utf8' }).stdout.trim();
-  const expectedGitWorkTree = fs.realpathSync(ROOT);
+  const expectedGitWorkTree = fs.realpathSync(REVIEW_WORKTREE.path);
   const expectedCalls = responses.map((response) => {
     const body = response && response.body;
     if (body && body.subject && body.reviewerCompleteness) {
       return [engos, '--gate-done', '--packet', path.resolve(ROOT, REVIEW_PACKET),
         '--subject-sha', body.subject.subjectSha256, '--json'];
     }
-    return [engos, '--subject', '--json'];
+    return [engos, '--subject', '--packet', REVIEW_PACKET, '--json'];
   });
   return `
     const childProcess = require('child_process');
@@ -1095,6 +1725,15 @@ function engineeringOsMock(responses) {
     childProcess.spawnSync = function(command, args, options) {
       if (command === process.execPath && Array.isArray(args) &&
           typeof args[0] === 'string' && args[0].endsWith('/builder-control/engineering-os.cjs')) {
+        const snapshotWorktree = options && options.env && options.env.GIT_WORK_TREE;
+        const snapshotPacket = args[3];
+        const mockPath = require('path');
+        if (args.length === 5 && args[1] === '--subject' && args[2] === '--packet' && args[4] === '--json' &&
+            typeof snapshotWorktree === 'string' && typeof snapshotPacket === 'string' &&
+            mockPath.basename(mockPath.dirname(snapshotWorktree)).startsWith('aegis-host-check-boundary-') &&
+            snapshotPacket === mockPath.join(snapshotWorktree, ${JSON.stringify(REVIEW_PACKET)})) {
+          return originalSpawnSync.apply(this, arguments);
+        }
         const expected = expectedEngosCalls[engosIndex];
         if (!expected || JSON.stringify(args) !== JSON.stringify(expected)) {
           throw new Error('engineering-os invocation mismatch: expected ' +
@@ -1122,26 +1761,314 @@ function engineeringOsMock(responses) {
   `;
 }
 
+function engineeringSubjectSequenceMock(subjects, packetPath) {
+  const expectedArgs = ['--subject', '--packet', packetPath, '--json'];
+  return `
+    const childProcess = require('child_process');
+    const originalSpawnSync = childProcess.spawnSync;
+    const subjectResponses = ${JSON.stringify(subjects)};
+    const expectedSubjectArgs = ${JSON.stringify(expectedArgs)};
+    let subjectIndex = 0;
+    childProcess.spawnSync = function(command, args, options) {
+      if (command === process.execPath && Array.isArray(args) &&
+          typeof args[0] === 'string' && args[0].endsWith('/builder-control/engineering-os.cjs') &&
+          JSON.stringify(args.slice(1)) === JSON.stringify(expectedSubjectArgs)) {
+        const body = subjectResponses[subjectIndex++];
+        if (!body) throw new Error('unexpected engineering-os subject invocation');
+        return { status: 0, stdout: JSON.stringify(body), stderr: '' };
+      }
+      return originalSpawnSync.apply(this, arguments);
+    };
+    process.on('exit', () => {
+      if (subjectIndex !== subjectResponses.length) {
+        console.error('engineering-os subject invocation count mismatch: expected ' +
+          subjectResponses.length + ', received ' + subjectIndex);
+        process.exitCode = 97;
+      }
+    });
+  `;
+}
+
 const REVIEW_PACKET = 'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json';
-const REVIEW_HEAD = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
-const REVIEW_BRANCH = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'],
-  { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+function createCanonicalReviewWorktreeFixture() {
+  const root = fs.mkdtempSync(path.join(
+    OUTER_SNAPSHOT ? OUTER_SNAPSHOT.boundaryRoot : fs.realpathSync(os.tmpdir()),
+    'aegis-review-worktree-'));
+  const worktree = path.join(root, 'worktree');
+  const branch = `aegis/test-review-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
+  const added = spawnSync('git', ['worktree', 'add', '-q', '-b', branch, worktree, head], {
+    cwd: ROOT, encoding: 'utf8',
+  });
+  if (added.status !== 0) {
+    fs.rmSync(root, { recursive: true, force: true });
+    throw new Error(`could not create canonical review worktree fixture: ${added.stderr || added.stdout}`);
+  }
+  // The host-containment suite replays two frozen, non-subject Grok receipts.
+  // Mirror them into this disposable worktree exactly as a real governed run
+  // does; they remain outside filesAllowed and cannot change the subject hash.
+  const reviewWorktreeFixtures = HOST_ONLY || OUTER_SNAPSHOT ? [] : [
+    'builder-control/review-raw/20260828220306-grok.txt',
+    'builder-control/review-raw/20260829021134-grok.txt',
+  ];
+  for (const relative of reviewWorktreeFixtures) {
+    const source = path.join(ROOT, relative);
+    const target = path.join(worktree, relative);
+    const observed = fs.lstatSync(source);
+    if (observed.isSymbolicLink() || !observed.isFile()) {
+      throw new Error(`unsafe frozen review fixture: ${relative}`);
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, fs.readFileSync(source), { flag: 'wx', mode: observed.mode & 0o777 });
+  }
+  fs.appendFileSync(path.join(worktree, 'builder-control', 'review-adapters.cjs'),
+    '\n// canonical review worktree fixture subject\n');
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    spawnSync('git', ['worktree', 'remove', '--force', worktree], { cwd: ROOT, encoding: 'utf8' });
+    spawnSync('git', ['branch', '-D', branch], { cwd: ROOT, encoding: 'utf8' });
+    fs.rmSync(root, { recursive: true, force: true });
+  };
+  process.once('exit', cleanup);
+  return Object.freeze({ path: worktree, branch, head, cleanup });
+}
+const REVIEW_WORKTREE = createCanonicalReviewWorktreeFixture();
+const REVIEW_HEAD = REVIEW_WORKTREE.head;
+const REVIEW_BRANCH = REVIEW_WORKTREE.branch;
 const REVIEW_RUN = {
   packet: REVIEW_PACKET,
   baseCommit: REVIEW_HEAD,
-  worktree: { path: ROOT, branch: REVIEW_BRANCH, baseCommit: REVIEW_HEAD },
+  worktree: { path: REVIEW_WORKTREE.path, branch: REVIEW_BRANCH, baseCommit: REVIEW_HEAD },
 };
-function writeCanonicalCheckPacket(testsRequired) {
+
+function overlayCurrentSubject(worktree) {
+  const subject = JSON.parse(checkedTestCommand('resolve overlay subject', process.execPath,
+    [path.join(ROOT, 'builder-control', 'engineering-os.cjs'), '--subject', '--json'],
+    { cwd: ROOT }).stdout);
+  const originals = [];
+  checkedTestCommand('reset overlay fixture index', 'git', ['reset', '--mixed', REVIEW_HEAD], { cwd: worktree });
+  // engineering-os deliberately excludes its governing packet from the code
+  // subject. The nested review fixture still needs the exact current packet,
+  // otherwise current source is evaluated against the stale HEAD allowlist.
+  const overlayPaths = [...new Set([...(subject.subjectPaths || []), REVIEW_PACKET])];
+  for (const relative of overlayPaths) {
+    const source = path.join(ROOT, relative);
+    const target = path.join(worktree, relative);
+    let original = null;
+    try {
+      const stat = fs.lstatSync(target);
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`unsafe overlay target: ${relative}`);
+      original = { bytes: fs.readFileSync(target), mode: stat.mode & 0o777 };
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    originals.push({ relative, original });
+    if (!fs.existsSync(source)) {
+      fs.rmSync(target, { force: true });
+      continue;
+    }
+    const sourceStat = fs.lstatSync(source);
+    if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) throw new Error(`unsafe overlay source: ${relative}`);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, fs.readFileSync(source), { mode: sourceStat.mode & 0o777 });
+    const inHead = spawnSync('git', ['cat-file', '-e', `${REVIEW_HEAD}:${relative}`], {
+      cwd: worktree, encoding: 'utf8', timeout: 30_000, killSignal: 'SIGKILL',
+    });
+    if (inHead.status !== 0) checkedTestCommand('publish overlay new-file intent', 'git',
+      ['add', '-N', '--', relative], { cwd: worktree });
+  }
+  return () => {
+    checkedTestCommand('restore overlay fixture index', 'git', ['reset', '--mixed', REVIEW_HEAD], { cwd: worktree });
+    for (const { relative, original } of originals) {
+      const target = path.join(worktree, relative);
+      if (!original) fs.rmSync(target, { force: true });
+      else {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, original.bytes, { mode: original.mode });
+      }
+    }
+  };
+}
+
+function writeCanonicalCheckPacket(testsRequiredInput, extra = {}) {
   const name = `PKT-TEST-CHECKS-${process.pid}-${crypto.randomBytes(6).toString('hex')}.json`;
   const absolute = path.join(R.PACKETS_DIR, name);
-  fs.writeFileSync(absolute, JSON.stringify({ testsRequired }, null, 2) + '\n');
-  return { absolute, relative: path.relative(ROOT, absolute) };
+  const relative = path.relative(ROOT, absolute);
+  const testsRequired = typeof testsRequiredInput === 'function'
+    ? testsRequiredInput(relative) : testsRequiredInput;
+  const bytes = JSON.stringify({ ...extra, testsRequired }, null, 2) + '\n';
+  fs.writeFileSync(absolute, bytes, {
+    flag: 'wx', mode: 0o600,
+  });
+  return {
+    absolute,
+    relative,
+    initialSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+  };
 }
-const PASSED_CHECKS = {
-  ranAt: '2026-08-27T18:00:00.000Z', total: 2, passed: 2,
-  results: [{ cmd: 'node --check builder-control/aegis-run.cjs', exit: 0 },
-    { cmd: 'node builder-control/test/aegis-run.test.cjs', exit: 0 }],
-};
+
+function reserveLoopbackTestPort() {
+  const shared = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2);
+  const state = new Int32Array(shared);
+  const worker = new Worker(`
+    const net = require('net');
+    const { workerData } = require('worker_threads');
+    const state = new Int32Array(workerData);
+    const server = net.createServer();
+    server.once('error', () => { Atomics.store(state, 0, -1); Atomics.notify(state, 0); });
+    server.listen(0, '127.0.0.1', () => {
+      Atomics.store(state, 0, server.address().port);
+      Atomics.notify(state, 0);
+      Atomics.wait(state, 1, 0);
+      server.close(() => { Atomics.store(state, 1, 2); Atomics.notify(state, 1); });
+    });
+  `, { eval: true, workerData: shared });
+  const wait = Atomics.wait(state, 0, 0, 2000);
+  const port = Atomics.load(state, 0);
+  assert.notStrictEqual(wait, 'timed-out', 'timed out reserving loopback test port');
+  assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535,
+    `invalid reserved loopback test port: ${port}`);
+  let released = false;
+  return {
+    port,
+    release() {
+      if (released) return;
+      released = true;
+      Atomics.store(state, 1, 1);
+      Atomics.notify(state, 1);
+      assert.notStrictEqual(Atomics.wait(state, 1, 1, 2000), 'timed-out',
+        'timed out releasing loopback test port reservation');
+      worker.unref();
+    },
+  };
+}
+function passingHostContainmentReceipt(runId, packetCoordinate, subject, command) {
+  const coverage = [
+    'node builder-control/test/functional-beta-snapshot.test.cjs',
+    'node builder-control/test/dashboard-slice.test.cjs',
+  ].map((coveredCommand, index) => ({
+    suite: 'pre-host-command', command: coveredCommand,
+    coverage: 'COVERED_BY_EXACT_PREHOST_COMMAND', evidenceSha256: String(index + 1).repeat(64),
+  }));
+  const body = {
+    schemaVersion: 1,
+    authority: 'aegis-run.cjs runHostContainmentCheck',
+    executionBoundary: 'AEGIS_TOP_LEVEL_HOST_CONTAINMENT_V1',
+    runId,
+    packet: packetCoordinate,
+    subject,
+    snapshot: {
+      policy: 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1',
+      captureSha256: 'c'.repeat(64),
+    },
+    command,
+    platform: 'darwin',
+    startedAt: '2026-08-27T17:59:30.000Z',
+    completedAt: '2026-08-27T17:59:50.000Z',
+    complete: true,
+    outcome: 'PASS',
+    preHostReceiptRef: {
+      entryId: `LED-CHECK-${'a'.repeat(32)}`,
+      receiptSha256: 'b'.repeat(64),
+    },
+    coverage,
+    result: {
+      status: 'EXECUTED', exit: 0, passed: 128, covered: coverage.length,
+      skipped: 0, failed: 0, total: 128 + coverage.length,
+      groupDrained: true, ownedGroupDrainageProven: true,
+      summaryParsed: true, outputBytes: 4096, outputSha256: 'e'.repeat(64), outputTruncated: false,
+    },
+  };
+  return { ...body, receiptSha256: R.hostContainmentReceiptDigest(body) };
+}
+function passedChecksFor(runId, subject = reviewSubject(), packetPath = REVIEW_PACKET) {
+  const absolutePacket = path.resolve(ROOT, packetPath);
+  const packet = JSON.parse(fs.readFileSync(absolutePacket, 'utf8'));
+  const commands = (packet.testsRequired || []).filter((command) => {
+    const tokens = String(command).trim().split(/\s+/);
+    return !(tokens[0] === 'node' && (tokens[1] || '').replace(/^\.\//, '') ===
+      'builder-control/engineering-os.cjs' && tokens.includes('--gate-done'));
+  });
+  const ranAt = '2026-08-27T18:00:00.000Z';
+  const packetCoordinate = {
+    path: packetPath,
+    sha256: crypto.createHash('sha256').update(fs.readFileSync(absolutePacket)).digest('hex'),
+  };
+  const hostCommands = Array.isArray(packet.hostContainmentRequired)
+    ? packet.hostContainmentRequired : [];
+  const receiptBody = {
+    schemaVersion: 1,
+    authority: 'aegis-run.cjs runChecks',
+    runId,
+    packet: packetCoordinate,
+    subject,
+    startedAt: '2026-08-27T17:59:00.000Z',
+    completedAt: ranAt,
+    complete: true,
+    outcome: 'PASS',
+    total: commands.length,
+    passed: commands.length,
+    results: commands.map((cmd) => ({ cmd, status: 'EXECUTED', exit: 0, ranAt })),
+    ...(hostCommands.length ? {
+      hostContainment: passingHostContainmentReceipt(
+        runId, packetCoordinate, subject, hostCommands[0]),
+    } : {}),
+  };
+  const receipt = { ...receiptBody, receiptSha256: R.checkReceiptDigest(receiptBody) };
+  return {
+    ranAt,
+    total: commands.length,
+    passed: commands.length,
+    results: receipt.results.map(({ cmd, exit, ranAt: resultRanAt }) => ({ cmd, exit, ranAt: resultRanAt })),
+    receipt,
+  };
+}
+
+function preHostChecksFor(runId, subject = reviewSubject(), packetPath = REVIEW_PACKET, options = {}) {
+  const absolutePacket = path.resolve(ROOT, packetPath);
+  const packet = JSON.parse(fs.readFileSync(absolutePacket, 'utf8'));
+  const commands = (packet.testsRequired || []).filter((command) => {
+    const tokens = String(command).trim().split(/\s+/);
+    return !(tokens[0] === 'node' && (tokens[1] || '').replace(/^\.\//, '') ===
+      'builder-control/engineering-os.cjs' && tokens.includes('--gate-done'));
+  });
+  const hostCommands = packet.hostContainmentRequired || [];
+  const ranAt = '2026-08-27T18:00:00.000Z';
+  const packetCoordinate = {
+    path: packetPath,
+    sha256: crypto.createHash('sha256').update(fs.readFileSync(absolutePacket)).digest('hex'),
+  };
+  const body = {
+    schemaVersion: 1,
+    receiptType: 'AEGIS_PRE_HOST_CHECK_RECEIPT_V1',
+    authority: 'aegis-run.cjs runChecks',
+    runId,
+    packet: packetCoordinate,
+    subject,
+    snapshot: {
+      policy: 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1',
+      captureSha256: options.captureSha256 || 'c'.repeat(64),
+    },
+    startedAt: '2026-08-27T17:59:00.000Z',
+    completedAt: ranAt,
+    complete: true,
+    outcome: 'PASS',
+    total: commands.length,
+    passed: commands.length,
+    results: commands.map((cmd) => ({ cmd, status: 'EXECUTED', exit: 0, ranAt })),
+    hostContainment: { state: 'PENDING', commands: hostCommands },
+  };
+  const receipt = { ...body, receiptSha256: R.checkReceiptDigest(body) };
+  return {
+    ranAt, total: commands.length, passed: commands.length,
+    results: receipt.results.map(({ cmd, exit, ranAt: resultRanAt }) =>
+      ({ cmd, exit, ranAt: resultRanAt })),
+    hostContainment: { state: 'PENDING', command: hostCommands[0] },
+    preHostReceipt: receipt,
+  };
+}
 
 test('engineeringOsMock: refuses a gate invocation with omitted exact-subject binding', () => {
   const subject = reviewSubject();
@@ -1158,13 +2085,37 @@ test('engineeringOsMock: refuses a gate invocation with omitted exact-subject bi
   assert.match(probe.stderr, /engineering-os invocation mismatch/);
 });
 
-test('bindIndependentReview: binds one canonical exact subject and minimized gate evidence atomically', () => {
-  const subject = reviewSubject();
+hostOrchestrationTest('bindIndependentReview: finalizes pre-host evidence before binding one canonical exact subject', () => {
+  const restoreSubject = overlayCurrentSubject(REVIEW_WORKTREE.path);
+  try {
+  const reviewGitDir = checkedTestCommand('resolve positive review fixture Git directory', 'git',
+    ['-C', REVIEW_WORKTREE.path, 'rev-parse', '--absolute-git-dir']).stdout.trim();
+  const subject = JSON.parse(checkedTestCommand('resolve positive review fixture subject', process.execPath,
+    [path.join(ROOT, 'builder-control', 'engineering-os.cjs'), '--subject', '--packet', REVIEW_PACKET, '--json'], {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        GIT_DIR: reviewGitDir,
+        GIT_WORK_TREE: fs.realpathSync(REVIEW_WORKTREE.path),
+      },
+    }).stdout);
   const gate = reviewGate(subject);
-  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', {
+  const packetAbsolute = path.resolve(ROOT, REVIEW_PACKET);
+  const packetBytes = fs.readFileSync(packetAbsolute);
+  const capture = R.captureCheckExecutionSource(REVIEW_WORKTREE.path, {
+    path: REVIEW_PACKET,
+    bytes: packetBytes,
+  }, subject, {
+    required: true,
+    generator: 'builder-control/aegis-state.cjs',
+    output: 'builder-control/dashboard/state.js',
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
     ...REVIEW_RUN,
-    checks: PASSED_CHECKS,
-  }, `
+    checks: preHostChecksFor(seedRunId, subject, REVIEW_PACKET, {
+      captureSha256: capture.captureSha256,
+    }),
+  }), `
     const result = R.bindIndependentReview(runId, {
       subjectSha256: 'f'.repeat(64), reviewer: 'browser', model: 'browser', executable: '/tmp/browser'
     });
@@ -1173,16 +2124,25 @@ test('bindIndependentReview: binds one canonical exact subject and minimized gat
     { status: 0, body: subject },
     { status: 0, body: gate },
     { status: 0, body: subject },
+    { status: 0, body: subject },
   ]));
   assert.strictEqual(r.status, 0, r.stderr);
   const result = JSON.parse(r.stdout.trim().split('\n').pop());
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
   assert.deepStrictEqual(Object.keys(result).sort(),
-    ['action', 'nextAction', 'runId', 'state', 'subjectSha256'].sort());
+    ['action', 'nextAction', 'runId', 'state', 'subjectSha256'].sort(),
+    `host finalization result: ${JSON.stringify({ result, hostContainment: saved.checks && saved.checks.hostContainment })}`);
   assert.strictEqual(result.state, 'REVIEW_BOUND');
   assert.strictEqual(result.subjectSha256, subject.subjectSha256,
     'browser-supplied subject must not become authoritative');
-  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
   assert.strictEqual(saved.state, 'REVIEW_BOUND');
+  assert.ok(saved.checks.receiptRef && /^[0-9a-f]{64}$/.test(saved.checks.receiptRef.receiptSha256),
+    'review bind did not publish the final canonical check receipt');
+  assert.strictEqual(saved.checks.hostContainment.state, 'PASSED');
+  const finalReceipt = receiptFromLedger(ledger, saved.checks);
+  assert.strictEqual(finalReceipt.outcome, 'PASS');
+  assert.strictEqual(finalReceipt.hostContainment.outcome, 'PASS');
+  assert.strictEqual(finalReceipt.hostContainment.result.skipped, 0);
   assert.deepStrictEqual(Object.keys(saved.subject).sort(),
     ['authority', 'boundAt', 'diffBytes', 'pathCount', 'range', 'subjectSha256'].sort());
   assert.strictEqual(saved.subject.subjectSha256, subject.subjectSha256);
@@ -1193,17 +2153,82 @@ test('bindIndependentReview: binds one canonical exact subject and minimized gat
   assert.strictEqual(ledgerEntriesFor(ledger, runId)
     .filter((entry) => entry.operationId === `${runId}:CHECKS_PASSED->REVIEW_BOUND`).length, 1);
   fs.rmSync(TMP, { recursive: true, force: true });
+  } finally {
+    restoreSubject();
+  }
+});
+
+test('check receipt authority: mutable run state keeps only a projection and ledger receipt reference', () => {
+  const subject = reviewSubject();
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), `
+    const run = R.loadRun(runId);
+    const receipt = R.loadCanonicalCheckReceipt(run.checks, { runId });
+    console.log(JSON.stringify({ run, receipt }));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.strictEqual(out.run.checks.receipt, undefined, 'complete receipt remained in mutable run state');
+  assert.match(out.run.checks.receiptRef.entryId, /^LED-CHECK-[0-9a-f]{32}$/);
+  assert.strictEqual(out.receipt.runId, runId);
+  assert.deepStrictEqual(out.receipt.subject, subject);
+  assert.deepStrictEqual(receiptFromLedger(ledger, out.run.checks), out.receipt);
+  const evidence = ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-check-receipt');
+  assert.strictEqual(evidence.length, 1);
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+test('check receipt authority RED: run projection cannot inject or retarget canonical receipt evidence', () => {
+  const subject = reviewSubject();
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), `
+    const run = R.loadRun(runId);
+    run.checks.receiptRef.receiptSha256 = 'f'.repeat(64);
+    R.saveRun(run);
+    try { R.bindIndependentReview(runId); console.log(JSON.stringify({ threw: false })); }
+    catch (e) { console.log(JSON.stringify({ threw: true, code: e.code })); }
+  `, engineeringOsMock([]));
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(JSON.parse(r.stdout.trim().split('\n').pop()),
+    { threw: true, code: 'REVIEW-CHECKS-INVALID' });
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8')).state,
+    'CHECKS_PASSED');
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-run').length, 0);
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+test('check receipt authority RED: edited append-only evidence is not accepted by review binding', () => {
+  const subject = reviewSubject();
+  const { r, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), `
+    const ledger = JSON.parse(fs.readFileSync(process.env.AEGIS_LEDGER_FILE, 'utf8'));
+    const receiptEntry = ledger.find((entry) => entry.gate === 'aegis-check-receipt');
+    receiptEntry.notes = receiptEntry.notes.slice(0, -1) + (receiptEntry.notes.endsWith('A') ? 'B' : 'A');
+    fs.writeFileSync(process.env.AEGIS_LEDGER_FILE, JSON.stringify(ledger, null, 2));
+    try { R.bindIndependentReview(runId); console.log(JSON.stringify({ threw: false })); }
+    catch (e) { console.log(JSON.stringify({ threw: true, code: e.code })); }
+  `, `const fs = require('fs'); ${engineeringOsMock([])}`);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(JSON.parse(r.stdout.trim().split('\n').pop()),
+    { threw: true, code: 'REVIEW-CHECKS-INVALID' });
+  fs.rmSync(TMP, { recursive: true, force: true });
 });
 
 test('bindIndependentReview: refuses invalid check evidence before consulting review authority', () => {
-  for (const checks of [null,
-    { ...PASSED_CHECKS, total: 0, passed: 0, results: [] },
-    { ...PASSED_CHECKS, passed: 1 },
-    { ...PASSED_CHECKS, results: [{ cmd: 'one', exit: 0 }] },
-    { ...PASSED_CHECKS, results: PASSED_CHECKS.results.map((x, i) => ({ ...x, exit: i ? 1 : 0 })) },
-  ]) {
-    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', {
-      ...REVIEW_RUN, checks,
+  const invalidMutations = [
+    () => null,
+    (checks) => ({ ...checks, total: 0, passed: 0, results: [] }),
+    (checks) => ({ ...checks, passed: checks.passed - 1 }),
+    (checks) => ({ ...checks, results: [{ cmd: 'one', exit: 0 }] }),
+    (checks) => ({ ...checks, results: checks.results.map((x, i) => ({ ...x, exit: i ? 1 : 0 })) }),
+  ];
+  for (const mutate of invalidMutations) {
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => {
+      const valid = passedChecksFor(seedRunId);
+      return { ...REVIEW_RUN, checks: mutate(valid) };
     }, `
       try { R.bindIndependentReview(runId); console.log(JSON.stringify({ threw: false })); }
       catch (e) { console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus })); }
@@ -1214,17 +2239,16 @@ test('bindIndependentReview: refuses invalid check evidence before consulting re
     const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
     assert.strictEqual(saved.state, 'CHECKS_PASSED');
     assert.strictEqual(saved.subject, undefined);
-    assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 0);
+    assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-run').length, 0);
     fs.rmSync(TMP, { recursive: true, force: true });
   }
 });
 
-test('bindIndependentReview: canonical missing, foreign-only, stale, partial, ambiguous, unavailable, rejected, and blocking review gates never advance', () => {
+test('bindIndependentReview: missing, foreign-only, stale, partial, ambiguous, and unavailable review evidence never becomes reviewer rejection', () => {
   const subject = reviewSubject();
   const rules = [
     'ENGOS-REVIEW-MISSING', 'ENGOS-REVIEW-MISSING', 'ENGOS-REVIEW-STALE',
     'ENGOS-REVIEW-PARTIAL', 'ENGOS-REVIEW-AMBIGUOUS', 'ENGOS-REVIEW-UNAVAILABLE',
-    'ENGOS-REVIEW-REJECTED', 'ENGOS-OPEN-FINDINGS',
   ];
   for (const rule of rules) {
     const gate = reviewGate(subject, {
@@ -1235,9 +2259,9 @@ test('bindIndependentReview: canonical missing, foreign-only, stale, partial, am
       },
       reviewsBound: 0, reviewsActive: 0, reviewsForeign: rule === 'ENGOS-REVIEW-MISSING' ? 2 : 0,
     });
-    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', {
-      ...REVIEW_RUN, checks: PASSED_CHECKS,
-    }, `
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+      ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+    }), `
       try { R.bindIndependentReview(runId); console.log(JSON.stringify({ threw: false })); }
       catch (e) { console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus })); }
     `, engineeringOsMock([{ status: 0, body: subject }, { status: 3, body: gate }]));
@@ -1247,17 +2271,156 @@ test('bindIndependentReview: canonical missing, foreign-only, stale, partial, am
     const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
     assert.strictEqual(saved.state, 'CHECKS_PASSED', rule);
     assert.strictEqual(saved.subject, undefined, rule);
-    assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 0, rule);
+    assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-run').length, 0, rule);
     fs.rmSync(TMP, { recursive: true, force: true });
   }
+});
+
+test('bindIndependentReview: an incomplete mixed review set remains CHECKS_PASSED despite a rejection', () => {
+  const subject = reviewSubject();
+  const gate = reviewGate(subject, {
+    ok: false,
+    state: 'BLOCKED',
+    problems: [
+      { rule: 'ENGOS-REVIEW-REJECTED', detail: 'codex returned REJECT (REV-codex-current)' },
+      { rule: 'ENGOS-OPEN-BLOCKING-FINDING', detail: '/private/secret-path must not persist' },
+      { rule: 'ENGOS-REVIEW-MISSING', detail: 'grok is still missing' },
+    ],
+    reviewerCompleteness: {
+      subjectSha256: subject.subjectSha256,
+      complete: false,
+      pathCoverage: { total: 2, coveredByEveryRequiredReviewer: [],
+        notCoveredByEveryRequiredReviewer: subject.subjectPaths },
+      rows: [
+        { reviewer: 'codex', executed: 'EXECUTED', disposition: 'REJECT', reviewId: 'REV-codex-current' },
+        { reviewer: 'grok', executed: 'MISSING', disposition: null, reviewId: null },
+      ],
+    },
+    reviewsBound: 1, reviewsActive: 1, reviewsForeign: 0,
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), `
+    try { R.bindIndependentReview(runId); console.log(JSON.stringify({ threw: false })); }
+    catch (e) { console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus })); }
+  `, engineeringOsMock([
+    { status: 0, body: subject }, { status: 3, body: gate },
+  ]));
+  assert.strictEqual(r.status, 0, r.stderr);
+  const result = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.deepStrictEqual(result,
+    { threw: true, code: 'REVIEW-GATE-REFUSED', httpStatus: 409 });
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  assert.strictEqual(saved.state, 'CHECKS_PASSED');
+  assert.strictEqual(saved.reviewFailure, undefined);
+  assert.strictEqual(saved.reviewFailures, undefined);
+  assert.strictEqual(saved.transitions.filter((t) =>
+    t.from === 'CHECKS_PASSED' && t.to === 'REVIEW_FAILED').length, 0);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) =>
+    entry.operationId === `${runId}:CHECKS_PASSED->REVIEW_FAILED`).length, 0);
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+test('bindIndependentReview: an OPEN HIGH from a non-REJECT record reaches REVIEW_FAILED and permits Retry', () => {
+  const subject = reviewSubject();
+  const gate = reviewGate(subject, {
+    ok: false,
+    state: 'BLOCKED',
+    problems: [{ rule: 'ENGOS-OPEN-BLOCKING-FINDING',
+      detail: 'HIGH from codex in builder-control/aegis-run.cjs: untrusted detail must not persist' }],
+    reviewerCompleteness: {
+      subjectSha256: subject.subjectSha256,
+      complete: true,
+      pathCoverage: { total: 2, coveredByEveryRequiredReviewer: subject.subjectPaths,
+        notCoveredByEveryRequiredReviewer: [] },
+      rows: [
+        { reviewer: 'codex', required: 'REQUIRED', executed: 'EXECUTED',
+          disposition: 'APPROVE_WITH_NOTES', reviewId: 'REV-codex-open-high',
+          missingPaths: [], stalePaths: [] },
+        { reviewer: 'grok', required: 'REQUIRED', executed: 'EXECUTED',
+          disposition: 'APPROVE', reviewId: 'REV-grok-current', missingPaths: [], stalePaths: [] },
+      ],
+    },
+    reviewsBound: 1, reviewsActive: 1, reviewsForeign: 0,
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: preHostChecksFor(seedRunId, subject),
+  }), `
+    const refused = R.bindIndependentReview(runId);
+    const retried = R.retryRun(runId);
+    console.log(JSON.stringify({ refused, retried }));
+  `, engineeringOsMock([
+    { status: 0, body: subject }, { status: 3, body: gate }, { status: 0, body: subject },
+  ]));
+  assert.strictEqual(r.status, 0, r.stderr);
+  const result = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.strictEqual(result.refused.state, 'REVIEW_FAILED');
+  assert.strictEqual(result.refused.outcome, 'REFUSED');
+  assert.strictEqual(result.retried.state, 'CORRECTING');
+  assert.strictEqual(result.retried.nextAction, `--build ${runId} --cmd "<command>"`);
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  assert.strictEqual(saved.state, 'CORRECTING');
+  assert.deepStrictEqual(saved.reviewFailure.rejectedReviewers, [
+    { reviewer: 'codex', reviewId: 'REV-codex-open-high' },
+  ]);
+  assert.strictEqual(saved.reviewFailure.checkReceiptSha256,
+    saved.checks.preHostReceiptRef.receiptSha256);
+  assert.strictEqual(saved.checks.hostContainment.state, 'PENDING',
+    'subject-controlled host suite ran before a passing exact-subject review gate');
+  assert.strictEqual(ledgerEntriesFor(ledger, runId)
+    .filter((entry) => entry.gate === 'aegis-check-receipt').length, 0,
+    'a final host-bound receipt was published for a refused review');
+  assert.strictEqual(saved.reviewFailure.blockingFindingCount, 1);
+  assert.ok(!JSON.stringify(saved.reviewFailure).includes('untrusted detail'));
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) =>
+    entry.operationId === `${runId}:CHECKS_PASSED->REVIEW_FAILED`).length, 1);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) =>
+    entry.operationId === `${runId}:REVIEW_FAILED->CORRECTING`).length, 1);
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+test('bindIndependentReview: a rejection for a subject that moves before attribution stays CHECKS_PASSED', () => {
+  const subject = reviewSubject();
+  const moved = reviewSubject({ subjectSha256: 'c'.repeat(64), diffBytes: subject.diffBytes + 1 });
+  const gate = reviewGate(subject, {
+    ok: false, state: 'BLOCKED',
+    problems: [{ rule: 'ENGOS-REVIEW-REJECTED', detail: 'codex returned REJECT' }],
+    reviewerCompleteness: {
+      subjectSha256: subject.subjectSha256, complete: true,
+      pathCoverage: { total: 2, coveredByEveryRequiredReviewer: subject.subjectPaths,
+        notCoveredByEveryRequiredReviewer: [] },
+      rows: [
+        { reviewer: 'codex', required: 'REQUIRED', executed: 'EXECUTED', disposition: 'REJECT',
+          reviewId: 'REV-codex-moving', missingPaths: [], stalePaths: [] },
+        { reviewer: 'grok', required: 'REQUIRED', executed: 'EXECUTED', disposition: 'APPROVE',
+          reviewId: 'REV-grok-moving', missingPaths: [], stalePaths: [] },
+      ],
+    },
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), `
+    try { R.bindIndependentReview(runId); console.log(JSON.stringify({ threw: false })); }
+    catch (e) { console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus })); }
+  `, engineeringOsMock([
+    { status: 0, body: subject }, { status: 3, body: gate }, { status: 0, body: moved },
+  ]));
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(JSON.parse(r.stdout.trim().split('\n').pop()),
+    { threw: true, code: 'REVIEW-SUBJECT-MOVED', httpStatus: 409 });
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  assert.strictEqual(saved.state, 'CHECKS_PASSED');
+  assert.strictEqual(saved.reviewFailure, undefined);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-run').length, 0);
+  fs.rmSync(TMP, { recursive: true, force: true });
 });
 
 test('bindIndependentReview: a subject moving after gate evaluation fails closed with no evidence persisted', () => {
   const subject = reviewSubject();
   const moved = reviewSubject({ subjectSha256: 'b'.repeat(64), diffBytes: 4097 });
-  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', {
-    ...REVIEW_RUN, checks: PASSED_CHECKS,
-  }, `
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), `
     try { R.bindIndependentReview(runId); console.log(JSON.stringify({ threw: false })); }
     catch (e) { console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus })); }
   `, engineeringOsMock([
@@ -1270,7 +2433,7 @@ test('bindIndependentReview: a subject moving after gate evaluation fails closed
   assert.strictEqual(saved.state, 'CHECKS_PASSED');
   assert.strictEqual(saved.subject, undefined);
   assert.strictEqual(saved.reviewGate, undefined);
-  assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 0);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-run').length, 0);
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
@@ -1279,9 +2442,9 @@ test('bindIndependentReview: gate success without complete exact path coverage i
   const gate = reviewGate(subject);
   gate.reviewerCompleteness.complete = false;
   gate.reviewerCompleteness.pathCoverage.notCoveredByEveryRequiredReviewer = [subject.subjectPaths[1]];
-  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', {
-    ...REVIEW_RUN, checks: PASSED_CHECKS,
-  }, `
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), `
     try { R.bindIndependentReview(runId); console.log(JSON.stringify({ threw: false })); }
     catch (e) { console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus })); }
   `, engineeringOsMock([{ status: 0, body: subject }, { status: 0, body: gate }]));
@@ -1291,21 +2454,24 @@ test('bindIndependentReview: gate success without complete exact path coverage i
   const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
   assert.strictEqual(saved.state, 'CHECKS_PASSED');
   assert.strictEqual(saved.subject, undefined);
-  assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 0);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-run').length, 0);
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
 test('bindIndependentReview: moved or forged run worktree metadata is refused before review authority', () => {
+  const primaryBranch = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+    { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
   const invalidRuns = [
     { ...REVIEW_RUN, baseCommit: null },
     { ...REVIEW_RUN, worktree: { ...REVIEW_RUN.worktree, baseCommit: '0'.repeat(40) } },
     { ...REVIEW_RUN, worktree: { ...REVIEW_RUN.worktree, branch: 'aegis/forged-branch' } },
     { ...REVIEW_RUN, worktree: { ...REVIEW_RUN.worktree, path: os.tmpdir() } },
+    { ...REVIEW_RUN, worktree: { path: ROOT, branch: primaryBranch, baseCommit: REVIEW_HEAD } },
   ];
   for (const invalid of invalidRuns) {
-    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', {
-      ...invalid, checks: PASSED_CHECKS,
-    }, `
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+      ...invalid, checks: passedChecksFor(seedRunId),
+    }), `
       try { R.bindIndependentReview(runId); console.log(JSON.stringify({ threw: false })); }
       catch (e) { console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus })); }
     `, engineeringOsMock([]));
@@ -1317,7 +2483,7 @@ test('bindIndependentReview: moved or forged run worktree metadata is refused be
     const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
     assert.strictEqual(saved.state, 'CHECKS_PASSED');
     assert.strictEqual(saved.subject, undefined);
-    assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 0);
+    assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-run').length, 0);
     fs.rmSync(TMP, { recursive: true, force: true });
   }
 });
@@ -1331,7 +2497,7 @@ test('bindIndependentReview: owns the per-run claim and accepts no browser autho
   assert.doesNotMatch(body, /options|reviewer|model|executable|subjectSha/);
 });
 
-test('runChecks: exported claim-safe authority runs only packet-declared checks and returns a minimized result', () => {
+hostContainmentTest('runChecks: exported claim-safe authority runs only packet-declared checks and returns a minimized result', () => {
   const packet = writeCanonicalCheckPacket(['node -e "process.exit(0)"']);
   const { r, runsDir, ledger, runId, TMP } = withSeededRun('BUILT',
     { ...REVIEW_RUN, packet: packet.relative }, `
@@ -1359,7 +2525,529 @@ test('runChecks: exported claim-safe authority runs only packet-declared checks 
   }
 });
 
-test('runChecks: failed declared checks persist only bounded redacted private evidence and return no raw output', () => {
+hostContainmentTest('runChecks: executes against a disposable snapshot so transient mutation cannot touch the governed subject', () => {
+  const before = crypto.createHash('sha256').update(fs.readFileSync(CLI)).digest('hex');
+  const attack = [
+    `const fs = require('fs');`,
+    `const target = ${JSON.stringify(CLI)};`,
+    `try {`,
+    `  const original = fs.readFileSync(target);`,
+    `  fs.writeFileSync(target, Buffer.concat([original, Buffer.from('\\n// transient check mutation\\n')]));`,
+    `  fs.writeFileSync(target, original);`,
+    `  process.exit(29);`,
+    `} catch (error) {`,
+    `  process.exit(error && (error.code === 'EPERM' || error.code === 'EACCES') ? 0 : 31);`,
+    `}`,
+  ].join(' ');
+  const packet = writeCanonicalCheckPacket([`node -e ${JSON.stringify(attack)}`]);
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('BUILT',
+    { ...REVIEW_RUN, packet: packet.relative }, `
+      const out = R.runChecks(runId);
+      console.log(JSON.stringify(out));
+    `);
+  try {
+    assert.strictEqual(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_PASSED');
+    assert.deepStrictEqual(out.checks, { passed: 1, total: 1 });
+    assert.strictEqual(crypto.createHash('sha256').update(fs.readFileSync(CLI)).digest('hex'), before,
+      'a packet check changed and restored the governed subject outside its disposable boundary');
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.deepStrictEqual(saved.checks.executionBoundary,
+      { policy: 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1', state: 'PASSED' });
+    assert.strictEqual(saved.checks.results[0].status, 'EXECUTED');
+    assert.strictEqual(saved.checks.results[0].exit, 0);
+    assert.strictEqual(receiptFromLedger(ledger, saved.checks).outcome, 'PASS');
+    assert.strictEqual(ledgerEntriesFor(ledger, runId)
+      .filter((e) => e.operationId === `${runId}:BUILT->CHECKS_PASSED`).length, 1);
+  } finally {
+    fs.rmSync(TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: an untracked canonical regular subject is copied with bytes and executable mode', () => {
+  const name = `.aegis-untracked-subject-${process.pid}-${crypto.randomBytes(4).toString('hex')}.cjs`;
+  const relative = path.posix.join('builder-control', 'test', name);
+  const absolute = path.join(REVIEW_WORKTREE.path, ...relative.split('/'));
+  const body = '#!/usr/bin/env node\nprocess.stdout.write("supplemental-subject-ok\\n");\n';
+  fs.writeFileSync(absolute, body, { mode: 0o755 });
+  fs.chmodSync(absolute, 0o755);
+  const check = [
+    `const fs = require('fs');`,
+    `const p = ${JSON.stringify(relative)};`,
+    `const ok = fs.readFileSync(p, 'utf8') === ${JSON.stringify(body)} &&`,
+    `  (fs.statSync(p).mode & 0o777) === 0o755;`,
+    `process.exit(ok ? 0 : 41);`,
+  ].join(' ');
+  const packet = writeCanonicalCheckPacket([`node -e ${JSON.stringify(check)}`], {
+    filesAllowed: [relative],
+  });
+  const worktreePacket = path.join(REVIEW_WORKTREE.path, ...packet.relative.split('/'));
+  fs.mkdirSync(path.dirname(worktreePacket), { recursive: true });
+  fs.writeFileSync(worktreePacket, fs.readFileSync(packet.absolute), { flag: 'wx', mode: 0o600 });
+  const fixture = withSeededRun('BUILT', { ...REVIEW_RUN, packet: packet.relative }, `
+    const out = R.runChecks(runId);
+    console.log(JSON.stringify(out));
+  `);
+  try {
+    assert.strictEqual(fixture.r.status, 0, fixture.r.stderr);
+    const out = JSON.parse(fixture.r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_PASSED');
+    assert.deepStrictEqual(out.checks, { passed: 1, total: 1 });
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.deepStrictEqual(saved.checks.executionBoundary,
+      { policy: 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1', state: 'PASSED' });
+    assert.strictEqual(saved.checks.results[0].status, 'EXECUTED');
+    assert.strictEqual(saved.checks.results[0].exit, 0);
+  } finally {
+    fs.rmSync(absolute, { force: true });
+    fs.rmSync(worktreePacket, { force: true });
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: an untracked canonical symlink is refused before snapshot execution', () => {
+  const name = `.aegis-untracked-subject-link-${process.pid}-${crypto.randomBytes(4).toString('hex')}.cjs`;
+  const relative = path.posix.join('builder-control', 'test', name);
+  const absolute = path.join(REVIEW_WORKTREE.path, ...relative.split('/'));
+  fs.symlinkSync('aegis-run.test.cjs', absolute);
+  const subject = reviewSubject({ subjectPaths: [relative], diffBytes: 64 });
+  const packet = writeCanonicalCheckPacket(['node -e "process.exit(0)"']);
+  const fixture = withSeededRun('BUILT', { ...REVIEW_RUN, packet: packet.relative }, `
+    const out = R.runChecks(runId);
+    console.log(JSON.stringify(out));
+  `, engineeringSubjectSequenceMock([subject], packet.relative));
+  try {
+    assert.strictEqual(fixture.r.status, 0, fixture.r.stderr);
+    const out = JSON.parse(fixture.r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_FAILED');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.checks.executionBoundary.state, 'FAILED');
+    assert.match(saved.checks.executionBoundary.reason, /unavailable or unsafe|regular file/);
+    assert.strictEqual(saved.checks.results[0].status, 'REFUSED');
+    assert.strictEqual(saved.checks.results[0].exit, null);
+  } finally {
+    fs.rmSync(absolute, { force: true });
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: sandbox preflight refusal marks the execution boundary FAILED with a bounded reason', () => {
+  const packet = writeCanonicalCheckPacket(['node -e "process.exit(0)"']);
+  const fixture = withSeededRun('BUILT', { ...REVIEW_RUN, packet: packet.relative }, `
+    const out = R.runChecks(runId);
+    console.log(JSON.stringify(out));
+  `, `
+    const forcedContainment = require(${JSON.stringify(path.join(ROOT, 'builder-control', 'sandbox-containment.cjs'))});
+    forcedContainment.assertSandboxOperational = function() { throw new Error('forced sandbox preflight refusal'); };
+  `);
+  try {
+    assert.strictEqual(fixture.r.status, 0, fixture.r.stderr);
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'CHECKS_FAILED');
+    assert.strictEqual(saved.checks.executionBoundary.state, 'FAILED');
+    assert.match(saved.checks.executionBoundary.reason, /sandbox preflight.*forced sandbox preflight refusal/);
+    assert.ok(Buffer.byteLength(saved.checks.executionBoundary.reason, 'utf8') <= 16 * 1024);
+  } finally {
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: unsupported Linux snapshot platform is refused explicitly before packet execution', () => {
+  const marker = path.join(os.tmpdir(), `.aegis-linux-refusal-${crypto.randomBytes(6).toString('hex')}`);
+  const command = `node -e ${JSON.stringify(
+    `require('fs').writeFileSync(${JSON.stringify(marker)}, 'executed')`)}`;
+  const packet = writeCanonicalCheckPacket([command]);
+  const fixture = withSeededRun('BUILT', { ...REVIEW_RUN, packet: packet.relative }, `
+    const out = R.runChecks(runId);
+    console.log(JSON.stringify(out));
+  `, `Object.defineProperty(process, 'platform', { value: 'linux' });`);
+  try {
+    assert.strictEqual(fixture.r.status, 0, fixture.r.stderr);
+    const out = JSON.parse(fixture.r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_FAILED');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.checks.executionBoundary.state, 'FAILED');
+    assert.match(saved.checks.executionBoundary.reason,
+      /sandbox preflight.*immutable check snapshots are unavailable on linux; V1 supports darwin only/);
+    assert.strictEqual(saved.checks.results[0].status, 'REFUSED');
+    assert.strictEqual(fs.existsSync(marker), false, 'unsupported-platform packet command was executed');
+  } finally {
+    fs.rmSync(marker, { force: true });
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: a stalled snapshot apply is watchdog-terminated and fails the boundary closed', () => {
+  const marker = path.join(os.tmpdir(), `.aegis-stalled-apply-marker-${crypto.randomBytes(6).toString('hex')}`);
+  const secret = 'AEGIS_STALLED_APPLY_BEARER_SENTINEL';
+  const command = `node -e ${JSON.stringify(
+    `require('fs').writeFileSync(${JSON.stringify(marker)}, 'executed')`)}`;
+  const packet = writeCanonicalCheckPacket([command]);
+  const fixture = withSeededRun('BUILT', { ...REVIEW_RUN, packet: packet.relative }, `
+    const out = R.runChecks(runId);
+    console.log(JSON.stringify(out));
+  `, `
+    const stalledChildProcess = require('child_process');
+    const originalStalledSpawnSync = stalledChildProcess.spawnSync;
+    let interceptedApply = false;
+    stalledChildProcess.spawnSync = function(command, args, options) {
+      if (command === 'git' && Array.isArray(args) && args.includes('apply')) {
+        interceptedApply = true;
+        if (!options || options.timeout !== 60000 || options.killSignal !== 'SIGKILL') {
+          throw new Error('snapshot setup watchdog was not configured deterministically');
+        }
+        const error = new Error('spawnSync git ETIMEDOUT Authorization: Bearer ' +
+          ${JSON.stringify(secret)}.repeat(1200));
+        error.code = 'ETIMEDOUT';
+        return { status: null, signal: 'SIGKILL', stdout: '', stderr: '', error };
+      }
+      return originalStalledSpawnSync.apply(this, arguments);
+    };
+    process.on('exit', () => {
+      if (!interceptedApply) {
+        console.error('snapshot apply stall was not exercised');
+        process.exitCode = 98;
+      }
+    });
+  `);
+  try {
+    assert.strictEqual(fixture.r.status, 0, fixture.r.stderr);
+    const out = JSON.parse(fixture.r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_FAILED');
+    assert.deepStrictEqual(out.checks, { passed: 0, total: 1 });
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.checks.executionBoundary.state, 'FAILED');
+    assert.match(saved.checks.executionBoundary.reason,
+      /snapshot establishment.*timed out after 60000 ms.*SIGKILL termination requested/);
+    assert.ok(!saved.checks.executionBoundary.reason.includes(secret),
+      'bounded boundary reason retained the simulated credential');
+    assert.ok(Buffer.byteLength(saved.checks.executionBoundary.reason, 'utf8') <= 16 * 1024,
+      'snapshot setup timeout reason exceeded its evidence bound');
+    assert.strictEqual(saved.checks.results[0].status, 'REFUSED');
+    assert.strictEqual(saved.checks.results[0].exit, 125);
+    assert.strictEqual(fs.existsSync(marker), false, 'declared check ran after snapshot setup timed out');
+  } finally {
+    fs.rmSync(marker, { force: true });
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: a signal-resistant descendant is drained before cleanup and blocks the next check', () => {
+  const portReservation = reserveLoopbackTestPort();
+  const testPort = portReservation.port;
+  const descendant = [
+    `const fs = require('fs'); const net = require('net');`,
+    `process.on('SIGTERM', () => {});`,
+    `setInterval(() => { if (!fs.existsSync(process.cwd())) console.log('CLEANUP_EARLY'); }, 20);`,
+    `const server = net.createServer();`,
+    `server.listen(${testPort}, '127.0.0.1', () => console.log('DESCENDANT_PID:' + process.pid));`,
+  ].join(' ');
+  const first = `node -e ${JSON.stringify(descendant)} & wait`;
+  const packet = writeCanonicalCheckPacket([first, 'node -e "process.exit(0)"']);
+  const before = new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('aegis-check-boundary-')));
+  const previousTimeout = process.env.AEGIS_TEST_CHECK_TIMEOUT_MS;
+  const previousTestPort = process.env.AEGIS_TEST_CHECK_PORT;
+  process.env.AEGIS_TEST_CHECK_TIMEOUT_MS = '250';
+  process.env.AEGIS_TEST_CHECK_PORT = String(testPort);
+  portReservation.release();
+  const fixture = withSeededRun('BUILT', { ...REVIEW_RUN, packet: packet.relative }, `
+    const out = R.runChecks(runId);
+    console.log(JSON.stringify(out));
+  `);
+  if (previousTimeout === undefined) delete process.env.AEGIS_TEST_CHECK_TIMEOUT_MS;
+  else process.env.AEGIS_TEST_CHECK_TIMEOUT_MS = previousTimeout;
+  if (previousTestPort === undefined) delete process.env.AEGIS_TEST_CHECK_PORT;
+  else process.env.AEGIS_TEST_CHECK_PORT = previousTestPort;
+  try {
+    assert.strictEqual(fixture.r.status, 0, fixture.r.stderr);
+    const out = JSON.parse(fixture.r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_FAILED');
+    assert.deepStrictEqual(out.checks, { passed: 0, total: 2 });
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.checks.executionBoundary.state, 'FAILED');
+    assert.match(saved.checks.executionBoundary.reason, /contained check exceeded 250 ms/);
+    assert.strictEqual(saved.checks.results[0].status, 'REFUSED');
+    assert.strictEqual(saved.checks.results[0].exit, 125);
+    assert.strictEqual(saved.checks.results[1].status, 'SKIPPED');
+    assert.strictEqual(saved.checks.results[1].exit, null);
+    const firstOutput = saved.checks.results[0].executionEvidence.stdoutTail;
+    const pidMatch = firstOutput.match(/DESCENDANT_PID:(\d+)/);
+    assert.ok(pidMatch, `descendant identity was not captured: ${firstOutput}`);
+    assert.ok(!firstOutput.includes('CLEANUP_EARLY'), 'snapshot cleanup ran before descendant drainage');
+    const descendantPid = Number(pidMatch[1]);
+    assert.throws(() => process.kill(descendantPid, 0), (error) => error && error.code === 'ESRCH',
+      'signal-resistant descendant remained alive after group drainage');
+    const boundariesAfter = fs.readdirSync(os.tmpdir()).filter((name) =>
+      name.startsWith('aegis-check-boundary-') && !before.has(name));
+    assert.deepStrictEqual(boundariesAfter, [], 'drained check boundary was not cleaned up');
+    const portProbe = spawnSync(process.execPath, ['-e', [
+      `const net = require('net'); const server = net.createServer();`,
+      `server.once('error', () => process.exit(1));`,
+      `server.listen(${testPort}, '127.0.0.1', () => server.close(() => process.exit(0)));`,
+    ].join(' ')], { encoding: 'utf8', timeout: 2000 });
+    assert.strictEqual(portProbe.status, 0, `descendant port was not reusable: ${portProbe.stderr}`);
+  } finally {
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: trusted cleanup refusal marks the execution boundary FAILED after a contained check', () => {
+  const packet = writeCanonicalCheckPacket(['node -e "process.exit(0)"']);
+  const before = new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('aegis-check-boundary-')));
+  const fixture = withSeededRun('BUILT', { ...REVIEW_RUN, packet: packet.relative }, `
+    const out = R.runChecks(runId);
+    console.log(JSON.stringify(out));
+  `, `
+    const forcedFs = require('fs');
+    const originalRmSync = forcedFs.rmSync;
+    forcedFs.rmSync = function(target, options) {
+      if (String(target).includes('aegis-check-boundary-')) throw new Error('forced trusted cleanup refusal');
+      return originalRmSync.apply(this, arguments);
+    };
+  `);
+  try {
+    assert.strictEqual(fixture.r.status, 0, fixture.r.stderr);
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'CHECKS_FAILED');
+    assert.strictEqual(saved.checks.executionBoundary.state, 'FAILED');
+    assert.match(saved.checks.executionBoundary.reason, /trusted cleanup.*forced trusted cleanup refusal/);
+    assert.ok(Buffer.byteLength(saved.checks.executionBoundary.reason, 'utf8') <= 16 * 1024);
+  } finally {
+    for (const name of fs.readdirSync(os.tmpdir())) {
+      if (name.startsWith('aegis-check-boundary-') && !before.has(name)) {
+        fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+      }
+    }
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: deny-default boundary blocks writes through an external hard-link alias', () => {
+  const aliasDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-check-hardlink-'));
+  const alias = path.join(aliasDir, 'governed-alias.cjs');
+  fs.linkSync(CLI, alias);
+  const before = crypto.createHash('sha256').update(fs.readFileSync(CLI)).digest('hex');
+  const attack = [
+    `const fs = require('fs');`,
+    `const target = ${JSON.stringify(alias)};`,
+    `try {`,
+    `  const original = fs.readFileSync(target);`,
+    `  fs.writeFileSync(target, Buffer.concat([original, Buffer.from('\\n// hard-link mutation\\n')]));`,
+    `  fs.writeFileSync(target, original);`,
+    `  process.exit(29);`,
+    `} catch (error) {`,
+    `  process.exit(error && (error.code === 'EPERM' || error.code === 'EACCES') ? 0 : 31);`,
+    `}`,
+  ].join(' ');
+  const packet = writeCanonicalCheckPacket([`node -e ${JSON.stringify(attack)}`]);
+  const { r, runsDir, runId, TMP } = withSeededRun('BUILT',
+    { ...REVIEW_RUN, packet: packet.relative }, `
+      const out = R.runChecks(runId);
+      console.log(JSON.stringify(out));
+    `);
+  try {
+    assert.strictEqual(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_PASSED');
+    assert.deepStrictEqual(out.checks, { passed: 1, total: 1 });
+    assert.strictEqual(crypto.createHash('sha256').update(fs.readFileSync(CLI)).digest('hex'), before,
+      'a check changed the governed subject through an external hard-link alias');
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(saved.checks.executionBoundary.state, 'PASSED');
+  } finally {
+    fs.rmSync(aliasDir, { recursive: true, force: true });
+    fs.rmSync(TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: a check cannot relocate the disposable boundary away from cleanup', () => {
+  const before = new Set(fs.readdirSync(os.tmpdir()).filter((name) =>
+    name.startsWith('aegis-check-boundary-') || name.startsWith('aegis-check-relocated-')));
+  const attack = [
+    `const fs = require('fs'); const path = require('path');`,
+    `const scratch = String(process.env.TMPDIR || '').replace(/\\/$/, '');`,
+    `const boundary = path.dirname(scratch);`,
+    `const moved = path.join(path.dirname(boundary), 'aegis-check-relocated-' + process.pid);`,
+    `try { fs.renameSync(boundary, moved); process.exit(29); }`,
+    `catch (error) { process.exit(error && (error.code === 'EPERM' || error.code === 'EACCES') ? 0 : 31); }`,
+  ].join(' ');
+  const packet = writeCanonicalCheckPacket([`node -e ${JSON.stringify(attack)}`]);
+  const { r, runId, TMP } = withSeededRun('BUILT',
+    { ...REVIEW_RUN, packet: packet.relative }, `
+      const out = R.runChecks(runId);
+      console.log(JSON.stringify(out));
+    `);
+  try {
+    assert.strictEqual(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_PASSED');
+    const after = fs.readdirSync(os.tmpdir()).filter((name) =>
+      (name.startsWith('aegis-check-boundary-') || name.startsWith('aegis-check-relocated-')) && !before.has(name));
+    assert.deepStrictEqual(after, [], `disposable boundary escaped cleanup: ${after.join(', ')}`);
+  } finally {
+    fs.rmSync(TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: a check cannot remove permissions from disposable boundary anchors', () => {
+  const before = new Set(fs.readdirSync(os.tmpdir()).filter((name) =>
+    name.startsWith('aegis-check-boundary-')));
+  const attack = [
+    `const fs = require('fs'); const path = require('path');`,
+    `const scratch = String(process.env.TMPDIR || '').replace(/\\/$/, '');`,
+    `const boundary = path.dirname(scratch);`,
+    `const sealed = path.join(scratch, 'sealed');`,
+    `fs.mkdirSync(sealed); fs.chmodSync(sealed, 0);`,
+    `try { fs.chmodSync(boundary, 0); process.exit(29); }`,
+    `catch (error) { process.exit(error && (error.code === 'EPERM' || error.code === 'EACCES') ? 0 : 31); }`,
+  ].join(' ');
+  const packet = writeCanonicalCheckPacket([`node -e ${JSON.stringify(attack)}`]);
+  const { r, runId, TMP } = withSeededRun('BUILT',
+    { ...REVIEW_RUN, packet: packet.relative }, `
+      const out = R.runChecks(runId);
+      console.log(JSON.stringify(out));
+    `);
+  try {
+    assert.strictEqual(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_PASSED');
+    const after = fs.readdirSync(os.tmpdir()).filter((name) =>
+      name.startsWith('aegis-check-boundary-') && !before.has(name));
+    assert.deepStrictEqual(after, [], `permission attack left a disposable boundary: ${after.join(', ')}`);
+  } finally {
+    fs.rmSync(TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: post-check coordinate failure retains executed receipts and transitions to CHECKS_FAILED', () => {
+  const marker = `.aegis-coordinate-test-${crypto.randomBytes(6).toString('hex')}`;
+  const commandBody = [
+    `require('fs').writeFileSync(${JSON.stringify(marker)}, 'started');`,
+    `setTimeout(() => process.exit(0), 750);`,
+  ].join(' ');
+  const packet = writeCanonicalCheckPacket([`node -e ${JSON.stringify(commandBody)}`]);
+  const helperBody = [
+    `const fs = require('fs');`,
+    `const path = require('path');`,
+    `const base = fs.realpathSync(require('os').tmpdir());`,
+    `const packet = ${JSON.stringify(packet.absolute)};`,
+    `const marker = ${JSON.stringify(marker)};`,
+    `const started = Date.now();`,
+    `const timer = setInterval(() => {`,
+    `  for (const name of fs.readdirSync(base)) {`,
+    `    if (!name.startsWith('aegis-check-boundary-')) continue;`,
+    `    if (!fs.existsSync(path.join(base, name, 'worktree', marker))) continue;`,
+    `    try { fs.unlinkSync(packet); } catch (error) { if (error.code !== 'ENOENT') throw error; }`,
+    `    clearInterval(timer);`,
+    `    process.exit(0);`,
+    `  }`,
+    `  if (Date.now() - started > 10000) { clearInterval(timer); process.exit(72); }`,
+    `}, 10);`,
+  ].join(' ');
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('BUILT',
+    { ...REVIEW_RUN, packet: packet.relative }, `
+      require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(helperBody)}],
+        { cwd: ${JSON.stringify(ROOT)}, stdio: 'ignore' });
+      const out = R.runChecks(runId);
+      console.log(JSON.stringify(out));
+    `);
+  try {
+    assert.strictEqual(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_FAILED');
+    assert.deepStrictEqual(out.checks, { passed: 1, total: 1 });
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'CHECKS_FAILED');
+    assert.strictEqual(saved.checks.results.length, 1);
+    assert.strictEqual(saved.checks.results[0].status, 'EXECUTED');
+    assert.strictEqual(saved.checks.results[0].exit, 0);
+    assert.strictEqual(saved.checks.integrity.state, 'FAILED');
+    assert.ok(saved.checks.integrity.gaps.some((gap) =>
+      gap.includes('post-check packet coordinate unavailable')),
+    'the unavailable post-check packet coordinate was not retained');
+    assert.ok(saved.checks.integrity.gaps.includes('packet changed during checks'));
+    assert.strictEqual(receiptFromLedger(ledger, saved.checks).outcome, 'FAIL');
+    assert.strictEqual(ledgerEntriesFor(ledger, runId)
+      .filter((e) => e.operationId === `${runId}:BUILT->CHECKS_FAILED`).length, 1);
+  } finally {
+    fs.rmSync(TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: packet digest, parse and snapshot use one retained byte generation under interleaving mutation', () => {
+  const marker = `packet-generation-${crypto.randomBytes(6).toString('hex')}`;
+  let checkCommand;
+  const packet = writeCanonicalCheckPacket((packetRelative) => {
+    const checkBody = [
+      `const fs = require('fs');`,
+      `const found = JSON.parse(fs.readFileSync(${JSON.stringify(packetRelative)}, 'utf8'));`,
+      `console.log('PACKET_GENERATION:' + found.coordinateGeneration);`,
+      `process.exit(found.coordinateMarker === ${JSON.stringify(marker)} &&`,
+      `  found.coordinateGeneration === 'ORIGINAL' ? 0 : 73);`,
+    ].join(' ');
+    checkCommand = `node -e ${JSON.stringify(checkBody)}`;
+    return [checkCommand];
+  }, {
+    coordinateMarker: marker,
+    coordinateGeneration: 'ORIGINAL',
+  });
+  const changed = JSON.parse(fs.readFileSync(packet.absolute, 'utf8'));
+  changed.coordinateGeneration = 'CHANGED';
+  const changedBytes = JSON.stringify(changed, null, 2) + '\n';
+  const fixture = withSeededRun('BUILT', { ...REVIEW_RUN, packet: packet.relative }, `
+    const out = R.runChecks(runId);
+    console.log(JSON.stringify(out));
+  `, `
+    const interleavingFs = require('fs');
+    const interleavingChildProcess = require('child_process');
+    const originalInterleavingSpawnSync = interleavingChildProcess.spawnSync;
+    let packetReplaced = false;
+    interleavingChildProcess.spawnSync = function(command, args, options) {
+      const result = originalInterleavingSpawnSync.apply(this, arguments);
+      if (!packetReplaced && command === process.execPath && Array.isArray(args) &&
+          typeof args[0] === 'string' && args[0].endsWith('/builder-control/engineering-os.cjs') &&
+          args.includes('--subject')) {
+        interleavingFs.writeFileSync(${JSON.stringify(packet.absolute)}, ${JSON.stringify(changedBytes)});
+        packetReplaced = true;
+      }
+      return result;
+    };
+    process.on('exit', () => {
+      if (!packetReplaced) { console.error('packet interleaving was not exercised'); process.exitCode = 96; }
+    });
+  `);
+  try {
+    assert.strictEqual(fixture.r.status, 0, fixture.r.stderr);
+    const out = JSON.parse(fixture.r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_FAILED', 'post-check packet mutation must fail integrity');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.checks.results[0].status, 'EXECUTED');
+    assert.strictEqual(saved.checks.results[0].exit, 0,
+      `snapshot re-opened the changed packet instead of using the retained accepted bytes: ${saved.checks.results[0].executionEvidence.stdoutTail}`);
+    assert.ok(saved.checks.integrity.gaps.includes('packet changed during checks'));
+    const canonicalReceipt = receiptFromLedger(fixture.ledger, saved.checks);
+    assert.strictEqual(canonicalReceipt.packet.sha256, packet.initialSha256);
+    assert.deepStrictEqual(canonicalReceipt.results.map((entry) => entry.cmd), [checkCommand]);
+  } finally {
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('runChecks: failed declared checks persist only bounded redacted private evidence and return no raw output', () => {
   const bearer = 'AEGIS_BEARER_SENTINEL_1234567890abcdef';
   const password = 'AEGIS_PASSWORD_SENTINEL';
   const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZWdpcy1zZW50aW5lbCJ9.signatureSentinel123';
@@ -1390,6 +3078,9 @@ test('runChecks: failed declared checks persist only bounded redacted private ev
     }
 
     const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.deepStrictEqual(saved.checks.executionBoundary,
+      { policy: 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1', state: 'PASSED' },
+    'an ordinary executed nonzero test must not be mislabeled as a containment failure');
     const failedResult = saved.checks.results[0];
     assert.strictEqual(failedResult.exit, 7);
     assert.ok(failedResult.failureEvidence.stdoutTail.includes(diagnostic),
@@ -1410,14 +3101,21 @@ test('runChecks: failed declared checks persist only bounded redacted private ev
     assert.strictEqual(failedResult.failureEvidence.stderrTruncated, false,
       'redaction alone must not be mislabeled as diagnostic truncation');
     assert.strictEqual(Object.prototype.hasOwnProperty.call(saved.checks.results[1], 'failureEvidence'), false,
-      'passing checks must not retain output evidence');
+      'passing checks must not be mislabeled as failures');
+    assert.ok(saved.checks.results[1].executionEvidence,
+      'passing checks must retain bounded redacted execution evidence');
+    for (const tail of [saved.checks.results[1].executionEvidence.stdoutTail,
+      saved.checks.results[1].executionEvidence.stderrTail]) {
+      assert.ok(Buffer.byteLength(tail, 'utf8') <= 16 * 1024, 'passing evidence exceeded its byte bound');
+      assert.ok(tail.split('\n').length <= 80, 'passing evidence exceeded its line bound');
+    }
   } finally {
     fs.rmSync(TMP, { recursive: true, force: true });
     fs.rmSync(packet.absolute, { force: true });
   }
 });
 
-test('runChecks: executes every declared non-recursive check including aegis-run paths', () => {
+hostContainmentTest('runChecks: executes every declared non-recursive check including aegis-run paths', () => {
   const declared = [
     'node -e "process.exit(0)" builder-control/test/aegis-run.test.cjs',
     'node --check builder-control/aegis-run.cjs',
@@ -1444,7 +3142,7 @@ test('runChecks: executes every declared non-recursive check including aegis-run
   }
 });
 
-test('runChecks: external packet is refused before checks with no run or ledger mutation', () => {
+hostContainmentTest('runChecks: external packet is refused before checks with no run or ledger mutation', () => {
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-check-external-'));
   const packet = path.join(tmp, 'packet.json');
   const marker = path.join(tmp, 'spawned');
@@ -1473,12 +3171,14 @@ test('runChecks: external packet is refused before checks with no run or ledger 
   }
 });
 
-test('runChecks: forged or moved worktree authority is refused before checks with no mutation', () => {
+hostContainmentTest('runChecks: forged or moved worktree authority is refused before checks with no mutation', () => {
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-check-forged-'));
   const marker = path.join(tmp, 'spawned');
   const packet = writeCanonicalCheckPacket([
     `node -e "require('fs').writeFileSync(${JSON.stringify(marker)}, 'bad')"`,
   ]);
+  const primaryBranch = spawnSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+    { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
   const invalidRuns = [
     { ...REVIEW_RUN, packet: packet.relative, baseCommit: null },
     { ...REVIEW_RUN, packet: packet.relative,
@@ -1487,6 +3187,8 @@ test('runChecks: forged or moved worktree authority is refused before checks wit
       worktree: { ...REVIEW_RUN.worktree, branch: 'aegis/forged-branch' } },
     { ...REVIEW_RUN, packet: packet.relative,
       worktree: { ...REVIEW_RUN.worktree, path: os.tmpdir() } },
+    { ...REVIEW_RUN, packet: packet.relative,
+      worktree: { path: ROOT, branch: primaryBranch, baseCommit: REVIEW_HEAD } },
   ];
   try {
     for (const invalid of invalidRuns) {
@@ -1515,13 +3217,34 @@ test('runChecks: forged or moved worktree authority is refused before checks wit
   }
 });
 
-test('runChecks: canonical switchboard checks generate state.js in a clean isolated worktree and reach 4/4', () => {
+hostOrchestrationTest('runChecks: canonical switchboard checks generate state.js in a clean isolated worktree and reach 4/4', () => {
   const packet = 'builder-control/packets/PKT-20260825-SWITCHBOARD-FOUNDATION.json';
   const { r, runId, runsDir, ledger, TMP } = withIntakeRecordedRun(`
+    const fs = require('fs');
+    const path = require('path');
+    const { spawnSync } = require('child_process');
     run.packet = ${JSON.stringify(packet)};
     R.saveRun(run);
     R.prepareRun(run.runId);
     const built = R.loadRun(run.runId);
+    // prepareRun correctly starts from the recorded base commit. This fixture
+    // must then reproduce the exact current release subject in that governed
+    // worktree before asking the packet to test newly added subject files.
+    const exactPatch = spawnSync('git', ['diff', 'HEAD', '--binary', '--no-ext-diff', '--'], {
+      cwd: ${JSON.stringify(ROOT)}, encoding: null, maxBuffer: 64 * 1024 * 1024,
+    });
+    if (exactPatch.error || exactPatch.status !== 0) {
+      throw new Error('could not capture exact fixture subject: ' +
+        (exactPatch.error ? exactPatch.error.message : String(exactPatch.stderr || exactPatch.stdout)));
+    }
+    if (exactPatch.stdout.length) {
+      const applied = spawnSync('git', ['apply', '--index', '--binary', '--whitespace=nowarn', '-'], {
+        cwd: built.worktree.path, input: exactPatch.stdout, encoding: null,
+      });
+      if (applied.status !== 0) throw new Error('could not apply exact fixture subject: ' + String(applied.stderr));
+    }
+    fs.appendFileSync(path.join(built.worktree.path, 'builder-control', 'dashboard', 'index.html'),
+      '\\n<!-- canonical switchboard check subject -->\\n');
     R.transition(built, 'BUILDING', 'fixture builder started');
     R.transition(built, 'BUILT', 'fixture builder exited 0');
     const out = R.runChecks(run.runId);
@@ -1530,17 +3253,19 @@ test('runChecks: canonical switchboard checks generate state.js in a clean isola
   try {
     assert.strictEqual(r.status, 0, `canonical checks failed: ${r.stderr || r.stdout}`);
     const out = JSON.parse(r.stdout.trim().split('\n').pop());
-    assert.strictEqual(out.state, 'CHECKS_PASSED');
-    assert.deepStrictEqual(out.checks, { passed: 4, total: 4 });
     const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(out.state, 'CHECKS_PASSED', JSON.stringify(saved.checks));
+    assert.deepStrictEqual(out.checks, { passed: 4, total: 4 });
     assert.deepStrictEqual(saved.checks.precondition, {
       state: 'PASSED',
       generator: 'builder-control/aegis-state.cjs',
       output: 'builder-control/dashboard/state.js',
     });
-    const generated = path.join(saved.worktree.path, 'builder-control', 'dashboard', 'state.js');
-    assert.ok(fs.existsSync(generated), 'canonical checks did not generate state.js in the run worktree');
-    assert.match(fs.readFileSync(generated, 'utf8'), /^\/\* Generated by builder-control\/aegis-state\.cjs/);
+    const stateStatus = spawnSync('git', ['status', '--porcelain=v1', '--',
+      'builder-control/dashboard/state.js'], { cwd: saved.worktree.path, encoding: 'utf8' });
+    assert.strictEqual(stateStatus.status, 0, stateStatus.stderr);
+    assert.strictEqual(stateStatus.stdout.trim(), '',
+      'canonical checks changed dashboard state in the governed worktree instead of the disposable snapshot');
     assert.strictEqual(ledgerEntriesFor(ledger, runId)
       .filter((e) => e.operationId === `${runId}:BUILT->CHECKS_PASSED`).length, 1);
   } finally {
@@ -1549,7 +3274,184 @@ test('runChecks: canonical switchboard checks generate state.js in a clean isola
   }
 });
 
-test('runChecks: canonical state generation failure records CHECKS_FAILED and runs no packet check', () => {
+hostContainmentTest('runChecks: canonical state generator cannot mutate the exact subject before a declared check', () => {
+  const packet = 'builder-control/packets/PKT-20260825-SWITCHBOARD-FOUNDATION.json';
+  const maliciousGenerator = [
+    `'use strict';`,
+    `const fs = require('fs'); const path = require('path');`,
+    `const at = process.argv.indexOf('--out'); const out = process.argv[at + 1];`,
+    `fs.writeFileSync(out, '/* Generated by builder-control/aegis-state.cjs */\\nwindow.AEGIS_STATE = {};\\n');`,
+    `fs.appendFileSync(path.join(__dirname, 'dashboard', 'index.html'), '\\n<!-- generator-mutated-subject -->\\n');`,
+  ].join(' ');
+  const { r, runId, runsDir, ledger, TMP } = withIntakeRecordedRun(`
+    const fs = require('fs');
+    const path = require('path');
+    run.packet = ${JSON.stringify(packet)};
+    R.saveRun(run);
+    R.prepareRun(run.runId);
+    const built = R.loadRun(run.runId);
+    fs.writeFileSync(path.join(built.worktree.path, 'builder-control', 'aegis-state.cjs'),
+      ${JSON.stringify(maliciousGenerator)});
+    R.transition(built, 'BUILDING', 'fixture builder started');
+    R.transition(built, 'BUILT', 'fixture builder exited 0');
+    const out = R.runChecks(run.runId);
+    console.log(JSON.stringify(out));
+  `);
+  try {
+    assert.strictEqual(r.status, 0, `generator containment driver failed: ${r.stderr || r.stdout}`);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.state, 'CHECKS_FAILED');
+    assert.deepStrictEqual(out.checks, { passed: 0, total: 4 });
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(saved.checks.executionBoundary.state, 'FAILED');
+    assert.match(saved.checks.executionBoundary.reason, /dashboard state preflight.*changed the captured exact subject/);
+    assert.strictEqual(saved.checks.results[0].status, 'REFUSED');
+    assert.strictEqual(saved.checks.results[0].exit, 125);
+    assert.ok(saved.checks.results.slice(1).every((result) => result.status === 'SKIPPED' &&
+      result.exit === null && result.executionEvidence && result.failureEvidence),
+    'checks after the first boundary loss were not blocked with evidence');
+    assert.ok(saved.checks.results.every((result) =>
+      result.failureEvidence.stderrTail.includes('changed the captured exact subject')),
+    'state-generator subject mismatch was not preserved in bounded evidence');
+    assert.ok(!fs.readFileSync(path.join(saved.worktree.path, 'builder-control', 'dashboard', 'index.html'), 'utf8')
+      .includes('generator-mutated-subject'),
+    'the malicious disposable generator changed the governed worktree');
+    assert.strictEqual(ledgerEntriesFor(ledger, runId)
+      .filter((e) => e.operationId === `${runId}:BUILT->CHECKS_FAILED`).length, 1);
+  } finally {
+    cleanupWorktree(runId);
+    fs.rmSync(TMP, { recursive: true, force: true });
+  }
+});
+
+hostOrchestrationTest('runChecks: operator-beta stops at exact pre-host PASS without executing the host suite', () => {
+  const restoreSubject = overlayCurrentSubject(REVIEW_WORKTREE.path);
+  const packet = JSON.parse(fs.readFileSync(path.join(ROOT, REVIEW_PACKET), 'utf8'));
+  const snapshotCommands = packet.testsRequired.filter((command) => {
+    const tokens = String(command).trim().split(/\s+/);
+    return !(tokens[0] === 'node' && (tokens[1] || '').replace(/^\.\//, '') ===
+      'builder-control/engineering-os.cjs' && tokens.includes('--gate-done'));
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CREATED', {
+    ...REVIEW_RUN,
+    packet: REVIEW_PACKET,
+  }, `
+    const fs = require('fs');
+    const path = require('path');
+    for (const stage of ['INTAKE_RECORDED', 'ROUTED', 'WORKTREE_READY', 'BUILDING', 'BUILT']) {
+      R.transition(seededRun, stage, 'operator-beta watchdog fixture');
+    }
+    const subjectFile = path.join(${JSON.stringify(REVIEW_WORKTREE.path)}, 'builder-control', 'review-adapters.cjs');
+    const original = fs.readFileSync(subjectFile);
+    try {
+      fs.appendFileSync(subjectFile, '\\n// operator-beta exact-subject host-receipt fixture\\n');
+      const out = R.runChecks(runId);
+      const saved = R.loadRun(runId);
+      const receipt = R.loadCanonicalPreHostCheckReceipt(saved.checks, {
+        runId,
+        packetPath: saved.packet,
+        packetSha256: require('crypto').createHash('sha256')
+          .update(fs.readFileSync(path.resolve(${JSON.stringify(ROOT)}, saved.packet))).digest('hex'),
+        hostCommands: ['node builder-control/test/host-containment.test.cjs'],
+      });
+      const watchdog = R.watchdog(saved);
+      console.log(JSON.stringify({ out, receipt, watchdog }));
+    } finally {
+      fs.writeFileSync(subjectFile, original);
+    }
+  `);
+  try {
+    assert.strictEqual(r.status, 0, `operator-beta packet failed: ${r.stderr || r.stdout}`);
+    const result = JSON.parse(r.stdout.trim().split('\n').pop());
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(result.out.state, 'CHECKS_PASSED', JSON.stringify(saved.checks));
+    assert.deepStrictEqual(result.out.checks, {
+      passed: snapshotCommands.length,
+      total: snapshotCommands.length,
+    });
+    assert.ok(result.receipt, 'canonical check receipt could not be reloaded');
+    assert.strictEqual(result.receipt.receiptType, 'AEGIS_PRE_HOST_CHECK_RECEIPT_V1');
+    assert.strictEqual(result.receipt.hostContainment.state, 'PENDING');
+    assert.deepStrictEqual(result.receipt.hostContainment.commands,
+      ['node builder-control/test/host-containment.test.cjs']);
+    assert.strictEqual(saved.checks.hostContainment.state, 'PENDING');
+    assert.strictEqual(saved.checks.receiptRef, undefined,
+      'a final check receipt was published before independent review');
+    assert.strictEqual(result.watchdog.checkReceiptValid, true,
+      'watchdog did not recognize the digest-bound pre-host snapshot PASS');
+    assert.strictEqual(result.watchdog.checkReceiptStage, 'PRE_HOST');
+    assert.strictEqual(result.watchdog.hostContainmentState, 'PENDING');
+    const evidence = ledgerEntriesFor(ledger, runId)
+      .find((entry) => entry.gate === 'aegis-pre-host-check-receipt');
+    assert.ok(evidence);
+    assert.ok(!evidence.testsRun.includes('node builder-control/test/host-containment.test.cjs'));
+    assert.ok(evidence.evidencePaths.some((entry) => entry.startsWith('host-containment:pending:')));
+  } finally {
+    restoreSubject();
+    fs.rmSync(TMP, { recursive: true, force: true });
+  }
+});
+
+governedHostProofTest('host containment executes captured bytes despite a mutate-and-restore interleaving', () => {
+  const restoreSubject = overlayCurrentSubject(REVIEW_WORKTREE.path);
+  const packetAbsolute = path.join(ROOT, REVIEW_PACKET);
+  const packetBytes = fs.readFileSync(packetAbsolute);
+  const packetBefore = {
+    real: fs.realpathSync(packetAbsolute),
+    path: REVIEW_PACKET,
+    bytes: packetBytes,
+    parsed: JSON.parse(packetBytes),
+    sha256: crypto.createHash('sha256').update(packetBytes).digest('hex'),
+  };
+  const env = R.canonicalGitEnvironment(REVIEW_RUN);
+  const subjectResult = spawnSync(process.execPath,
+    [path.join(ROOT, 'builder-control', 'engineering-os.cjs'), '--subject', '--json'],
+    { cwd: ROOT, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  assert.strictEqual(subjectResult.status, 0, subjectResult.stderr);
+  const subject = JSON.parse(subjectResult.stdout);
+  const capture = R.captureCheckExecutionSource(
+    REVIEW_WORKTREE.path, packetBefore, subject, { required: false });
+  const targetRelative = 'builder-control/test/host-containment.test.cjs';
+  const governedTarget = path.join(REVIEW_WORKTREE.path, targetRelative);
+  const governedBytes = fs.readFileSync(governedTarget);
+  const preHostReceipt = preHostChecksFor(
+    'RUN-20260829-abcdef12', subject, REVIEW_PACKET).preHostReceipt;
+  const preHostReceiptRef = {
+    entryId: `LED-CHECK-${preHostReceipt.receiptSha256.slice(0, 32)}`,
+    receiptSha256: preHostReceipt.receiptSha256,
+  };
+  let seamCalled = false;
+  try {
+    const receipt = R.runTopLevelHostContainmentCheck(
+      { runId: 'RUN-20260829-abcdef12' }, REVIEW_WORKTREE.path, packetBefore, subject,
+      'node builder-control/test/host-containment.test.cjs', capture, {
+        preHostReceipt,
+        preHostReceiptRef,
+        afterSnapshotEstablished(snapshot) {
+          seamCalled = true;
+          fs.appendFileSync(governedTarget, '\n// transient mutate-and-restore attack\n');
+          const capturedBytes = fs.readFileSync(path.join(snapshot.snapshotRoot, targetRelative));
+          assert.deepStrictEqual(capturedBytes, governedBytes,
+            'host snapshot observed bytes written after the canonical capture');
+          fs.writeFileSync(governedTarget, governedBytes);
+        },
+      });
+    assert.strictEqual(seamCalled, true, 'the deterministic interleaving seam did not run');
+    assert.strictEqual(receipt.outcome, 'PASS', receipt.reason);
+    assert.strictEqual(receipt.snapshot.captureSha256, capture.captureSha256);
+    assert.strictEqual(R.validateHostContainmentReceipt(receipt, {
+      runId: 'RUN-20260829-abcdef12', packetPath: REVIEW_PACKET,
+      packetSha256: packetBefore.sha256, subject,
+      command: 'node builder-control/test/host-containment.test.cjs', platform: 'darwin',
+      preHostReceiptRef,
+    }), true);
+  } finally {
+    fs.writeFileSync(governedTarget, governedBytes);
+    restoreSubject();
+  }
+});
+
+hostContainmentTest('runChecks: canonical state generation failure records CHECKS_FAILED and runs no packet check', () => {
   const packet = 'builder-control/packets/PKT-20260825-SWITCHBOARD-FOUNDATION.json';
   const { r, runId, runsDir, ledger, TMP } = withIntakeRecordedRun(`
     const fs = require('fs');
@@ -1558,8 +3460,7 @@ test('runChecks: canonical state generation failure records CHECKS_FAILED and ru
     R.saveRun(run);
     R.prepareRun(run.runId);
     const built = R.loadRun(run.runId);
-    fs.renameSync(path.join(built.worktree.path, 'builder-control', 'aegis-state.cjs'),
-      path.join(built.worktree.path, 'builder-control', 'aegis-state.cjs.disabled'));
+    fs.unlinkSync(path.join(built.worktree.path, 'builder-control', 'aegis-state.cjs'));
     R.transition(built, 'BUILDING', 'fixture builder started');
     R.transition(built, 'BUILT', 'fixture builder exited 0');
     const out = R.runChecks(run.runId);
@@ -1576,6 +3477,9 @@ test('runChecks: canonical state generation failure records CHECKS_FAILED and ru
     assert.strictEqual(saved.checks.results.length, 4);
     assert.ok(saved.checks.results.every((result) => result.exit === null && result.skipped),
       'packet checks must remain unexecuted when their state precondition fails');
+    assert.ok(saved.checks.results.every((result) => result.status === 'SKIPPED' &&
+      result.executionEvidence && result.failureEvidence),
+    'every skipped check must retain bounded execution and failure evidence');
     assert.strictEqual(ledgerEntriesFor(ledger, runId)
       .filter((e) => e.operationId === `${runId}:BUILT->CHECKS_FAILED`).length, 1);
     assert.strictEqual(ledgerEntriesFor(ledger, runId)
@@ -1587,7 +3491,7 @@ test('runChecks: canonical state generation failure records CHECKS_FAILED and ru
   }
 });
 
-test('runChecks: invalid state fails closed under the canonical claim with no mutation', () => {
+hostContainmentTest('runChecks: invalid state fails closed under the canonical claim with no mutation', () => {
   const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', null, `
     try {
       R.runChecks(runId);
@@ -1606,7 +3510,7 @@ test('runChecks: invalid state fails closed under the canonical claim with no mu
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
-test('runChecks: owns the per-run claim and reuses one claimed executor', () => {
+hostContainmentTest('runChecks: owns the per-run claim and reuses one claimed executor', () => {
   const src = fs.readFileSync(CLI, 'utf8');
   const claimed = src.slice(src.indexOf('function runChecksClaimed'), src.indexOf('function runChecks(runId)'));
   const control = src.slice(src.indexOf('function runChecks(runId)'), src.indexOf('function cmdChecks'));
@@ -1807,6 +3711,30 @@ test('cancelRun source has no raw PID or process-group signal path', () => {
   const cancelSrc = src.slice(src.indexOf('function cancelRun'), src.indexOf('\n/**\n * Retry', src.indexOf('function cancelRun')));
   assert.doesNotMatch(cancelSrc, /process\.kill|terminateWorker|terminateProcessGroup|childProcessGroupId/);
   assert.match(cancelSrc, /requestCancellation/);
+});
+
+test('workerCancellationCapability preserves authenticated retry authority without trusting a PID alone', () => {
+  assert.strictEqual(typeof R.workerCancellationCapability, 'function');
+  const complete = {
+    state: 'BUILDING',
+    build: {
+      mode: 'async', workerState: 'RUNNING', workerPid: 4141,
+      control: { dir: '/fixture/control', secret: 'private', secretSha256: 'digest' },
+      childProcessIdentity: { pid: 4242, processGroupId: 4242,
+        startMarker: 'fixture', executable: '/fixture/claude', source: 'fixture' },
+    },
+  };
+  assert.strictEqual(R.workerCancellationCapability(complete), true);
+  assert.strictEqual(R.workerCancellationCapability({
+    ...complete, build: { ...complete.build, workerState: 'TERMINATION_UNVERIFIED' },
+  }), true, 'an authenticated timeout must retain capability for the bounded second cancellation');
+  for (const candidate of [
+    { ...complete, state: 'BUILT' },
+    { ...complete, build: { ...complete.build, mode: 'sync' } },
+    { ...complete, build: { ...complete.build, workerPid: null } },
+    { ...complete, build: { ...complete.build, control: null } },
+    { ...complete, build: { ...complete.build, childProcessIdentity: null } },
+  ]) assert.strictEqual(R.workerCancellationCapability(candidate), false);
 });
 
 test('transition: exported authority refuses BUILDING -> ABANDONED even with caller-fabricated evidence', () => {
@@ -2264,9 +4192,9 @@ test('cancelRun: refuses terminal/non-permitted states with no mutation', () => 
   }
 });
 
-test('retryRun: exported; BUILD_FAILED and CHECKS_FAILED transition to CORRECTING with exactly one increment', () => {
+test('retryRun: build, checks, and review failures transition to CORRECTING with exactly one increment', () => {
   assert.strictEqual(typeof R.retryRun, 'function');
-  for (const state of ['BUILD_FAILED', 'CHECKS_FAILED']) {
+  for (const state of ['BUILD_FAILED', 'CHECKS_FAILED', 'REVIEW_FAILED']) {
     const { r, runsDir, ledger, TMP } = withSeededRun(state, { corrections: 1 }, `
       const out = R.retryRun(runId);
       console.log(JSON.stringify(out));
@@ -2373,6 +4301,70 @@ test('launch claim: a positively absent crashed owner is reclaimed without signa
   const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
   assert.strictEqual(saved.corrections, 1);
   assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 1);
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+hostContainmentTest('global lease transfer defeats a stale launcher decision and stale generations cannot release', () => {
+  const { r, TMP, env } = withSeededRun('WORKTREE_READY', {
+    worktree: { path: fs.realpathSync(os.tmpdir()) },
+  }, `
+    const fs = require('fs');
+    const { spawn } = require('child_process');
+    const worker = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'],
+      { detached: true, stdio: 'ignore' });
+    worker.unref();
+    let workerIdentity = null;
+    const identityDeadline = Date.now() + 2000;
+    while (!workerIdentity && Date.now() < identityDeadline) {
+      workerIdentity = R.processIdentity(worker.pid);
+      if (!workerIdentity) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
+    }
+    if (!workerIdentity) throw new Error('fixture worker identity unavailable');
+    const launcher = R.acquireGlobalWorkerClaim(0);
+    const staleDecision = R.readRunLaunchClaim(R.globalWorkerLockPath());
+    const transferred = R.transferGlobalWorkerClaim(launcher, runId,
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', worker.pid, workerIdentity);
+    const staleReleased = R.releaseRunLaunchClaim({ ...staleDecision.claim,
+      lockPath: R.globalWorkerLockPath(), ownerPath: staleDecision.ownerPath });
+    const staleGenerationReleased = R.releaseGlobalWorkerLease({ ...transferred,
+      attemptId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' });
+    const current = R.readRunLaunchClaim(R.globalWorkerLockPath());
+    try { process.kill(-worker.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    console.log(JSON.stringify({ staleReleased, staleGenerationReleased,
+      currentClaimId: current.claim.claimId, transferredClaimId: transferred.claimId,
+      currentHolder: current.claim.holder }));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.strictEqual(out.staleReleased, false);
+  assert.strictEqual(out.staleGenerationReleased, false);
+  assert.strictEqual(out.currentClaimId, out.transferredClaimId);
+  assert.strictEqual(out.currentHolder, 'WORKER_LEASE');
+  const reclaim = spawnSync(process.execPath, ['-e', `
+    const R=require(${JSON.stringify(CLI)});const fs=require('fs');
+    const replacement=R.acquireGlobalWorkerClaim(3000);
+    const replacementReleased=R.releaseRunLaunchClaim(replacement);
+    console.log(JSON.stringify({replacementReleased,lockExists:fs.existsSync(R.globalWorkerLockPath())}));
+  `], { cwd: ROOT, env, encoding: 'utf8' });
+  assert.strictEqual(reclaim.status, 0, reclaim.stderr);
+  assert.deepStrictEqual(JSON.parse(reclaim.stdout.trim().split('\n').pop()),
+    { replacementReleased: true, lockExists: false });
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+hostContainmentTest('global admission recovers an empty directory left by interrupted release', () => {
+  const { r, TMP } = withSeededRun('WORKTREE_READY', {
+    worktree: { path: fs.realpathSync(os.tmpdir()) },
+  }, `
+    const fs = require('fs');
+    fs.mkdirSync(R.globalWorkerLockPath(), { mode: 0o700 });
+    const claim = R.acquireGlobalWorkerClaim(1000);
+    const released = R.releaseRunLaunchClaim(claim);
+    console.log(JSON.stringify({ released, lockExists: fs.existsSync(R.globalWorkerLockPath()) }));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(JSON.parse(r.stdout.trim().split('\n').pop()),
+    { released: true, lockExists: false });
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
@@ -2596,7 +4588,9 @@ test('retryRun uses one claim-aware launch path and never re-enters public start
   const retry = src.slice(src.indexOf('function retryRun'), src.indexOf('// ── step 5', src.indexOf('function retryRun')));
   assert.doesNotMatch(claimed, /acquireRunLaunchClaim/);
   assert.match(retry, /acquireRunLaunchClaim/);
-  assert.match(retry, /startWorkerClaimed\(/);
+  assert.match(retry, /canonicalRetryLaunchSpec\(/);
+  assert.match(retry, /validateWorkerLaunch\(/);
+  assert.match(retry, /startValidatedWorkerClaimed\(/);
   assert.doesNotMatch(retry, /\bstartWorker\(/);
 });
 
@@ -2623,33 +4617,197 @@ test('retryRun: refuses other states with INVALID_RETRY/409 and no mutation', ()
   }
 });
 
-test('retryRun: refuses with CORRECTION_LIMIT/409 once MAX_CORRECTIONS is reached, with no mutation', () => {
-  const { r, runsDir, ledger, TMP } = withSeededRun('BUILD_FAILED', { corrections: R.MAX_CORRECTIONS }, `
-    try {
-      R.retryRun(runId);
-      console.log(JSON.stringify({ threw: false }));
-    } catch (e) {
-      console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus }));
-    }
+test('retryRun: every retryable failure respects MAX_CORRECTIONS with no mutation', () => {
+  for (const state of ['BUILD_FAILED', 'CHECKS_FAILED', 'REVIEW_FAILED']) {
+    const { r, runsDir, ledger, TMP } = withSeededRun(state, { corrections: R.MAX_CORRECTIONS }, `
+      try {
+        R.retryRun(runId);
+        console.log(JSON.stringify({ threw: false }));
+      } catch (e) {
+        console.log(JSON.stringify({ threw: true, code: e.code, httpStatus: e.httpStatus }));
+      }
+    `);
+    assert.strictEqual(r.status, 0, `driver failed for ${state}: ${r.stderr}`);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.threw, true);
+    assert.strictEqual(out.code, 'CORRECTION_LIMIT');
+    assert.strictEqual(out.httpStatus, 409);
+    const files = fs.readdirSync(runsDir);
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, files[0]), 'utf8'));
+    assert.strictEqual(saved.state, state, 'retryRun must not mutate a run at the correction limit');
+    assert.strictEqual(saved.corrections, R.MAX_CORRECTIONS, 'retryRun must not increment corrections past the limit');
+    assert.strictEqual(ledgerEntriesFor(ledger, saved.runId).length, 0);
+    fs.rmSync(TMP, { recursive: true, force: true });
+  }
+});
+
+test('correction cap parity: synchronous cycles 1 through 3 are usable build cycles', () => {
+  for (let correction = 1; correction <= R.MAX_CORRECTIONS; correction++) {
+    const worktree = fs.realpathSync(os.tmpdir());
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CORRECTING',
+      { corrections: correction, worktree: { path: worktree } }, `
+        const child = require('child_process').spawnSync(process.execPath,
+          [${JSON.stringify(CLI)}, '--build', runId, '--cmd', 'true'],
+          { cwd: ${JSON.stringify(ROOT)}, encoding: 'utf8', env: process.env });
+        console.log(JSON.stringify({ status: child.status, stderr: child.stderr }));
+      `);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.status, 0, `synchronous correction ${correction} was not usable: ${out.stderr}`);
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILT');
+    assert.strictEqual(saved.corrections, correction);
+    assert.deepStrictEqual(ledgerEntriesFor(ledger, runId).map((entry) => entry.operationId), [
+      `${runId}:CORRECTING->BUILDING`, `${runId}:BUILDING->BUILT`,
+    ]);
+    fs.rmSync(TMP, { recursive: true, force: true });
+  }
+});
+
+test('repeated correction transitions receive distinct exact ledger identities', () => {
+  const seedFor = (runId) => ({
+    corrections: 2,
+    transitions: [
+      { from: 'CORRECTING', to: 'BUILDING', ts: '2026-08-25T06:00:01Z',
+        ledgerEntryId: 'LED-FIRST-BUILD', operationId: `${runId}:CORRECTING->BUILDING` },
+      { from: 'BUILDING', to: 'BUILD_FAILED', ts: '2026-08-25T06:00:02Z',
+        ledgerEntryId: 'LED-FIRST-FAIL', operationId: `${runId}:BUILDING->BUILD_FAILED` },
+    ],
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CORRECTING', seedFor, `
+    const fs = require('fs');
+    fs.writeFileSync(process.env.AEGIS_LEDGER_FILE, JSON.stringify([
+      { entryId: 'LED-FIRST-BUILD', correlationId: runId,
+        operationId: runId + ':CORRECTING->BUILDING' },
+      { entryId: 'LED-FIRST-FAIL', correlationId: runId,
+        operationId: runId + ':BUILDING->BUILD_FAILED' },
+    ], null, 2));
+    const run = R.loadRun(runId);
+    R.transition(run, 'BUILDING', 'second build');
+    R.transition(run, 'BUILD_FAILED', 'second failure');
+    const saved = R.loadRun(runId);
+    const before = R.watchdog(saved).problems.filter((problem) =>
+      problem.rule === 'WATCHDOG-UNRECORDED-TRANSITION').length;
+    const entries = JSON.parse(fs.readFileSync(process.env.AEGIS_LEDGER_FILE, 'utf8'));
+    entries.splice(2, 1);
+    fs.writeFileSync(process.env.AEGIS_LEDGER_FILE, JSON.stringify(entries, null, 2));
+    const after = R.watchdog(saved).problems.filter((problem) =>
+      problem.rule === 'WATCHDOG-UNRECORDED-TRANSITION').length;
+    console.log(JSON.stringify({ saved, before, after }));
   `);
-  assert.strictEqual(r.status, 0, `driver failed: ${r.stderr}`);
+  assert.strictEqual(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout.trim().split('\n').pop());
-  assert.strictEqual(out.threw, true);
-  assert.strictEqual(out.code, 'CORRECTION_LIMIT');
-  assert.strictEqual(out.httpStatus, 409);
-  const files = fs.readdirSync(runsDir);
-  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, files[0]), 'utf8'));
-  assert.strictEqual(saved.state, 'BUILD_FAILED', 'retryRun must not mutate a run at the correction limit');
-  assert.strictEqual(saved.corrections, R.MAX_CORRECTIONS, 'retryRun must not increment corrections past the limit');
-  assert.strictEqual(ledgerEntriesFor(ledger, saved.runId).length, 0);
+  const saved = out.saved;
+  const entries = ledgerEntriesFor(ledger, runId);
+  assert.strictEqual(entries.length, 3);
+  assert.deepStrictEqual(entries.map((entry) => entry.operationId), [
+    `${runId}:CORRECTING->BUILDING`,
+    `${runId}:BUILDING->BUILD_FAILED`,
+    `${runId}:BUILDING->BUILD_FAILED:occurrence:2`,
+  ]);
+  assert.strictEqual(new Set(saved.transitions.map((transition) => transition.ledgerEntryId)).size, 4);
+  assert.strictEqual(out.before, 0);
+  assert.strictEqual(out.after, 1);
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
-test('retryRun: does not execute a builder, model, or checks', () => {
+test('correction cap parity: asynchronous cycles 1 through 3 are usable build cycles', () => {
+  for (let correction = 1; correction <= R.MAX_CORRECTIONS; correction++) {
+    const worktree = fs.realpathSync(os.tmpdir());
+    const workerPath = path.join(ROOT, 'builder-control', 'aegis-worker.cjs');
+    const workerStub = `
+      const workerPath = ${JSON.stringify(workerPath)};
+      let workerLaunches = 0;
+      require.cache[workerPath] = { id: workerPath, filename: workerPath, loaded: true, exports: {
+        processAlive: () => false,
+        normalizeLaunchSpec: (spec) => spec,
+        normalizeTimeoutSec: (value) => value || 30,
+        launchWorker: ({ launchSpec }) => {
+          workerLaunches += 1;
+          return { launchSha256: require('crypto').createHash('sha256').update(JSON.stringify(launchSpec)).digest('hex'),
+            workerPid: process.pid, processGroupId: process.pid, control: { fixture: true } };
+        },
+      } };
+    `;
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CORRECTING',
+      { corrections: correction, worktree: { path: worktree } }, `
+        const out = R.startWorker(runId,
+          { provider: 'claude-subscription', model: 'opus', prompt: 'bounded correction fixture' },
+          { timeoutSec: 30 });
+        console.log(JSON.stringify({ out, workerLaunches }));
+      `, workerStub);
+    assert.strictEqual(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.workerLaunches, 1, `asynchronous correction ${correction} did not launch exactly once`);
+    assert.strictEqual(out.out.state, 'BUILDING');
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILDING');
+    assert.strictEqual(saved.corrections, correction);
+    assert.strictEqual(ledgerEntriesFor(ledger, runId).length, 1);
+    assert.strictEqual(ledgerEntriesFor(ledger, runId)[0].operationId, `${runId}:CORRECTING->BUILDING`);
+    fs.rmSync(TMP, { recursive: true, force: true });
+  }
+});
+
+test('correction cap parity: synchronous and asynchronous builders refuse only after cycle 3', () => {
+  const worktree = fs.realpathSync(os.tmpdir());
+  const marker = path.join(worktree, `aegis-cap-marker-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+  const sync = withSeededRun('CORRECTING',
+    { corrections: R.MAX_CORRECTIONS + 1, worktree: { path: worktree } }, `
+      const child = require('child_process').spawnSync(process.execPath,
+        [${JSON.stringify(CLI)}, '--build', runId, '--cmd', ${JSON.stringify(`touch ${marker}`)}],
+        { cwd: ${JSON.stringify(ROOT)}, encoding: 'utf8', env: process.env });
+      console.log(JSON.stringify({ status: child.status, stderr: child.stderr,
+        markerExists: require('fs').existsSync(${JSON.stringify(marker)}) }));
+    `);
+  assert.strictEqual(sync.r.status, 0, sync.r.stderr);
+  const syncOut = JSON.parse(sync.r.stdout.trim().split('\n').pop());
+  assert.notStrictEqual(syncOut.status, 0);
+  assert.match(syncOut.stderr, /CORRECTION-LIMIT/);
+  assert.strictEqual(syncOut.markerExists, false, 'synchronous path executed work beyond the cap');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(sync.runsDir, `${sync.runId}.json`), 'utf8')).state,
+    'CORRECTING');
+  assert.strictEqual(ledgerEntriesFor(sync.ledger, sync.runId).length, 0);
+  fs.rmSync(sync.TMP, { recursive: true, force: true });
+
+  const workerPath = path.join(ROOT, 'builder-control', 'aegis-worker.cjs');
+  const async = withSeededRun('CORRECTING',
+    { corrections: R.MAX_CORRECTIONS + 1, worktree: { path: worktree } }, `
+      let out;
+      try { R.startWorker(runId,
+        { provider: 'claude-subscription', model: 'opus', prompt: 'must not launch' }, { timeoutSec: 30 });
+        out = { threw: false }; }
+      catch (error) { out = { threw: true, code: error.code, httpStatus: error.httpStatus }; }
+      console.log(JSON.stringify({ out, workerLaunches }));
+    `, `
+      const workerPath = ${JSON.stringify(workerPath)};
+      let workerLaunches = 0;
+      require.cache[workerPath] = { id: workerPath, filename: workerPath, loaded: true, exports: {
+        processAlive: () => false,
+        normalizeLaunchSpec: (spec) => spec,
+        normalizeTimeoutSec: (value) => value || 30,
+        launchWorker: () => { workerLaunches += 1; throw new Error('must not launch'); },
+      } };
+    `);
+  assert.strictEqual(async.r.status, 0, async.r.stderr);
+  const asyncOut = JSON.parse(async.r.stdout.trim().split('\n').pop());
+  assert.deepStrictEqual(asyncOut, {
+    out: { threw: true, code: 'CORRECTION_LIMIT', httpStatus: 409 }, workerLaunches: 0,
+  });
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(async.runsDir, `${async.runId}.json`), 'utf8')).state,
+    'CORRECTING');
+  assert.strictEqual(ledgerEntriesFor(async.ledger, async.runId).length, 0);
+  fs.rmSync(async.TMP, { recursive: true, force: true });
+});
+
+test('retryRun: asynchronous retries relaunch only through governed worker ownership and never run checks', () => {
   const src = fs.readFileSync(CLI, 'utf8');
   const retrySrc = src.slice(src.indexOf('function retryRun'), src.indexOf('// ── step 5'));
-  assert.ok(!/spawnSync\('bash'/.test(retrySrc), 'retryRun must not spawn a build command');
-  assert.ok(!/cmdBuild|cmdChecks|cmdAuto/.test(retrySrc), 'retryRun must not execute the builder or checks itself');
+  assert.match(retrySrc, /startWorkerClaimed\(run, retryLaunchSpec\)/,
+    'asynchronous retry must relaunch through the governed claimed worker path');
+  assert.ok(!/spawnSync\('bash'/.test(retrySrc), 'retryRun must not spawn an ungoverned build command');
+  assert.ok(!/cmdBuild|cmdChecks|cmdAuto/.test(retrySrc),
+    'retryRun must not enter synchronous build commands or execute checks itself');
 });
 
 test('control functions: malformed and missing run ids map to stable AegisControlError', () => {
@@ -2676,5 +4834,126 @@ test('control functions: malformed and missing run ids map to stable AegisContro
     (e) => e instanceof R.AegisControlError && e.code === 'RUN_NOT_FOUND' && e.httpStatus === 404);
 });
 
+test('check receipt: exact packet, subject, commands and digest validate', () => {
+  const body = {
+    schemaVersion: 1, authority: 'aegis-run.cjs runChecks', runId: 'RUN-20260828-deadbeef',
+    packet: { path: 'builder-control/packets/example.json', sha256: 'a'.repeat(64) },
+    subject: { subjectSha256: 'b'.repeat(64), subjectPaths: ['a.js', 'b.js'], diffBytes: 42, range: 'HEAD' },
+    startedAt: '2026-08-28T00:00:00.000Z', completedAt: '2026-08-28T00:01:00.000Z',
+    complete: true, outcome: 'PASS', total: 1, passed: 1,
+    results: [{ cmd: 'node test.cjs', status: 'EXECUTED', exit: 0, ranAt: '2026-08-28T00:00:30.000Z' }],
+  };
+  const receipt = { ...body, receiptSha256: R.checkReceiptDigest(body) };
+  assert.strictEqual(R.validateCheckReceipt(receipt, {
+    runId: body.runId, packetPath: body.packet.path, packetSha256: body.packet.sha256,
+    subject: body.subject, commands: ['node test.cjs'],
+  }), true);
+});
+
+test('pre-host check receipt is a distinct exact-subject authority and never validates as final', () => {
+  const runId = 'RUN-20260828-deadbeef';
+  const checks = preHostChecksFor(runId);
+  const receipt = checks.preHostReceipt;
+  const expected = {
+    runId,
+    packetPath: receipt.packet.path,
+    packetSha256: receipt.packet.sha256,
+    subject: receipt.subject,
+    commands: receipt.results.map((result) => result.cmd),
+    hostCommands: receipt.hostContainment.commands,
+    captureSha256: receipt.snapshot.captureSha256,
+  };
+  assert.strictEqual(R.validatePreHostCheckReceipt(receipt, expected), true);
+  assert.strictEqual(R.validateCheckReceipt(receipt, expected), false,
+    'pre-host evidence was accepted as a final host-bound receipt');
+  for (const changed of [
+    { subject: { ...expected.subject, subjectSha256: 'd'.repeat(64) } },
+    { packetSha256: 'd'.repeat(64) },
+    { captureSha256: 'd'.repeat(64) },
+    { commands: ['node unrelated.test.cjs'] },
+    { hostCommands: ['node unrelated-host.test.cjs'] },
+  ]) {
+    assert.strictEqual(R.validatePreHostCheckReceipt(receipt, { ...expected, ...changed }), false);
+  }
+});
+
+test('host containment receipt: exact packet/subject, darwin, zero-skip and complete output are mandatory', () => {
+  const runId = 'RUN-20260828-deadbeef';
+  const packet = { path: 'builder-control/packets/example.json', sha256: 'a'.repeat(64) };
+  const subject = {
+    subjectSha256: 'b'.repeat(64), subjectPaths: ['a.js'], diffBytes: 42, range: 'HEAD',
+  };
+  const command = 'node builder-control/test/host-containment.test.cjs';
+  const valid = passingHostContainmentReceipt(runId, packet, subject, command);
+  const expected = { runId, packetPath: packet.path, packetSha256: packet.sha256,
+    subject, command, platform: 'darwin' };
+  assert.strictEqual(R.validateHostContainmentReceipt(valid, expected), true);
+  const mutate = (change) => {
+    const body = change({ ...valid, result: { ...valid.result } });
+    delete body.receiptSha256;
+    return { ...body, receiptSha256: R.hostContainmentReceiptDigest(body) };
+  };
+  const invalid = [
+    mutate((receipt) => ({ ...receipt, packet: { ...receipt.packet, sha256: 'c'.repeat(64) } })),
+    mutate((receipt) => ({ ...receipt, subject: { ...receipt.subject, subjectSha256: 'c'.repeat(64) } })),
+    mutate((receipt) => ({ ...receipt, platform: 'linux' })),
+    mutate((receipt) => ({ ...receipt, result: { ...receipt.result, exit: 1 } })),
+    mutate((receipt) => ({ ...receipt, result: { ...receipt.result, outputTruncated: true } })),
+    mutate((receipt) => ({ ...receipt, result: { ...receipt.result, skipped: 1, total: 129 } })),
+    mutate((receipt) => { delete receipt.preHostReceiptRef; return receipt; }),
+    mutate((receipt) => ({ ...receipt, preHostReceiptRef: {
+      ...receipt.preHostReceiptRef, receiptSha256: 'z'.repeat(64),
+    } })),
+    mutate((receipt) => ({ ...receipt, coverage: receipt.coverage.slice(0, 1),
+      result: { ...receipt.result, covered: 1, total: receipt.result.passed + 1 } })),
+    mutate((receipt) => ({ ...receipt, coverage: receipt.coverage.map((item, index) =>
+      index === 0 ? { ...item, command: 'node unrelated.test.cjs' } : item) })),
+  ];
+  for (const receipt of invalid) {
+    assert.strictEqual(R.validateHostContainmentReceipt(receipt, expected), false);
+  }
+});
+
+test('check receipt RED: A-to-B subject mutation, stale packet and partial execution are rejected', () => {
+  const body = {
+    schemaVersion: 1, authority: 'aegis-run.cjs runChecks', runId: 'RUN-20260828-deadbeef',
+    packet: { path: 'builder-control/packets/example.json', sha256: 'a'.repeat(64) },
+    subject: { subjectSha256: 'b'.repeat(64), subjectPaths: ['a.js'], diffBytes: 42, range: 'HEAD' },
+    startedAt: '2026-08-28T00:00:00.000Z', completedAt: '2026-08-28T00:01:00.000Z',
+    complete: true, outcome: 'PASS', total: 1, passed: 1,
+    results: [{ cmd: 'node test.cjs', status: 'EXECUTED', exit: 0, ranAt: '2026-08-28T00:00:30.000Z' }],
+  };
+  const receipt = { ...body, receiptSha256: R.checkReceiptDigest(body) };
+  assert.strictEqual(R.validateCheckReceipt(receipt, { subject: { ...body.subject, subjectSha256: 'c'.repeat(64) } }), false);
+  assert.strictEqual(R.validateCheckReceipt(receipt, { packetSha256: 'd'.repeat(64) }), false);
+  assert.strictEqual(R.validateCheckReceipt({ ...receipt, complete: false }), false);
+  assert.strictEqual(R.validateCheckReceipt({ ...receipt, results: [] }), false);
+  assert.strictEqual(R.validateCheckReceipt(receipt, {
+    hostCommands: ['node builder-control/test/host-containment.test.cjs'],
+  }), false, 'a missing mandatory host receipt was accepted');
+});
+
+test('checkpoint candidate accepts one clean descendant containing the exact reviewed subject', () => {
+  const base = 'a'.repeat(40), head = 'b'.repeat(40);
+  const subject = { subjectSha256: 'c'.repeat(64), subjectPaths: ['a.js'], diffBytes: 12, range: 'HEAD' };
+  const committed = { ...subject, range: `${base}..${head}` };
+  assert.strictEqual(R.checkpointCandidateProblem({
+    clean: true, reviewedBase: base, head, ancestor: true,
+    reviewedSubject: subject, committedSubject: committed,
+  }), null);
+});
+
+test('checkpoint candidate RED: dirty tree, unrelated HEAD, or post-bind subject mutation are refused', () => {
+  const base = 'a'.repeat(40), head = 'b'.repeat(40);
+  const subject = { subjectSha256: 'c'.repeat(64), subjectPaths: ['a.js'], diffBytes: 12, range: 'HEAD' };
+  const committed = { ...subject, range: `${base}..${head}` };
+  assert.strictEqual(R.checkpointCandidateProblem({ clean: false }), 'CHECKPOINT-DIRTY-TREE');
+  assert.strictEqual(R.checkpointCandidateProblem({ clean: true, reviewedBase: base, head, ancestor: false }), 'CHECKPOINT-HEAD-UNRELATED');
+  assert.strictEqual(R.checkpointCandidateProblem({
+    clean: true, reviewedBase: base, head, ancestor: true,
+    reviewedSubject: subject, committedSubject: { ...committed, subjectSha256: 'd'.repeat(64) },
+  }), 'CHECKPOINT-SUBJECT-MISMATCH');
+});
+
 const failed = process.exitCode ? 'at least 1' : '0';
-console.log(`${passed} passed, ${failed} failed.`);
+console.log(`${passed} passed, ${skipped} skipped, ${failed} failed.`);

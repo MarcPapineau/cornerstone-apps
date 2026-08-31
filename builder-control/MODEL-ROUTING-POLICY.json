@@ -43,8 +43,8 @@
         "subagents": false,
         "webAccess": false,
         "toolWrites": false,
-        "boundsNote": "REVISED 2026-08-25 on evidence. This was maxTurns:1, justified as 'one turn forces it to spend its attention on the diff rather than on a conversation'. That reasoning was wrong for an AGENTIC reviewer: turn one is spent opening files, so the run ended with 'max turns reached', no verdict, and USD 0.00717944 charged. Paying for a non-answer is the worst outcome available — worse than paying for a real review and worse than not calling at all.\n\nTurns are the wrong cost lever. Spend is bounded by capUsd against the USD 5 hard ceiling, by the wall-clock timeout, by no web access, and by no sub-agents. maxTurns is a RUNAWAY guard, not a budget: it exists so a stuck agent stops, not so a working one is cut off mid-sentence. It is now set for task completion on ONE chunk — Grok used 9 and 13 turns on the whole subject, and a chunk is roughly a quarter of that, so 16 leaves real headroom without being unbounded.",
-        "maxTurnsPurpose": "runaway guard — NOT a cost control. Cost is controlled by capUsd, the hard ceiling, the timeout, and the absence of web and sub-agents."
+        "boundsNote": "REVISED 2026-08-29 on evidence. This was maxTurns:1, justified as 'one turn forces it to spend its attention on the diff rather than on a conversation'. That reasoning was wrong for an AGENTIC reviewer: turn one is spent opening files, so the run ended with 'max turns reached', no verdict, and USD 0.00717944 charged. Paying for a non-answer is the worst outcome available — worse than paying for a real review and worse than not calling at all.\n\nmaxTurns, the wall-clock timeout, no web access, and no sub-agents are bounded execution guards; they do not enforce a spend ceiling. AEGIS separately refuses launch unless a fresh, execution-bound ACP proof shows unified billing, every spend vector at zero, and auto-topup absent or disabled. Authentication is not usage evidence. If ACP reports a tier it is preserved; if ACP omits it, AEGIS records UNREPORTED instead of inventing one. Both shapes require the same zero-metered contract. capUsd is retained only as the owner-approved post-run telemetry ceiling applied to terminal credit-equivalent pricing after completion. It is not billed spend, has no pre-run or incremental enforcement, and one completed event can overshoot it before comparison. maxTurns remains a RUNAWAY guard so a stuck agent stops without cutting off a working reviewer mid-sentence.",
+        "maxTurnsPurpose": "runaway guard only — not a cost control; launch requires fresh execution-bound ACP zero-metered proof and capUsd is post-run telemetry only"
       }
     },
     "repository-guardian": {
@@ -68,9 +68,13 @@
       "rank": 1,
       "description": "Repository code and process state. Default for engineering work."
     },
-    "SENSITIVE": {
+    "CONFIDENTIAL": {
       "rank": 2,
-      "description": "Credentials, customer data, financial or health information."
+      "description": "Confidential business or client information. Eligibility must also agree with the Tool Capability Canon ceiling."
+    },
+    "RESTRICTED": {
+      "rank": 3,
+      "description": "Credentials, regulated health or financial data, and other material requiring the strictest handling."
     }
   },
   "models": {
@@ -89,7 +93,7 @@
         "analysis",
         "documentation"
       ],
-      "maxDataClass": "INTERNAL",
+      "maxDataClass": "CONFIDENTIAL",
       "availabilityProbe": "in-process — this policy is read by the running orchestrator",
       "costPerRouteUsd": 0
     },
@@ -102,7 +106,7 @@
         "verification",
         "analysis"
       ],
-      "maxDataClass": "INTERNAL",
+      "maxDataClass": "CONFIDENTIAL",
       "availabilityProbe": "review-adapters.cjs --doctor (local executable check) plus a read-only ephemeral zero-tool probe; the probe result is recorded in the Tool Capability Canon under codex-local",
       "costPerRouteUsd": 0
     },
@@ -128,15 +132,15 @@
     "grok": {
       "label": "Grok CLI",
       "providerFamily": "grok",
-      "execution": "METERED",
+      "execution": "CANON_UNKNOWN_REQUIRES_PREFLIGHT",
       "capabilities": [
         "adversarial-review",
         "red-team"
       ],
       "maxDataClass": "INTERNAL",
-      "availabilityProbe": "review-adapters.cjs --doctor (local executable check only — it cannot observe authentication) plus an explicit authentication check; the result is recorded in the Tool Capability Canon under grok-cli",
+      "availabilityProbe": "Pinned executable identity plus a no-session ACP preflight bound to the exact invocation. The proof must be no more than five minutes old, use unified billing, show all spend vectors at zero, and show auto-topup absent or disabled. Authentication is not usage. A reported tier must be a nonempty string; an omitted tier is recorded explicitly as UNREPORTED with a null value. Both use the same zero-metered contract.",
       "costPerRouteUsd": null,
-      "costNote": "Observed 0.87 USD for one bounded review on 2026-08-23. Recorded as an observation, not a guarantee — it is not used as a prediction. As of 2026-08-25 `grok login` completed as marc@cornerstoneregroup.ca and a read-only `grok models` check exited 0, so the canon now holds it AVAILABLE. No review has run under this authenticated state and no cost has been observed for it."
+      "costNote": "The canonical tool cost class is UNKNOWN. The governed route fails closed until a fresh per-execution ACP proof is bound to the exact invocation, uses unified billing, shows all three spend vectors at zero, and shows auto-topup absent or disabled. Authentication is not usage. ACP may report a nonempty tier or explicitly omit it; omission is recorded as UNREPORTED and never inferred. Eligibility depends on the same zero-metered vectors in either case. Any terminal credit-equivalent figure is recorded only as post-run telemetry; it is not billed spend or a pre-run cap."
     },
     "copilot": {
       "label": "GitHub Copilot CLI (repository guardian)",

@@ -9,7 +9,22 @@ const DEFAULT_CANON = path.join(__dirname, 'TOOL-CAPABILITY-CANON.json');
 const EXIT_OK = 0;
 const EXIT_USAGE = 2;
 const EXIT_BLOCK = 3;
-const DATA_RANK = { PUBLIC: 0, INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3 };
+const DATA_RANK = Object.freeze({ PUBLIC: 0, INTERNAL: 1, CONFIDENTIAL: 2, RESTRICTED: 3 });
+const ZERO_METERED_PROOF_MAX_LIFETIME_MS = 5 * 60 * 1000;
+const ADAPTER_BILLING_PREFLIGHT_STAGE = 'adapter-billing-preflight';
+const POLICY_MODEL_TO_CANON_TOOL = Object.freeze({
+  claude: 'claude-code',
+  codex: 'codex-local',
+  grok: 'grok-cli',
+  'grok-builder': 'grok-cli',
+  copilot: 'copilot-cli',
+});
+const ROLE_CAPABILITY_AUTHORITY = Object.freeze({
+  orchestrator: Object.freeze({ modelCapability: 'orchestration', canonTaskId: 'software.build' }),
+  'implementation-review': Object.freeze({ modelCapability: 'implementation-review', canonTaskId: 'software.review' }),
+  'adversarial-review': Object.freeze({ modelCapability: 'adversarial-review', canonTaskId: 'software.red-team' }),
+  'repository-guardian': Object.freeze({ modelCapability: 'repository-guardian', canonTaskId: 'software.repository-guardian' }),
+});
 
 function parse(argv) {
   const out = {};
@@ -68,22 +83,78 @@ function validate(canon) {
 // ── policy-based routing (MODEL-ROUTING-POLICY.json) ────────────────────────
 const POLICY_PATH = require('path').join(__dirname, 'MODEL-ROUTING-POLICY.json');
 
-function loadPolicy() {
+function loadPolicy(policyPath = POLICY_PATH) {
   const fs = require('fs');
-  if (!fs.existsSync(POLICY_PATH)) {
+  if (!fs.existsSync(policyPath)) {
     const e = new Error('MODEL-ROUTING-POLICY.json is missing. Refusing to route: an absent policy is not a permissive policy.');
     e.refused = true; throw e;
   }
-  return JSON.parse(fs.readFileSync(POLICY_PATH, 'utf8'));
+  const policy = JSON.parse(fs.readFileSync(policyPath, 'utf8'));
+  const declared = policy && policy.dataClasses;
+  const names = declared && typeof declared === 'object' ? Object.keys(declared) : [];
+  const canonicalNames = Object.keys(DATA_RANK);
+  if (JSON.stringify(names) !== JSON.stringify(canonicalNames) ||
+      canonicalNames.some((name) => !declared[name] || declared[name].rank !== DATA_RANK[name])) {
+    const e = new Error(`MODEL-ROUTING-POLICY data classes must exactly match canonical ${canonicalNames.join(', ')}`);
+    e.refused = true; throw e;
+  }
+  return policy;
+}
+
+function validateRoleToolAuthority(roleId, modelId, model, canon) {
+  const required = ROLE_CAPABILITY_AUTHORITY[roleId];
+  if (!required) {
+    return { ok: false, code: 'ROLE_CAPABILITY_UNDECLARED',
+      reason: `${roleId} has no canonical capability requirement.` };
+  }
+  if (!model || !Array.isArray(model.capabilities) ||
+      !model.capabilities.includes(required.modelCapability)) {
+    return { ok: false, code: 'MODEL_CAPABILITY_REFUSED',
+      reason: `${modelId} does not declare the required ${required.modelCapability} capability for ${roleId}.` };
+  }
+  const toolId = POLICY_MODEL_TO_CANON_TOOL[modelId];
+  if (!toolId) {
+    return { ok: false, code: 'CANON_TOOL_UNMAPPED',
+      reason: `${modelId} has no explicit Tool Capability Canon mapping.` };
+  }
+  const tool = canon && Array.isArray(canon.tools)
+    ? canon.tools.find((entry) => entry && entry.toolId === toolId) : null;
+  if (!tool) {
+    return { ok: false, code: 'CANON_TOOL_MISSING',
+      reason: `${modelId} maps to ${toolId}, which is absent from the Tool Capability Canon.` };
+  }
+  if (!Array.isArray(tool.taskIds) || !tool.taskIds.includes(required.canonTaskId)) {
+    return { ok: false, code: 'CANON_CAPABILITY_REFUSED',
+      reason: `${toolId} is not canonically authorized for ${required.canonTaskId}.` };
+  }
+  if (!(tool.maxDataClassification in DATA_RANK)) {
+    return { ok: false, code: 'CANON_DATA_CEILING_UNKNOWN',
+      reason: `${toolId} has unknown canonical data ceiling ${JSON.stringify(tool.maxDataClassification)}.` };
+  }
+  if (model.maxDataClass !== tool.maxDataClassification) {
+    return { ok: false, code: 'DATA_CEILING_AUTHORITY_MISMATCH',
+      reason: `${modelId} policy ceiling ${JSON.stringify(model.maxDataClass)} conflicts with ${toolId} canonical ceiling ${JSON.stringify(tool.maxDataClassification)}.` };
+  }
+  if (tool.enabled !== true || tool.availability !== 'AVAILABLE') {
+    return { ok: false, code: 'CANON_TOOL_UNAVAILABLE',
+      reason: `${toolId} is enabled=${String(tool.enabled)} availability=${String(tool.availability)}; only enabled AVAILABLE tools may route.` };
+  }
+  if (!tool.availabilityEvidence ||
+      !Number.isFinite(Date.parse(tool.availabilityEvidence.observedAt || '')) ||
+      typeof tool.availabilityEvidence.result !== 'string' || !tool.availabilityEvidence.result.trim()) {
+    return { ok: false, code: 'CANON_AVAILABILITY_UNPROVEN',
+      reason: `${toolId} has no dated positive availability evidence.` };
+  }
+  return { ok: true, toolId, costClass: tool.costClass };
 }
 
 // Metered execution needs a named human and a cap inside the hard ceiling.
 // Each condition exists because of a specific way spending goes wrong:
 // no name = nobody accountable; no cap = unbounded; cap above ceiling = the
 // ceiling was decorative.
-function meteredAuthorization(opts) {
+function meteredAuthorization(opts, policyOverride) {
   let policy;
-  try { policy = loadPolicy(); }
+  try { policy = policyOverride || loadPolicy(opts.policyPath); }
   catch (e) { return { ok: false, reason: 'model routing policy unreadable — metered execution refused' }; }
   const b = policy.budgets || {};
   if (!opts.allowMetered) return { ok: false, reason: 'metered execution has no explicit budget authorization' };
@@ -113,9 +184,101 @@ function meteredAuthorization(opts) {
   return { ok: true, approvedBy: String(opts.approvedBy), capUsd: cap };
 }
 
+function canonicalIsoTimestamp(value) {
+  if (typeof value !== 'string' || !value) return null;
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) return null;
+  return new Date(milliseconds).toISOString() === value ? milliseconds : null;
+}
+
+// UNKNOWN canonical billing is neither free nor metered: it is unresolved.
+// The only launch proof accepted here is a fresh ACP observation bound to this
+// exact invocation. Authentication and a subscription label are not usage
+// evidence, so the proof also has to carry the observed zero-spend vectors.
+function validateZeroMeteredProof(opts = {}, nowMs = Date.now()) {
+  const invocationId = typeof opts.invocationId === 'string' ? opts.invocationId.trim() : '';
+  if (!invocationId) {
+    return { ok: false, reason: 'zero-metered billing proof requires a nonempty execution invocationId' };
+  }
+  const proof = opts.subscriptionProof;
+  if (!proof || typeof proof !== 'object') {
+    return { ok: false, reason: 'fresh per-execution zero-metered billing proof is missing' };
+  }
+  if (proof.ok !== true || proof.mode !== 'zero-metered') {
+    return { ok: false, reason: 'billing proof mode must be zero-metered and positively validated' };
+  }
+  if (proof.invocationId !== invocationId) {
+    return { ok: false, reason: 'billing proof invocationId does not match this execution; proof replay is refused' };
+  }
+  if (typeof proof.preflightId !== 'string' || !proof.preflightId.trim()) {
+    return { ok: false, reason: 'billing proof requires a unique nonempty preflightId' };
+  }
+  const observedAt = canonicalIsoTimestamp(proof.observedAt);
+  const expiresAt = canonicalIsoTimestamp(proof.expiresAt);
+  if (observedAt === null || expiresAt === null) {
+    return { ok: false, reason: 'billing proof observedAt and expiresAt must be canonical ISO timestamps' };
+  }
+  if (observedAt > nowMs) {
+    return { ok: false, reason: 'billing proof observedAt is in the future' };
+  }
+  if (expiresAt < nowMs) {
+    return { ok: false, reason: 'billing proof is expired' };
+  }
+  const lifetimeMs = expiresAt - observedAt;
+  if (lifetimeMs <= 0 || lifetimeMs > ZERO_METERED_PROOF_MAX_LIFETIME_MS) {
+    return { ok: false, reason: 'billing proof lifetime must be positive and no longer than 5 minutes' };
+  }
+  const tierReported = proof.subscriptionTierState === 'REPORTED';
+  const tierUnreported = proof.subscriptionTierState === 'UNREPORTED';
+  if (tierReported &&
+      (typeof proof.subscriptionTier !== 'string' || !proof.subscriptionTier.trim())) {
+    return { ok: false, reason: 'REPORTED billing proof requires a nonempty subscriptionTier string' };
+  }
+  if (tierUnreported && proof.subscriptionTier !== null) {
+    return { ok: false, reason: 'UNREPORTED billing proof requires subscriptionTier null; AEGIS does not invent a tier' };
+  }
+  if (!tierReported && !tierUnreported) {
+    return { ok: false, reason: 'billing proof subscriptionTierState must be REPORTED or UNREPORTED' };
+  }
+  const zeroSpend = proof.unifiedBilling === true
+    && proof.onDemandCap === 0
+    && proof.onDemandUsed === 0
+    && proof.prepaidBalance === 0
+    && (proof.autoTopup === 'ABSENT' || proof.autoTopup === 'DISABLED');
+  if (!zeroSpend) {
+    return { ok: false, reason: 'billing proof must show unified billing, all three spend vectors at zero, and auto-topup absent or disabled' };
+  }
+  return { ok: true, invocationId, preflightId: proof.preflightId };
+}
+
+function billingEligibility(costClass, execution, opts = {}, policyOverride, allowAdapterDefer = false) {
+  const costUnknown = costClass === 'UNKNOWN';
+  const authorizationIntent = execution === 'METERED' || costClass === 'METERED' || costUnknown
+    || opts.allowMetered !== undefined || opts.approvedBy !== undefined || opts.capUsd !== undefined;
+  if (authorizationIntent) {
+    const authorization = meteredAuthorization(opts, policyOverride);
+    if (!authorization.ok) return { ok: false, code: 'METERED_UNAUTHORIZED', reason: authorization.reason };
+  }
+  if (opts.deferSubscriptionProof === true) {
+    const invocationId = typeof opts.invocationId === 'string' ? opts.invocationId.trim() : '';
+    if (!costUnknown || !allowAdapterDefer ||
+        opts.preflightStage !== ADAPTER_BILLING_PREFLIGHT_STAGE || !invocationId) {
+      return { ok: false, code: 'BILLING_PROOF_REQUIRED',
+        reason: 'zero-metered proof may be deferred only for an UNKNOWN-cost route by the adapter billing-preflight stage for a named invocation' };
+    }
+    return { ok: true, deferred: true };
+  }
+
+  if (!costUnknown) return { ok: true };
+
+  const proof = validateZeroMeteredProof(opts);
+  if (!proof.ok) return { ok: false, code: 'BILLING_PROOF_REQUIRED', reason: proof.reason };
+  return proof;
+}
+
 // Role routing: who performs a role, with the separation rules enforced.
 function routeRole(roleId, opts = {}) {
-  const policy = loadPolicy();
+  const policy = loadPolicy(opts.policyPath);
   const role = (policy.roles || {})[roleId];
   if (!role) return { ok: false, code: 'UNKNOWN_ROLE', reason: `${roleId} is not a role in the routing policy.` };
 
@@ -178,14 +341,33 @@ function routeRole(roleId, opts = {}) {
     };
   }
 
-  if (model.execution === 'METERED') {
-    const m = meteredAuthorization(opts);
-    if (!m.ok) return { ok: false, code: 'METERED_UNAUTHORIZED', reason: m.reason };
+  // Capability and availability follow the data-sensitivity veto. Policy model
+  // labels are not runtime evidence: resolve the selected model through one
+  // explicit mapping and require the canonical tool to declare this role's task,
+  // be enabled, be AVAILABLE, and carry dated positive evidence.
+  let canonAuthority;
+  try {
+    canonAuthority = validateRoleToolAuthority(
+      roleId, chosen, model, readCanon(opts.canonPath || DEFAULT_CANON));
+  } catch (error) {
+    return { ok: false, code: 'CANON_UNREADABLE',
+      reason: `Tool Capability Canon could not be read: ${error.message}` };
   }
+  if (!canonAuthority.ok) return canonAuthority;
+
+  // A subscription route may still receive an explicit metered/post-run
+  // telemetry authorization envelope from its caller. Once any spending
+  // authority field is present, the envelope must be complete and remain
+  // inside the policy ceiling; changing a model's billing classification must
+  // never make a malformed authorization silently irrelevant.
+  const billing = billingEligibility(
+    canonAuthority.costClass, model.execution, opts, policy, true);
+  if (!billing.ok) return billing;
 
   return {
     ok: true, roleId, model: chosen, label: model.label,
-    execution: model.execution, dataClass,
+    execution: model.execution, dataClass, toolId: canonAuthority.toolId,
+    canonCostClass: canonAuthority.costClass,
     bounds: role.bounds || null,
     recursiveDelegation: recursion,
     advisoryOnly: role.advisoryOnly === true,
@@ -229,10 +411,8 @@ function route(canon, opts) {
     // CONFIRMED FINDING #5: a bare --allow-metered boolean used to authorize
     // spending. Money now requires a name attached to the decision and a
     // number attached to the spend, both bounded by the policy ceiling.
-    if (tool.costClass === 'METERED') {
-      const m = meteredAuthorization(opts);
-      if (!m.ok) reasons.push(m.reason);
-    }
+    const billing = billingEligibility(tool.costClass, null, opts, undefined, false);
+    if (!billing.ok) reasons.push(`${billing.code}: ${billing.reason}`);
     considered.push({ toolId, eligible: reasons.length === 0, reasons });
     if (reasons.length === 0) {
       return {
@@ -301,7 +481,8 @@ function main() {
   return result.ok ? EXIT_OK : EXIT_BLOCK;
 }
 
-module.exports = { routeRole, meteredAuthorization, loadPolicy, route, DATA_RANK };
+module.exports = { routeRole, meteredAuthorization, validateZeroMeteredProof, billingEligibility,
+  loadPolicy, validateRoleToolAuthority,
+  route, DATA_RANK, POLICY_MODEL_TO_CANON_TOOL, ROLE_CAPABILITY_AUTHORITY };
 
 if (require.main === module) process.exit(main());
-
