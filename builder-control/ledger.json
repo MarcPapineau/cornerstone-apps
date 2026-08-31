@@ -24846,5 +24846,59 @@
       }
     ],
     "notes": "authorized op passed all gate rules."
+  },
+  {
+    "entryId": "LED-2026-08-31-996958",
+    "ts": "2026-08-31T19:19:56.958Z",
+    "packetId": "PKT-20260826-ASYNC-WORKER-OPERATOR-BETA",
+    "agentId": "claude-code",
+    "gate": "control",
+    "status": "PASS",
+    "blockRule": null,
+    "operation": "push builder-control/schemas/engineering-review.schema.json",
+    "changed": [
+      "builder-control/schemas/engineering-review.schema.json"
+    ],
+    "commandsRun": [],
+    "testsRun": [],
+    "screenshots": [],
+    "commitSha": null,
+    "bundleHash": null,
+    "evidencePaths": [],
+    "driftChecks": [
+      {
+        "check": "check-drift.cjs",
+        "exit": 0,
+        "summary": "\n🟢 DRIFT CHECK PASSED — tier matrix authority intact, no forbidden patterns."
+      }
+    ],
+    "notes": "authorized op passed all gate rules."
+  },
+  {
+    "entryId": "LED-2026-08-31-997188",
+    "ts": "2026-08-31T19:19:57.188Z",
+    "packetId": "PKT-20260826-ASYNC-WORKER-OPERATOR-BETA",
+    "agentId": "claude-code",
+    "gate": "control",
+    "status": "PASS",
+    "blockRule": null,
+    "operation": "push builder-control/schemas/task-packet.schema.json",
+    "changed": [
+      "builder-control/schemas/task-packet.schema.json"
+    ],
+    "commandsRun": [],
+    "testsRun": [],
+    "screenshots": [],
+    "commitSha": null,
+    "bundleHash": null,
+    "evidencePaths": [],
+    "driftChecks": [
+      {
+        "check": "check-drift.cjs",
+        "exit": 0,
+        "summary": "\n🟢 DRIFT CHECK PASSED — tier matrix authority intact, no forbidden patterns."
+      }
+    ],
+    "notes": "authorized op passed all gate rules."
   }
 ]
