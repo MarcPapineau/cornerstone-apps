@@ -26,13 +26,24 @@
     "filesAllowed": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Exact paths/globs this packet may create or edit. A write outside this list is HARD-BLOCKED even for a registered agent.",
+      "description": "Exact paths and * or ** globs this packet may edit. Globs resolve once to existing regular files inside the isolated worktree; creation authority requires an exact new-leaf path. A write outside the resolved list is HARD-BLOCKED even for a registered agent.",
       "minItems": 1
     },
     "testsRequired": {
       "type": "array",
-      "items": { "type": "string" },
-      "description": "Commands that must run and pass (or be explicitly INCOMPLETE) before the packet's ledger entry can be PASS."
+      "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
+      "description": "Commands that must run and pass (or be explicitly INCOMPLETE) before the packet's ledger entry can be PASS. Entries must be non-blank: `bash -lc \"\"` exits 0 and would be recorded as a passing check that verified nothing."
+    },
+    "hostContainmentRequired": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["node builder-control/test/host-containment.test.cjs"]
+      },
+      "minItems": 1,
+      "maxItems": 1,
+      "uniqueItems": true,
+      "description": "Optional exact top-level macOS containment command. When declared it is separate from testsRequired and its zero-skip exact-subject receipt is mandatory."
     },
     "stopConditions": {
       "type": "array",
@@ -44,7 +55,7 @@
       "description": "The override surface. Empty/false everywhere = packet authorizes only ordinary allowed ops. Each true/non-empty field is logged to the ledger.",
       "required": ["authorizedBy", "allowsProtectedPaths", "allowsPublicPush", "allowsRelease"],
       "properties": {
-        "authorizedBy": { "type": "string", "description": "Human/owner who authorized any exception. 'none' if no exception requested.", "examples": ["Marc", "none"] },
+        "authorizedBy": { "type": "string", "minLength": 1, "pattern": "\\S", "description": "Human/owner who authorized any exception. 'none' if no exception requested. Must be non-blank: a whitespace-only name is not an authorization.", "examples": ["Marc", "none"] },
         "allowsProtectedPaths": {
           "type": "array",
           "items": { "type": "string" },

@@ -24729,5 +24729,68 @@
     "evidencePaths": [],
     "driftChecks": [],
     "notes": "protected path builder-control/schemas/task-packet.schema.json (controlSystemSelf) with no packet."
+  },
+  {
+    "entryId": "LED-2026-08-31-594858",
+    "ts": "2026-08-31T19:13:14.858Z",
+    "packetId": null,
+    "agentId": "claude-code",
+    "gate": "control",
+    "status": "BLOCKED",
+    "blockRule": "BC-NO-PACKET",
+    "operation": "write builder-control/schemas/engineering-review.schema.json",
+    "changed": [
+      "builder-control/schemas/engineering-review.schema.json"
+    ],
+    "commandsRun": [],
+    "testsRun": [],
+    "screenshots": [],
+    "commitSha": null,
+    "bundleHash": null,
+    "evidencePaths": [],
+    "driftChecks": [],
+    "notes": "protected path builder-control/schemas/engineering-review.schema.json (controlSystemSelf) with no packet."
+  },
+  {
+    "entryId": "LED-2026-08-31-594954",
+    "ts": "2026-08-31T19:13:14.954Z",
+    "packetId": null,
+    "agentId": "claude-code",
+    "gate": "control",
+    "status": "BLOCKED",
+    "blockRule": "BC-NO-PACKET",
+    "operation": "write builder-control/schemas/task-packet.schema.json",
+    "changed": [
+      "builder-control/schemas/task-packet.schema.json"
+    ],
+    "commandsRun": [],
+    "testsRun": [],
+    "screenshots": [],
+    "commitSha": null,
+    "bundleHash": null,
+    "evidencePaths": [],
+    "driftChecks": [],
+    "notes": "protected path builder-control/schemas/task-packet.schema.json (controlSystemSelf) with no packet."
+  },
+  {
+    "entryId": "LED-2026-08-31-910624",
+    "ts": "2026-08-31T19:18:30.624Z",
+    "packetId": null,
+    "agentId": "claude-code",
+    "gate": "control",
+    "status": "BLOCKED",
+    "blockRule": "BC-NO-PACKET",
+    "operation": "write builder-control/schemas/engineering-review.schema.json",
+    "changed": [
+      "builder-control/schemas/engineering-review.schema.json"
+    ],
+    "commandsRun": [],
+    "testsRun": [],
+    "screenshots": [],
+    "commitSha": null,
+    "bundleHash": null,
+    "evidencePaths": [],
+    "driftChecks": [],
+    "notes": "protected path builder-control/schemas/engineering-review.schema.json (controlSystemSelf) with no packet."
   }
 ]

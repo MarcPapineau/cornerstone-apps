@@ -71,12 +71,11 @@
         },
         "changedPaths": {
           "type": "array",
-          "minItems": 1,
           "items": {
             "type": "string",
             "minLength": 1
           },
-          "description": "REQUIRED. Every subject path this reviewer actually read. The gate requires exact set equality with the subject: a reviewer that saw 3 of 11 files and returned APPROVE is otherwise indistinguishable from one that saw everything."
+          "description": "REQUIRED. Every subject path this reviewer actually read. Empty is permitted only for disposition UNAVAILABLE so a failed transport can leave truthful durable evidence; engineering-os.cjs rejects an empty set for every substantive verdict. The gate requires exact set equality with the subject for APPROVE, APPROVE_WITH_NOTES, and REJECT."
         }
       },
       "additionalProperties": false
@@ -169,6 +168,47 @@
           "verifiedByReviewId": {
             "type": "string",
             "description": "REQUIRED when status is FIXED: the reviewId of a record that re-verified the fix. It must be an active record bound to this same subject and must not be from 'claude-self' — a builder may not certify its own fix."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "reverifiedFindings": {
+      "type": "array",
+      "description": "Explicit, reviewer-authored proof that this record re-verified a specific finding in another active review of the same subject. Merely approving the subject does not clear a FIXED finding.",
+      "items": {
+        "type": "object",
+        "required": [
+          "sourceReviewId",
+          "findingIndex",
+          "verificationMethod",
+          "evidence",
+          "outcome"
+        ],
+        "properties": {
+          "sourceReviewId": {
+            "type": "string",
+            "pattern": "^REV-[0-9A-Za-z._-]{3,}$",
+            "description": "The reviewId containing the finding that was re-verified."
+          },
+          "findingIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Zero-based index of the finding in sourceReviewId."
+          },
+          "verificationMethod": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The method actually used. The gate requires an exact match with the source finding's verificationMethod."
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Concrete result of independently applying the verification method."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["PASS"]
           }
         },
         "additionalProperties": false
