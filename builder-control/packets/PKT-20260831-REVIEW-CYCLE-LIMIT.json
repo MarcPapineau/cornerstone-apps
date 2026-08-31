@@ -1,0 +1,38 @@
+{
+  "packetId": "PKT-20260831-REVIEW-CYCLE-LIMIT",
+  "agentId": "claude-code",
+  "objective": "Enforce AEGIS Decision Register D-19, D-20 and D-14 in the runtime. These three decisions govern review cycle limits, immediate dispute of recurring findings, and stopping rather than attempting one more pass. All three were recorded on 30 Aug 2026 and enforced nowhere: a grep across builder-control for cycleLimit, reviewRound, correctionRound, churn and disputed returns exactly one hit, in schemas/engineering-review.schema.json, which describes a shape a record may have rather than a rule anything applies. Adds review-cycle.cjs and its proof suite. Changes no existing file.",
+  "constraints": [
+    "Additive only. No existing file is modified by this packet, so no existing behaviour can regress.",
+    "No new state and no counter file. The round count is derived from review evidence already on disk, because D-01 says evidence owns runtime truth and a counter would be a second owner.",
+    "The checker reports recurrence; it never writes a DISPUTED status itself. The schema requires builderResponse for that status and this module has no standing to author one.",
+    "Fail-closed: unreadable evidence exits 2 and must never print the same way as a clear-to-proceed."
+  ],
+  "sourceOfTruth": [
+    "Notion 06.2 AEGIS Decision Register, entries D-14, D-19, D-20",
+    "builder-control/schemas/engineering-review.schema.json"
+  ],
+  "filesAllowed": [
+    "builder-control/review-cycle.cjs",
+    "builder-control/test/review-cycle.test.cjs",
+    "builder-control/packets/PKT-20260831-REVIEW-CYCLE-LIMIT.json"
+  ],
+  "testsRequired": [
+    "node --check builder-control/review-cycle.cjs",
+    "node --check builder-control/test/review-cycle.test.cjs",
+    "node builder-control/test/review-cycle.test.cjs",
+    "node builder-control/test/engineering-os.test.cjs",
+    "node builder-control/test/gate.test.cjs"
+  ],
+  "stopConditions": [
+    "Marc revokes the authorization",
+    "Any existing suite regresses against its pre-patch baseline",
+    "The review cycle limit this packet introduces fires on this packet's own review"
+  ],
+  "authorization": {
+    "authorizedBy": "PENDING - Marc has not authorized this packet. It is drafted, not granted.",
+    "allowsProtectedPaths": [],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}
