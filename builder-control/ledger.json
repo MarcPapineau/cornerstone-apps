@@ -24792,5 +24792,59 @@
     "evidencePaths": [],
     "driftChecks": [],
     "notes": "protected path builder-control/schemas/engineering-review.schema.json (controlSystemSelf) with no packet."
+  },
+  {
+    "entryId": "LED-2026-08-31-961450",
+    "ts": "2026-08-31T19:19:21.450Z",
+    "packetId": "PKT-20260826-ASYNC-WORKER-OPERATOR-BETA",
+    "agentId": "claude-code",
+    "gate": "control",
+    "status": "PASS",
+    "blockRule": null,
+    "operation": "write builder-control/schemas/engineering-review.schema.json",
+    "changed": [
+      "builder-control/schemas/engineering-review.schema.json"
+    ],
+    "commandsRun": [],
+    "testsRun": [],
+    "screenshots": [],
+    "commitSha": null,
+    "bundleHash": null,
+    "evidencePaths": [],
+    "driftChecks": [
+      {
+        "check": "check-drift.cjs",
+        "exit": 0,
+        "summary": "\n🟢 DRIFT CHECK PASSED — tier matrix authority intact, no forbidden patterns."
+      }
+    ],
+    "notes": "authorized op passed all gate rules."
+  },
+  {
+    "entryId": "LED-2026-08-31-961687",
+    "ts": "2026-08-31T19:19:21.687Z",
+    "packetId": "PKT-20260826-ASYNC-WORKER-OPERATOR-BETA",
+    "agentId": "claude-code",
+    "gate": "control",
+    "status": "PASS",
+    "blockRule": null,
+    "operation": "write builder-control/schemas/task-packet.schema.json",
+    "changed": [
+      "builder-control/schemas/task-packet.schema.json"
+    ],
+    "commandsRun": [],
+    "testsRun": [],
+    "screenshots": [],
+    "commitSha": null,
+    "bundleHash": null,
+    "evidencePaths": [],
+    "driftChecks": [
+      {
+        "check": "check-drift.cjs",
+        "exit": 0,
+        "summary": "\n🟢 DRIFT CHECK PASSED — tier matrix authority intact, no forbidden patterns."
+      }
+    ],
+    "notes": "authorized op passed all gate rules."
   }
 ]
