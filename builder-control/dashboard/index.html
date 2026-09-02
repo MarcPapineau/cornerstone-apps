@@ -1098,6 +1098,28 @@
     return { clear: true, text: 'Nothing is blocking this run.' };
   }
 
+  // BUILDING is the only stage the ledger has reached while a builder is still
+  // running, so the primary BLOCKER card may describe that stage and nothing
+  // else. Review and checkpoint requirements belong to gates that have not run
+  // for this build; promoting them here would report an active build as blocked
+  // by work that is not due yet. Only positively recorded builder evidence — a
+  // failure, a cancellation, a timeout or a recorded owner decision — can block
+  // the current stage. Anything else fails closed by returning null, which
+  // leaves the existing blocking summary exactly as it was.
+  function builderStageBlocker(run){
+    if (!run || run.state !== 'BUILDING') return null;
+    // The same canonical active-builder rule the lifecycle label uses: active
+    // worker evidence, a running status, and no terminal exit.
+    if (operationalState(run).state !== 'RUNNING') return null;
+    var build = run.build || {};
+    if (build.timedOut === true || build.retrySafe === false || build.failure || build.failover ||
+        build.recoveryCode || build.recovery || build.cancellation ||
+        run.ownerDecision || run.decision) return null;
+    return { text: 'No current builder blocker is recorded. The governed builder is still working on ' +
+      'this change, and the later review and checkpoint gates have not run yet. ' +
+      'Open Evidence, reviewer coverage & run history for the requirements those later gates will apply.' };
+  }
+
   var currentOperatorContext = null;
   function crewIdentity(run){
     if (!run) return 'No worker is assigned.';
@@ -1561,9 +1583,14 @@
     // verdict. A locally empty problem list can never turn the BLOCKER card
     // green when the exact-subject/current-run authority has already failed
     // closed as BLOCKED or UNAVAILABLE.
+    // A running builder is a current-stage fact, so the card describes that
+    // stage instead of a downstream gate requirement. The exact requirements
+    // remain in the evidence disclosure below.
+    var builderStage = builderStageBlocker(boundRun);
     var operatorBlocker = cleanIdle ? 'No blocker — no run has started.' :
-      (controlBlocks ? controlState.plain + (blocked.clear ? '' : ' ' + blocked.text) : blocked.text);
-    var blockerClear = cleanIdle || (!controlBlocks && blocked.clear);
+      (controlBlocks ? controlState.plain + (blocked.clear ? '' : ' ' + blocked.text) :
+        (builderStage ? builderStage.text : blocked.text));
+    var blockerClear = cleanIdle || (!controlBlocks && (!!builderStage || blocked.clear));
     var safeCheckpoint = checkpointEvidence(boundRun);
     var shell = $('operator-shell');
     if (shell) shell.setAttribute('data-run-status', controlState.state.toLowerCase());
@@ -1806,6 +1833,15 @@
       why.appendChild(document.createTextNode(blocked.text));
     }
     host.appendChild(why);
+    // What the primary BLOCKER card refused to promote into an active build
+    // stays legible here, with its exact count and its exact stage.
+    var laterGateCount = (e.problems && e.problems.length) || 0;
+    if (builderStage && laterGateCount){
+      host.appendChild(el('p','meta', laterGateCount + ' unresolved gate requirement' +
+        (laterGateCount === 1 ? ' belongs' : 's belong') +
+        ' to the review and checkpoint gates, which have not run for this build yet. ' +
+        'This is not a current builder blocker.'));
+    }
 
     var next = el('p');
     next.appendChild(el('strong', null, 'Next action: '));

@@ -1111,6 +1111,98 @@ test('DOM: BLOCKED or UNAVAILABLE control truth can never render a green-clear B
   assert.match(unavailableCard.textContent, /Current control-plane status is unavailable/);
 });
 
+// ── the BLOCKER card describes the CURRENT stage, not a later gate ─────────
+// During canonical BUILDING the only stage that has run is the builder. A
+// missing downstream review is a requirement of a gate that has not run yet, so
+// rendering it as the active build's blocker tells the operator the build is
+// stuck when it is simply still working.
+function buildingBlockerFixture(over) {
+  const run = Object.assign({
+    runId: 'RUN-BUILDING-BLOCKER', state: 'BUILDING',
+    objective: 'Keep the blocker card bound to the current stage',
+    updatedAt: '2026-09-02T10:10:00.000Z',
+    build: {
+      mode: 'async', status: 'RUNNING', workerPid: 5150,
+      startedAt: '2026-09-02T10:00:00.000Z', endedAt: null, exit: null,
+      timedOut: false, retrySafe: null, recoveryCode: null, failure: null, failover: null,
+      activity: { active: true, phase: 'RUNNING', code: 'RUNNING', summary: 'Builder is running' },
+    },
+  }, over || {});
+  return fixtureState({
+    generatedAt: '2026-09-02T10:10:00.000Z',
+    engineering: Object.assign({}, fixtureState().engineering, {
+      state: 'OK', verdict: 'BLOCKED',
+      problems: [{ rule: 'ENGOS-REVIEW-MISSING',
+        detail: 'grok is required and has no review bound to this subject.' }],
+      reviewerCompleteness: { complete: false, rows: [{
+        reviewer: 'grok', job: 'adversarial reviewer', required: 'REQUIRED', executed: 'MISSING',
+        disposition: null, score: 'UNAVAILABLE', coveredPaths: [], missingPaths: [], stalePaths: [],
+      }] },
+    }),
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      reason: 'exact current run is bound',
+    } },
+  });
+}
+
+function blockerCard(page) {
+  return findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+    .find((node) => node.attrs['data-operator-field'] === 'blocker');
+}
+
+test('DOM: an active BUILDING run reports no current builder blocker instead of a later review gate', () => {
+  const page = bootPage(buildingBlockerFixture());
+  const card = blockerCard(page);
+  assert.ok(card, 'the BLOCKER card is missing');
+  assert.match(card.textContent, /No current builder blocker is recorded\./,
+    `BUILDING did not state its current-stage blocker truth: ${card.textContent}`);
+  assert.match(card.textContent, /later review and checkpoint gates have not run yet/,
+    'the card does not say the later gates have not run');
+  assert.doesNotMatch(card.textContent, /unresolved gate requirement/,
+    'a downstream gate requirement was promoted into the active build blocker');
+  assert.doesNotMatch(card.textContent, /grok/i,
+    'the active build blocker names a reviewer for a gate that has not run');
+  assert.match(card.className, /\bis-clear\b/, 'no current blocker must not render as a blocked card');
+  assert.doesNotMatch(card.className, /\bis-blocked\b/);
+  // The requirement itself is not hidden — it stays in the evidence disclosure.
+  const body = page.text('founder-body');
+  assert.ok(body.includes('grok is required and has no review bound to this subject.'),
+    'the exact downstream requirement disappeared from detailed evidence');
+  assert.ok(body.includes('1 unresolved gate requirement belongs to the review and checkpoint gates'),
+    `the counted downstream requirement is missing from detailed evidence: ${body}`);
+});
+
+test('DOM: recorded builder failure, cancellation, timeout or unverified activity keeps the BUILDING blocker', () => {
+  const cases = [
+    { label: 'model auth failure recorded', over: { build: Object.assign({},
+      buildingBlockerFixture().runs.runs[0].build, {
+        failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
+          summary: 'Claude authentication failed.' } }) } },
+    { label: 'builder timed out', over: { build: Object.assign({},
+      buildingBlockerFixture().runs.runs[0].build, { timedOut: true }) } },
+    { label: 'cancellation recovery recorded', over: { build: Object.assign({},
+      buildingBlockerFixture().runs.runs[0].build, { recoveryCode: 'CANCELLED', retrySafe: false }) } },
+    { label: 'owner decision recorded', over: { ownerDecision: { state: 'ABANDON_REQUESTED' } } },
+    { label: 'terminal exit contradicts BUILDING', over: { build: Object.assign({},
+      buildingBlockerFixture().runs.runs[0].build, { exit: 1 }) } },
+    { label: 'worker activity unverified', over: { build: Object.assign({},
+      buildingBlockerFixture().runs.runs[0].build, {
+        status: 'LAUNCH_CLAIMED', activity: { active: false, phase: 'CLAIMED', code: 'LAUNCH_CLAIMED',
+          summary: 'Builder launch is claimed; process startup is not yet verified' } }) } },
+  ];
+  for (const scenario of cases) {
+    const page = bootPage(buildingBlockerFixture(scenario.over));
+    const card = blockerCard(page);
+    assert.ok(card, `${scenario.label}: the BLOCKER card is missing`);
+    assert.doesNotMatch(card.textContent, /No current builder blocker is recorded\./,
+      `${scenario.label}: recorded builder evidence was rendered as no blocker`);
+    assert.match(card.className, /\bis-blocked\b/,
+      `${scenario.label}: recorded builder evidence rendered a clear card`);
+    assert.doesNotMatch(card.className, /\bis-clear\b/);
+  }
+});
+
 test('DOM: CHECKPOINTED is COMPLETE only for positively bound current-subject clear evidence', () => {
   const subject = 'c'.repeat(64);
   const run = {
