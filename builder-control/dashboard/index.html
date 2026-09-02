@@ -1457,8 +1457,18 @@
     var reviewerSubjectMismatchKnown = !!(validSubjectSha(reviewerSubject) &&
       ((validSubjectSha(canonicalSubject) && reviewerSubject !== canonicalSubject) ||
        (validSubjectSha(gateSubject) && reviewerSubject !== gateSubject)));
+    // BUILDING is the canonical state in which the builder result does not
+    // exist yet. A reviewer row can only describe coverage of a change that has
+    // been produced, so projecting "get codex/grok to review this" here would
+    // announce a review stage the ledger has not reached and imply an external
+    // reviewer is already working. The only honest next step is to wait for the
+    // recorded builder result and then run the packet's own checks.
+    var builderRunning = !!(boundRun && boundRun.state === 'BUILDING');
     if (!boundRun && !reviewRun) {
       deckActions.push('Enter an objective and start a governed build.');
+    } else if (builderRunning) {
+      deckActions.push('Wait for the governed builder to finish this change. ' +
+        'When its result is recorded, run only the deterministic checks this packet declares.');
     } else if (deckRc && deckRc.rows){
       deckRc.rows.forEach(function(row){
         if (row.required === 'REQUIRED' && row.executed !== 'EXECUTED'){
@@ -1811,7 +1821,13 @@
         }
       });
     }
-    if (boundRun && boundRun.state === 'BUILT'){
+    if (builderRunning){
+      // Same canonical rule as the NEXT STEP card: while the run is BUILDING
+      // there is no builder result for anyone to review, so this surface may not
+      // name a reviewer as the pending action either.
+      actions = ['Wait for the governed builder to finish this change. ' +
+        'When its result is recorded, run only the deterministic checks this packet declares.'];
+    } else if (boundRun && boundRun.state === 'BUILT'){
       actions = ['Run deterministic checks on this completed build.'];
     } else if (!actions.length && reviewRun && reviewRun.state === 'CHECKS_PASSED'){
       actions.push(reviewEvidenceReady

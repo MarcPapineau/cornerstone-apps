@@ -963,12 +963,21 @@ test('DOM: a running build shows its mission, current action, elapsed evidence, 
     'Governed builder active · model identity UNAVAILABLE in current status evidence.',
     'Refining the founder-readable mission controls.',
     '10 minutes as of the latest evidence.',
-    'Get grok to review this exact change.',
+    'Wait for the governed builder to finish this change.',
+    'run only the deterministic checks this packet declares.',
     '1 unresolved gate requirement',
     'No safe checkpoint is recorded for this run.',
   ]) {
     assert.ok(body.includes(phrase), `running pilot deck is missing: ${phrase}`);
   }
+  // While the canonical state is BUILDING there is no builder result to review,
+  // so no reviewer may be named as the next or current stage.
+  const buildingNext = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+    .find((node) => node.attrs['data-operator-field'] === 'next-step');
+  assert.ok(buildingNext && !/review/i.test(buildingNext.textContent),
+    `BUILDING claimed a review stage as the next step: ${buildingNext && buildingNext.textContent}`);
+  assert.ok(!/Get \S+ to review this exact change/.test(body),
+    'BUILDING named an independent reviewer as the pending action');
   assert.ok(!/Claude|Opus/.test(body), 'the dashboard inferred a model that current run evidence does not name');
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'running');
 });
