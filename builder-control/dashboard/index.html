@@ -1143,6 +1143,40 @@
     return 'No active worker · assigned model UNAVAILABLE in current status evidence.';
   }
 
+  // Why this model / tool. The only canonical routing evidence this page has is
+  // the run's recorded route: its source marker names the authority that made
+  // the selection, and a REFUSED route carries the one selection reason AEGIS
+  // actually records. A successful route records WHO was selected and never
+  // WHY, so the reason is reported as UNAVAILABLE rather than reconstructed
+  // from capability, cost or failover assumptions this page cannot see. A model
+  // or provider named only on the run record — not by the router — is repeated
+  // as the named worker with its routing reason still UNAVAILABLE.
+  function routingRationale(run){
+    if (!run) return 'No run is active, so no routing decision is recorded.';
+    var route = run.route || null;
+    if (route && route.state === 'REFUSED' &&
+        typeof route.reason === 'string' && route.reason){
+      return 'AEGIS routing refused to select a worker for this run' +
+        (typeof route.code === 'string' && route.code ? ' (' + route.code + ')' : '') +
+        '. Recorded routing reason: ' + route.reason;
+    }
+    if (route && route.source === 'tool-router.cjs routeRole' &&
+        typeof route.model === 'string' && route.model &&
+        typeof route.execution === 'string' && route.execution){
+      return 'AEGIS routing selected ' + route.model + ', recorded by ' + route.source +
+        ' with execution path ' + route.execution + '. No selection reason is recorded with that route, ' +
+        'so why this model was chosen is UNAVAILABLE.';
+    }
+    var named = run.builder && (run.builder.model || run.builder.provider)
+      ? [run.builder.model, run.builder.provider].filter(Boolean).join(' via ')
+      : null;
+    if (named){
+      return 'This run names ' + named + ' as its worker, but no canonical routing decision is recorded ' +
+        'for it, so the routing reason is UNAVAILABLE.';
+    }
+    return 'No canonical routing decision is recorded for this run, so the routing reason is UNAVAILABLE.';
+  }
+
   function elapsedEvidence(run, evidenceAt){
     if (!run) return 'Not running.';
     var build = run.build || {};
@@ -1549,6 +1583,7 @@
     var emptyRunsAvailable = availableEmptyRuns(view);
     var controlState = controlPlaneState(e, bind, boundRun, emptyRunsAvailable);
     var crew = crewIdentity(boundRun);
+    var routing = routingRationale(boundRun);
     var currentAction = boundRun ? opState.plain : 'Nothing is currently running.';
     if (reviewRun && reviewRun.state === 'CHECKS_PASSED' && reviewEvidenceReady &&
         ['UNVERIFIED','BLOCKED','UNAVAILABLE'].indexOf(controlState.state) === -1){
@@ -1623,6 +1658,9 @@
     }
     var commandGrid = el('div','command-grid');
     commandGrid.appendChild(commandCard('CREW / MODEL', crew, 'is-crew'));
+    // Kept adjacent to CREW / MODEL, and rendered for every run state, so an
+    // active build never shows a worker without its recorded routing evidence.
+    commandGrid.appendChild(commandCard('WHY THIS MODEL / TOOL', routing, 'is-routing'));
     commandGrid.appendChild(commandCard('CURRENT ACTION', currentAction, 'is-now'));
     commandGrid.appendChild(commandCard('NEXT STEP', deckActions.join(' '), 'is-next'));
     commandGrid.appendChild(commandCard('BLOCKER', operatorBlocker,

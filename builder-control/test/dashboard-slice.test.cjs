@@ -1689,6 +1689,129 @@ test('no FX rate is hardcoded anywhere in the page — a rate may only arrive as
     'the page must never fetch a live FX rate');
 });
 
+// ── WHY THIS MODEL / TOOL — the routing instrument may not infer a reason ───
+// The pilot deck names a worker. The founder's next question is "why that
+// one?", and the only honest answer is the run's recorded route: who selected
+// it, and — for a refusal — the one reason AEGIS actually writes down. A
+// successful route records the selection and no reason at all, so the card must
+// say the reason is UNAVAILABLE rather than reconstruct a plausible capability,
+// cost or failover story the evidence never contained.
+function routingFixture(run, over) {
+  return fixtureState(Object.assign({
+    generatedAt: '2026-09-02T12:10:00.000Z',
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      reason: 'exact current run is bound',
+    } },
+  }, over || {}));
+}
+
+function routingRun(over) {
+  return Object.assign({
+    runId: 'RUN-ROUTING-WHY', state: 'BUILDING',
+    objective: 'Explain the selected worker from routing evidence',
+    updatedAt: '2026-09-02T12:10:00.000Z', transitions: 4,
+    build: {
+      mode: 'async', status: 'RUNNING', workerPid: 6161,
+      startedAt: '2026-09-02T12:00:00.000Z', endedAt: null,
+      activity: { active: true, phase: 'RUNNING', code: 'RUNNING', summary: 'Builder is running' },
+    },
+  }, over || {});
+}
+
+function operatorFields(page) {
+  return findByAttr(page.document.getElementById('founder-body'), 'data-operator-field');
+}
+
+function routingCard(page) {
+  return operatorFields(page).find((node) => node.attrs['data-operator-field'] === 'why-this-model-/-tool');
+}
+
+// The card is label + value; the rendered claim under test is the value.
+function routingText(page) {
+  const card = routingCard(page);
+  assert.ok(card, 'the WHY THIS MODEL / TOOL card is missing');
+  return card.lastChild.textContent;
+}
+
+test('the routing instrument is one pilot card built beside Crew / Model from run.route alone', () => {
+  assert.ok(/commandCard\('WHY THIS MODEL \/ TOOL'/.test(code),
+    'the pilot deck has no WHY THIS MODEL / TOOL instrument');
+  const grid = code.slice(code.indexOf("commandGrid.appendChild(commandCard('CREW / MODEL'"),
+    code.indexOf('host.appendChild(commandGrid)'));
+  assert.strictEqual((grid.match(/commandCard\('WHY THIS MODEL \/ TOOL'/g) || []).length, 1,
+    'the routing instrument must appear exactly once in the primary pilot deck');
+  assert.ok(grid.indexOf("commandCard('WHY THIS MODEL / TOOL'") < grid.indexOf("commandCard('CURRENT ACTION'"),
+    'the routing instrument was separated from Crew / Model by other pilot cards');
+  const fn = code.slice(code.indexOf('function routingRationale'), code.indexOf('function elapsedEvidence'));
+  assert.ok(fn.length > 0, 'no routingRationale() boundary found');
+  assert.ok(/route\.source === 'tool-router\.cjs routeRole'/.test(fn),
+    'a selected route is claimed without the canonical router source marker');
+  for (const invented of ['capabilit', 'cheaper', 'cost', 'usd', 'fallback', 'failover', 'faster', 'best']) {
+    assert.ok(!new RegExp(invented, 'i').test(fn.replace(/\/\/[^\n]*/g, '')),
+      `the routing instrument invents a "${invented}" claim that routing evidence does not carry`);
+  }
+});
+
+test('DOM: a router-selected route names the selection and its authority, and still calls the reason UNAVAILABLE', () => {
+  const page = bootPage(routingFixture(routingRun({
+    route: { model: 'claude-opus-5', execution: 'claude-cli', source: 'tool-router.cjs routeRole' },
+  })));
+  const card = routingCard(page);
+  assert.ok(card, 'the WHY THIS MODEL / TOOL card is missing');
+  const fields = operatorFields(page).map((node) => node.attrs['data-operator-field']);
+  assert.strictEqual(fields.indexOf('why-this-model-/-tool'), fields.indexOf('crew-/-model') + 1,
+    `the routing instrument no longer renders beside Crew / Model: ${fields.join(', ')}`);
+  assert.strictEqual(card.getAttribute('hidden'), null,
+    'the routing instrument is hidden during an active build');
+  assert.strictEqual(card.firstChild.textContent, 'WHY THIS MODEL / TOOL',
+    'the routing instrument lost its founder-readable label');
+  const text = routingText(page);
+  assert.match(text, /claude-opus-5/, 'the card does not name the routed model');
+  assert.match(text, /tool-router\.cjs routeRole/,
+    'the card does not attribute the selection to the canonical routing authority');
+  assert.match(text, /claude-cli/, 'the card does not name the recorded execution path');
+  assert.match(text, /No selection reason is recorded[\s\S]*UNAVAILABLE/,
+    `a recorded selection reason was invented: ${text}`);
+  assert.doesNotMatch(text, /capabilit|cost|cheap|fallback|failover|fastest|best/i,
+    `the card claimed a capability, cost or fallback fact: ${text}`);
+});
+
+test('DOM: a REFUSED route renders its canonical refusal code and recorded reason', () => {
+  const page = bootPage(routingFixture(routingRun({
+    state: 'CREATED', build: undefined,
+    route: { state: 'REFUSED', code: 'DATA_CLASS_VETO',
+      reason: 'SECRET data may not be sent to claude-opus-5 (max INTERNAL).' },
+  })));
+  const text = routingText(page);
+  assert.strictEqual(text,
+    'AEGIS routing refused to select a worker for this run (DATA_CLASS_VETO). ' +
+    'Recorded routing reason: SECRET data may not be sent to claude-opus-5 (max INTERNAL).',
+    `the refusal code and the one reason routing actually records were not rendered exactly: ${text}`);
+});
+
+test('DOM: a named worker without router evidence reports the routing reason as UNAVAILABLE', () => {
+  const page = bootPage(routingFixture(routingRun({
+    builder: { provider: 'claude-subscription', model: 'claude-opus-5' },
+  })));
+  const text = routingText(page);
+  assert.strictEqual(text,
+    'This run names claude-opus-5 via claude-subscription as its worker, but no canonical routing ' +
+    'decision is recorded for it, so the routing reason is UNAVAILABLE.',
+    `a routing reason the run never recorded was inferred for a named worker: ${text}`);
+});
+
+test('DOM: a run with no routing evidence states UNAVAILABLE and names no model', () => {
+  const text = routingText(bootPage(routingFixture(routingRun())));
+  assert.strictEqual(text,
+    'No canonical routing decision is recorded for this run, so the routing reason is UNAVAILABLE.',
+    `absent routing evidence produced something other than an honest absence: ${text}`);
+
+  assert.strictEqual(routingText(bootPage(fixtureState())),
+    'No run is active, so no routing decision is recorded.',
+    'an idle dashboard claims a routing decision it does not have');
+});
+
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────
 // The panel used to render once from the generated snapshot and never again,
 // so a founder watching the page saw an old objective and an old verdict
