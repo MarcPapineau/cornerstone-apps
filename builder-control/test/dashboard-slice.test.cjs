@@ -3169,6 +3169,126 @@ async function asyncTests() {
     assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')) && !/REVIEW_BOUND/.test(page.text('runs-list')),
       'the bind response optimistically advanced the run before SSE evidence');
   });
+
+  // ── generic Retry must match what the canonical run state actually permits ──
+  // aegis-run refuses /api/retry once the recorded correction budget is spent,
+  // and a recorded builder timeout can only be continued from the CLI, where a
+  // command and a timeout may legally be chosen. A live-looking Retry in either
+  // case is a control that promises an action AEGIS would reject.
+  function retryStatusFixture(run, generatedAt) {
+    return {
+      generatedAt, runsState: 'OK',
+      engineering: { state: 'OK', verdict: 'BLOCKED', problems: [], stages: [] },
+      runsBinding: { state: 'BOUND', runId: run.runId, updatedAt: generatedAt, reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [run],
+    };
+  }
+
+  function bootRetryFixture(status) {
+    const calls = [];
+    const page = bootPage(fixtureState(), { fetch: async (path, options) => {
+      calls.push({ path, options });
+      if (path === '/api/status') return { ok: true, json: async () => status };
+      if (path === '/api/retry') return { ok: true, json: async () => ({
+        runId: status.runs[0].runId, state: 'CORRECTING', action: 'retry', correction: 2,
+      }) };
+      throw new Error('unexpected request ' + path);
+    } });
+    return { page, calls };
+  }
+
+  function retryControls(page) {
+    return {
+      history: allNodes(page.document.getElementById('runs-list'))
+        .find((node) => node.tagName === 'BUTTON' && node.textContent === 'Retry') || null,
+      command: findByAttr(page.document.getElementById('founder-body'), 'data-command-control')
+        .find((node) => node.attrs['data-command-control'] === 'retry') || null,
+      nextStep: (findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+        .find((node) => node.attrs['data-operator-field'] === 'next-step') || { textContent: '' }).textContent,
+    };
+  }
+
+  await atest('DOM: an exhausted correction budget disables generic Retry and states the truthful next action', async () => {
+    const status = retryStatusFixture({
+      runId: 'RUN-CORRECTION-LIMIT', state: 'CHECKS_FAILED',
+      objective: 'Spend the bounded correction budget', updatedAt: '2026-09-02T09:00:00.000Z',
+      corrections: 3, maxCorrections: 3,
+    }, '2026-09-02T09:00:00.000Z');
+    const { page, calls } = bootRetryFixture(status);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const found = retryControls(page);
+    assert.ok(found.history, 'the exhausted run hid Retry instead of explaining the refusal');
+    assert.strictEqual(found.history.disabled, true,
+      'Retry stayed clickable after every bounded correction cycle was already used');
+    assert.strictEqual((found.history._listeners.click || []).length, 0,
+      'a refused Retry still carries an executable click handler');
+    assert.match(page.text('runs-list'), /All 3 bounded correction cycle\(s\) are already used/,
+      'the run card never states why Retry is refused');
+    assert.match(page.text('runs-list'), /Escalate this run or abandon it/,
+      'the run card offers no truthful next action');
+    assert.ok(found.command && found.command.disabled === true,
+      'the command deck kept a live Retry the canonical run state refuses');
+    assert.match(found.nextStep, /All 3 bounded correction cycle\(s\) are already used[\s\S]*Escalate this run or abandon it/,
+      `NEXT STEP still advertises a retry route: ${found.nextStep}`);
+    assert.strictEqual(page.sandbox.AEGIS_DASHBOARD.retryAvailability(status.runs[0]).state,
+      'CORRECTION_LIMIT', 'the projection does not name the canonical refusal');
+    await page.sandbox.AEGIS_DASHBOARD.requestRunRetry(status.runs[0], null);
+    assert.strictEqual(calls.filter((call) => call.path === '/api/retry').length, 0,
+      'the shared helper still POSTed a retry the canonical run state refuses');
+  });
+
+  await atest('DOM: a recorded builder timeout disables generic Retry and names CLI continuation', async () => {
+    const status = retryStatusFixture({
+      runId: 'RUN-BUILDER-TIMEOUT', state: 'BUILD_FAILED',
+      objective: 'Continue a timed-out builder', updatedAt: '2026-09-02T09:05:00.000Z',
+      corrections: 1, maxCorrections: 3,
+      build: { mode: 'async', status: 'FAILED', exit: 124, timedOut: true, retrySafe: null,
+        activity: { code: 'FAILED', phase: 'STOPPED', active: false,
+          summary: 'Builder stopped with exit 124' } },
+    }, '2026-09-02T09:05:00.000Z');
+    const { page, calls } = bootRetryFixture(status);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const found = retryControls(page);
+    assert.ok(found.history, 'the timed-out run hid Retry instead of explaining the refusal');
+    assert.strictEqual(found.history.disabled, true,
+      'a timed-out builder still exposed a generic same-bound Retry');
+    assert.strictEqual((found.history._listeners.click || []).length, 0,
+      'a refused Retry still carries an executable click handler');
+    assert.match(page.text('runs-list'), /Continue this run from the AEGIS CLI/,
+      'the run card never names the one valid continuation route');
+    assert.ok(found.command && found.command.disabled === true,
+      'the command deck kept a live Retry for a timed-out builder');
+    assert.match(found.nextStep, /timed out[\s\S]*Continue this run from the AEGIS CLI/,
+      `NEXT STEP still advertises a generic retry route: ${found.nextStep}`);
+    assert.strictEqual(page.sandbox.AEGIS_DASHBOARD.retryAvailability(status.runs[0]).state,
+      'CLI_TIMEOUT_CONTINUATION', 'the projection does not name the CLI-only continuation');
+    await page.sandbox.AEGIS_DASHBOARD.requestRunRetry(status.runs[0], null);
+    assert.strictEqual(calls.filter((call) => call.path === '/api/retry').length, 0,
+      'the shared helper POSTed a retry that only the CLI can legally continue');
+  });
+
+  await atest('DOM: remaining correction capacity still exposes an executable bounded Retry', async () => {
+    const status = retryStatusFixture({
+      runId: 'RUN-CORRECTION-AVAILABLE', state: 'BUILD_FAILED',
+      objective: 'Keep the bounded recovery route usable', updatedAt: '2026-09-02T09:10:00.000Z',
+      corrections: 1, maxCorrections: 3,
+    }, '2026-09-02T09:10:00.000Z');
+    const { page, calls } = bootRetryFixture(status);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const found = retryControls(page);
+    assert.ok(found.history && found.history.disabled !== true,
+      'remaining correction capacity lost its executable Retry');
+    assert.ok(found.command && found.command.disabled !== true,
+      'remaining correction capacity lost the command-deck Retry');
+    assert.doesNotMatch(page.text('runs-list'), /already used|Continue this run from the AEGIS CLI/,
+      'an available retry was described as refused');
+    await found.history._listeners.click[0]();
+    const retryCalls = calls.filter((call) => call.path === '/api/retry');
+    assert.strictEqual(retryCalls.length, 1, 'the available Retry did not POST exactly one request');
+    assert.deepStrictEqual(JSON.parse(retryCalls[0].options.body), { runId: 'RUN-CORRECTION-AVAILABLE' },
+      'Retry crossed fields beyond the canonical runId');
+  });
 }
 
 async function atest(name, fn) {

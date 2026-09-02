@@ -1355,9 +1355,40 @@
       }));
   }
 
+  // Retry is a governed correction cycle, not a generic "try again". aegis-run
+  // refuses another cycle once the recorded correction budget is spent, and a
+  // recorded builder timeout can only be continued from the CLI — the one place
+  // an operator may choose a command and a timeout, which this browser surface
+  // is forbidden to do. Decide that here, from the run record, so the operator
+  // reads the refusal instead of discovering it after a failed POST.
+  //
+  // Only a positively recorded refusal disables the control. Absent correction
+  // counters are UNVERIFIED, not proof of exhaustion, and must not silently
+  // remove a legitimate recovery action.
+  function retryAvailability(run){
+    if (!run || ['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'].indexOf(run.state) === -1) {
+      return { state: 'NOT_APPLICABLE', allowed: false, reason: null };
+    }
+    if (run.build && run.build.retrySafe === false) {
+      return { state: 'UNSAFE', allowed: false, reason: null };
+    }
+    var used = run.corrections;
+    var max = run.maxCorrections;
+    if (Number.isInteger(used) && Number.isInteger(max) && max > 0 && used >= max) {
+      return { state: 'CORRECTION_LIMIT', allowed: false,
+        reason: 'All ' + max + ' bounded correction cycle(s) are already used, so AEGIS refuses another retry. ' +
+          'Escalate this run or abandon it.' };
+    }
+    if (run.build && run.build.timedOut === true) {
+      return { state: 'CLI_TIMEOUT_CONTINUATION', allowed: false,
+        reason: 'The builder timed out. Retry here would repeat the same bounded attempt and spend a correction cycle. ' +
+          'Continue this run from the AEGIS CLI, which is the only place a command and a timeout may be chosen.' };
+    }
+    return { state: 'AVAILABLE', allowed: true, reason: null };
+  }
+
   async function requestRunRetry(run, button){
-    if (!run || ['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'].indexOf(run.state) === -1) return;
-    if (run.build && run.build.retrySafe === false) return;
+    if (!retryAvailability(run).allowed) return;
     if (button){ button.disabled = true; button.textContent = 'Retry requested…'; }
     var publishActivity = function(text){
       var dashboard = window.AEGIS_DASHBOARD;
@@ -1411,6 +1442,7 @@
     var deckObjective = (boundRun && boundRun.objective) || (bind && bind.objective) || 'No active task';
     var missionHeadlineText = missionHeadline(deckObjective);
     var blocked = blockingStatus(e, bind, boundRun);
+    var deckRetry = retryAvailability(boundRun);
     var deckActions = [];
     var namedReviewActions = [];
     var deckRc = e.reviewerCompleteness;
@@ -1472,9 +1504,9 @@
     } else if (boundRun && boundRun.state === 'CHECKPOINTED') {
       deckActions = ['No owner action is required. This run reached its recorded safe checkpoint.'];
     } else if (boundRun && ['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'].indexOf(boundRun.state) !== -1) {
-      deckActions = [boundRun.state === 'REVIEW_FAILED'
+      deckActions = [deckRetry.reason || (boundRun.state === 'REVIEW_FAILED'
         ? 'Independent review found a blocking issue on this exact checked version. Retry starts the bounded correction route.'
-        : 'The governed run failed. Retry starts only the bounded recovery route allowed for this failure state.'];
+        : 'The governed run failed. Retry starts only the bounded recovery route allowed for this failure state.')];
     } else {
       if (!deckActions.length && e.verdict === 'READY_FOR_DETERMINISTIC_VALIDATION') deckActions.push('Run the deterministic checks.');
       if (!deckActions.length && postBindReadyForPr) deckActions.push('Continue from the recorded governed lifecycle state.');
@@ -1500,13 +1532,13 @@
     var controlBlocks = controlState.state === 'BLOCKED' || controlState.state === 'UNAVAILABLE';
     var modelAuthBlocked = !!(boundRun && boundRun.state === 'BUILD_FAILED' && boundRun.build &&
       boundRun.build.failure && boundRun.build.failure.code === 'MODEL_AUTH_FAILURE');
-    var retryableFailure = !!(boundRun &&
-      ['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'].indexOf(boundRun.state) !== -1 &&
-      !(boundRun.build && boundRun.build.retrySafe === false));
+    var retryableFailure = deckRetry.allowed;
     if (controlBlocks) {
       currentAction = controlState.plain;
       deckActions = modelAuthBlocked
         ? ['Re-authenticate Claude before continuing. Grok is identified as the next eligible builder, but automatic failover is not enabled for this beta.']
+        : deckRetry.reason
+        ? [deckRetry.reason]
         : retryableFailure
         ? [boundRun.state === 'REVIEW_FAILED'
           ? 'Retry this run through the bounded correction route; the recorded review-failure claim remains unverified until exact-subject gate evidence is available.'
@@ -1561,15 +1593,25 @@
     commandGrid.appendChild(commandCard('LAST SAFE CHECKPOINT', safeCheckpoint, 'is-checkpoint'));
     commandGrid.appendChild(commandCard('ELAPSED', elapsed, 'is-elapsed'));
     host.appendChild(commandGrid);
-    if (retryableFailure) {
+    if (retryableFailure || deckRetry.reason) {
       var retryControls = el('div','btn-row command-recovery-controls');
       var retryControl = el('button','action primary','Retry');
       retryControl.type = 'button';
       retryControl.setAttribute('data-command-control','retry');
-      retryControl.addEventListener('click', function(){
-        return window.AEGIS_DASHBOARD.requestRunRetry(boundRun, retryControl);
-      });
+      if (retryableFailure) {
+        retryControl.addEventListener('click', function(){
+          return window.AEGIS_DASHBOARD.requestRunRetry(boundRun, retryControl);
+        });
+      } else {
+        // The canonical run state refuses another generic correction cycle.
+        // Keep the control visible and disabled with its exact reason, so the
+        // deck cannot imply an action AEGIS would reject.
+        retryControl.disabled = true;
+        retryControl.title = deckRetry.reason;
+        retryControl.setAttribute('data-retry-state', deckRetry.state);
+      }
       retryControls.appendChild(retryControl);
+      if (deckRetry.reason) retryControls.appendChild(el('div','meta',deckRetry.reason));
       host.appendChild(retryControls);
     }
     currentOperatorContext = {
@@ -2317,6 +2359,7 @@
     reviewerEvidenceReady: reviewerEvidenceReady,
     checkpointEvidence: checkpointEvidence,
     requestRunRetry: requestRunRetry,
+    retryAvailability: retryAvailability,
     availableEmptyRuns: availableEmptyRuns,
     renderStateSource: renderStateSource
   };
@@ -2594,14 +2637,26 @@
       row.appendChild(cancelBtn);
     }
 
-    if ((run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED' || run.state === 'REVIEW_FAILED') &&
-        !(run.build && run.build.retrySafe === false)) {
+    // One authority decides whether Retry is permitted, shared with the command
+    // deck and the POST helper. Without it the browser cannot know what the
+    // canonical run state allows, so it offers nothing rather than guessing.
+    var retryState = window.AEGIS_DASHBOARD && window.AEGIS_DASHBOARD.retryAvailability
+      ? window.AEGIS_DASHBOARD.retryAvailability(run)
+      : { state: 'UNAVAILABLE', allowed: false, reason: null };
+    if (retryState.allowed || retryState.reason) {
       var retryBtn = el('button', 'action', 'Retry');
       retryBtn.type = 'button';
-      retryBtn.addEventListener('click', function(){
-        return window.AEGIS_DASHBOARD.requestRunRetry(run, retryBtn);
-      });
+      if (retryState.allowed) {
+        retryBtn.addEventListener('click', function(){
+          return window.AEGIS_DASHBOARD.requestRunRetry(run, retryBtn);
+        });
+      } else {
+        retryBtn.disabled = true;
+        retryBtn.title = retryState.reason;
+        retryBtn.setAttribute('data-retry-state', retryState.state);
+      }
       row.appendChild(retryBtn);
+      if (retryState.reason) row.appendChild(el('div', 'meta', retryState.reason));
     }
 
     return row;
