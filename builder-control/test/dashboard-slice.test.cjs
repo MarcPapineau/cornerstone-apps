@@ -714,6 +714,80 @@ test('RED: dashboard executable code never reads raw worker output fields', () =
     'dashboard still advertises raw worker streams as safe evidence');
 });
 
+// ── operational status strip (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─────
+// The failure guarded here is a first screen that stays calm while the build
+// is dying: five operational answers have to be readable above the fold — run
+// state, real progress versus heartbeat-only liveness, watchdog or timeout,
+// recorded CAD, and last safe checkpoint — each in words and shape, none of
+// them produced by a clock, a poll, or a second reading of the run.
+test('the operational status strip sits beneath the header, ahead of the operator shell', () => {
+  const source = htmlSrc();
+  const header = source.indexOf('</header>');
+  const strip = source.indexOf('id="ops-strip"');
+  const shell = source.indexOf('id="operator-shell"');
+  assert.ok(strip !== -1, 'no operational status strip exists on the first screen');
+  assert.ok(header !== -1 && header < strip && strip < shell,
+    'the strip must render beneath the header and ahead of the operator shell');
+  assert.ok(/id="ops-strip-cells"/.test(source), 'the strip has no repaint target');
+  assert.strictEqual((source.match(/id="ops-strip-cells"/g) || []).length, 1,
+    'a second strip host would let two copies of the same five facts drift apart');
+  const markup = source.slice(strip, source.indexOf('</section>', strip));
+  for (const word of ['PASS', 'HEALTHY', 'VERIFIED', 'COMPLETE', 'RUNNING', 'IDLE', 'RECORDED']) {
+    assert.ok(!new RegExp('>\\s*' + word).test(markup),
+      `the strip ships the literal status word ${word} in static markup`);
+  }
+});
+
+test('the status strip is compact and motion-free, and its state is never colour alone', () => {
+  assert.ok(/\.ops-strip-cells\{[^}]*display:grid[^}]*repeat\(5,minmax\(0,1fr\)\)/.test(code),
+    'the five operational answers are not laid out as one compact band');
+  const strip = code.slice(code.indexOf('.ops-strip{'), code.indexOf('.command-shell{display:grid'));
+  assert.ok(strip.length > 0, 'the strip stylesheet block was not located');
+  assert.ok(!/\banimation\s*:/.test(strip) && !/\btransition\s*:/.test(strip),
+    'the strip animates or transitions — it is an instrument, not decoration');
+  assert.ok(/-webkit-line-clamp/.test(strip),
+    'the strip does not clamp its prose, so a long canonical sentence would consume the first screen');
+  // Colour is emphasis only: the renderer writes the canonical word and a glyph
+  // into every cell, and each new supervision token has its own state style.
+  for (const token of ['PROGRESS_RECORDED', 'PROGRESS_UNRECORDED', 'TIMED_OUT', 'NOT_RUNNING', 'RECORDED']) {
+    assert.ok(new RegExp('\\.s-' + token + '\\b').test(code), `${token} has no state style`);
+    assert.ok(new RegExp('\\b' + token + ':').test(code.slice(code.indexOf('var GLYPH'), code.indexOf('function el('))),
+      `${token} has no glyph, so that cell would be legible by colour alone`);
+  }
+  for (const width of ['1599', '1050', '680']) {
+    const start = code.lastIndexOf('@media (max-width:' + width + 'px)');
+    assert.ok(start !== -1, `the ${width}px breakpoint is missing`);
+    const block = code.slice(start, code.indexOf('\n  }', start));
+    assert.ok(/\.ops-strip-cells\{grid-template-columns:/.test(block),
+      `the strip keeps five columns at ${width}px, where they cannot stay legible`);
+  }
+});
+
+test('the strip restates existing resolutions and owns no clock, threshold or second authority', () => {
+  const fn = code.slice(code.indexOf('function opsStripCells'), code.indexOf('function renderOpsStrip'));
+  assert.ok(fn.length > 0, 'no opsStripCells() boundary found');
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.random', 'fetch(', 'innerHTML', 'AEGIS_STATE']) {
+    assert.ok(!fn.includes(banned), `the strip uses ${banned} — it may only restate resolved facts`);
+  }
+  // It is handed resolutions, never raw records: reaching into a run, a view or
+  // a projection here would be a sixth verdict about the same build.
+  for (const raw of ['run.', 'view.', 'binding', 'engineering', 'lastProgressAt', 'noProgressLimitSec',
+    'totalUsd', 'rollbackPoint', 'stdoutTail']) {
+    assert.ok(!fn.includes(raw), `the strip reads the raw field ${raw} instead of an existing resolution`);
+  }
+  assert.strictEqual((code.match(/function opsStripCells/g) || []).length, 1,
+    'the strip was resolved by more than one function');
+  assert.strictEqual((code.match(/renderOpsStrip\(/g) || []).length, 2,
+    'the strip is painted from more than one place, or never painted at all');
+  assert.ok(/renderOpsStrip\(opsStripCells\(controlState, supervision,\s*evidenceCostPanel\(view && view\.cost\),\s*evidenceCheckpointPanel\(boundRun, safeCheckpoint\)\)\)/.test(code),
+    'the strip is not fed by the deck\'s own control-plane, supervision, CAD cost and checkpoint resolutions');
+  // Detail View keeps the deeper evidence: the strip did not take the rail's
+  // panels away, and the rail still resolves them through the same renderers.
+  assert.ok(/evidenceCostPanel\(view && view\.cost\),\s*evidenceCheckpointPanel\(ctx\.run, ctx\.checkpointText\)/.test(code),
+    'the Detail View evidence rail lost its own CAD cost and checkpoint panels');
+});
+
 
 // ── DOM harness: render the REAL page source, not a copy of it ─────────────
 // jsdom is not a dependency here and will not become one for a governance
@@ -4522,6 +4596,200 @@ async function asyncTests() {
     assert.ok(/var supervision = supervisionEvidence\(boundRun\);/.test(code) &&
       /commandCard\('BUILDER PROGRESS', supervision\.headline/.test(code),
       'the Command View progress card is not driven by the shared supervision resolution');
+  });
+
+  // ── first-screen operational status strip ─────────────────────────────────
+  // Five cells, one repaint path. Each proof below reads the strip through the
+  // page's own DOM, so a cell that answers from a clock, from a neighbouring
+  // fact, or from raw worker output fails here rather than on a real build.
+  function opsCells(page) {
+    const found = {};
+    findByAttr(page.document.getElementById('ops-strip-cells'), 'data-ops-cell')
+      .forEach((node) => { found[node.attrs['data-ops-cell']] = node; });
+    return found;
+  }
+
+  // A cell states its condition three ways: the machine attribute, a written
+  // state word, and a glyph. Colour is never the only carrier. The chip word
+  // may be the evidence renderer's own vocabulary (a recorded CAD figure is an
+  // AVAILABLE chip over a RECORDED state); both are asserted, never inferred.
+  function assertCellStates(cell, expected, label) {
+    const state = typeof expected === 'string' ? expected : expected.state;
+    const chipWord = typeof expected === 'string' ? expected : expected.chip;
+    assert.ok(cell, `the strip has no ${label} cell`);
+    assert.strictEqual(cell.attrs['data-ops-state'], state,
+      `the ${label} cell does not carry the canonical state ${state}`);
+    const chipNode = (cell.children || []).find((c) => String(c.className).includes('chip'));
+    assert.ok(chipNode, `the ${label} cell has no state chip`);
+    assert.strictEqual(chipNode.children.length, 2,
+      `the ${label} chip must carry a glyph and a written state, not colour alone`);
+    assert.ok(chipNode.children[0].textContent.trim().length > 0,
+      `the ${label} chip glyph is empty, leaving colour as the only shape`);
+    assert.strictEqual(chipNode.children[1].textContent, chipWord,
+      `the ${label} chip does not write out its canonical state`);
+  }
+
+  const IDLE_STATUS = {
+    generatedAt: '2026-09-02T09:00:00.000Z', runsState: 'OK',
+    engineering: { state: 'OK', verdict: 'READY_FOR_DETERMINISTIC_VALIDATION', problems: [], stages: [] },
+    runsBinding: { state: 'UNAVAILABLE', runId: null, evidenceState: 'OK',
+      reason: 'no run records exist yet, so no run is current.' },
+    runs: [], integration: { connectors: [] },
+    cost: { state: 'UNAVAILABLE', reason: 'no transcripts are recorded' },
+  };
+
+  await atest('DOM: the strip answers all five operational questions from one live status push', async () => {
+    const page = bootPage(fixtureState(), { status: IDLE_STATUS });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    // Idle first: the strip is calm, and every cell still says something true.
+    let cells = opsCells(page);
+    assert.deepStrictEqual(Object.keys(cells).sort(),
+      ['checkpoint', 'cost', 'progress', 'run-state', 'watchdog'],
+      'the strip does not expose exactly the five operational answers');
+    assertCellStates(cells['run-state'], 'IDLE', 'run state');
+    assert.match(cells['run-state'].textContent, /RUN STATE/);
+    assert.match(cells['run-state'].textContent, /Nothing is currently running\./);
+    assertCellStates(cells.progress, 'NOT_RUNNING', 'progress');
+    assert.match(cells.progress.textContent, /No run is active, so there is no builder to supervise\./);
+    assertCellStates(cells.watchdog, 'NOT_RUNNING', 'watchdog');
+    assert.match(cells.watchdog.textContent, /no builder watchdog is armed/);
+    assertCellStates(cells.cost, 'UNAVAILABLE', 'cost');
+    assert.match(cells.cost.textContent, /CAD UNAVAILABLE — no transcripts are recorded/,
+      `an absent cost projection was not stated as explicitly unavailable: ${cells.cost.textContent}`);
+    assertCellStates(cells.checkpoint, 'UNAVAILABLE', 'checkpoint');
+    assert.match(cells.checkpoint.textContent, /LAST SAFE CHECKPOINT/);
+    assert.match(cells.checkpoint.textContent, /No run is active\./);
+
+    // The same live seam a real build repaints through: no reload, no timer,
+    // and no second renderer — the strip must follow canonical status.
+    renderMinimizedStatus(page, supervisionStatusFixture(RECORDED_SUPERVISION_BUILD,
+      '2026-09-02T10:10:00.000Z'));
+    cells = opsCells(page);
+    assertCellStates(cells['run-state'], 'RUNNING', 'run state');
+    assert.match(cells['run-state'].textContent, /Builder is running/,
+      `the strip did not repaint the running run state: ${cells['run-state'].textContent}`);
+    assertCellStates(cells.progress, 'PROGRESS_RECORDED', 'progress');
+    assert.match(cells.progress.textContent,
+      /Builder changed a file it is authorized to write — last real progress 2026-09-02T10:04:00\.000Z\./,
+      `the strip did not state real progress: ${cells.progress.textContent}`);
+    assert.match(cells.progress.textContent,
+      /Supervisor heartbeat 2026-09-02T10:09:59\.000Z is liveness only, never progress/,
+      `the strip merged the heartbeat into progress: ${cells.progress.textContent}`);
+    assertCellStates(cells.watchdog, 'RECORDED', 'watchdog');
+    assert.match(cells.watchdog.textContent,
+      /Fixed no-progress watchdog: the build is stopped after 300s without real progress · fixed wall-clock limit 900s\./,
+      `the strip omitted the fixed watchdog limits: ${cells.watchdog.textContent}`);
+    assert.match(cells.watchdog.textContent, /Timeout: none recorded/);
+    // This projection carries no cost envelope at all, which is not zero.
+    assertCellStates(cells.cost, 'UNAVAILABLE', 'cost');
+    assert.match(cells.cost.textContent, /CAD UNAVAILABLE/);
+    assert.ok(!/CAD 0|\$0/.test(cells.cost.textContent), 'a missing cost projection was rendered as zero');
+    assertCellStates(cells.checkpoint, { state: 'NOT_RECORDED', chip: 'UNAVAILABLE' }, 'checkpoint');
+    assert.match(cells.checkpoint.textContent, /No safe checkpoint is recorded for this run\./);
+  });
+
+  await atest('DOM: a heartbeating build with no recorded progress is never calm in the strip', async () => {
+    const status = supervisionStatusFixture(Object.assign({}, RECORDED_SUPERVISION_BUILD, {
+      supervision: Object.assign({}, RECORDED_SUPERVISION_BUILD.supervision, {
+        progressState: 'UNRECORDED', progressKind: null, progressSummary: null, lastProgressAt: null,
+        progressReason: 'No real builder progress is recorded for this attempt, so builder liveness rests on the supervisor heartbeat alone.',
+      }),
+    }), '2026-09-02T10:11:00.000Z');
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const cells = opsCells(page);
+    assertCellStates(cells.progress, 'PROGRESS_UNRECORDED', 'progress');
+    assert.match(cells.progress.textContent, /No real builder progress is recorded for this attempt/);
+    assert.match(cells.progress.textContent, /liveness rests on the supervisor heartbeat alone/);
+    assert.ok(!/last real progress 2026/.test(cells.progress.textContent),
+      'the strip back-filled an absent progress timestamp');
+    // The watchdog has not fired, and the strip says exactly that rather than
+    // implying the build is fine.
+    assertCellStates(cells.watchdog, 'RECORDED', 'watchdog');
+    assert.match(cells.watchdog.textContent, /Timeout: none recorded/);
+  });
+
+  await atest('DOM: a recorded timeout is stated in the strip with its canonical stop reason', async () => {
+    const status = supervisionStatusFixture({
+      mode: 'async', status: 'FAILED', exit: 124, timedOut: true, retrySafe: false,
+      heartbeatAt: '2026-09-02T10:14:00.000Z',
+      activity: { code: 'FAILED', phase: 'STOPPED', active: false, summary: 'Builder stopped with exit 124' },
+      supervision: {
+        progressState: 'RECORDED', progressKind: 'STDOUT',
+        progressSummary: 'Builder is emitting model and tool stream activity',
+        lastProgressAt: '2026-09-02T10:04:00.000Z', progressReason: null,
+        noProgressLimitSec: 300, wallClockLimitSec: 900,
+        timeoutReason: 'NO_PROGRESS_TIMEOUT',
+        timeoutSummary: 'Stopped because no real builder progress was observed inside the fixed no-progress limit',
+      },
+    }, '2026-09-02T10:15:00.000Z');
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const cells = opsCells(page);
+    assertCellStates(cells.watchdog, 'TIMED_OUT', 'watchdog');
+    assert.match(cells.watchdog.textContent,
+      /Timeout: NO_PROGRESS_TIMEOUT — Stopped because no real builder progress was observed inside the fixed no-progress limit/,
+      `the strip did not name the canonical stop reason: ${cells.watchdog.textContent}`);
+    assertCellStates(cells.progress, 'TIMED_OUT', 'progress');
+    // A run record still saying BUILDING against a terminal exit is a
+    // contradiction the control plane already resolves; the strip repeats it.
+    assertCellStates(cells['run-state'], 'BLOCKED', 'run state');
+    assert.match(cells['run-state'].textContent, /recorded terminal exit 124/);
+  });
+
+  await atest('DOM: an absent supervision projection is UNAVAILABLE in the strip, never an assumed start', async () => {
+    const status = supervisionStatusFixture({
+      mode: 'async', status: 'RUNNING', heartbeatAt: '2026-09-02T10:16:00.000Z',
+      activity: { code: 'RUNNING', phase: 'RUNNING', active: true, summary: 'Builder is running' },
+    }, '2026-09-02T10:16:30.000Z');
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const cells = opsCells(page);
+    assertCellStates(cells.progress, 'UNAVAILABLE', 'progress');
+    assert.match(cells.progress.textContent, /Builder supervision UNAVAILABLE/);
+    assertCellStates(cells.watchdog, 'UNAVAILABLE', 'watchdog');
+    assert.match(cells.watchdog.textContent, /Watchdog limits UNAVAILABLE/,
+      `an absent watchdog limit was not stated as unavailable: ${cells.watchdog.textContent}`);
+    assert.ok(!/300s|900s|AUTHORIZED_WRITE/.test(cells.watchdog.textContent + cells.progress.textContent),
+      'a missing supervision projection invented a limit or a progress phase');
+  });
+
+  await atest('DOM: the strip states recorded CAD and a recorded checkpoint from the existing renderers', async () => {
+    const status = supervisionStatusFixture(RECORDED_SUPERVISION_BUILD, '2026-09-02T10:10:00.000Z');
+    status.cost = { state: 'OK', totalUsd: 'AT LEAST 2.46', recordedRuns: 3, unrecordedRuns: 0,
+      cad: { state: 'OK', totalCad: '3.38', source: 'builder-control/fx-canon.json',
+        plain: '1 USD = 1.37 CAD, observed 2026-08-24 (Bank of Canada daily rate).' } };
+    status.runs[0].checkpoint = 'CKPT-2026-09-02';
+    status.runs[0].rollbackPoint = 'f'.repeat(40);
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const cells = opsCells(page);
+    assertCellStates(cells.cost, { state: 'RECORDED', chip: 'AVAILABLE' }, 'cost');
+    assert.match(cells.cost.textContent, /CAD 3\.38/,
+      `the recorded CAD figure is missing from the strip: ${cells.cost.textContent}`);
+    assertCellStates(cells.checkpoint, { state: 'RECORDED', chip: 'AVAILABLE' }, 'checkpoint');
+    assert.match(cells.checkpoint.textContent,
+      new RegExp('Checkpoint CKPT-2026-09-02 · rollback commit ' + 'f'.repeat(40)),
+      `the recorded checkpoint is missing from the strip: ${cells.checkpoint.textContent}`);
+    // The same two facts stay available, unabridged, in Detail View.
+    const rail = page.text('evidence-rail-body');
+    assert.match(rail, /1 USD = 1\.37 CAD/, 'Detail View lost the CAD rate evidence behind the strip figure');
+    assert.match(rail, /Rollback commit: f{40}/, 'Detail View lost the deeper checkpoint evidence');
+  });
+
+  await atest('DOM: the strip never renders raw worker output', async () => {
+    const hostile = Object.assign({}, RECORDED_SUPERVISION_BUILD, {
+      stdoutTail: HOSTILE_WORKER_OUTPUT.source, stderrTail: HOSTILE_WORKER_OUTPUT.pem,
+      rawOutput: HOSTILE_WORKER_OUTPUT.jwt, modelOutput: HOSTILE_WORKER_OUTPUT.cookie,
+      transcript: HOSTILE_WORKER_OUTPUT.unlabelled,
+    });
+    const page = bootPage(fixtureState(), { status: supervisionStatusFixture(hostile, '2026-09-02T10:10:00.000Z') });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const stripText = page.text('ops-strip-cells');
+    assert.ok(stripText.length > 0, 'the strip rendered nothing to inspect');
+    for (const [kind, sentinel] of Object.entries(HOSTILE_WORKER_OUTPUT)) {
+      assert.ok(!stripText.includes(sentinel), `the status strip rendered ${kind} worker output`);
+    }
   });
 }
 

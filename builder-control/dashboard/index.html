@@ -84,6 +84,13 @@
     .chip.s-CONFLICT{background:rgba(214,158,46,.16);color:#e0b055;border-color:rgba(214,158,46,.38)}
     .chip.s-REFUSED{background:rgba(190,90,90,.14);color:#d99;border-color:rgba(190,90,90,.34)}
   .s-UNAVAILABLE,.s-DISCONNECTED,.s-AUTH_EXPIRED{color:var(--stale)}
+  /* Supervision and watchdog vocabulary. These are the exact tokens the
+     canonical supervision projection already uses, so the status strip prints
+     the recorded state rather than translating it into a friendlier word. */
+  .s-PROGRESS_RECORDED{color:var(--active)}
+  .s-PROGRESS_UNRECORDED,.s-NOT_RUNNING{color:var(--unknown)}
+  .s-TIMED_OUT{color:var(--fail)}
+  .s-RECORDED{color:var(--text-1)}
 
   /* ── topology ───────────────────────────────────────────────────── */
   .stages{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
@@ -268,6 +275,36 @@
   .context-cell{padding:7px 10px;border:1px solid rgba(57,198,255,.14);border-radius:4px;
     background:rgba(57,198,255,.035);min-width:0}
   .context-cell.mono{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ── operational status strip ──
+     Five cells directly beneath the header, so the first screen answers the
+     five operational questions before any panel is opened: what the run is
+     doing, whether that rests on real builder progress or on heartbeat liveness
+     alone, whether a watchdog or timeout has fired, what the work has cost in
+     CAD, and where the last safe checkpoint is. It is a re-presentation of
+     resolutions that already exist on this page and computes no value of its
+     own. Every cell carries a written label, the canonical state word and a
+     glyph, so nothing here is legible by colour alone, and it has no transition
+     and no animation at all: there is nothing for reduced motion to suppress
+     because nothing here ever moves. */
+  .ops-strip{max-width:1920px;margin:0 auto;padding:0 14px 2px;border:0;border-radius:0;background:none}
+  .ops-strip>.ops-strip-title{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    min-height:34px;padding:9px 2px;border-bottom:1px solid #243344;color:#9ab2c8;
+    font:650 11px/1.45 var(--mono);letter-spacing:.13em;text-transform:uppercase}
+  .ops-strip-cells{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;padding:10px 0 0}
+  .ops-cell{min-width:0;padding:9px 11px;border:1px solid #29485f;border-left:2px solid #31536b;
+    border-radius:4px;background:#0d1922}
+  /* Emphasis, never the signal. The state word and its glyph are inside the
+     cell; this edge only repeats what the text already says. */
+  .ops-cell[data-ops-state="RUNNING"],.ops-cell[data-ops-state="PROGRESS_RECORDED"]{border-left-color:var(--cyan)}
+  .ops-cell[data-ops-state="BLOCKED"],.ops-cell[data-ops-state="TIMED_OUT"]{border-left-color:var(--fail)}
+  .ops-label{font:650 10px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:#8faac0}
+  .ops-cell>.chip{margin-top:6px;white-space:normal}
+  /* The complete canonical sentence stays in the DOM for assistive technology
+     and for the tests; the strip clamps how much of it occupies the first
+     screen. Detail View keeps the same evidence unabridged. */
+  .ops-value{margin-top:6px;font-size:12px;line-height:1.45;color:var(--text-0);overflow-wrap:anywhere;
+    display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden}
 
   .command-shell{display:grid;grid-template-columns:minmax(280px,330px) minmax(520px,1fr) minmax(300px,360px);
     grid-template-areas:"left center right" "evidence evidence evidence";gap:14px;align-items:start;
@@ -618,12 +655,14 @@
     #founder-summary .command-card{padding:8px 10px}
     #founder-summary .command-value{line-height:1.3}
     .evidence-deck{grid-template-columns:repeat(3,minmax(0,1fr))}.event-panel{grid-column:span 2}
+    .ops-strip-cells{grid-template-columns:repeat(3,minmax(0,1fr))}
   }
   @media (max-width:1050px){
     .command-shell{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"}
     .core-stage{grid-template-columns:1fr 150px 1fr}.aegis-core{width:145px;height:145px}
     .core-path-track{grid-template-columns:repeat(4,minmax(0,1fr))}
     .evidence-deck{grid-template-columns:repeat(2,minmax(0,1fr))}.event-panel{grid-column:span 2}
+    .ops-strip-cells{grid-template-columns:repeat(2,minmax(0,1fr))}
   }
   @media (max-width:680px){
     /* The wrapped header is three rows tall on a phone. Kept sticky it would
@@ -643,6 +682,7 @@
     .core-node{width:100%}.core-stage::before,.core-stage::after{display:none}
     .core-path-track{grid-template-columns:1fr}.core-station::after{display:none}
     .evidence-deck{grid-template-columns:1fr}.event-panel{grid-column:auto}
+    .ops-strip-cells{grid-template-columns:1fr}
   }
 </style>
 </head>
@@ -670,6 +710,20 @@
     <button type="button" class="hud-control" disabled title="2D is the authoritative AEGIS view">Flat 2D</button>
   </div>
 </header>
+
+<!-- Operational status strip. The five questions an operator asks before
+     opening anything, answered on the first screen from canonical status only.
+     It is repainted by renderFounderSummary from the same view the deck, the
+     Strategic HUD and the Detail View rail are painted from, so it holds no
+     authority of its own and cannot disagree with them. It owns no clock: it
+     changes when a canonical status arrives and at no other moment. -->
+<section class="ops-strip" id="ops-strip" aria-labelledby="ops-strip-h">
+  <h2 class="ops-strip-title" id="ops-strip-h"><span>Operational status</span>
+    <span class="rail-note">canonical status only · no timer of its own</span></h2>
+  <div class="ops-strip-cells" id="ops-strip-cells">
+    <p class="empty">Loading canonical operational status…</p>
+  </div>
+</section>
 
 <div id="fatal"></div>
 
@@ -926,6 +980,12 @@
     // outcome, and it must not look like one at a glance.
     READY_FOR_DETERMINISTIC_VALIDATION:'◇', READY_FOR_PR:'◆',
     INCOMPLETE:'◌', IMPORTED:'⇢',
+    // Supervision and watchdog states, so the status strip can print the exact
+    // canonical token with a shape instead of softening it into a known word.
+    // TIMED_OUT is deliberately given the same hard mark as FAILED, and a
+    // watchdog whose limits are merely RECORDED is a waypoint, not a pass.
+    PROGRESS_RECORDED:'◐', PROGRESS_UNRECORDED:'◌', TIMED_OUT:'✕',
+    NOT_RUNNING:'○', RECORDED:'◇',
     SYNCED:'●', PENDING:'◌', CONFLICT:'⚑', REFUSED:'⊘', OK:'●'
   };
 
@@ -1523,6 +1583,9 @@
     if (!build) {
       return { state: 'UNAVAILABLE',
         headline: 'Builder supervision UNAVAILABLE — no builder attempt is recorded.',
+        watchdogState: 'UNAVAILABLE',
+        watchdog: 'Watchdog limits UNAVAILABLE — no builder attempt is recorded.',
+        timeout: 'Timeout: UNAVAILABLE — no builder attempt is recorded.',
         detail: ['No builder attempt is recorded, so there is nothing to supervise.'] };
     }
     var heartbeat = typeof build.heartbeatAt === 'string' && build.heartbeatAt
@@ -1532,6 +1595,11 @@
       return { state: 'UNAVAILABLE',
         headline: 'Builder supervision UNAVAILABLE — the current projection carries no supervision evidence. ' +
           'Supervisor heartbeat ' + heartbeat + ' is liveness only, never progress.',
+        watchdogState: 'UNAVAILABLE',
+        watchdog: 'Watchdog limits UNAVAILABLE — no supervision projection reached this page.',
+        timeout: 'Timeout: ' + (build.timedOut === true
+          ? 'recorded, but no canonical reason travelled with it'
+          : 'UNAVAILABLE — no supervision projection reached this page.'),
         detail: ['Supervision UNAVAILABLE — no supervision projection reached this page.',
           'Recovery: ' + recoveryFacts(build)] };
     }
@@ -1544,20 +1612,34 @@
         ? s.progressSummary + ' — last real progress ' + s.lastProgressAt + '.'
         : (s.progressReason || 'No real builder progress is recorded for this attempt.')) +
       ' Supervisor heartbeat ' + heartbeat + ' is liveness only, never progress.';
+    // The two watchdog sentences are built once and read twice: the deep block
+    // below keeps them in its ordered list, and the first-screen strip states
+    // the same two facts in the same words. A limit the projection did not
+    // record stays UNAVAILABLE rather than becoming a reassuring number.
+    var watchdog = 'Fixed no-progress watchdog: the build is stopped after ' + seconds(s.noProgressLimitSec) +
+      ' without real progress · fixed wall-clock limit ' + seconds(s.wallClockLimitSec) + '.';
+    var timeout = 'Timeout: ' + (s.timeoutReason
+      ? s.timeoutReason + ' — ' + s.timeoutSummary
+      : (build.timedOut === true
+        ? (s.timeoutSummary || 'recorded, but no canonical reason travelled with it')
+        : 'none recorded'));
+    var stopped = !!s.timeoutReason || build.timedOut === true;
     return {
       state: s.timeoutReason ? 'TIMED_OUT' : (recorded ? 'PROGRESS_RECORDED' : 'PROGRESS_UNRECORDED'),
       headline: headline,
+      // RECORDED means only that both fixed limits reached this page; it is a
+      // waypoint, never an assurance that the build is healthy.
+      watchdogState: stopped ? 'TIMED_OUT'
+        : (Number.isFinite(s.noProgressLimitSec) && Number.isFinite(s.wallClockLimitSec)
+          ? 'RECORDED' : 'UNAVAILABLE'),
+      watchdog: watchdog,
+      timeout: timeout,
       detail: [
         'Progress phase: ' + (recorded ? s.progressKind + ' — ' + s.progressSummary : 'NOT RECORDED'),
         'Last real progress: ' + (recorded ? s.lastProgressAt
           : 'NOT RECORDED — ' + (s.progressReason || 'no real builder progress is recorded.')),
-        'Fixed no-progress watchdog: the build is stopped after ' + seconds(s.noProgressLimitSec) +
-          ' without real progress · fixed wall-clock limit ' + seconds(s.wallClockLimitSec) + '.',
-        'Timeout: ' + (s.timeoutReason
-          ? s.timeoutReason + ' — ' + s.timeoutSummary
-          : (build.timedOut === true
-            ? (s.timeoutSummary || 'recorded, but no canonical reason travelled with it')
-            : 'none recorded')),
+        watchdog,
+        timeout,
         'Recovery: ' + recoveryFacts(build)
       ]
     };
@@ -1566,7 +1648,11 @@
   function supervisionEvidence(run){
     if (!run) {
       return { state: 'NOT_RUNNING',
-        headline: 'No run is active, so there is no builder to supervise.', detail: [] };
+        headline: 'No run is active, so there is no builder to supervise.',
+        watchdogState: 'NOT_RUNNING',
+        watchdog: 'No run is active, so no builder watchdog is armed.',
+        timeout: 'Timeout: none — no run is active.',
+        detail: [] };
     }
     return supervisionFacts(run.build || null);
   }
@@ -2123,6 +2209,64 @@
         article.appendChild(ul);
       }
       host.appendChild(article);
+    });
+  }
+
+  // ── operational status strip ──────────────────────────────────────
+  // The five questions an operator asks before opening anything: what the run
+  // is doing, whether that claim rests on real builder progress or on
+  // supervisor heartbeat alone, whether a watchdog or timeout has fired, what
+  // the work has recorded in CAD, and where the last safe checkpoint is.
+  //
+  // It answers none of them itself. Every cell is handed a resolution that
+  // already exists on this page — controlPlaneState(), the shared
+  // supervisionFacts() resolution, evidenceCostPanel() and
+  // evidenceCheckpointPanel() — and restates it verbatim. There is no clock,
+  // no threshold, no interpretation and no second reading of the view here, so
+  // the strip cannot disagree with the deck, the HUD or the Detail View rail,
+  // and it repaints only when a canonical status arrives. A resolution that
+  // produced no usable sentence is reported as UNAVAILABLE rather than filled.
+  function opsCellText(value){
+    return typeof value === 'string' && value.trim()
+      ? value : 'UNAVAILABLE — no canonical resolution produced this fact.';
+  }
+  function opsCellState(value){
+    return typeof value === 'string' && value.trim() ? value : 'UNAVAILABLE';
+  }
+  function opsStripCells(control, supervision, costPanel, checkpointPanel){
+    return [
+      { id: 'run-state', label: 'RUN STATE',
+        state: opsCellState(control.state), chip: opsCellState(control.state),
+        value: opsCellText(control.plain) },
+      { id: 'progress', label: 'REAL PROGRESS VS HEARTBEAT',
+        state: opsCellState(supervision.state), chip: opsCellState(supervision.state),
+        value: opsCellText(supervision.headline) },
+      { id: 'watchdog', label: 'WATCHDOG / TIMEOUT',
+        state: opsCellState(supervision.watchdogState), chip: opsCellState(supervision.watchdogState),
+        value: opsCellText(supervision.watchdog) + ' ' + opsCellText(supervision.timeout) },
+      { id: 'cost', label: 'RECORDED COST (CAD)',
+        state: opsCellState(costPanel.state), chip: opsCellState(costPanel.chip),
+        value: opsCellText(costPanel.value) },
+      { id: 'checkpoint', label: 'LAST SAFE CHECKPOINT',
+        state: opsCellState(checkpointPanel.state), chip: opsCellState(checkpointPanel.chip),
+        value: opsCellText(checkpointPanel.value) }
+    ];
+  }
+
+  // Text, shape and state word in every cell. The canonical token is written
+  // out as the chip label and repeated as a machine attribute; the border
+  // emphasis in the stylesheet adds nothing that these words do not say.
+  function renderOpsStrip(cells){
+    var host = $('ops-strip-cells'); if (!host) return;
+    host.textContent = '';
+    cells.forEach(function(cell){
+      var node = el('div','ops-cell');
+      node.setAttribute('data-ops-cell', cell.id);
+      node.setAttribute('data-ops-state', cell.state);
+      node.appendChild(el('div','ops-label',cell.label));
+      node.appendChild(chip(cell.chip));
+      node.appendChild(el('div','ops-value',cell.value));
+      host.appendChild(node);
     });
   }
 
@@ -2782,6 +2926,15 @@
       ((view && view.origin) || 'UNKNOWN') + '.'));
     visibleHost.appendChild(evidence);
 
+    // The first-screen strip beneath the header repaints from the SAME
+    // resolutions this deck has just used, and from the two existing evidence
+    // renderers the Detail View rail reads for CAD cost and for the checkpoint.
+    // It is handed them rather than allowed to re-read the view, so no cell can
+    // state a fact the surface below it does not already state.
+    renderOpsStrip(opsStripCells(controlState, supervision,
+      evidenceCostPanel(view && view.cost),
+      evidenceCheckpointPanel(boundRun, safeCheckpoint)));
+
     // The Detail View rail repaints from the SAME resolved facts this deck has
     // just used. It is given them rather than allowed to re-read the view, so
     // the rail and the deck cannot reach two verdicts about one run.
@@ -3286,6 +3439,7 @@
     reviewerEvidenceReady: reviewerEvidenceReady,
     checkpointEvidence: checkpointEvidence,
     supervisionFacts: supervisionFacts,
+    opsStripCells: opsStripCells,
     requestRunRetry: requestRunRetry,
     retryAvailability: retryAvailability,
     availableEmptyRuns: availableEmptyRuns,
