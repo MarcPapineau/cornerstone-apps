@@ -486,6 +486,38 @@
     font:10px/1.4 var(--mono)}
   .core-legend span::before{content:"";display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:currentColor}
 
+  /* ── handoff path around the AEGIS Core ──
+     The canonical lifecycle stations, in the order aegis-run declares them.
+     Exactly two things can ever be marked: the station the bound run's own
+     canonical state belongs to, and the origin station of a handoff the
+     indicator has already proven. Every other station stays dark and says so
+     in words, so a station is never read as "done" or "lit" by colour alone.
+     There is no transition and no animation here at all: the path repaints
+     when canonical state changes and at no other moment, which is what
+     reduced motion would otherwise have to suppress. */
+  .core-path{margin-top:14px;padding-top:12px;border-top:1px solid #22516c}
+  .core-path-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .core-path-head h3{margin:0;font:650 10px/1.3 var(--mono);letter-spacing:.11em;text-transform:uppercase;color:#8faac0}
+  .core-path-track{list-style:none;margin:10px 0 0;padding:0;display:grid;
+    grid-template-columns:repeat(9,minmax(0,1fr));gap:9px}
+  .core-station{position:relative;min-width:0;padding:8px 9px;border:1px solid #29485f;border-radius:4px;
+    background:rgba(8,19,29,.94)}
+  .core-station::after{content:"";position:absolute;right:-6px;top:50%;width:6px;height:1px;background:#31536b}
+  .core-station:last-child::after{display:none}
+  .core-station-name{display:block;font:600 11px/1.4 var(--mono);color:var(--text-1);overflow-wrap:anywhere}
+  .core-station-mark{display:block;margin-top:5px;font:650 9px/1.4 var(--mono);letter-spacing:.09em;
+    color:var(--text-2);overflow-wrap:anywhere}
+  .core-station-holder{display:block;margin-top:4px;font-size:11px;line-height:1.4;color:var(--text-1);
+    overflow-wrap:anywhere}
+  .core-station.is-current{border-color:var(--cyan);box-shadow:inset 0 0 18px rgba(57,198,255,.08)}
+  .core-station.is-current .core-station-name{color:var(--text-0)}
+  .core-station.is-current .core-station-mark{color:var(--cyan)}
+  .core-station.is-from{border-color:#3f6d8c}
+  .core-station.is-from .core-station-mark{color:#9ab2c8}
+  .core-path-note{margin:10px 0 0;color:var(--text-2);font:11px/1.5 var(--mono);overflow-wrap:anywhere}
+  .core-path-handoff{margin:7px 0 0;color:var(--text-1);font-size:12px;line-height:1.45;overflow-wrap:anywhere}
+  .core-path-handoff[hidden]{display:none}
+
   .evidence-deck{grid-template-columns:repeat(5,minmax(0,1fr))}
   .hud-summary .body{min-height:108px}
   .hud-summary-value{font-size:14px;line-height:1.4;color:var(--text-0)}
@@ -513,12 +545,14 @@
   @media (max-width:1050px){
     .command-shell{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"}
     .core-stage{grid-template-columns:1fr 150px 1fr}.aegis-core{width:145px;height:145px}
+    .core-path-track{grid-template-columns:repeat(4,minmax(0,1fr))}
     .evidence-deck{grid-template-columns:repeat(2,minmax(0,1fr))}.event-panel{grid-column:span 2}
   }
   @media (max-width:680px){
     .command-header{display:flex}.view-nav{order:3;width:100%}.header-state{width:100%;flex-wrap:wrap;justify-content:flex-start}
     .core-stage{display:flex;flex-direction:column;min-height:0}.aegis-core{order:-1;flex:0 0 145px}
     .core-node{width:100%}.core-stage::before,.core-stage::after{display:none}
+    .core-path-track{grid-template-columns:1fr}.core-station::after{display:none}
     .evidence-deck{grid-template-columns:1fr}.event-panel{grid-column:auto}
   }
 </style>
@@ -647,6 +681,17 @@
             <h3>Checkpoint</h3><div class="hud-value" id="hud-checkpoint">Loading checkpoint evidence…</div>
             <div class="hud-state" id="hud-checkpoint-state">CHECKPOINT UNAVAILABLE</div>
           </article>
+        </div>
+        <div class="core-path" id="core-path" role="group" aria-labelledby="core-path-h">
+          <div class="core-path-head">
+            <h3 id="core-path-h">Handoff path</h3>
+            <span class="rail-note">canonical run transitions only</span>
+          </div>
+          <ol class="core-path-track" id="core-path-track">
+            <li class="core-station"><span class="core-station-name">Loading canonical stations…</span></li>
+          </ol>
+          <p class="core-path-note" id="core-path-note">HANDOFF PATH UNAVAILABLE — no canonical run state is loaded.</p>
+          <p class="core-path-handoff" id="core-path-handoff" data-core-handoff="INACTIVE" hidden></p>
         </div>
         <div class="core-legend" aria-label="System state legend">
           <span class="s-ACTIVE">Working</span><span class="s-PASS">Verified</span>
@@ -1366,7 +1411,7 @@
       // hidden rather than rendering a reassuring empty state.
       strip.hidden = true;
       host.appendChild(strip);
-      return;
+      return null;
     }
     var from = handoffActor(moved.from, run);
     var to = handoffActor(moved.to, run);
@@ -1384,6 +1429,94 @@
       var live = $('live');
       if (live) live.textContent = from + ' handed off to ' + to + '. Now: ' + task;
     }
+    // Returned so the path around the AEGIS Core marks the same proven move
+    // rather than re-observing the run and deciding a second time.
+    return moved;
+  }
+
+  // ── handoff path around the AEGIS Core ────────────────────────────
+  // One station per lifecycle step aegis-run declares, in aegis-run's own step
+  // order, each naming the exact run states that sit at that step. The order is
+  // therefore canonical rather than a shape this page found readable. It is a
+  // reading order, not a promise of travel: a correction returns a run to an
+  // earlier station, and a state that belongs to no station (ABANDONED, or any
+  // state this list does not name) is reported as off-path, never forced onto
+  // one.
+  var CORE_PATH = [
+    { id: 'created',    label: 'Created',    states: ['CREATED'] },
+    { id: 'objective',  label: 'Objective',  states: ['INTAKE_RECORDED'] },
+    { id: 'routing',    label: 'Routing',    states: ['ROUTED'] },
+    { id: 'worktree',   label: 'Worktree',   states: ['WORKTREE_READY'] },
+    { id: 'build',      label: 'Build',      states: ['BUILDING', 'BUILD_CONTINUED', 'BUILT', 'BUILD_FAILED'] },
+    { id: 'checks',     label: 'Checks',     states: ['CHECKS_PASSED', 'CHECKS_FAILED'] },
+    { id: 'review',     label: 'Review',     states: ['REVIEW_BOUND', 'REVIEW_FAILED'] },
+    { id: 'correction', label: 'Correction', states: ['CORRECTING'] },
+    { id: 'checkpoint', label: 'Checkpoint', states: ['CHECKPOINTED', 'ROLLED_BACK'] }
+  ];
+
+  function pathStation(state){
+    if (!state) return null;
+    for (var i = 0; i < CORE_PATH.length; i++){
+      if (CORE_PATH[i].states.indexOf(state) !== -1) return CORE_PATH[i];
+    }
+    return null;
+  }
+
+  // Marks at most two stations, and only from evidence that already exists:
+  // the bound run's own canonical state, and the transition renderHandoff has
+  // already proven for that same run. It observes nothing, times nothing and
+  // infers no travel between the two — a station with no canonical state on it
+  // is labelled NOT CURRENT, never "done".
+  function renderCorePath(run, proven){
+    var track = $('core-path-track');
+    var note = $('core-path-note');
+    var line = $('core-path-handoff');
+    if (!track || !note || !line) return;
+    var current = run && run.state ? pathStation(run.state) : null;
+    var moved = (proven && run && proven.runId === run.runId && proven.to === run.state) ? proven : null;
+    var from = moved ? pathStation(moved.from) : null;
+    track.textContent = '';
+    CORE_PATH.forEach(function(station){
+      var item = el('li','core-station');
+      var isCurrent = !!(current && current.id === station.id);
+      // A handoff inside one station (BUILDING → BUILT) leaves that station
+      // current; it does not also become the place the run came from.
+      var isFrom = !isCurrent && !!(from && from.id === station.id);
+      var role = isCurrent ? 'CURRENT' : (isFrom ? 'HANDED FROM' : 'NOT CURRENT');
+      if (isCurrent) item.className = 'core-station is-current';
+      else if (isFrom) item.className = 'core-station is-from';
+      item.setAttribute('data-station', station.id);
+      item.setAttribute('data-station-role', role);
+      item.appendChild(el('span','core-station-name',station.label));
+      item.appendChild(el('span','core-station-mark',
+        isCurrent ? 'CURRENT · ' + run.state
+          : (isFrom ? 'HANDED FROM · ' + moved.from : 'NOT CURRENT')));
+      // Identity is only ever named for the station canonical state proves the
+      // run is on, and only from the model/tool the run record already carries.
+      if (isCurrent) item.appendChild(el('span','core-station-holder','Held by ' + handoffActor(run.state, run)));
+      track.appendChild(item);
+    });
+    if (!run || !run.state){
+      note.textContent = 'HANDOFF PATH UNAVAILABLE — no run is bound, so no station is current.';
+    } else if (!current){
+      note.textContent = 'Canonical run state ' + run.state + ' belongs to no station on this path, ' +
+        'so no station is marked current.';
+    } else {
+      note.textContent = 'Current station: ' + current.label + ' — canonical run state ' + run.state +
+        ', held by ' + handoffActor(run.state, run) + '.';
+    }
+    line.setAttribute('data-core-handoff', moved ? 'ACTIVE' : 'INACTIVE');
+    if (!moved){
+      // No proven transition, so the path says nothing about one. It does not
+      // fall back to the last run's move or to a plausible direction.
+      line.textContent = '';
+      line.hidden = true;
+      return;
+    }
+    line.hidden = false;
+    line.textContent = 'Last proven handoff: ' + handoffActor(moved.from, run) + ' handed off to ' +
+      handoffActor(moved.to, run) + '. Canonical ' + moved.from + ' → ' + moved.to +
+      ', run record written ' + (moved.at || 'UNAVAILABLE') + '.';
   }
 
   function reviewerEvidenceReady(engineering, binding, run){
@@ -1718,7 +1851,7 @@
       briefBlocker && blockerClear ? 'is-clear' : (briefBlocker ? 'is-blocked' : ''));
     host.appendChild(brief);
 
-    renderHandoff(host, boundRun, currentAction);
+    var provenHandoff = renderHandoff(host, boundRun, currentAction);
 
     function commandCard(label, value, cls){
       var card = el('div','command-card ' + (cls || ''));
@@ -1824,6 +1957,10 @@
       ? 'AEGIS will surface a required owner decision here.'
       : 'This is the next recorded governed action; open the route or evidence detail for its reason.');
     hudText('hud-safe-checkpoint', safeCheckpoint);
+    // The path around the core re-reads the same two canonical facts: the bound
+    // run's state, and the transition the handoff indicator above already
+    // proved. It never re-observes the run, so it cannot reach a second verdict.
+    renderCorePath(boundRun, provenHandoff);
 
     var routeHead = el('div','deck-heading');
     routeHead.appendChild(el('h3',null,'Build sequence'));

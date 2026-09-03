@@ -202,6 +202,103 @@ test('the handoff indicator claims a transition only from canonical run state, n
   assert.ok(/strip\.hidden\s*=\s*true/.test(render), 'an inactive strip must be hidden, not rendered as reassuring text');
 });
 
+// ── handoff path around the AEGIS Core (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// The failure this guards is the same one the indicator above guards, moved to
+// a bigger surface: a row of stations is a diagram, and a diagram that lights
+// up on a repaint reads as progress no canonical event ever recorded.
+function corePathStations() {
+  const start = code.indexOf('var CORE_PATH = [');
+  const end = code.indexOf('];', start);
+  assert.ok(start !== -1 && end > start, 'the canonical station path was not found in the page source');
+  return require('vm').runInNewContext('(' + code.slice(start + 'var CORE_PATH = '.length, end + 1) + ')');
+}
+
+function canonicalRunStates() {
+  const source = fs.readFileSync(path.join(ROOT, 'builder-control', 'aegis-run.cjs'), 'utf8');
+  const start = source.indexOf('const STATES = {');
+  const end = source.indexOf('\n};', start);
+  assert.ok(start !== -1 && end > start, 'the canonical aegis-run state table was not found');
+  const states = {};
+  for (const m of source.slice(start, end).matchAll(/^\s+([A-Z_]+):\s*\{[^}]*step:\s*(\d+)/gm)) {
+    states[m[1]] = Number(m[2]);
+  }
+  assert.ok(Object.keys(states).length >= 10, 'the canonical state table parsed as almost empty');
+  return states;
+}
+
+test('the core path names only real aegis-run states, in the canonical step order, inventing no station', () => {
+  const stations = corePathStations();
+  const canonical = canonicalRunStates();
+  const named = [];
+  let previousStep = 0;
+  for (const station of stations) {
+    assert.ok(station.id && station.label && Array.isArray(station.states) && station.states.length,
+      `station ${station.id || '(unnamed)'} carries no canonical states`);
+    const steps = station.states.map((state) => {
+      assert.ok(Object.prototype.hasOwnProperty.call(canonical, state),
+        `station ${station.id} names ${state}, which aegis-run does not declare as a run state`);
+      named.push(state);
+      return canonical[state];
+    });
+    assert.strictEqual(new Set(steps).size, 1,
+      `station ${station.id} groups run states aegis-run puts at different lifecycle steps`);
+    // One station per canonical step, in aegis-run's step order: the sequence
+    // a founder reads is the lifecycle's own, not one this page composed.
+    assert.ok(steps[0] > previousStep,
+      `station ${station.id} is out of canonical step order — the path order must be aegis-run's, not the page's`);
+    previousStep = steps[0];
+  }
+  assert.strictEqual(new Set(named).size, named.length, 'a canonical run state is claimed by two stations');
+  // ABANDONED is reachable from any station, so it is deliberately off-path and
+  // must be reported as off-path rather than drawn as a step in the sequence.
+  assert.deepStrictEqual(Object.keys(canonical).filter((state) => !named.includes(state)), ['ABANDONED'],
+    'the path silently dropped or absorbed a canonical run state');
+});
+
+test('the handoff path reads around the AEGIS Core HUD and carries no motion of any kind', () => {
+  const source = htmlSrc();
+  const core = source.indexOf('class="strategic-core"');
+  const stage = source.indexOf('class="core-stage"');
+  const pathIdx = source.indexOf('id="core-path"');
+  const legend = source.indexOf('class="core-legend"');
+  assert.ok(core !== -1 && stage !== -1 && pathIdx !== -1 && legend !== -1,
+    'the handoff path is not part of the AEGIS Core HUD');
+  assert.ok(core < stage && stage < pathIdx && pathIdx < legend,
+    'the handoff path must read around the AEGIS Core stage, ahead of the state legend');
+  assert.strictEqual((source.match(/id="core-path-track"/g) || []).length, 1,
+    'expected exactly one station track — a duplicated path would drift silently');
+  const css = code.slice(code.indexOf('.core-path{'),
+    code.indexOf('.evidence-deck{grid-template-columns:repeat(5'));
+  assert.ok(css.length > 0 && css.length < 2400, 'the handoff path style block was not located');
+  assert.ok(!/@keyframes/.test(css) && !/\banimation\s*:/.test(css), 'the handoff path must not animate');
+  assert.ok(!/\btransition\s*:/.test(css),
+    'the path repaints only when canonical state changes, so it must own no transition for reduced motion to undo');
+  assert.ok(/\.core-path-handoff\[hidden\]\s*\{display:none/.test(code),
+    'an unproven handoff line must actually disappear, not merely render empty');
+});
+
+test('the core path marks a station only from canonical run state and an already-proven handoff', () => {
+  const fn = code.slice(code.indexOf('function renderCorePath'), code.indexOf('function reviewerEvidenceReady'));
+  assert.ok(fn.length > 0, 'no renderCorePath() boundary found');
+  assert.ok(!/observeHandoff\s*\(/.test(fn),
+    'the path re-observes the run — a second observer could reach a second verdict about the same evidence');
+  assert.ok(/proven\.runId\s*===\s*run\.runId/.test(fn),
+    'a handoff proven for another run could still mark this path');
+  assert.ok(/proven\.to\s*===\s*run\.state/.test(fn),
+    'a stale handoff may not stay marked once the run has moved on');
+  assert.ok(/NOT CURRENT/.test(fn),
+    'an unmarked station must state its own status in words, never by colour alone');
+  assert.ok(/handoffActor\(run\.state, run\)/.test(fn),
+    'the current station names a holder from something other than the recorded model/tool identity');
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.random', 'fetch(', 'innerHTML']) {
+    assert.ok(!fn.includes(banned), `the path uses ${banned} — it may only re-read facts the deck already resolved`);
+  }
+  assert.ok(/var provenHandoff = renderHandoff\(host, boundRun, currentAction\);/.test(code) &&
+    /renderCorePath\(boundRun, provenHandoff\);/.test(code),
+    'the path is not driven by the single handoff the indicator proved');
+});
+
 // ── one data path, no seeds ─────────────────────────────────────────────────
 test('the slice reads window.AEGIS_STATE and has no fallback seed object', () => {
   assert.ok(/window\.AEGIS_STATE/.test(code), 'must read the projector output');
@@ -1350,6 +1447,67 @@ test('DOM: the FIRST sighting of a running build is a starting point, not a hand
   assert.strictEqual(node.attrs['data-handoff-state'], 'INACTIVE',
     'a run that was already BUILDING when the page opened is not evidence of a transition');
   assert.ok(!/handed off/.test(page.text('founder-body')), 'the page invented a handoff from a single observation');
+});
+
+// ── the station path: dark until canonical evidence says otherwise ────────
+function stationRoles(page) {
+  const nodes = findByAttr(page.document.getElementById('core-path-track'), 'data-station');
+  assert.strictEqual(nodes.length, 9, `expected the nine canonical stations, found ${nodes.length}`);
+  const roles = {};
+  for (const node of nodes) roles[node.attrs['data-station']] = node.attrs['data-station-role'];
+  return roles;
+}
+
+function corePathHandoff(page) {
+  return page.document.getElementById('core-path-handoff');
+}
+
+test('DOM: an unbound dashboard marks no station and claims no handoff on the path', () => {
+  const page = bootPage(fixtureState());
+  const roles = stationRoles(page);
+  assert.deepStrictEqual([...new Set(Object.values(roles))], ['NOT CURRENT'],
+    `an unbound dashboard marked a station it has no run for: ${JSON.stringify(roles)}`);
+  assert.match(page.text('core-path-note'), /HANDOFF PATH UNAVAILABLE — no run is bound/,
+    'the path invented a current station with no bound run');
+  const line = corePathHandoff(page);
+  assert.strictEqual(line.attrs['data-core-handoff'], 'INACTIVE', 'the path claimed a handoff it never observed');
+  assert.strictEqual(line.hidden, true, 'the inactive handoff line must be hidden, not merely empty');
+  assert.strictEqual(line.textContent, '', 'the inactive handoff line must say nothing at all');
+});
+
+test('DOM: a first sighting highlights the current station and still proves no handoff', () => {
+  const run = {
+    runId: 'RUN-STATION', state: 'BUILDING', objective: 'First sighting',
+    updatedAt: '2026-08-28T09:00:00.000Z', transitions: 4,
+    route: { model: 'claude-opus-5', execution: 'claude-cli', source: 'tool-router.cjs routeRole' },
+  };
+  const page = bootPage(fixtureState({ runs: { state: 'OK', runs: [run],
+    current: { state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, reason: 'bound' } } }));
+  const roles = stationRoles(page);
+  assert.strictEqual(roles.build, 'CURRENT', 'the canonical BUILDING state did not highlight its own station');
+  assert.strictEqual(Object.values(roles).filter((role) => role === 'CURRENT').length, 1,
+    'more than one station claimed to be current');
+  assert.ok(!Object.values(roles).includes('HANDED FROM'),
+    'a single observation was drawn as a completed handoff between two stations');
+  const note = page.text('core-path-note');
+  assert.match(note, /Current station: Build — canonical run state BUILDING/,
+    `the current station does not cite the exact canonical run state: ${note}`);
+  assert.match(note, /held by claude-opus-5 \(claude-cli\)/,
+    `the station holder is not the recorded model and execution path: ${note}`);
+  assert.strictEqual(corePathHandoff(page).attrs['data-core-handoff'], 'INACTIVE',
+    'the path claimed a handoff from one sighting of a running build');
+});
+
+test('DOM: a run whose canonical state is off-path marks nothing and says so', () => {
+  const run = { runId: 'RUN-ABANDONED', state: 'ABANDONED', objective: 'Stopped',
+    updatedAt: '2026-08-28T09:00:00.000Z', transitions: 9 };
+  const page = bootPage(fixtureState({ runs: { state: 'OK', runs: [run],
+    current: { state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, reason: 'bound' } } }));
+  assert.ok(!Object.values(stationRoles(page)).includes('CURRENT'),
+    'a state that belongs to no station was forced onto one');
+  assert.match(page.text('core-path-note'),
+    /Canonical run state ABANDONED belongs to no station on this path/,
+    'the page hid the fact that the canonical state is off-path');
 });
 
 // ── FINDING #10 RED PROOF: four evidence states, four different sentences ──
@@ -3273,6 +3431,94 @@ async function asyncTests() {
       'a different run inherited a handoff that was observed for another run');
     assert.ok(!/handed off/.test(page.text('founder-body')),
       'the previous run’s handoff sentence survived onto an unrelated run');
+  });
+
+  await atest('DOM: a proven transition marks the origin station and names both ends of the path handoff', async () => {
+    const page = bootPage(fixtureState(), { status: handoffStatus() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(corePathHandoff(page).attrs['data-core-handoff'], 'INACTIVE',
+      'precondition: one observation of a BUILDING run is not a transition');
+
+    // BUILDING → BUILT is a canonical move inside one station: the station is
+    // current, and it must not also be drawn as the place the run came from.
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(movedToBuilt()) }));
+    let roles = stationRoles(page);
+    assert.strictEqual(roles.build, 'CURRENT', 'the canonical BUILT state lost its own station');
+    assert.ok(!Object.values(roles).includes('HANDED FROM'),
+      'a move inside one station was drawn as a handoff between two stations');
+    assert.match(corePathHandoff(page).textContent, /Canonical BUILDING → BUILT/,
+      'the path did not report the proven in-station transition in canonical terms');
+
+    // BUILT → CHECKS_PASSED crosses stations, corroborated by the counter.
+    const real = movedToBuilt();
+    real.generatedAt = '2026-08-28T10:09:00.000Z';
+    real.runs[0].state = 'CHECKS_PASSED';
+    real.runs[0].updatedAt = '2026-08-28T10:08:00.000Z';
+    real.runs[0].transitions = 6;
+    real.runsBinding.updatedAt = real.runs[0].updatedAt;
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(real) }));
+    roles = stationRoles(page);
+    assert.strictEqual(roles.checks, 'CURRENT', 'the run moved but the current station did not');
+    assert.strictEqual(roles.build, 'HANDED FROM', 'the proven origin station is not marked');
+    assert.strictEqual(Object.values(roles).filter((role) => role === 'NOT CURRENT').length, 7,
+      'a station with no canonical evidence on it was still marked');
+    const line = corePathHandoff(page);
+    assert.strictEqual(line.attrs['data-core-handoff'], 'ACTIVE', 'a proven crossing did not reach the path');
+    assert.strictEqual(line.hidden, false, 'a proven handoff must actually be visible');
+    assert.match(line.textContent,
+      /Last proven handoff: the deterministic checks handed off to independent review\./,
+      `the path handoff is not readable in plain English: ${line.textContent}`);
+    assert.match(line.textContent,
+      /Canonical BUILT → CHECKS_PASSED, run record written 2026-08-28T10:08:00\.000Z\./,
+      `the path handoff does not cite the exact canonical states and record time: ${line.textContent}`);
+  });
+
+  await atest('DOM: a refused reading moves the station but never lights a handoff on the path', async () => {
+    // The station highlight is the run record's own state field, which every
+    // other instrument on this page already reads. The handoff claim is not:
+    // when the canonical transition counter refuses to corroborate the change,
+    // the path must show where the run says it is and claim no move at all.
+    const page = bootPage(fixtureState(), { status: handoffStatus() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(movedToBuilt()) }));
+    assert.strictEqual(corePathHandoff(page).attrs['data-core-handoff'], 'ACTIVE', 'precondition failed');
+
+    const refused = movedToBuilt();
+    refused.generatedAt = '2026-08-28T10:07:00.000Z';
+    refused.runs[0].state = 'CHECKS_PASSED';
+    refused.runs[0].updatedAt = '2026-08-28T10:06:00.000Z';
+    refused.runsBinding.updatedAt = refused.runs[0].updatedAt;
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(refused) }));
+    const roles = stationRoles(page);
+    assert.strictEqual(roles.checks, 'CURRENT', 'the path stopped reporting the canonical run state');
+    assert.ok(!Object.values(roles).includes('HANDED FROM'),
+      'an uncorroborated state change was drawn as a completed handoff');
+    const line = corePathHandoff(page);
+    assert.strictEqual(line.attrs['data-core-handoff'], 'INACTIVE',
+      'the path claimed a handoff the transition counter refused');
+    assert.strictEqual(line.textContent, '', 'a refused handoff still rendered a sentence');
+  });
+
+  await atest('DOM: an unrelated newly bound run inherits no station handoff and invents no identity', async () => {
+    const page = bootPage(fixtureState(), { status: handoffStatus() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(movedToBuilt()) }));
+    assert.strictEqual(corePathHandoff(page).attrs['data-core-handoff'], 'ACTIVE', 'precondition failed');
+
+    const other = movedToBuilt();
+    other.generatedAt = '2026-08-28T11:00:00.000Z';
+    other.runs = [{ runId: 'RUN-OTHER', state: 'BUILT', objective: 'A different run',
+      updatedAt: '2026-08-28T11:00:00.000Z', transitions: 5 }];
+    other.runsBinding = { state: 'BOUND', runId: 'RUN-OTHER', updatedAt: '2026-08-28T11:00:00.000Z', reason: 'bound' };
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(other) }));
+    const roles = stationRoles(page);
+    assert.strictEqual(roles.build, 'CURRENT', 'the newly bound run lost its own canonical station');
+    assert.ok(!Object.values(roles).includes('HANDED FROM'),
+      'a different run inherited a station handoff observed for another run');
+    assert.strictEqual(corePathHandoff(page).attrs['data-core-handoff'], 'INACTIVE',
+      'the previous run’s proven handoff survived onto an unrelated run');
+    assert.doesNotMatch(page.text('core-path-note'), /claude-opus-5/,
+      'the previous run’s recorded model was carried onto a run whose own record names none');
   });
 
   await atest('RED: a malformed live push never blanks or half-paints the summary', async () => {
