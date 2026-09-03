@@ -4837,7 +4837,7 @@ test('DOM: a heartbeat with no real progress still reads as progress unavailable
       `a heartbeat produced ${invented}, which no canonical progress evidence supports`);
   }
   const detail = page.text('runs-list');
-  assert.match(detail, /Current activity: NOT RECORDED/,
+  assert.match(detail, /Last observed activity: NOT RECORDED/,
     'Detail View filled an unrecorded activity in rather than stating the absence');
 });
 
@@ -4855,7 +4855,7 @@ test('DOM: Command View and Detail View print one builder-activity resolution, n
   assert.strictEqual(detailBlocks[0].attrs['data-supervision-state'],
     builderProgressCard(page).attrs['data-supervision-state'],
     'the two surfaces disagree about the supervision state');
-  assert.ok(detailBlocks[0].textContent.includes('Current activity: ' + facts.activity),
+  assert.ok(detailBlocks[0].textContent.includes('Last observed activity: ' + facts.activity),
     'Detail View derived its own activity sentence instead of restating the resolved one');
   // One resolution, read twice — not two renderers that happen to agree today.
   assert.ok(/window\.AEGIS_DASHBOARD\.supervisionFacts\(build\)/.test(code),
@@ -4885,6 +4885,80 @@ test('DOM: no raw builder output reaches the page through the activity surface',
   }
   assert.match(rendered, /Reading files in the worktree/,
     'the bounded activity category must still reach the page beside the refused raw output');
+});
+
+// ── observed-then vs running-now ───────────────────────────────────────────
+// The same recorded activity and the same canonical timestamps, under a
+// running worker and under a stopped one. A BUILD_FAILED attempt must still
+// show what it was last seen doing — losing that evidence is its own defect —
+// but it may not read as work in progress, and "running now" is granted only
+// on validated active worker evidence.
+function stoppedActivityRun(overrides) {
+  const run = liveActivityRun(RECORDED_ACTIVITY_SUPERVISION);
+  run.state = 'BUILD_FAILED';
+  Object.assign(run.build, {
+    status: 'FAILED', exit: 1, endedAt: '2026-09-03T14:10:00.000Z',
+    activity: { active: false, phase: 'STOPPED', code: 'FAILED', summary: 'Builder exited' },
+  }, overrides || {});
+  return run;
+}
+
+test('DOM: the same observed activity reads as history on a stopped run and as now on a running one', () => {
+  const running = builderProgressCard(liveActivityPage(RECORDED_ACTIVITY_SUPERVISION)).textContent;
+  const stoppedRun = stoppedActivityRun();
+  const stopped = builderProgressCard(bootPage(fixtureState({
+    generatedAt: '2026-09-03T14:10:00.000Z',
+    runs: { state: 'OK', runs: [stoppedRun], current: {
+      state: 'BOUND', runId: stoppedRun.runId, updatedAt: stoppedRun.updatedAt,
+      reason: 'exact current run is bound',
+    } },
+  }))).textContent;
+
+  // The evidence itself, verbatim and identically timed, on both.
+  for (const kept of [
+    /Last observed activity: Reading files in the worktree — activity evidence recorded 2026-09-03T14:09:45\.000Z\./,
+    /Last observed progress: Builder is emitting model and tool stream activity — last real progress 2026-09-03T14:09:50\.000Z\./,
+    /Supervisor heartbeat 2026-09-03T14:09:59\.000Z is liveness only, never progress\./,
+  ]) {
+    assert.match(running, kept, `a running worker lost recorded evidence: ${kept}`);
+    assert.match(stopped, kept, `a stopped worker lost recorded evidence: ${kept}`);
+  }
+  // Only the lifecycle reading differs, and only one of them may say "now".
+  assert.match(running, /The worker is running now\./,
+    'a validated active worker did not say it is running now');
+  assert.match(stopped, /The worker has stopped, so nothing is running now\./,
+    'a BUILD_FAILED attempt did not state that nothing is running now');
+  assert.doesNotMatch(stopped, /The worker is running now/,
+    'a stopped worker was presented as currently running');
+});
+
+test('supervisionFacts: present-tense worker wording is granted only by validated lifecycle', () => {
+  const resolve = bootPage(fixtureState()).sandbox.AEGIS_DASHBOARD.supervisionFacts;
+  const facts = (build) => resolve(build);
+  const base = () => liveActivityRun(RECORDED_ACTIVITY_SUPERVISION).build;
+
+  assert.strictEqual(facts(base()).presence, 'RUNNING');
+  for (const status of ['FAILED', 'EXITED', 'CANCELLED', 'ORPHANED']) {
+    assert.strictEqual(facts(stoppedActivityRun({ status, exit: null }).build).presence, 'STOPPED',
+      `a ${status} worker was not read as stopped`);
+  }
+  // A terminal exit or a recorded timeout under a still-RUNNING status is the
+  // contradiction case: stopped, never running.
+  assert.strictEqual(facts(Object.assign(base(), { exit: 3 })).presence, 'STOPPED');
+  assert.strictEqual(facts(Object.assign(base(), { timedOut: true })).presence, 'STOPPED');
+  // Claimed but not yet working, and active worker evidence that never arrived.
+  assert.strictEqual(facts(Object.assign(base(), {
+    status: 'LAUNCH_CLAIMED', activity: { active: false, phase: 'CLAIMED', code: 'LAUNCH_CLAIMED' },
+  })).presence, 'WAITING');
+  assert.strictEqual(facts(Object.assign(base(), { activity: null })).presence, 'UNVERIFIED');
+  assert.match(facts(Object.assign(base(), { activity: null })).headline,
+    /Whether the worker is running now is UNVERIFIED/,
+    'an unverified worker borrowed the present tense');
+  // Heartbeat-only evidence stays unrecorded, whatever the lifecycle says.
+  const quiet = Object.assign(base(), { supervision: HEARTBEAT_ONLY_SUPERVISION });
+  assert.strictEqual(facts(quiet).activity, null);
+  assert.ok(facts(quiet).detail.some((line) => /^Last observed activity: NOT RECORDED/.test(line)),
+    'a heartbeat-only attempt did not state its activity as unrecorded');
 });
 
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────

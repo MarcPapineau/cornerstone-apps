@@ -2582,6 +2582,34 @@
       (build.recoveryCode ? ' · recovery code ' + build.recoveryCode : '');
   }
 
+  // Recorded activity is what the builder was observed doing; it is not proof
+  // that the builder is doing it now. This separates the two, reading only the
+  // canonical worker fields the lifecycle label at operationalState() already
+  // trusts: RUNNING is granted solely on recorded active worker evidence under
+  // a live status, with no terminal exit and no recorded timeout beside it. A
+  // terminal exit, a timeout or a terminal status is stopped, a claimed launch
+  // that is not working yet is waiting, and everything else is UNVERIFIED —
+  // because an unproven worker must not borrow the present tense.
+  var WORKER_STOPPED_STATUS = ['FAILED','EXITED','CANCELLED','CANCELED','ORPHANED',
+    'TIMED_OUT','KILLED','DONE','COMPLETED','SUCCEEDED'];
+  var WORKER_WAITING_STATUS = ['QUEUED','PENDING','CLAIMED','LAUNCH_CLAIMED','STARTING'];
+  var WORKER_PRESENCE_PLAIN = {
+    RUNNING: 'The worker is running now.',
+    WAITING: 'The worker is recorded as claimed but not yet working, so nothing is running now.',
+    STOPPED: 'The worker has stopped, so nothing is running now.',
+    UNVERIFIED: 'Whether the worker is running now is UNVERIFIED — no active worker evidence is recorded.'
+  };
+
+  function builderPresence(build, s){
+    if (Number.isInteger(build.exit) || build.timedOut === true ||
+        !!(s && s.timeoutReason) ||
+        WORKER_STOPPED_STATUS.indexOf(build.status) !== -1) return 'STOPPED';
+    if (build.activity && build.activity.active === true &&
+        (build.status === 'STARTING' || build.status === 'RUNNING')) return 'RUNNING';
+    if (WORKER_WAITING_STATUS.indexOf(build.status) !== -1) return 'WAITING';
+    return 'UNVERIFIED';
+  }
+
   function supervisionFacts(build){
     if (!build) {
       return { state: 'UNAVAILABLE',
@@ -2590,23 +2618,28 @@
         watchdog: 'Watchdog limits UNAVAILABLE — no builder attempt is recorded.',
         timeout: 'Timeout: UNAVAILABLE — no builder attempt is recorded.',
         activity: null,
+        presence: 'UNAVAILABLE',
         detail: ['No builder attempt is recorded, so there is nothing to supervise.'] };
     }
     var heartbeat = typeof build.heartbeatAt === 'string' && build.heartbeatAt
       ? build.heartbeatAt : 'UNAVAILABLE';
     var s = build.supervision || null;
+    var presence = builderPresence(build, s);
     if (!s) {
       return { state: 'UNAVAILABLE',
         headline: 'Builder supervision UNAVAILABLE — the current projection carries no supervision evidence. ' +
-          'Supervisor heartbeat ' + heartbeat + ' is liveness only, never progress.',
+          WORKER_PRESENCE_PLAIN[presence] +
+          ' Supervisor heartbeat ' + heartbeat + ' is liveness only, never progress.',
         watchdogState: 'UNAVAILABLE',
         watchdog: 'Watchdog limits UNAVAILABLE — no supervision projection reached this page.',
         timeout: 'Timeout: ' + (build.timedOut === true
           ? 'recorded, but no canonical reason travelled with it'
           : 'UNAVAILABLE — no supervision projection reached this page.'),
         activity: null,
+        presence: presence,
         detail: ['Supervision UNAVAILABLE — no supervision projection reached this page.',
-          'Current activity: NOT RECORDED — no supervision projection reached this page.',
+          'Worker right now: ' + WORKER_PRESENCE_PLAIN[presence],
+          'Last observed activity: NOT RECORDED — no supervision projection reached this page.',
           'Recovery: ' + recoveryFacts(build)] };
     }
     var seconds = function(value){
@@ -2620,11 +2653,17 @@
     var activity = s.activityState === 'RECORDED' && s.activitySummary && s.activityAt
       ? s.activitySummary + ' — activity evidence recorded ' + s.activityAt + '.'
       : null;
+    // Every recorded sentence is labelled as an observation and keeps its own
+    // canonical time; whether work is happening now is stated once, separately,
+    // from the lifecycle reading above. A stopped run can therefore show what it
+    // was last seen doing without that reading as work in progress.
     var headline = (s.timeoutReason ? s.timeoutSummary + '. ' : '') +
       (recorded
-        ? (activity ? activity + ' ' : '') +
-          s.progressSummary + ' — last real progress ' + s.lastProgressAt + '.'
+        ? (activity ? 'Last observed activity: ' + activity + ' ' : '') +
+          'Last observed progress: ' + s.progressSummary +
+          ' — last real progress ' + s.lastProgressAt + '.'
         : (s.progressReason || 'No real builder progress is recorded for this attempt.')) +
+      ' ' + WORKER_PRESENCE_PLAIN[presence] +
       ' Supervisor heartbeat ' + heartbeat + ' is liveness only, never progress.';
     // The two watchdog sentences are built once and read twice: the deep block
     // below keeps them in its ordered list, and the first-screen strip states
@@ -2649,8 +2688,10 @@
       watchdog: watchdog,
       timeout: timeout,
       activity: activity,
+      presence: presence,
       detail: [
-        'Current activity: ' + (activity || ('NOT RECORDED — ' +
+        'Worker right now: ' + WORKER_PRESENCE_PLAIN[presence],
+        'Last observed activity: ' + (activity || ('NOT RECORDED — ' +
           (s.activityReason || 'no bounded builder activity is recorded.'))),
         'Progress phase: ' + (recorded ? s.progressKind + ' — ' + s.progressSummary : 'NOT RECORDED'),
         'Last real progress: ' + (recorded ? s.lastProgressAt
@@ -2670,6 +2711,7 @@
         watchdog: 'No run is active, so no builder watchdog is armed.',
         timeout: 'Timeout: none — no run is active.',
         activity: null,
+        presence: 'NOT_RUNNING',
         detail: [] };
     }
     return supervisionFacts(run.build || null);
