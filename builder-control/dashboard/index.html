@@ -527,6 +527,23 @@
   body[data-detail="true"] #raw-state{display:block}
   body[data-detail="true"] #raw-state>.raw-body{display:grid}
   body[data-detail="true"] .strategic-core{opacity:.78}
+
+  /* Evidence inspector — Detail View only. display:none keeps it out of the
+     Command View layout AND out of the accessibility tree, so the first screen
+     stays uncluttered without a second copy of any instrument. */
+  #evidence-rail{grid-column:1/-1;display:none}
+  body[data-detail="true"] #evidence-rail{display:block}
+  #evidence-rail>.body{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:10px}
+  .evidence-panel{min-width:0;padding:9px 10px;border:1px solid #29485f;border-radius:4px;
+    background:rgba(8,19,29,.94)}
+  .evidence-panel>h3{margin:0;font:650 10px/1.3 var(--mono);letter-spacing:.11em;text-transform:uppercase;
+    color:#8faac0}
+  .evidence-value{margin:7px 0 0;font-size:12px;line-height:1.45;color:var(--text-0);overflow-wrap:anywhere}
+  .evidence-meta{margin-top:5px;font:11px/1.45 var(--mono);color:var(--text-2);overflow-wrap:anywhere}
+  .evidence-list{list-style:none;margin:6px 0 0;padding:0}
+  .evidence-list>li{margin-top:3px;font:11px/1.5 var(--mono);color:var(--text-1);overflow-wrap:anywhere}
+  .evidence-panel .chip{margin-top:7px}
+
   body[data-reduced-motion="true"] *{transition:none!important;scroll-behavior:auto!important}
 
   @media (max-width:1599px){
@@ -763,6 +780,13 @@
       <h2 id="safe-checkpoint-h">Last safe checkpoint</h2>
       <div class="body"><div class="hud-summary-value" id="hud-safe-checkpoint">UNAVAILABLE</div>
         <div class="hud-summary-meta">Recorded checkpoint evidence only.</div></div>
+    </section>
+
+    <section id="evidence-rail" aria-labelledby="evidence-rail-h">
+      <h2 id="evidence-rail-h">Evidence inspector <span class="rail-note">detail view · canonical receipts only</span></h2>
+      <div class="body" id="evidence-rail-body">
+        <p class="empty">Loading canonical evidence…</p>
+      </div>
     </section>
 
     <details id="raw-state">
@@ -1254,6 +1278,13 @@
       ' as of the latest evidence.';
   }
 
+  // One shape for a canonical rollback commit, shared by the sentence and the
+  // machine state below so the two can never disagree about the same field.
+  var ROLLBACK_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+  function rollbackCommitRecorded(run){
+    return !!(run && typeof run.rollbackPoint === 'string' && ROLLBACK_COMMIT.test(run.rollbackPoint));
+  }
+
   function checkpointEvidence(run){
     if (!run) return 'No run is active.';
     var checkpoint = run.checkpoint;
@@ -1264,10 +1295,20 @@
     if (typeof checkpoint !== 'string') {
       return 'A checkpoint exists, but its public checkpoint id is UNAVAILABLE.';
     }
-    if (typeof run.rollbackPoint === 'string' && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(run.rollbackPoint)) {
+    if (rollbackCommitRecorded(run)) {
       return 'Checkpoint ' + checkpoint + ' · rollback commit ' + run.rollbackPoint;
     }
     return 'Checkpoint ' + checkpoint + ' is recorded; rollback commit UNAVAILABLE.';
+  }
+
+  // The same four facts checkpointEvidence() states in words, as one machine
+  // token. It reads the same fields through the same predicate, so a panel
+  // cannot label a sentence with a state that sentence does not say.
+  function checkpointEvidenceState(run){
+    if (!run) return 'UNAVAILABLE';
+    if (!run.checkpoint) return 'NOT_RECORDED';
+    if (typeof run.checkpoint !== 'string') return 'UNAVAILABLE';
+    return rollbackCommitRecorded(run) ? 'RECORDED' : 'ROLLBACK_UNAVAILABLE';
   }
 
   // What "live" on this page is actually made of. Two facts, both read straight
@@ -1628,6 +1669,218 @@
       if (button){ button.disabled = false; button.textContent = 'Retry'; }
       publishActivity('Retry failed for ' + run.runId + ': ' + e.message);
     }
+  }
+
+  // ── Detail View evidence inspector ────────────────────────────────
+  // Five receipts, side by side, for the operator who has stopped asking
+  // "what is happening" and started asking "show me": the exact changed
+  // paths, the deterministic check result, the independent-review binding and
+  // its coverage, the recorded CAD figure, and the checkpoint/rollback
+  // reference. Every value is a field the projector already delivered to this
+  // page and the deck above has already resolved — this rail recomputes no
+  // verdict, reads no second source, and reaches no second opinion.
+  //
+  // The one rule that governs all five: a receipt that is not present renders
+  // as Unavailable or Not recorded, in words, with the reason the projection
+  // gave. Nothing here is estimated, defaulted, averaged or back-filled — an
+  // absent figure never becomes a zero, and an absent path list never becomes
+  // an empty change.
+  var CHECK_OUTCOME_PLAIN = {
+    PASS: 'Every declared deterministic check passed and a canonical digest-bound receipt proves it.',
+    FAIL: 'The deterministic checks failed for this run.',
+    SNAPSHOT_PASS_HOST_PENDING: 'Snapshot checks passed; mandatory host containment is still pending.',
+    UNVERIFIED: 'Check counters are recorded, but no canonical digest-bound receipt verifies them here.'
+  };
+  var CHECK_OUTCOME_CHIP = {
+    PASS: 'PASS', FAIL: 'FAILED', SNAPSHOT_PASS_HOST_PENDING: 'PENDING', UNVERIFIED: 'UNVERIFIED'
+  };
+  // Cost is read from the reviewer-transcript projection, which is not scoped
+  // to one run. Saying so is the difference between a figure and a wrong
+  // figure attributed to the run on screen.
+  var COST_SCOPE = 'Recorded reviewer-transcript spend, not scoped to one run. AEGIS produces no ' +
+    'estimated cost: a run whose telemetry was never written is counted as UNRECORDED, never estimated.';
+
+  function shortSubject(value){
+    return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value)
+      ? value.slice(0, 12) + '…' : null;
+  }
+
+  function evidencePathsPanel(e, exactSubjectBound){
+    var paths = Array.isArray(e.subjectPaths) ? e.subjectPaths : null;
+    var subject = shortSubject(e.subjectSha256);
+    var meta = [
+      'Gate subject: ' + (subject || 'UNAVAILABLE'),
+      exactSubjectBound
+        ? 'The current run is bound to this exact code version.'
+        : 'No exact code-version binding is proven for the current run.'
+    ];
+    if (!paths || !paths.length){
+      return { id: 'paths', title: 'Changed paths', chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
+        value: 'Exact changed paths UNAVAILABLE — the gate projection carries no changed-path list for ' +
+          'this subject. That is missing evidence, not a change with no files.',
+        meta: meta, list: null };
+    }
+    return { id: 'paths', title: 'Changed paths', chip: 'AVAILABLE', state: 'RECORDED',
+      value: paths.length + ' exact changed path(s) in the current gate subject.',
+      meta: meta, list: paths.slice() };
+  }
+
+  function evidenceChecksPanel(run){
+    if (!run){
+      return { id: 'checks', title: 'Deterministic checks', chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
+        value: 'No run is bound to this page, so no deterministic check result can be attributed.',
+        meta: [], list: null };
+    }
+    var checks = run.checks;
+    if (!checks){
+      return { id: 'checks', title: 'Deterministic checks', chip: 'UNAVAILABLE', state: 'NOT_RECORDED',
+        value: 'Not recorded — this run carries no deterministic check result. Zero passing checks is ' +
+          'not the same as none run.',
+        meta: [], list: null };
+    }
+    var counted = Number.isInteger(checks.passed) && Number.isInteger(checks.total)
+      ? checks.passed + '/' + checks.total + ' checks passed'
+      : 'check counters UNAVAILABLE';
+    var outcome = typeof checks.outcome === 'string' && checks.outcome ? checks.outcome : 'UNAVAILABLE';
+    var meta = [
+      'Recorded receipt outcome: ' + outcome,
+      'Snapshot counters: ' + counted + (typeof checks.snapshotOutcome === 'string'
+        ? ' (snapshot outcome ' + checks.snapshotOutcome + ')' : '')
+    ];
+    if (checks.hostContainmentState){
+      meta.push('Host containment: ' + checks.hostContainmentState +
+        (checks.hostContainmentReason ? ' — ' + checks.hostContainmentReason : ''));
+    }
+    ['integrityState', 'executionBoundaryState', 'preconditionState'].forEach(function(field){
+      if (checks[field]) meta.push(field.replace(/State$/, '') + ': ' + checks[field]);
+    });
+    if (checks.preconditionCode) meta.push('Precondition code: ' + checks.preconditionCode);
+    return { id: 'checks', title: 'Deterministic checks',
+      chip: CHECK_OUTCOME_CHIP[outcome] || 'UNVERIFIED', state: outcome,
+      value: CHECK_OUTCOME_PLAIN[outcome] ||
+        ('Recorded check outcome ' + outcome + ' is not one this page knows how to explain, so it is ' +
+          'reported verbatim rather than interpreted.'),
+      meta: meta, list: null };
+  }
+
+  function evidenceReviewPanel(bind, rc, subjectMatches, mismatchKnown){
+    var title = 'Independent review';
+    var bindingMeta = [
+      'Binding: ' + ((bind && bind.state) || 'UNAVAILABLE') +
+        ' · subject ' + ((bind && bind.subjectState) || 'UNAVAILABLE'),
+      'Reviewer subject: ' + (shortSubject(rc && rc.subjectSha256) || 'UNAVAILABLE') +
+        ' · gate subject: ' + (shortSubject(bind && bind.gateSubjectSha256) || 'UNAVAILABLE')
+    ];
+    if (!rc || !Array.isArray(rc.rows) || !rc.rows.length){
+      return { id: 'review', title: title, chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
+        value: 'No reviewer table was produced for this change, so reviewer coverage is unknown — not ' +
+          'zero, and not complete.',
+        meta: bindingMeta, list: null };
+    }
+    if (!subjectMatches){
+      return { id: 'review', title: title, chip: mismatchKnown ? 'STALE' : 'UNAVAILABLE',
+        state: mismatchKnown ? 'SUBJECT_MISMATCHED' : 'SUBJECT_UNAVAILABLE',
+        value: mismatchKnown
+          ? 'The recorded reviewer rows belong to a different code subject. They are preserved as ' +
+            'evidence and are not attributed to the current change.'
+          : 'The reviewer subject, engineering subject and gate subject cannot all be proven equal, so ' +
+            'current-change coverage is UNAVAILABLE.',
+        meta: bindingMeta, list: null };
+    }
+    var coverage = rc.pathCoverage || null;
+    var meta = bindingMeta.concat([
+      coverage && Number.isInteger(coverage.total)
+        ? 'Path coverage: ' + coverage.total + ' subject path(s), ' +
+          (Array.isArray(coverage.notCoveredByEveryRequiredReviewer)
+            ? coverage.notCoveredByEveryRequiredReviewer.length : 'UNAVAILABLE') +
+          ' not covered by every required reviewer.'
+        : 'Path coverage: UNAVAILABLE — the gate recorded no coverage totals.',
+      rc.completeReason ||
+        'The gate recorded no explanation for this coverage verdict, so the reason is UNAVAILABLE.'
+    ]);
+    var rows = rc.rows.map(function(row){
+      return row.reviewer + ' · ' + (row.required || 'UNAVAILABLE') + ' · ' +
+        (row.executed || 'UNAVAILABLE') + ' · ' + (row.disposition || 'no disposition') +
+        ' · covered ' + ((row.coveredPaths || []).length) +
+        ', not covered ' + ((row.missingPaths || []).length) +
+        ', no longer in this change ' + ((row.stalePaths || []).length);
+    });
+    return { id: 'review', title: title, chip: rc.complete === true ? 'COMPLETE' : 'INCOMPLETE',
+      state: rc.complete === true ? 'COMPLETE' : 'INCOMPLETE',
+      value: rc.complete === true
+        ? 'Every required review has bound evidence for every changed file of this version.'
+        : 'Not every required review has bound evidence for every changed file of this version.',
+      meta: meta, list: rows };
+  }
+
+  function evidenceCostPanel(cost){
+    var title = 'Cost (CAD)';
+    if (!cost || cost.state !== 'OK'){
+      return { id: 'cost', title: title, chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
+        value: 'CAD UNAVAILABLE — ' + ((cost && cost.reason) || 'no cost projection was delivered to this page.'),
+        meta: [COST_SCOPE], list: null };
+    }
+    var cad = cost.cad || { state: 'UNAVAILABLE', reason: 'no CAD projection was produced' };
+    var audit = 'Source audit values, as recorded: USD ' + cost.totalUsd + '.';
+    var counts = cost.recordedRuns + ' run(s) reported cost, ' + cost.unrecordedRuns + ' did not.';
+    if (cad.state !== 'OK' && cad.state !== 'STALE'){
+      return { id: 'cost', title: title, chip: 'UNAVAILABLE', state: 'CAD_UNAVAILABLE',
+        value: 'CAD UNAVAILABLE — ' + (cad.reason || 'no dated FX evidence is recorded.'),
+        meta: [audit, counts, COST_SCOPE], list: null };
+    }
+    var incomplete = cost.unrecordedRuns > 0;
+    return { id: 'cost', title: title,
+      chip: cad.state === 'STALE' ? 'STALE' : (incomplete ? 'INCOMPLETE' : 'AVAILABLE'),
+      state: incomplete ? 'AT_LEAST_RECORDED' : 'RECORDED',
+      value: 'CAD ' + cad.totalCad,
+      meta: [
+        'Converted at ' + cad.plain + ' Rate evidence: ' + (cad.source || 'UNKNOWN') + '.',
+        audit, counts
+      ].concat(cost.caveat ? [cost.caveat] : []).concat([COST_SCOPE]), list: null };
+  }
+
+  function evidenceCheckpointPanel(run, checkpointText){
+    var state = checkpointEvidenceState(run);
+    var CHIP = { RECORDED: 'AVAILABLE', ROLLBACK_UNAVAILABLE: 'INCOMPLETE',
+      NOT_RECORDED: 'UNAVAILABLE', UNAVAILABLE: 'UNAVAILABLE' };
+    var meta = [
+      'Rollback commit: ' + (rollbackCommitRecorded(run) ? run.rollbackPoint : 'UNAVAILABLE')
+    ];
+    if (run && run.checkpointState) meta.push('Checkpoint state: ' + run.checkpointState);
+    if (run && run.checkpointReason) meta.push(run.checkpointReason);
+    return { id: 'checkpoint', title: 'Checkpoint & rollback', chip: CHIP[state] || 'UNAVAILABLE',
+      state: state, value: checkpointText, meta: meta, list: null };
+  }
+
+  function renderEvidenceRail(view, ctx){
+    var host = $('evidence-rail-body');
+    if (!host) return;
+    host.textContent = '';
+    var panels = [
+      evidencePathsPanel(ctx.engineering, ctx.exactSubjectBound),
+      evidenceChecksPanel(ctx.run),
+      evidenceReviewPanel(ctx.binding, ctx.reviewerCompleteness,
+        ctx.reviewerSubjectMatchesCurrent, ctx.reviewerSubjectMismatchKnown),
+      evidenceCostPanel(view && view.cost),
+      evidenceCheckpointPanel(ctx.run, ctx.checkpointText)
+    ];
+    panels.forEach(function(panel){
+      var article = el('article','evidence-panel');
+      article.setAttribute('data-evidence-panel', panel.id);
+      article.setAttribute('data-evidence-state', panel.state);
+      article.appendChild(el('h3',null,panel.title));
+      article.appendChild(chip(panel.chip));
+      article.appendChild(el('p','evidence-value',panel.value));
+      (panel.meta || []).forEach(function(line){
+        article.appendChild(el('div','evidence-meta',line));
+      });
+      if (panel.list && panel.list.length){
+        var ul = el('ul','evidence-list');
+        panel.list.forEach(function(item){ ul.appendChild(el('li',null,item)); });
+        article.appendChild(ul);
+      }
+      host.appendChild(article);
+    });
   }
 
   function renderFounderSummary(view){
@@ -2218,6 +2471,20 @@
       'This summary re-expresses the gate verdict and reviewer-completeness table; it decides nothing new. Last repaint from: ' +
       ((view && view.origin) || 'UNKNOWN') + '.'));
     visibleHost.appendChild(evidence);
+
+    // The Detail View rail repaints from the SAME resolved facts this deck has
+    // just used. It is given them rather than allowed to re-read the view, so
+    // the rail and the deck cannot reach two verdicts about one run.
+    renderEvidenceRail(view, {
+      engineering: e,
+      binding: bind,
+      run: boundRun,
+      exactSubjectBound: exactSubjectBound,
+      reviewerCompleteness: deckRc,
+      reviewerSubjectMatchesCurrent: reviewerSubjectMatchesCurrent,
+      reviewerSubjectMismatchKnown: reviewerSubjectMismatchKnown,
+      checkpointText: safeCheckpoint
+    });
   }
 
   function operatorAnswer(question){
@@ -3069,6 +3336,10 @@
         runs: status.runs || [],
         runsState: status.runsState || 'UNAVAILABLE',
         binding: status.runsBinding || null,
+        // The same canonical cost envelope renderCost() is given below. The
+        // Detail View evidence rail reads it through this one seam; it does
+        // not open a second source and it never estimates a missing figure.
+        cost: status.cost || null,
         integration: status.integration || null,
         generatedAt: status.generatedAt || null,
         source: '/api/status',
