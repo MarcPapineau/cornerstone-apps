@@ -740,7 +740,7 @@
     <section class="strategic-core" aria-labelledby="core-h">
       <h2 id="core-h">Strategic systems HUD <span class="rail-note">canonical state only</span></h2>
       <div class="body">
-        <div class="core-stage" aria-label="Live AEGIS control-plane overview">
+        <div class="core-stage" aria-label="Live AEGIS system overview">
           <article class="core-node is-mission">
             <h3>Mission</h3><div class="hud-value" id="hud-mission">Loading mission…</div>
             <div class="hud-state" id="hud-mission-state">STATE UNAVAILABLE</div>
@@ -763,7 +763,7 @@
             <div class="hud-state" id="hud-gate-state">GATE UNAVAILABLE</div>
           </article>
           <article class="core-node is-evidence">
-            <h3>Evidence</h3><div class="hud-value" id="hud-evidence">Loading exact-subject evidence…</div>
+            <h3>Evidence</h3><div class="hud-value" id="hud-evidence">Loading code-version evidence…</div>
             <div class="hud-state" id="hud-evidence-state">BINDING UNAVAILABLE</div>
           </article>
           <article class="core-node is-checkpoint">
@@ -1001,6 +1001,88 @@
     return runs.filter(function(run){ return run.runId === binding.runId; })[0] || null;
   }
 
+  // ── founder language ──────────────────────────────────────────────────────
+  // The Command View used to repeat the control plane's own vocabulary — "the
+  // control-plane status is unavailable", "the exact-subject gate" — in the
+  // mission line, the operator brief, the BLOCKER card and the HUD. That names
+  // the mechanism instead of answering the five questions the owner actually
+  // arrives with: what finished, why the integrated version still needs
+  // verification, what is actually blocked, whether Marc has to act, and the
+  // next valid action. This object is the ONE place those answers are phrased.
+  // It resolves nothing new and softens nothing: every string restates a
+  // canonical value the deck already computed, fails closed the same way, and
+  // the exact rule names, subject hashes and receipts stay in Detail View.
+  var FOUNDER = {
+    // Why "finished" is not "verified". Stated once, reused wherever the deck
+    // has to explain an unconfirmed version binding.
+    VERIFY: 'AEGIS cannot yet show that this work was checked against the combined ' +
+      'code as it stands right now, so it is not confirmed finished.',
+    VERIFY_CONFIRMED: 'This work was checked against the exact code version in the ' +
+      'build right now.',
+    VERIFY_OLDER: 'This run was checked against an older code version than the one ' +
+      'in the build right now, so it is not confirmed finished.',
+    VERIFY_PENDING: 'Nothing has been verified yet — the automated checks for this ' +
+      'code version have not run.',
+    VERIFY_IDLE: 'Nothing is waiting to be verified.',
+    // Fail-closed control states, in words a non-engineer can act on.
+    STATUS_UNCONFIRMED: 'Not confirmed — AEGIS cannot yet show that this run was ' +
+      'checked against the exact code version in the build right now, so it will ' +
+      'not call the work finished.',
+    STATUS_REQUIREMENTS: 'Blocked — the required checks on this exact code version ' +
+      'still have unmet requirements.',
+    REVIEW_FAILED_UNCONFIRMED: 'A review failure is recorded for this run, but the ' +
+      'supporting evidence for this exact code version is not available. Retry stays ' +
+      'governed and fails closed.',
+    HOST_PENDING: 'Automated checks passed. The required host-containment check runs ' +
+      'only after independent review of this exact code version completes.',
+    RETRY_UNCONFIRMED: 'Retry this run through its bounded correction route. The ' +
+      'recorded review failure stays unconfirmed until evidence for this exact code ' +
+      'version is available.',
+    RESOLVE_BLOCKER: 'Resolve the recorded blocker before continuing.'
+  };
+
+  // What actually finished, in one plain sentence, from the canonical run state
+  // alone. An unrecognised state reports UNAVAILABLE rather than implying
+  // progress the ledger has not recorded. No bound run is NOT the same fact as
+  // nothing built: an unreadable or contradictory ledger also produces no run,
+  // so only positively clean idle evidence may say nothing has been built.
+  function founderFinished(run, cleanIdle){
+    if (!run) {
+      return cleanIdle === true
+        ? 'Nothing has been built yet — no run has started.'
+        : 'UNAVAILABLE — canonical run evidence does not record what finished.';
+    }
+    var FINISHED = {
+      BUILDING: 'Nothing has finished yet — the assigned worker is still building this change.',
+      BUILT: 'The build finished. Its automated checks have not run yet.',
+      CHECKS_PASSED: 'The build finished and its automated checks passed.',
+      REVIEW_BOUND: 'The build finished, its checks passed, and independent review evidence is attached.',
+      CHECKPOINTED: 'This run finished and reached its recorded safe checkpoint.',
+      BUILD_FAILED: 'Nothing finished — this run stopped while building.',
+      CHECKS_FAILED: 'Nothing finished — this run stopped on a failed check.',
+      REVIEW_FAILED: 'Nothing finished — this run stopped on independent review.'
+    };
+    // Own-property lookup only: an unexpected run.state must never resolve to
+    // an inherited member and render as a sentence about finished work.
+    return Object.prototype.hasOwnProperty.call(FINISHED, run.state)
+      ? FINISHED[run.state]
+      : 'UNAVAILABLE — canonical run evidence does not record what finished.';
+  }
+
+  // Why the integrated version still requires verification. Only a run that is
+  // positively bound to the current code version with clear evidence may say it
+  // is confirmed; every other case explains the gap instead of hiding it.
+  function founderVerification(run, subjectState, confirmed, cleanIdle){
+    if (!run) {
+      return cleanIdle === true ? FOUNDER.VERIFY_IDLE
+        : 'UNAVAILABLE — canonical evidence does not record whether anything was verified.';
+    }
+    if (subjectState === 'MISMATCHED') return FOUNDER.VERIFY_OLDER;
+    if (['BUILDING','BUILT'].indexOf(run.state) !== -1) return FOUNDER.VERIFY_PENDING;
+    if (confirmed) return FOUNDER.VERIFY_CONFIRMED;
+    return FOUNDER.VERIFY;
+  }
+
   function operationalState(run){
     if (!run) return { state: 'IDLE', plain: 'Nothing is currently running.' };
     var build = run.build || {};
@@ -1032,14 +1114,12 @@
     }
     if (run.state === 'REVIEW_FAILED') {
       var reviewReason = run.reviewFailure && run.reviewFailure.summary;
-      return { state: 'BLOCKED', plain: reviewReason ||
-        'The run records REVIEW_FAILED, but corroborating exact-subject gate evidence is unavailable. Retry remains governed and fail-closed.' };
+      return { state: 'BLOCKED', plain: reviewReason || FOUNDER.REVIEW_FAILED_UNCONFIRMED };
     }
     if (run.state === 'BUILT') return { state: 'WAITING', plain: 'The build finished and is waiting for deterministic checks.' };
     if (run.state === 'CHECKS_PASSED') {
       if (run.checks && run.checks.outcome === 'SNAPSHOT_PASS_HOST_PENDING') {
-        return { state: 'WAITING', plain: run.checks.hostContainmentReason ||
-          'Snapshot checks passed. Mandatory host containment is pending until exact-subject review completes.' };
+        return { state: 'WAITING', plain: run.checks.hostContainmentReason || FOUNDER.HOST_PENDING };
       }
       if (!run.checks || run.checks.outcome !== 'PASS') {
         return { state: 'UNVERIFIED', plain: 'Check totals are recorded, but canonical receipt and lifecycle evidence have not verified a passing outcome.' };
@@ -1096,15 +1176,13 @@
     // lifecycle fact and is not hidden behind review work that is not due yet.
     var gateDependent = ['CHECKS_PASSED','REVIEW_BOUND','CHECKPOINTED'].indexOf(run.state) !== -1;
     if (gateDependent && (!engineering || engineering.state !== 'OK')) {
-      return { state: 'UNAVAILABLE',
-        plain: 'Current control-plane status is unavailable — the exact-subject gate has not positively reported available evidence for this run.' };
+      return { state: 'UNAVAILABLE', plain: FOUNDER.STATUS_UNCONFIRMED };
     }
     var gateBlocked = !!(engineering && engineering.state === 'OK' &&
       (engineering.verdict === 'BLOCKED' ||
        (Array.isArray(engineering.problems) && engineering.problems.length > 0)));
     if (gateDependent && run.state !== 'CHECKPOINTED' && gateBlocked) {
-      return { state: 'BLOCKED',
-        plain: 'Blocked — the current exact-subject gate has unresolved requirements for this run.' };
+      return { state: 'BLOCKED', plain: FOUNDER.STATUS_REQUIREMENTS };
     }
     if (run.state !== 'CHECKPOINTED') return lifecycle;
     var validSubject = function(value){
@@ -1229,6 +1307,21 @@
   // the current run set, and the engineering projection positively says OK.
   // Everything else fails closed in words. Existing problem counts survive an
   // unavailable binding so a real recorded requirement is never hidden.
+  //
+  // Two surfaces read this one resolution, so it returns two readings of the
+  // same fact. `text` is the full sentence Detail View needs, prefixed with the
+  // control plane's own framing. `founderText` is what the BLOCKER card may add
+  // beside the founder-language control verdict, and it is null when there is
+  // nothing left to add — never because a blocker was softened. `clear` is the
+  // verdict itself and is identical for both readings.
+  //
+  // Which authority failed decides whether the reason may be repeated to the
+  // founder. A missing binding or an absent run record states a fact about the
+  // run ledger that no other founder-facing field carries, so it is kept. A
+  // gate-projection failure does not: controlPlaneState already resolves that
+  // exact condition into FOUNDER.STATUS_UNCONFIRMED, so repeating the gate's
+  // own wording would state one refusal twice, the second time in vocabulary
+  // that names the mechanism instead of answering the founder.
   function blockingStatus(e, bind, boundRun){
     var problems = (e && Array.isArray(e.problems)) ? e.problems : [];
     var countText = problems.length
@@ -1236,22 +1329,26 @@
         '. Open Evidence, reviewer coverage & run history for the exact details.'
       : null;
     var unavailableReason = null;
+    var founderReason = null;
     if (!bind || bind.state !== 'BOUND'){
       unavailableReason = (bind && bind.reason) || 'no authoritative current-run binding is available.';
+      founderReason = unavailableReason;
     } else if (!boundRun){
       unavailableReason = 'the binding names ' + (bind.runId || 'an unavailable run') +
         ', but no matching run record is present in the current evidence.';
+      founderReason = unavailableReason;
     } else if (!e || e.state !== 'OK'){
       unavailableReason = (e && e.reason) || 'the engineering projection is unavailable or has not positively reported OK.';
     }
     if (unavailableReason){
       return {
         clear: false,
+        founderText: [countText, founderReason].filter(Boolean).join(' ') || null,
         text: (countText ? countText + ' ' : '') + 'Blocking status unavailable — ' + unavailableReason
       };
     }
-    if (countText) return { clear: false, text: countText };
-    return { clear: true, text: 'Nothing is blocking this run.' };
+    if (countText) return { clear: false, founderText: countText, text: countText };
+    return { clear: true, founderText: null, text: 'Nothing is blocking this run.' };
   }
 
   // BUILDING is the only stage the ledger has reached while a builder is still
@@ -2112,15 +2209,15 @@
     // recompute the subject, run the canonical gate and bind it to the run.
     // This page never launches or pays for a review.
     var reviewBindBoundary = 'Independent reviews run outside this dashboard. ' +
-      'It only verifies and binds existing exact-subject review evidence; ' +
-      'it does not launch or pay for reviews.';
+      'It only verifies and binds review evidence that already exists for this exact ' +
+      'code version; it does not launch or pay for reviews.';
     var reviewEvidenceReady = false;
     if (boundRun && boundRun.state === 'BUILT'){
       deckActions = ['Run deterministic checks on this completed build.'];
     } else if (reviewRun && reviewRun.state === 'CHECKS_PASSED'){
       reviewEvidenceReady = reviewerEvidenceReady(e, bind, reviewRun);
       if (reviewEvidenceReady){
-        deckActions.push('Existing exact-subject review evidence appears ready for server verification. ' +
+        deckActions.push('Review evidence for this exact code version appears ready for server verification. ' +
           'Ask AEGIS to verify it; only the server can approve and bind it. ' +
           'This dashboard does not launch or pay for reviews.');
       } else {
@@ -2173,11 +2270,11 @@
         ? [deckRetry.reason]
         : retryableFailure
         ? [boundRun.state === 'REVIEW_FAILED'
-          ? 'Retry this run through the bounded correction route; the recorded review-failure claim remains unverified until exact-subject gate evidence is available.'
+          ? FOUNDER.RETRY_UNCONFIRMED
           : 'Retry this failed run through its bounded recovery route.']
         : reviewRun && reviewRun.state === 'CHECKS_PASSED' && namedReviewActions.length
         ? namedReviewActions.concat([reviewBindBoundary])
-        : ['Resolve the recorded control-plane blocker before continuing.'];
+        : [FOUNDER.RESOLVE_BLOCKER];
     }
     // The warning instrument and the headline consume the same control-plane
     // verdict. A locally empty problem list can never turn the BLOCKER card
@@ -2186,12 +2283,31 @@
     // A running builder is a current-stage fact, so the card describes that
     // stage instead of a downstream gate requirement. The exact requirements
     // remain in the evidence disclosure below.
+    // When the control truth already fails closed, controlState.plain is the
+    // founder-language statement of exactly that verdict. Appending the full
+    // blocking sentence here restated the same refusal a second time in the
+    // control plane's own vocabulary; the founder card takes only the part
+    // that adds a fact the verdict does not already carry — the recorded
+    // requirement count and any run-ledger failure — while the gate mechanism
+    // stays in the Detail View disclosure below, unabridged.
     var builderStage = builderStageBlocker(boundRun);
     var operatorBlocker = cleanIdle ? 'No blocker — no run has started.' :
-      (controlBlocks ? controlState.plain + (blocked.clear ? '' : ' ' + blocked.text) :
+      (controlBlocks ? controlState.plain + (blocked.founderText ? ' ' + blocked.founderText : '') :
         (builderStage ? builderStage.text : blocked.text));
     var blockerClear = cleanIdle || (!controlBlocks && (!!builderStage || blocked.clear));
     var safeCheckpoint = checkpointEvidence(boundRun);
+    // The two questions the deck previously answered only in gate vocabulary:
+    // what actually finished, and why the integrated version still has to be
+    // verified before "finished" means anything. Both are resolved here with
+    // the rest of the deck fields so the brief below stays a pure re-read.
+    // "Confirmed" is deliberately narrow: the run must be positively bound to
+    // the current code version, past its checks, and carry an available gate
+    // with no problems. Every other case explains the gap.
+    var versionConfirmed = !!(boundRun && exactSubjectBound && !controlBlocks &&
+      ['CHECKS_PASSED','REVIEW_BOUND','CHECKPOINTED'].indexOf(boundRun.state) !== -1 &&
+      e.state === 'OK' && Array.isArray(e.problems) && e.problems.length === 0);
+    var deckFinished = founderFinished(boundRun, cleanIdle);
+    var deckVerification = founderVerification(boundRun, bindingSubjectState, versionConfirmed, cleanIdle);
     var shell = $('operator-shell');
     if (shell) shell.setAttribute('data-run-status', controlState.state.toLowerCase());
 
@@ -2213,13 +2329,16 @@
     mission.appendChild(chip(controlState.state));
     host.appendChild(mission);
 
-    // Operator brief: the three questions the owner arrives with — what is
-    // happening NOW, what happens NEXT, and does this NEED MARC. Every value
-    // is a canonical field this deck has already resolved above: the current
-    // action, the recorded next action, and the blocker/decision verdict. It
-    // derives nothing of its own — no elapsed time, no progress, no inferred
-    // status, no activity — so if a canonical field carries no usable text the
-    // brief says UNAVAILABLE instead of filling the gap.
+    // Operator brief: the five questions the owner arrives with — what
+    // FINISHED, WHY the integrated version still has to be VERIFIED, what is
+    // happening NOW, what happens NEXT, and does this NEED MARC (which is the
+    // blocker read out loud). This is the one place the deck explains itself in
+    // founder language; the gate vocabulary, rule names, subject hashes and
+    // receipts stay in Detail View. Every value is a canonical field this deck
+    // has already resolved above. It derives nothing of its own — no elapsed
+    // time, no progress, no inferred status, no activity — so if a canonical
+    // field carries no usable text the brief says UNAVAILABLE instead of
+    // filling the gap.
     function briefText(value){
       return typeof value === 'string' && value.trim() ? value : null;
     }
@@ -2243,6 +2362,10 @@
       : (blockerClear
         ? 'No owner decision is canonically required right now. Recorded blocker status: ' + briefBlocker
         : briefBlocker);
+    briefRow('FINISHED', 'finished', briefText(deckFinished) ||
+      'UNAVAILABLE — no canonical run evidence records what finished.');
+    briefRow('WHY VERIFY', 'verify', briefText(deckVerification) ||
+      'UNAVAILABLE — no canonical evidence records whether this code version was verified.');
     briefRow('NOW', 'now', briefText(currentAction) ||
       'UNAVAILABLE — no current action is recorded in canonical run evidence.');
     briefRow('NEXT', 'next', briefText(deckActions.join(' ')) ||
@@ -2306,6 +2429,11 @@
     currentOperatorContext = {
       objective: deckObjective,
       verdict: controlState.state,
+      // The context assistant answers from the SAME founder explanation the
+      // brief renders, so "Explain status" can never phrase the same evidence
+      // differently from the deck the owner is looking at.
+      finished: deckFinished,
+      verification: deckVerification,
       now: currentAction,
       risk: (plainRisk(e).reasons || []).join(' ') || plainRisk(e).plain,
       next: deckActions.join(' '),
@@ -2321,7 +2449,7 @@
     hudText('hud-core-status', controlState.state);
     hudText('hud-crew', crew);
     hudText('hud-crew-state', boundRun ? currentAction : 'NO ACTIVE WORKER');
-    var hudReview = 'No exact-subject independent-review evidence is bound.';
+    var hudReview = 'No independent-review evidence is attached to this exact code version.';
     var hudReviewState = 'EVIDENCE UNAVAILABLE';
     if (deckRc && deckRc.rows && deckRc.rows.length && !reviewerSubjectMatchesCurrent){
       hudReview = reviewerSubjectMismatchKnown
@@ -2509,6 +2637,14 @@
       why.appendChild(document.createTextNode(blocked.text));
     }
     host.appendChild(why);
+    // Recorded problem details describe requirements; they never say that the
+    // blocking status itself could not be established, or why. That sentence
+    // is the control plane's own, so Detail View is where it belongs — and it
+    // must appear here even when problems exist, or a founder card that now
+    // states the refusal in plain language would be its only surviving record.
+    if (e.problems && e.problems.length && blocked.text !== blocked.founderText){
+      host.appendChild(el('p','meta', blocked.text));
+    }
     // What the primary BLOCKER card refused to promote into an active build
     // stays legible here, with its exact count and its exact stage.
     var laterGateCount = (e.problems && e.problems.length) || 0;
@@ -2666,7 +2802,9 @@
     if (!ctx) return { title: 'Evidence unavailable', text: 'No current dashboard context has been rendered.' };
     if (question === 'next') return { title: 'Next evidence-backed action', text: ctx.next };
     if (question === 'summarize') {
-      return { title: 'Current build summary', text: ctx.objective + ' — ' + ctx.now + ' ' + ctx.blocked };
+      return { title: 'Current build summary',
+        text: ctx.objective + ' — ' + ctx.finished + ' ' + ctx.verification + ' ' +
+          ctx.now + ' ' + ctx.blocked };
     }
     if (currentOperatorSelection && currentOperatorSelection.data) {
       var selected = currentOperatorSelection.data;
@@ -2676,7 +2814,8 @@
         'Open the Inspector for the exact recorded evidence.';
       return { title: selectedName + ' — ' + selectedState, text: selectedReason };
     }
-    return { title: 'Why the dashboard shows ' + ctx.verdict, text: ctx.now + ' Risk context: ' + ctx.risk };
+    return { title: 'Why the dashboard shows ' + ctx.verdict,
+      text: ctx.finished + ' ' + ctx.verification + ' ' + ctx.now + ' Risk context: ' + ctx.risk };
   }
 
   function viewFromState(){
@@ -3150,7 +3289,11 @@
     requestRunRetry: requestRunRetry,
     retryAvailability: retryAvailability,
     availableEmptyRuns: availableEmptyRuns,
-    renderStateSource: renderStateSource
+    renderStateSource: renderStateSource,
+    // One founder-language source. The run-card renderer lives in the second
+    // script block and must read the same sentences the deck reads, so the
+    // same fact is never phrased two different ways on one screen.
+    founder: FOUNDER
   };
 })();
 </script>
@@ -3396,7 +3539,7 @@
     // stale, incomplete, rejected or otherwise ineligible.
     if (run.state === 'CHECKS_PASSED' && isBoundCurrent) {
       row.appendChild(el('div', 'meta',
-        'Independent reviews run outside this functional-beta dashboard. This action only verifies and binds existing exact-subject review evidence; it does not launch or pay for a review.'));
+        'Independent reviews run outside this functional-beta dashboard. This action only verifies and binds review evidence that already exists for this exact code version; it does not launch or pay for a review.'));
       var reviewBtn = el('button', 'action primary', 'Verify independent review');
       reviewBtn.type = 'button';
       reviewBtn.addEventListener('click', async function(){
@@ -3492,13 +3635,14 @@
           ' · ' + (run.checks.outcome || 'UNVERIFIED')));
         if (run.checks.hostContainmentState === 'PENDING') {
           card.appendChild(el('div', 'api-msg', run.checks.hostContainmentReason ||
-            'Snapshot checks passed; mandatory host containment is pending until exact-subject review completes.'));
+            (D && D.founder ? D.founder.HOST_PENDING : 'Host containment is pending.')));
         }
       }
       if (run.state === 'REVIEW_FAILED') {
         var reviewFailure = run.reviewFailure || {};
         card.appendChild(el('div', 'api-msg bad', reviewFailure.summary ||
-          'The run records REVIEW_FAILED, but corroborating exact-subject gate evidence is unavailable. Retry remains governed and fail-closed.'));
+          (D && D.founder ? D.founder.REVIEW_FAILED_UNCONFIRMED
+            : 'A review failure is recorded, but its supporting evidence is unavailable.')));
       }
       if (run.checkpoint && D && D.checkpointEvidence) {
         card.appendChild(el('div', 'meta', D.checkpointEvidence(run)));

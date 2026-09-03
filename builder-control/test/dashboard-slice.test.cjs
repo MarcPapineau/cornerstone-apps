@@ -1205,7 +1205,11 @@ test('DOM: BLOCKED or UNAVAILABLE control truth can never render a green-clear B
     .find((node) => node.attrs['data-operator-field'] === 'blocker');
   assert.match(unavailableCard.className, /\bis-blocked\b/);
   assert.doesNotMatch(unavailableCard.className, /\bis-clear\b/);
-  assert.match(unavailableCard.textContent, /Current control-plane status is unavailable/);
+  // Founder language, same fail-closed meaning: unavailable gate evidence must
+  // still refuse to call the work finished, without naming the control plane.
+  assert.match(unavailableCard.textContent, /Not confirmed — AEGIS cannot yet show/);
+  assert.match(unavailableCard.textContent, /will not call the work finished/);
+  assert.doesNotMatch(unavailableCard.textContent, /control[- ]plane|exact-subject gate/i);
 });
 
 // ── the BLOCKER card describes the CURRENT stage, not a later gate ─────────
@@ -2248,14 +2252,16 @@ test('DOM: missing or invalid lifecycle evidence is reported as UNAVAILABLE, nev
     'an idle dashboard claims live evidence it does not have');
 });
 
-// ── V2 OPERATOR COCKPIT — the operator brief (NOW / NEXT / NEEDS MARC) ────
-// The brief is the first thing the owner reads, so the only thing it may do is
-// repeat canonical fields the deck has already resolved. These proofs hold the
-// three properties that would make it a liability if they regressed: the three
-// questions are actually named, each answer is the canonical field itself
-// rather than a second derivation of it, and an absent field produces an
-// honest UNAVAILABLE instead of a reassuring sentence. It must also stay inert
-// — no timer, no elapsed arithmetic, no invented activity.
+// ── V2 OPERATOR COCKPIT — the operator brief ──────────────────────────────
+// FINISHED / WHY VERIFY / NOW / NEXT / NEEDS MARC. The brief is the first
+// thing the owner reads and the single place the deck explains itself in
+// founder language, so the only thing it may do is repeat canonical fields the
+// deck has already resolved. These proofs hold the properties that would make
+// it a liability if they regressed: the five questions are actually named,
+// each answer is the canonical field itself rather than a second derivation of
+// it, and an absent field produces an honest UNAVAILABLE instead of a
+// reassuring sentence. It must also stay inert — no timer, no elapsed
+// arithmetic, no invented activity.
 function briefRows(page) {
   return findByAttr(page.document.getElementById('founder-body'), 'data-operator-brief')
     .filter((node) => node.attrs['data-operator-brief'] !== 'summary');
@@ -2306,13 +2312,15 @@ function briefUnreadableLedgerStatus() {
   };
 }
 
-test('DOM: the operator brief names NOW, NEXT and NEEDS MARC at the top of Command View', () => {
+test('DOM: the operator brief names FINISHED, WHY VERIFY, NOW, NEXT and NEEDS MARC at the top of Command View', () => {
   const page = bootPage(fixtureState());
   const rows = briefRows(page);
-  assert.deepStrictEqual(rows.map((node) => node.attrs['data-operator-brief']), ['now', 'next', 'needs-marc'],
-    'the brief must answer exactly the three operator questions, in that order');
-  assert.deepStrictEqual(rows.map((node) => node.firstChild.textContent), ['NOW', 'NEXT', 'NEEDS MARC'],
-    'the three brief labels are not rendered as founder-readable text');
+  assert.deepStrictEqual(rows.map((node) => node.attrs['data-operator-brief']),
+    ['finished', 'verify', 'now', 'next', 'needs-marc'],
+    'the brief must answer exactly the five operator questions, in that order');
+  assert.deepStrictEqual(rows.map((node) => node.firstChild.textContent),
+    ['FINISHED', 'WHY VERIFY', 'NOW', 'NEXT', 'NEEDS MARC'],
+    'the five brief labels are not rendered as founder-readable text');
   const founder = page.document.getElementById('founder-body');
   const classes = founder.children.map((node) => node.className);
   const brief = classes.indexOf('operator-brief');
@@ -2381,6 +2389,22 @@ test('DOM: unreadable run evidence makes the brief say so instead of answering f
     'unreadable evidence was rendered as a positive "nothing is needed" answer');
   assert.doesNotMatch(briefRows(page).map((node) => node.textContent).join(' '), /No blocker — no run has started\./,
     'unreadable evidence was rendered as clean idle in the brief');
+  // No bound run is not the same fact as nothing built. An unreadable ledger
+  // produces no run too, so the founder answers must fail closed rather than
+  // report a clean slate the evidence cannot support.
+  assert.strictEqual(briefField(page, 'finished').value,
+    'UNAVAILABLE — canonical run evidence does not record what finished.',
+    'an unreadable ledger was reported as "nothing has been built yet"');
+  assert.strictEqual(briefField(page, 'verify').value,
+    'UNAVAILABLE — canonical evidence does not record whether anything was verified.',
+    'an unreadable ledger was reported as having nothing left to verify');
+
+  const idle = bootPage(fixtureState());
+  assert.strictEqual(briefField(idle, 'finished').value,
+    'Nothing has been built yet — no run has started.',
+    'positively clean idle evidence was withheld from the founder answer');
+  assert.strictEqual(briefField(idle, 'verify').value, 'Nothing is waiting to be verified.',
+    'positively clean idle evidence was withheld from the founder answer');
 });
 
 test('the brief is inert: it computes no time, no activity and no status of its own', () => {
@@ -2393,19 +2417,149 @@ test('the brief is inert: it computes no time, no activity and no status of its 
     assert.ok(!brief.includes(banned),
       `the brief uses ${banned} — it may only re-read fields the deck already resolved`);
   }
-  // Only the four canonical inputs the packet allows.
-  for (const canonical of ['currentAction', 'deckActions.join', 'operatorBlocker', 'blockerClear']) {
+  // Only the canonical inputs the packet allows — the two founder-language
+  // fields are resolved with the rest of the deck, so the brief still only
+  // re-reads values, it never computes one.
+  for (const canonical of ['deckFinished', 'deckVerification', 'currentAction',
+    'deckActions.join', 'operatorBlocker', 'blockerClear']) {
     assert.ok(brief.includes(canonical), `the brief no longer reads the canonical ${canonical} field`);
   }
   for (const raw of ['boundRun', 'view.', 'S.runs', 'build.activity', 'elapsed']) {
     assert.ok(!brief.includes(raw), `the brief reaches past the resolved deck fields into ${raw}`);
   }
-  assert.ok(/UNAVAILABLE — no current action is recorded in canonical run evidence\./.test(brief) &&
+  assert.ok(/UNAVAILABLE — no canonical run evidence records what finished\./.test(brief) &&
+    /UNAVAILABLE — no canonical evidence records whether this code version was verified\./.test(brief) &&
+    /UNAVAILABLE — no current action is recorded in canonical run evidence\./.test(brief) &&
     /UNAVAILABLE — no next action is recorded in canonical run evidence\./.test(brief) &&
     /UNAVAILABLE — no canonical blocker or decision evidence is recorded/.test(brief),
     'an absent canonical field would render as blank or reassuring text instead of an honest UNAVAILABLE');
   assert.ok(!/@keyframes|animation\s*:/.test(code.slice(code.indexOf('.operator-brief{'),
     code.indexOf('.handoff{display:flex'))), 'the brief block introduced motion');
+});
+
+// ── V2 FOUNDER LANGUAGE — one explanation, not the gate's own vocabulary ────
+// Command View used to repeat internal phrasing — "control-plane status is
+// unavailable", "the exact-subject gate" — across the mission line, the brief,
+// the BLOCKER card and the HUD. The replacement has to do three things at once:
+// answer the founder's five questions in plain words, keep every fail-closed
+// refusal exactly as strict as it was, and leave the exact technical evidence
+// in Detail View. These proofs hold all three, because dropping any one of them
+// turns a readable deck into a reassuring one. The pattern below is exactly the
+// two phrase families this packet replaced, not a general jargon filter.
+const FOUNDER_JARGON = /control[- ]plane|exact-subject/i;
+
+function founderSurfaceText(page) {
+  return [
+    page.text('founder-body'), page.text('hud-mission-state'), page.text('hud-evidence'),
+    page.text('hud-review'), page.text('hud-decisions'), page.text('hud-system-health-meta'),
+  ].join(' ');
+}
+
+test('DOM: a finished-but-unverified run is explained in founder language, not internal phrasing', () => {
+  const gateSubject = 'a'.repeat(64);
+  const runSubject = 'b'.repeat(64);
+  const run = {
+    runId: 'RUN-FOUNDER-LANGUAGE', state: 'CHECKPOINTED',
+    objective: 'Explain a finished run whose integrated version is still unverified',
+    updatedAt: '2026-09-03T10:00:00.000Z',
+    checkpoint: 'CP-FOUNDER', rollbackPoint: 'c'.repeat(40),
+  };
+  const page = bootPage(fixtureState({
+    engineering: Object.assign({}, fixtureState().engineering, {
+      state: 'OK', verdict: 'BLOCKED', subjectSha256: gateSubject, problems: [],
+    }),
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      subjectState: 'MISMATCHED', subjectSha256: null,
+      runSubjectSha256: runSubject, gateSubjectSha256: gateSubject,
+      reason: 'the run and gate subjects differ',
+    } },
+  }));
+
+  // What finished and why it is still not verified are both stated, and both
+  // are true at the same time. Saying only one of them is how a checkpoint
+  // receipt starts reading as completion.
+  assert.strictEqual(briefField(page, 'finished').value,
+    'This run finished and reached its recorded safe checkpoint.',
+    'the deck cannot say plainly what actually finished');
+  assert.strictEqual(briefField(page, 'verify').value,
+    'This run was checked against an older code version than the one in the build ' +
+    'right now, so it is not confirmed finished.',
+    'the deck cannot explain why the integrated version still requires verification');
+
+  // The refusal itself is unchanged.
+  assert.strictEqual(page.text('hud-core-status'), 'BLOCKED',
+    'founder language softened a blocked control state into a finished one');
+  assert.match(briefField(page, 'needs-marc').value, /older code version/,
+    'NEEDS MARC dropped the real blocker');
+  assert.doesNotMatch(briefField(page, 'needs-marc').value,
+    /No owner decision is canonically required/,
+    'a real blocker was reported as needing nothing from the owner');
+  assert.strictEqual(briefField(page, 'next').value,
+    'Resolve the recorded blocker before continuing.',
+    'the next valid action is not stated in founder language');
+
+  assert.doesNotMatch(founderSurfaceText(page), FOUNDER_JARGON,
+    `Command View still repeats the internal phrases this packet replaced: ${founderSurfaceText(page)}`);
+
+  // Detail View still carries the exact evidence the founder wording
+  // summarises. The plain words are a reading order, never a deletion.
+  assert.strictEqual(page.text('ctx-subject'), 'subject ' + 'a'.repeat(12) + '…',
+    'Detail View lost the exact subject identity behind the founder wording');
+  assert.match(page.text('founder-body'), /Checkpoint CP-FOUNDER · rollback commit c{40}/,
+    'the recorded checkpoint receipt was dropped');
+});
+
+test('DOM: a still-building run says nothing finished and nothing is verified yet', () => {
+  const page = bootPage(briefBuildingFixture());
+  assert.strictEqual(briefField(page, 'finished').value,
+    'Nothing has finished yet — the assigned worker is still building this change.',
+    'an in-flight build was reported as finished work');
+  assert.strictEqual(briefField(page, 'verify').value,
+    'Nothing has been verified yet — the automated checks for this code version have not run.',
+    'an in-flight build claimed verification that has not happened');
+  assert.doesNotMatch(founderSurfaceText(page), FOUNDER_JARGON,
+    `Command View still repeats the internal phrases this packet replaced: ${founderSurfaceText(page)}`);
+});
+
+test('DOM: unavailable gate evidence refuses to call the work finished, in plain words', () => {
+  const run = {
+    runId: 'RUN-FOUNDER-UNAVAILABLE', state: 'CHECKS_PASSED',
+    objective: 'Refuse to claim completion without available gate evidence',
+    updatedAt: '2026-09-03T11:00:00.000Z',
+    checks: { passed: 3, total: 3, outcome: 'PASS' },
+  };
+  const page = bootPage(fixtureState({
+    engineering: { state: 'UNAVAILABLE', reason: 'the gate projection could not be read', problems: [] },
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      subjectState: 'UNAVAILABLE', subjectSha256: null, reason: 'subject binding unavailable',
+    } },
+  }));
+  assert.strictEqual(briefField(page, 'finished').value,
+    'The build finished and its automated checks passed.',
+    'the deck hid the work that genuinely finished');
+  assert.strictEqual(briefField(page, 'verify').value,
+    'AEGIS cannot yet show that this work was checked against the combined code as ' +
+    'it stands right now, so it is not confirmed finished.',
+    'unavailable gate evidence was not explained as an unverified integrated version');
+  assert.match(briefField(page, 'needs-marc').value, /Not confirmed — AEGIS cannot yet show/,
+    'the fail-closed refusal was softened out of NEEDS MARC');
+  assert.doesNotMatch(founderSurfaceText(page), FOUNDER_JARGON,
+    `Command View still repeats the internal phrases this packet replaced: ${founderSurfaceText(page)}`);
+});
+
+test('the founder explanation has exactly one source, so no two surfaces can phrase it differently', () => {
+  assert.ok(/var FOUNDER = \{/.test(code), 'the single founder-language source is gone');
+  assert.strictEqual((code.match(/var FOUNDER = \{/g) || []).length, 1,
+    'a second founder-language source would drift from the first');
+  assert.ok(/founder: FOUNDER/.test(code),
+    'the run-card renderer cannot reach the same founder sentences the deck reads');
+  for (const key of ['STATUS_UNCONFIRMED', 'RESOLVE_BLOCKER', 'REVIEW_FAILED_UNCONFIRMED',
+    'HOST_PENDING', 'RETRY_UNCONFIRMED']) {
+    assert.ok(new RegExp('(FOUNDER|D\\.founder)\\.' + key).test(code),
+      `${key} is defined but never used, so some surface still carries its own wording`);
+  }
 });
 
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────
@@ -2655,7 +2809,7 @@ async function asyncTests() {
       .find((node) => node.attrs['data-operator-field'] === 'next-step').textContent;
     assert.match(next, /Get codex to review this exact change/);
     assert.match(next, /Get grok to review this exact change/);
-    assert.doesNotMatch(next, /^Resolve the recorded control-plane blocker before continuing\.$/);
+    assert.doesNotMatch(next, /^Resolve the recorded blocker before continuing\.$/);
   });
 
   await atest('DOM: authenticated checkpoint status and a later SSE checkpoint repaint share one safe formatter', async () => {
@@ -3867,7 +4021,7 @@ async function asyncTests() {
         expected: /Independent-review evidence is not yet complete or its status is unavailable/,
         forbidden: /Run the deterministic checks/, reviewBoundary: true },
       { label: 'unavailable engineering', engineering: { state: 'UNAVAILABLE' },
-        expected: /Resolve the recorded control-plane blocker before continuing/,
+        expected: /Resolve the recorded blocker before continuing/,
         forbidden: /No next action is recorded yet/, reviewBoundary: false },
     ]) {
       const status = Object.assign({}, checked, { engineering: scenario.engineering });
@@ -3950,7 +4104,7 @@ async function asyncTests() {
       assert.ok(!/appears ready for server verification/.test(guarded.text('founder-body')),
         `${scenario.label} was presented as ready to bind`);
       assert.ok((scenario.controlBlocked
-        ? /Resolve the recorded control-plane blocker before continuing|Get [a-z0-9._-]+ to review this exact change/i
+        ? /Resolve the recorded blocker before continuing|Get [a-z0-9._-]+ to review this exact change/i
         : /Independent-review evidence is not yet complete or its status is unavailable/).test(
           guarded.text('founder-body')),
       `${scenario.label} did not retain the fail-closed founder explanation`);
