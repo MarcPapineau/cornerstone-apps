@@ -646,7 +646,7 @@ const PUBLIC_BUILDER_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const PUBLIC_FAILURE_SUMMARIES = Object.freeze({
   MODEL_AUTH_FAILURE: 'Claude authentication failed.',
   PROVIDER_OVERLOAD: 'Claude reported a provider overload and never started this work.',
-  BUILDER_TIMEOUT: 'The Claude builder reached its bounded time limit without changing any file.',
+  BUILDER_TIMEOUT: 'The Claude builder reached its bounded time limit.',
 });
 const PUBLIC_HANDOFF_REASONS = Object.freeze({
   ELIGIBLE: 'A next eligible builder is identified, but no handoff has been authorized.',

@@ -450,7 +450,7 @@ const FAILOVER_FAILURE_CODES = Object.freeze([
 const FAILOVER_FAILURE_SUMMARIES = Object.freeze({
   MODEL_AUTH_FAILURE: 'Claude subscription authentication failed before any authorized file change.',
   PROVIDER_OVERLOAD: 'Claude reported a provider overload before any authorized file change.',
-  BUILDER_TIMEOUT: 'The Claude builder reached its bounded timeout without making an authorized file change.',
+  BUILDER_TIMEOUT: 'The Claude builder reached its bounded timeout.',
 });
 
 function failoverRefusal(code, message) {
