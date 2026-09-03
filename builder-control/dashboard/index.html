@@ -652,8 +652,16 @@
      typographic levels instead of one undifferentiated stack. */
   .core-node h3{padding-bottom:7px;border-bottom:1px solid #1e3446;font:650 10px/1.3 var(--mono);
     letter-spacing:.12em;text-transform:uppercase;color:#8faac0}
-  .core-node .hud-value{margin-top:9px;font-size:13px;line-height:1.42;color:var(--text-0);overflow-wrap:anywhere}
-  .core-node .hud-state{margin-top:8px;font:600 10px/1.4 var(--mono);letter-spacing:.07em;color:var(--text-2)}
+  /* The canonical answer is the one thing in the module that has to be found
+     first, so it carries the only raised weight in the box. */
+  .core-node .hud-value{margin-top:9px;font-size:13px;font-weight:500;line-height:1.42;color:var(--text-0);overflow-wrap:anywhere}
+  /* The module's own state reads as a ruled footer under that answer, on the
+     same neutral hairline the nameplate above it already uses. Three visibly
+     separate tiers — nameplate, answer, state — instead of one undifferentiated
+     stack of small text. The rule is the identical colour on all six modules in
+     every run state, so it separates and can never be read as a signal. */
+  .core-node .hud-state{margin-top:8px;padding-top:7px;border-top:1px solid #1e3446;
+    font:600 10px/1.4 var(--mono);letter-spacing:.07em;color:var(--text-2)}
   .core-node.is-review::before{background:var(--hud-violet)}
   .core-node.is-gate::before{background:var(--orange)}
   .core-node.is-evidence::before,.core-node.is-checkpoint::before{background:var(--pass)}
@@ -707,8 +715,12 @@
      is order, never status: station 4 is the fourth canonical lifecycle step
      whether or not anything has ever reached it. */
   .core-station::before{content:counter(station);counter-increment:station;position:absolute;right:8px;top:7px;
-    font:650 9px/1 var(--mono);color:var(--text-2)}
-  .core-station::after{content:"";position:absolute;right:-6px;top:50%;width:6px;height:1px;background:#31536b}
+    font:700 10px/1 var(--mono);color:var(--text-2)}
+  /* The link to the next station spans the track gap exactly, so nine plates
+     read as one path rather than as nine separate cards. It is the same
+     hairline on every link in every run state — it says "these are in
+     sequence", never "this one was reached". */
+  .core-station::after{content:"";position:absolute;right:-9px;top:50%;width:9px;height:1px;background:#31536b}
   .core-station:last-child::after{display:none}
   .core-station-name{display:block;padding-right:13px;font:600 11px/1.4 var(--mono);color:var(--text-1);overflow-wrap:anywhere}
   .core-station-mark{display:block;margin-top:5px;font:650 9px/1.4 var(--mono);letter-spacing:.09em;
@@ -960,7 +972,7 @@
        .objective-composer — keep their own colour, because those rules are
        id-scoped or !important and this one is deliberately neither. */
     .command-shell section,.command-shell details.panel{border-color:#26455b;background:#0f1720;
-      box-shadow:0 16px 32px rgba(0,0,0,.34),inset 0 1px 0 rgba(154,196,226,.08),inset 0 -1px 0 rgba(0,0,0,.4)}
+      box-shadow:0 6px 16px rgba(0,0,0,.3),inset 0 1px 0 rgba(154,196,226,.08),inset 0 -1px 0 rgba(0,0,0,.4)}
     .command-shell section>h2,.panel-summary{color:#a8c2d7;background:#0b131b;border-bottom-color:#26455b;
       box-shadow:inset 0 -1px 0 rgba(0,0,0,.45)}
     .command-shell section::before,.command-shell details.panel::before{width:46px;height:2px;box-shadow:none}
@@ -980,9 +992,16 @@
     /* The six evidence modules, as seated instrument plates with a ruled header.
        The corner tick is module identity, not status: its colour is fixed by
        which module it is and never changes with the value inside it, and the
-       module is named in words directly under it. */
+       module is named in words directly under it.
+
+       They are seated, not floating. Six modules each casting the same heavy
+       drop shadow as the panel they sit inside is what makes the instrument
+       field read as six competing cards; the AEGIS Core keeps the only large
+       outer presence on this stage, so the topology has one centre instead of
+       seven. This is depth, not signal: the shadow is identical on all six
+       modules in every run state. */
     .core-node{border-color:#2d4e66;background:#0a1622;
-      box-shadow:0 12px 24px rgba(0,0,0,.36),inset 0 1px 0 rgba(154,196,226,.09)}
+      box-shadow:0 3px 10px rgba(0,0,0,.26),inset 0 1px 0 rgba(154,196,226,.09)}
     .core-node::before{width:40px;height:2px}
     .core-node h3{color:#a8c2d7;border-bottom-color:#26425a}
 
@@ -1010,7 +1029,13 @@
     .core-station{border-color:#2d4e66;background:#0a1622;
       box-shadow:inset 0 1px 0 rgba(154,196,226,.07)}
     .core-station::after{background:#3d6786}
-    .core-station.is-current{box-shadow:inset 3px 0 0 var(--cyan),inset 0 1px 0 rgba(154,196,226,.1)}
+    /* The ordinal is the sequence anchor an operator scans the track by, so it
+       is legible at a glance rather than the quietest mark on the plate. It
+       states position and never status: 1 through 9 are the canonical lifecycle
+       steps whether or not anything has ever reached them, and the colour is one
+       fixed chrome value that no run state can change. */
+    .core-station::before{color:#8faac0}
+    .core-station.is-current{box-shadow:inset 4px 0 0 var(--cyan),inset 0 1px 0 rgba(154,196,226,.1)}
     .core-station.is-from{border-color:#4a7d9e;box-shadow:inset 3px 0 0 #4a7d9e,inset 0 1px 0 rgba(154,196,226,.07)}
     .core-station-name{color:var(--text-0)}
 
@@ -1019,7 +1044,7 @@
        decision cards keep the shipped inset state bar as their signal; it is one
        pixel wider here and nothing else about it changes. */
     #founder-summary{border-color:#2b6280;background:#0f1d2b;
-      box-shadow:0 16px 32px rgba(0,0,0,.36),inset 0 1px 0 rgba(154,196,226,.09)}
+      box-shadow:0 10px 22px rgba(0,0,0,.36),inset 0 1px 0 rgba(154,196,226,.09)}
     #founder-summary>h2{background:#0d2331;border-bottom-color:#2b6280;box-shadow:inset 0 -1px 0 rgba(0,0,0,.4)}
     #founder-summary .mission-head{border-bottom-color:#2b6280}
     #founder-summary .command-card{border-color:#2d4e66;background:#09131d}
@@ -1037,7 +1062,7 @@
        reading the cell has already written out in text with its glyph. */
     .ops-strip>.ops-strip-title{color:#a8c2d7;border-bottom-color:#26455b}
     .ops-cell{border-color:#2d4e66;background:#0c1a25;
-      box-shadow:0 10px 20px rgba(0,0,0,.3),inset 0 1px 0 rgba(154,196,226,.08)}
+      box-shadow:0 4px 12px rgba(0,0,0,.26),inset 0 1px 0 rgba(154,196,226,.08)}
     .ops-cell[data-ops-state="PASS"],.ops-cell[data-ops-state="COMPLETE"],
     .ops-cell[data-ops-state="HEALTHY"],.ops-cell[data-ops-state="FRESH"],
     .ops-cell[data-ops-state="AVAILABLE"]{border-left-color:var(--pass)}
@@ -1142,9 +1167,12 @@
     .core-stage::before{width:232px;height:232px}
     .core-stage::after{width:182px;height:182px}
     .core-node{min-height:0;padding:9px 11px 10px}
-    .core-node h3{padding-bottom:5px}
-    .core-node .hud-value{margin-top:6px;font-size:12.5px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
-    .core-node .hud-state{margin-top:5px}
+    .core-node h3{padding-bottom:4px}
+    .core-node .hud-value{margin-top:5px;font-size:12.5px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
+    /* The module's ruled state footer is kept here, tightened: the separation is
+       what makes the module scannable, so it is paid for out of the two rules
+       above rather than dropped on the screen that most needs it. */
+    .core-node .hud-state{margin-top:6px;padding-top:5px}
     .aegis-core{width:148px;height:148px;padding:0 11px}
     .core-mark{font-size:15px}
     .core-sub{margin-top:5px}
@@ -1156,6 +1184,9 @@
     .core-path{margin-top:10px;padding-top:9px}
     .core-path-track{margin-top:8px;gap:7px}
     .core-station{padding:6px 8px 6px 10px}
+    /* The track gap tightens here, so the link between stations tightens with
+       it and the nine plates stay one continuous path at this width. */
+    .core-station::after{right:-7px;width:7px}
     .core-station-mark{margin-top:4px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
     .core-station-holder{margin-top:3px;font-size:11px;line-height:135%}
     .core-path-note{margin-top:8px;font-size:11px;line-height:1.4}

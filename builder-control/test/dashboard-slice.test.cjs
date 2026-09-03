@@ -1528,6 +1528,176 @@ test('the wide HUD surface is flat, static, asset-free, gradient-free and identi
     'the ACTIVE route stage lost the shipped border that states its status alongside its word');
 });
 
+// ── command topology legibility (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// The failure guarded here is a Strategic Systems HUD that is complete and
+// still unreadable: six evidence modules whose nameplate, canonical answer and
+// state word are three lines of near-identical small text; six modules each
+// casting the same heavy drop shadow as the panel behind them, so the
+// instrument field has seven centres instead of one; and a nine-station handoff
+// path whose sequence anchor is the quietest mark on the plate and whose
+// stations sit as nine separate cards behind a link that stops short of the
+// next one.
+//
+// Every proof below pairs "easier to read" with "states nothing new". The tiers
+// are spacing, weight and one neutral rule; the depth is identical on all six
+// modules in every run state; and the link between two stations is the same
+// hairline on every link, so it can only say "these are in sequence" and never
+// "this one was reached".
+
+// Multi-layer shadows separate on commas that are never inside rgba().
+function shadowLayers(value) {
+  return value.replace(/rgba?\([^)]*\)/g, 'C').split(',').map((layer) => layer.trim());
+}
+
+// The widest outer blur a box casts. Inset layers are seating, not presence.
+function outerBlur(value) {
+  let widest = 0;
+  for (const layer of shadowLayers(value)) {
+    if (layer.startsWith('inset')) continue;
+    const lengths = layer.match(/-?\d*\.?\d+/g) || [];
+    if (lengths.length >= 3) widest = Math.max(widest, Math.abs(Number(lengths[2])));
+  }
+  return widest;
+}
+
+function hudShadow(selector) {
+  let value = null;
+  for (const rule of hudRules()) {
+    if (!rule.selectors.includes(selector)) continue;
+    for (const declaration of hudDeclarations(rule.body)) {
+      if (declaration.prop === 'box-shadow') value = declaration.value;
+    }
+  }
+  assert.ok(value, `the wide HUD treatment declares no box-shadow for ${selector}`);
+  return value;
+}
+
+test('the AEGIS Core is the only centre of the wide HUD stage, and the six modules are seated rather than floating', () => {
+  const core = outerBlur(hudShadow('.aegis-core'));
+  assert.ok(core > 0, 'the AEGIS Core lost the outer presence that makes it the centre of the topology');
+  const evidenceModule = outerBlur(hudShadow('.core-node'));
+  assert.ok(evidenceModule <= 12,
+    `each of the six evidence modules casts a ${evidenceModule}px drop shadow, so the stage reads as six competing cards rather than one topology`);
+  for (const selector of ['.command-shell section', '.ops-cell', '#founder-summary']) {
+    assert.ok(outerBlur(hudShadow(selector)) < core,
+      `${selector} casts a heavier outer shadow than the AEGIS Core, which moves the centre of the command topology off the control plane`);
+    assert.ok(evidenceModule <= outerBlur(hudShadow(selector)),
+      `${selector} is now quieter than the six HUD modules, which inverts the reading order of the first screen`);
+  }
+  // Depth is chrome, never a reading: nothing on the stage is raised or seated
+  // by a state, so a module can never look lifted because of something the run
+  // reported rather than because of what it is.
+  for (const rule of hudRules()) {
+    if (!/box-shadow\s*:/.test(rule.body)) continue;
+    for (const selector of rule.selectors) {
+      if (!/^\.core-node/.test(selector) && selector !== '.core-stage' && selector !== '.aegis-core') continue;
+      assert.ok(!/\[data-run-status=|\[data-ops-state=/.test(selector),
+        `${selector} seats or raises a HUD box according to a state it never reported`);
+    }
+  }
+  // Repaint bought this, not reflow: the stage, the modules and the core keep
+  // the exact geometry the density layer already fits to the first screen.
+  assert.ok(/\.core-node\{position:relative;z-index:1;min-height:92px;padding:12px 13px 13px/.test(code) &&
+    /\.core-node\{min-height:0;padding:9px 11px 10px\}/.test(WIDE) &&
+    /\.aegis-core\{width:148px;height:148px/.test(WIDE),
+    'the depth hierarchy was bought by resizing a shipped box instead of by repainting it');
+});
+
+test('each HUD evidence module reads as nameplate, answer and state instead of one stack of small text', () => {
+  const answer = /\.core-node \.hud-value\{([^}]*)\}/.exec(code);
+  assert.ok(answer, 'the module answer rule was rebuilt away');
+  assert.ok(/font-weight:500/.test(answer[1]),
+    'the canonical answer carries no weight of its own, so it reads at the same level as the nameplate above it');
+  assert.ok(/color:var\(--text-0\)/.test(answer[1]), 'the module answer lost the primary text token');
+  const state = /\.core-node \.hud-state\{([^}]*)\}/.exec(code);
+  assert.ok(state, 'the module state rule was rebuilt away');
+  assert.ok(/padding-top:\d+px/.test(state[1]),
+    'the module state sits flush against the answer above it, so the module is still one undifferentiated stack');
+  const divider = /border-top:1px solid (#[0-9a-f]{6})/i.exec(state[1]);
+  assert.ok(divider, 'the module state is not ruled off from the answer above it');
+  // The divider is the nameplate's own neutral hairline, so it separates tiers
+  // and can never be mistaken for a state the module did not report.
+  const nameplate = /\.core-node h3\{[^}]*border-bottom:1px solid (#[0-9a-f]{6})/i.exec(code);
+  assert.ok(nameplate && nameplate[1].toLowerCase() === divider[1].toLowerCase(),
+    'the module divider is a colour of its own rather than the neutral hairline the nameplate already uses');
+  assert.ok(!/var\(--(pass|fail|warn|blocked|active|stale|unknown|cyan)\)/.test(state[1]),
+    'the module state footer is drawn with a canonical state colour, which makes a divider look like a reading');
+
+  // The separation survives on the screen the acceptance criterion names, and
+  // the density layer only tightens it — it never repaints or drops it.
+  assert.ok(/\.core-node \.hud-state\{margin-top:6px;padding-top:5px\}/.test(WIDE),
+    'the wide Command View drops the module state footer on the screen that most needs it');
+  assert.ok(!/\.core-node \.hud-state\{[^}]*border/.test(WIDE),
+    'the density layer repaints the module divider instead of inheriting it');
+  assert.ok(/\.core-node \.hud-value\{[^}]*-webkit-line-clamp:3/.test(WIDE),
+    'the module answer is clamped harder than the three lines the density layer already holds');
+
+  // Nothing was made scannable by removing it: all six modules, the core status
+  // and the renderer that writes every one of their canonical values are intact.
+  const source = htmlSrc();
+  for (const id of ['hud-mission', 'hud-mission-state', 'hud-crew', 'hud-crew-state', 'hud-review',
+    'hud-review-state', 'hud-gate', 'hud-gate-state', 'hud-evidence', 'hud-evidence-state',
+    'hud-checkpoint', 'hud-checkpoint-state', 'hud-core-status']) {
+    assert.ok(source.includes('id="' + id + '"'), `${id} was restyled away instead of being made scannable`);
+    assert.ok(new RegExp("hudText\\('" + id + "'").test(code),
+      `${id} lost the renderer that writes its canonical value`);
+  }
+});
+
+test('the nine-station handoff track reads as one connected path with a legible sequence anchor', () => {
+  const baseGap = /\.core-path-track\{list-style:none;[^}]*gap:(\d+)px\}/.exec(code);
+  const baseLink = /\.core-station::after\{content:"";[^}]*right:-(\d+)px;top:50%;width:(\d+)px;height:1px/.exec(code);
+  assert.ok(baseGap && baseLink, 'the shipped station track or the link between its stations was rebuilt away');
+  assert.strictEqual(Number(baseLink[2]), Number(baseGap[1]),
+    'the link between two stations is shorter than the gap it crosses, so nine plates still read as nine separate cards');
+  assert.strictEqual(Number(baseLink[1]), Number(baseLink[2]),
+    'the link is offset by a distance other than its own length, so it either overlaps a station or floats');
+  const wideGap = /\.core-path-track\{margin-top:8px;gap:(\d+)px\}/.exec(WIDE);
+  const wideLink = /\.core-station::after\{right:-(\d+)px;width:(\d+)px\}/.exec(WIDE);
+  assert.ok(wideGap && wideLink, 'the wide track tightens its gap without tightening the link that crosses it');
+  assert.strictEqual(Number(wideLink[2]), Number(wideGap[1]),
+    'the wide Command View leaves a break in the handoff path it exists to fit onto one screen');
+  assert.strictEqual(Number(wideLink[1]), Number(wideLink[2]),
+    'the wide link is offset by a distance other than its own length');
+
+  // The link is adjacency, never progress. It is one fixed hairline on every
+  // link in every run state, the last canonical station has nothing after it to
+  // point at, and a phone that stacks the track drops the sideways link
+  // entirely rather than letting it widen the page.
+  assert.ok(/\.core-station:last-child::after\{display:none\}/.test(code),
+    'the final canonical station points at a tenth station that does not exist');
+  for (const rule of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    for (const selector of rule[1].split(',').map((part) => part.trim())) {
+      if (!/^\.core-station.*::after$/.test(selector)) continue;
+      assert.ok(!/\.is-current|\.is-from|\[data-run-status=|\[data-ops-state=/.test(selector),
+        `${selector} changes the link between two stations with a run state, which turns adjacency into progress`);
+    }
+  }
+  assert.ok(/\.core-station::after\{display:none\}/.test(PHONE),
+    'the phone stacks the track into one column and keeps a sideways link that can only push the page wider');
+
+  // The ordinal is what the track is scanned by, and it is order only: it is
+  // the list's own counter, it keeps the tested operational text token, and the
+  // wide treatment lifts it with one fixed chrome colour no state can change.
+  const ordinal = /\.core-station::before\{content:counter\(station\);[^}]*font:(\d+) (\d+)px[^}]*color:var\(--text-2\)\}/.exec(code);
+  assert.ok(ordinal, 'the station ordinal is no longer rendered from the list counter with the tested text token');
+  assert.ok(Number(ordinal[1]) >= 700 && Number(ordinal[2]) >= 10,
+    `the sequence anchor is still the quietest mark on the plate (font:${ordinal[1]} ${ordinal[2]}px)`);
+  assert.ok(/\.core-station::before\{color:#[0-9a-f]{6}\}/i.test(HUD),
+    'the wide treatment does not lift the sequence anchor, or lifts it with something other than a fixed chrome colour');
+
+  // Where the run actually is stays the loudest mark on the track, and both
+  // marks are still the shipped inset rails beside a mark the station writes in
+  // words — so the path is completely readable with colour removed.
+  const current = /\.core-station\.is-current\{box-shadow:inset (\d+)px 0 0 var\(--cyan\)/.exec(HUD);
+  const from = /\.core-station\.is-from\{[^}]*box-shadow:inset (\d+)px 0 0 #/.exec(HUD);
+  assert.ok(current && from, 'the marked-station rails were rebuilt away');
+  assert.ok(Number(current[1]) > Number(from[1]),
+    'the station the run is at is marked no more strongly than the station it came from');
+  assert.ok(/item\.appendChild\(el\('span','core-station-mark',/.test(code),
+    'a station carries a rail without the written mark the rail only repeats');
+});
+
 
 // ── Detail View tactical evidence surface (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
 // The failure guarded here is a Detail View that looks like an instrument and
