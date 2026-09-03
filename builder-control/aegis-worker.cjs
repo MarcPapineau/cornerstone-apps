@@ -37,6 +37,23 @@ const CLAUDE_OAUTH_TOKEN_FILE_DESCRIPTOR = CONTAINMENT.CLAUDE_OAUTH_TOKEN_FD;
 const CLAUDE_OAUTH_EXPIRY_SKEW_MS = 60 * 1000;
 const CLAUDE_FILE_TOOLS = Object.freeze(['Read', 'Edit', 'Write', 'Glob', 'Grep']);
 const CLAUDE_DISALLOWED_TOOLS = Object.freeze(['Bash']);
+// `--print` with the default text format buffers the entire tool and thinking
+// phase, so a builder that is genuinely working emits nothing on stdout until
+// it writes a file or produces text. The no-progress watchdog only resets on
+// stdout, stderr or an authorized-write digest change, so that silence reads
+// as idle and the run is killed NO_PROGRESS_TIMEOUT. Realtime stream-json with
+// partial messages turns each turn, tool call and delta into an stdout event,
+// which is real execution activity rather than a heartbeat.
+const CLAUDE_STREAM_PROGRESS_ARGV = Object.freeze([
+  '--output-format', 'stream-json',
+  '--verbose',
+  '--include-partial-messages',
+]);
+// Stream evidence stays bounded and carries no model content: only event
+// shape, tool names and explicit error text ever reach the ledger.
+const STREAM_EVIDENCE_BYTES = 24000;
+const STREAM_ERROR_TEXT_BYTES = 400;
+const STREAM_TEXT_LINE_BYTES = 1000;
 const GROK_FILE_TOOLS = Object.freeze(['read_file', 'search_replace', 'grep', 'list_dir']);
 const GROK_DISALLOWED_TOOLS = Object.freeze(['run_terminal_cmd', 'web_search', 'web_fetch', 'task']);
 const GROK_MAX_TURNS = 32;
@@ -149,6 +166,103 @@ function boundedTail(value) {
     // own shape, so it is redacted on the same boundary as the labelled forms.
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?\b/g, '[REDACTED JWT]')
     .split('\n').slice(-TAIL_LINES).join('\n').slice(-12000);
+}
+
+/**
+ * Reduce one Claude stream-json line to progress evidence.  The summary keeps
+ * the event shape and the tool names the model invoked; assistant text,
+ * thinking, tool inputs and tool results never survive this boundary, so the
+ * dashboard sees that work is happening without seeing raw model output.
+ * Explicit error text is retained, bounded, because failure classification
+ * depends on it.
+ */
+function summarizeClaudeStreamLine(line) {
+  const text = String(line === null || line === undefined ? '' : line).trim();
+  if (!text) return null;
+  // Non-JSON stdout is CLI output, not model output, and carries the
+  // authentication failures the builder classifier reads.
+  if (text[0] !== '{') return boundedTail(text).slice(-STREAM_TEXT_LINE_BYTES);
+  let event = null;
+  try { event = JSON.parse(text); } catch { event = null; }
+  if (!event || typeof event !== 'object' || Array.isArray(event)) {
+    return `stream-line unparsed bytes=${Buffer.byteLength(text, 'utf8')}`;
+  }
+  const parts = [String(event.type || 'event')];
+  if (typeof event.subtype === 'string') parts.push(event.subtype);
+  if (event.event && typeof event.event === 'object' && !Array.isArray(event.event)) {
+    if (typeof event.event.type === 'string') parts.push(event.event.type);
+    const delta = event.event.delta;
+    if (delta && typeof delta.type === 'string') parts.push(delta.type);
+    const block = event.event.content_block;
+    if (block && typeof block.type === 'string') parts.push(block.type);
+    if (block && typeof block.name === 'string') parts.push(`tool=${block.name}`);
+  }
+  const content = event.message && Array.isArray(event.message.content) ? event.message.content : null;
+  if (content) {
+    const kinds = [...new Set(content.map((b) => (b && typeof b.type === 'string' ? b.type : 'unknown')))];
+    if (kinds.length) parts.push(`blocks=${kinds.join('+')}`);
+    const tools = [...new Set(content
+      .filter((b) => b && b.type === 'tool_use' && typeof b.name === 'string')
+      .map((b) => b.name))];
+    if (tools.length) parts.push(`tools=${tools.join('+')}`);
+  }
+  const failed = event.is_error === true || event.type === 'error';
+  const errorText = !failed ? null
+    : typeof event.result === 'string' ? event.result
+      : typeof event.error === 'string' ? event.error
+        : event.error && typeof event.error.message === 'string' ? event.error.message : null;
+  if (errorText) {
+    parts.push(`error=${boundedTail(errorText).replace(/\s+/g, ' ').slice(0, STREAM_ERROR_TEXT_BYTES)}`);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Line-buffered accumulator over the child's stdout.  Repeated event shapes
+ * collapse into a count so a high-rate partial-message stream cannot flood the
+ * bounded evidence tail.
+ */
+function createClaudeStreamProgressDigest(limitBytes = STREAM_EVIDENCE_BYTES) {
+  let pending = '';
+  let digest = '';
+  let current = null;
+  let repeats = 0;
+  const render = () => (repeats > 1 ? `${current} x${repeats}` : current);
+  const commit = () => {
+    if (current === null) return;
+    const line = render();
+    digest = digest ? `${digest}\n${line}` : line;
+    if (digest.length > limitBytes) digest = digest.slice(-limitBytes);
+    current = null;
+    repeats = 0;
+  };
+  const take = (line) => {
+    const summary = summarizeClaudeStreamLine(line);
+    if (summary === null) return;
+    if (summary === current) { repeats += 1; return; }
+    commit();
+    current = summary;
+    repeats = 1;
+  };
+  const text = () => {
+    const joined = current === null ? digest : (digest ? `${digest}\n${render()}` : render());
+    return joined.length > limitBytes ? joined.slice(-limitBytes) : joined;
+  };
+  return Object.freeze({
+    push(chunk) {
+      pending += String(chunk);
+      const lines = pending.split('\n');
+      pending = lines.pop();
+      for (const line of lines) take(line);
+      return text();
+    },
+    end() {
+      if (pending) { take(pending); pending = ''; }
+      commit();
+      return text();
+    },
+    text,
+  });
 }
 
 function processAlive(pid) {
@@ -1085,6 +1199,7 @@ function launchClaudeProcess(run, launchSpec, childEnv, testInternals) {
   assertClaudeModelSandboxPolicy();
   const claudeArgv = [
     '--print',
+    ...CLAUDE_STREAM_PROGRESS_ARGV,
     '--model', normalized.model,
     '--permission-mode', 'acceptEdits',
     '--settings', JSON.stringify(CLAUDE_SETTINGS),
@@ -1482,8 +1597,12 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     child.once('error', (error) => resolve({ exit: 127, signal: null, error }));
     child.once('close', (code, signal) => resolve({ exit: code === null ? (timedOut ? 124 : 1) : code, signal, error: null }));
   });
+  const stdoutProgress = createClaudeStreamProgressDigest();
   if (child.stdout) child.stdout.on('data', (chunk) => {
-    stdout += chunk; stdout = stdout.slice(-24000); recordProgress('STDOUT');
+    // Every stream event is real execution activity, so the existing stdout
+    // progress path resets the no-progress watchdog while the retained
+    // evidence stays a bounded, content-free event digest.
+    stdout = stdoutProgress.push(chunk); recordProgress('STDOUT');
   });
   if (child.stderr) child.stderr.on('data', (chunk) => {
     stderr += chunk; stderr = stderr.slice(-24000); recordProgress('STDERR');
@@ -1602,6 +1721,7 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   clearInterval(heartbeat);
   clearTimeout(timeout);
   clearTimeout(noProgressTimer);
+  stdout = stdoutProgress.end();
 
   const authorizedMutationObserved = authorizedWriteDigest(contained.allowlists.writePaths, run.worktree.path) !==
     authorizedWriteBaselineSha256;
@@ -1694,6 +1814,7 @@ if (require.main === module) {
 module.exports = {
   launchWorker,
   processAlive, processGroupAlive, boundedTail,
+  summarizeClaudeStreamLine, createClaudeStreamProgressDigest,
   normalizeLaunchSpec, normalizeTimeoutSec, resolveClaudeExecutable, resolveGrokExecutable,
   launchClaudeProcess, grokArgv, prepareGrokLaunch,
   runContainedClaudeAuthStatus,
@@ -1706,7 +1827,7 @@ module.exports = {
   classifyBuilderFailure, selectFailoverBuilder, loadModelRoutingPolicy,
   MAX_PROMPT_BYTES, MAX_TIMEOUT_SEC, DEFAULT_NO_PROGRESS_TIMEOUT_SEC,
   builderNoProgressTimeoutMs, CLAUDE_SETTINGS, CLAUDE_FILE_TOOLS,
-  CLAUDE_DISALLOWED_TOOLS, CLAUDE_VERSION, CLAUDE_EXECUTABLE,
+  CLAUDE_DISALLOWED_TOOLS, CLAUDE_VERSION, CLAUDE_EXECUTABLE, CLAUDE_STREAM_PROGRESS_ARGV,
   GROK_EXECUTABLE, GROK_PINNED_EXECUTABLE, GROK_FILE_TOOLS, GROK_DISALLOWED_TOOLS,
   GROK_MAX_TURNS, GROK_HOME_PREFIX, MODEL_ROUTING_POLICY,
   CLAUDE_KEYCHAIN_SERVICE, CLAUDE_OAUTH_TOKEN_FILE_DESCRIPTOR, CLAUDE_OAUTH_EXPIRY_SKEW_MS,

@@ -1238,7 +1238,7 @@ test('option-like prompt stays out of argv and arrives verbatim over stdin', () 
   waitFor(f.read, (r) => r.state === 'BUILT');
   assert.strictEqual(fs.existsSync(marker), false, 'prompt crossed a shell boundary');
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(argsFile, 'utf8')), [
-    '--print', '--model', 'opus',
+    '--print', ...WORKER.CLAUDE_STREAM_PROGRESS_ARGV, '--model', 'opus',
     '--permission-mode', 'acceptEdits',
     '--settings', JSON.stringify(WORKER.CLAUDE_SETTINGS),
     '--tools', WORKER.CLAUDE_FILE_TOOLS.join(','),
@@ -1340,7 +1340,8 @@ test('Claude launch boundary uses exact contained argv and rejects caller proces
     assert.match(calls[0].argv[1], /^\(version 1\)\n\(deny default\)/);
     assert.strictEqual(calls[0].argv[2], fs.realpathSync(executable));
     assert.deepStrictEqual(calls[0].argv.slice(3), [
-      '--print', '--model', 'opus', '--permission-mode', 'acceptEdits',
+      '--print', ...WORKER.CLAUDE_STREAM_PROGRESS_ARGV, '--model', 'opus',
+      '--permission-mode', 'acceptEdits',
       '--settings', JSON.stringify(WORKER.CLAUDE_SETTINGS),
       '--tools', WORKER.CLAUDE_FILE_TOOLS.join(','),
       '--allowedTools', WORKER.CLAUDE_FILE_TOOLS.join(','),
@@ -2045,6 +2046,132 @@ test('production Claude executable is an absolute approved version pin', () => {
   assert.strictEqual(path.basename(WORKER.CLAUDE_EXECUTABLE), '2.1.245');
   assert.match(WORKER.CLAUDE_VERSION, /^\d+\.\d+\.\d+$/);
   assert.strictEqual(WORKER.resolveClaudeExecutable(), fs.realpathSync(WORKER.CLAUDE_EXECUTABLE));
+});
+
+test('production Claude argv requests realtime stream progress and keeps every safety flag', () => {
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-stream-argv-'));
+  const worktree = path.join(tmp, 'worktree');
+  fs.mkdirSync(worktree);
+  fs.writeFileSync(path.join(worktree, 'allowed.txt'), 'allowed\n');
+  const executable = path.join(tmp, 'claude-fixture');
+  fs.copyFileSync(WORKER.CLAUDE_EXECUTABLE, executable); fs.chmodSync(executable, 0o755);
+  const packetPath = path.join(worktree, 'packet.json');
+  writePacketFixture(worktree, packetPath,
+    { packetId: 'PKT-STREAM-PROGRESS', agentId: 'claude-code', filesAllowed: ['allowed.txt'] });
+  const prior = {
+    NODE_ENV: process.env.NODE_ENV,
+    executable: process.env.AEGIS_TEST_CLAUDE_EXECUTABLE,
+    mode: process.env.AEGIS_TEST_CONTAINMENT_MODE,
+  };
+  process.env.NODE_ENV = 'test';
+  process.env.AEGIS_TEST_CLAUDE_EXECUTABLE = executable;
+  process.env.AEGIS_TEST_CONTAINMENT_MODE = 'DETERMINISTIC_PROFILE_ONLY';
+  const spawnCalls = [];
+  try {
+    const result = WORKER.launchClaudeProcess(
+      { packet: packetPath, worktree: { path: worktree } },
+      { provider: 'claude-subscription', prompt: 'observable work', model: 'opus' },
+      WORKER.claudeEnvironment({ HOME: '/caller/home', PATH: '/caller/bin', NODE_ENV: 'test' }),
+      { forceContainedCommand: true, spawn: (bin, spawnedArgv) => {
+        spawnCalls.push({ bin, argv: [...spawnedArgv] });
+        return { pid: 4545, stdin: { end() {} }, stdout: null, stderr: null };
+      } });
+    const argv = [...result.claudeArgv];
+    // Streaming is configured on the print boundary itself, so tool and
+    // thinking activity reaches stdout while the run is still working.
+    assert.deepStrictEqual(argv.slice(0, 5), [
+      '--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+    ]);
+    assert.deepStrictEqual([...WORKER.CLAUDE_STREAM_PROGRESS_ARGV],
+      ['--output-format', 'stream-json', '--verbose', '--include-partial-messages']);
+    assert.strictEqual(argv.filter((a) => a === '--output-format').length, 1,
+      'exactly one output format may be requested');
+    assert.strictEqual(argv.includes('text'), false, 'text output must not survive the change');
+    assert.strictEqual(argv.includes('json'), false, 'buffered json output must not be requested');
+    // Containment, tool policy and session policy are unchanged by streaming.
+    for (const flag of ['--safe-mode', '--strict-mcp-config', '--no-session-persistence',
+      '--permission-mode', '--settings', '--tools', '--allowedTools', '--disallowedTools']) {
+      assert.strictEqual(argv.includes(flag), true, `${flag} must survive the streaming change`);
+    }
+    assert.strictEqual(argv[argv.indexOf('--permission-mode') + 1], 'acceptEdits');
+    assert.strictEqual(argv[argv.indexOf('--allowedTools') + 1], WORKER.CLAUDE_FILE_TOOLS.join(','));
+    assert.strictEqual(argv[argv.indexOf('--disallowedTools') + 1], WORKER.CLAUDE_DISALLOWED_TOOLS.join(','));
+    assert.strictEqual(argv[argv.indexOf('--settings') + 1], JSON.stringify(WORKER.CLAUDE_SETTINGS));
+    assert.strictEqual(argv[argv.indexOf('--tools') + 1].includes('Bash'), false,
+      'shell authority must not enter the granted tool set');
+    assert.strictEqual(argv.includes('--dangerously-skip-permissions'), false);
+    assert.strictEqual(argv.includes('observable work'), false, 'prompt must never enter argv');
+    // Streaming does not weaken the wall the contained command is launched
+    // behind: result.command.argv is the sandbox wrapper prefix alone, and the
+    // Claude argv is appended to it only in the spawn call itself.
+    assert.strictEqual(spawnCalls.length, 1, 'exactly one contained process may be spawned');
+    const spawnedArgv = spawnCalls[0].argv;
+    assert.strictEqual(spawnCalls[0].bin, result.command.bin);
+    assert.deepStrictEqual(spawnedArgv.slice(-argv.length), argv);
+    assert.deepStrictEqual(spawnedArgv.slice(0, spawnedArgv.length - argv.length),
+      [...result.command.argv]);
+    assert.strictEqual(WORKER.DEFAULT_NO_PROGRESS_TIMEOUT_SEC, 300,
+      'streaming must make work observable, not extend the blind wait');
+  } finally {
+    for (const [key, value] of [['NODE_ENV', prior.NODE_ENV],
+      ['AEGIS_TEST_CLAUDE_EXECUTABLE', prior.executable],
+      ['AEGIS_TEST_CONTAINMENT_MODE', prior.mode]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('stream progress evidence stays bounded and carries no raw model output', () => {
+  const digest = WORKER.createClaudeStreamProgressDigest();
+  digest.push('{"type":"system","subtype":"init","model":"opus"}\n');
+  // A partial-message firehose is progress, but it may not flood the evidence.
+  for (let i = 0; i < 5000; i++) {
+    digest.push('{"type":"stream_event","event":{"type":"content_block_delta",' +
+      '"delta":{"type":"text_delta","text":"CONFIDENTIAL MODEL PROSE"}}}\n');
+  }
+  digest.push('{"type":"assistant","message":{"content":[' +
+    '{"type":"text","text":"CONFIDENTIAL MODEL PROSE"},' +
+    '{"type":"tool_use","name":"Edit","input":{"file_path":"/secret/path"}}]}}\n');
+  digest.push('{"type":"user","message":{"content":[' +
+    '{"type":"tool_result","content":"CONFIDENTIAL FILE CONTENTS"}]}}\n');
+  const evidence = digest.end();
+  assert.strictEqual(evidence.includes('CONFIDENTIAL'), false, 'model output reached the evidence tail');
+  assert.strictEqual(evidence.includes('/secret/path'), false, 'tool input reached the evidence tail');
+  assert.strictEqual(evidence.length <= 24000, true, 'stream evidence must stay bounded');
+  assert.strictEqual(evidence.split('\n').length <= 8, true, 'repeated event shapes must collapse');
+  assert.match(evidence, /system init/);
+  assert.match(evidence, /stream_event content_block_delta text_delta x5000/);
+  assert.match(evidence, /assistant blocks=text\+tool_use tools=Edit/);
+  assert.match(evidence, /user blocks=tool_result/);
+
+  // Non-JSON CLI output is not model output; it is the text builder failure
+  // classification reads, so it survives verbatim and bounded.
+  const cli = WORKER.createClaudeStreamProgressDigest();
+  cli.push('hello\nFailed to authenticate. API Error: 401 OAuth access token has expired.\n');
+  const cliEvidence = cli.end();
+  assert.match(cliEvidence, /hello/);
+  assert.strictEqual(WORKER.classifyBuilderFailure('claude-subscription', 1, cliEvidence, '').code,
+    'MODEL_AUTH_FAILURE');
+  // The same expiry delivered as a stream result stays classifiable.
+  const streamed = WORKER.createClaudeStreamProgressDigest();
+  streamed.push('{"type":"result","subtype":"error_during_execution","is_error":true,' +
+    '"result":"API Error: 401 OAuth access token has expired."}\n');
+  assert.strictEqual(
+    WORKER.classifyBuilderFailure('claude-subscription', 1, streamed.end(), '').code, 'MODEL_AUTH_FAILURE');
+
+  // A credential inside stream text is still redacted on the evidence boundary.
+  const secret = WORKER.createClaudeStreamProgressDigest();
+  secret.push('token=sk-ant-oat01-not-a-real-value\n');
+  assert.strictEqual(secret.end().includes('sk-ant-oat01-not-a-real-value'), false);
+
+  // Partial writes across chunk boundaries never emit half of a JSON line.
+  const split = WORKER.createClaudeStreamProgressDigest();
+  split.push('{"type":"assistant","message":{"content":[{"type":"tool_use","na');
+  assert.strictEqual(split.text(), '', 'an incomplete line is not evidence yet');
+  split.push('me":"Read"}]}}\n');
+  assert.strictEqual(split.end(), 'assistant blocks=tool_use tools=Read');
+  assert.strictEqual(WORKER.summarizeClaudeStreamLine('   '), null);
 });
 
 (async () => {
