@@ -4079,6 +4079,247 @@ test('DOM: the Command and Detail switch moves the keyboard, not only the scroll
     'the first keyboard target still skips into a collapsed engineer disclosure rather than the command deck');
 });
 
+// ── "Show changes and checks": the signposted way into the receipts ────────
+// The defect these proofs guard is a founder who can see that something is
+// blocked and cannot find what says why: the rail exists, but the only door to
+// it is labelled with a disclosure level rather than with what is behind it.
+//
+// The defect the FIX could introduce is worse than the one it removes. A jump
+// that keeps its own copy of the receipts would be a second evidence surface
+// that can disagree with the rail; a jump that touches a build, gate, review or
+// checkpoint route on the way would make reading the evidence an action; and a
+// "return" that leaves the keyboard inside a region Command View has just
+// hidden would strand the operator who used it. So every proof below holds the
+// same shape: the control is real, reachable and named in words; it only
+// discloses; the surface it opens is the one canonical rail, repainted from
+// current state and still saying UNAVAILABLE where evidence is missing; and the
+// way back lands somewhere an operator can carry on from.
+
+// Boot the page with the evidence-navigation seams instrumented: every request
+// the page makes, and every scroll and focus move on the four elements this
+// navigation is allowed to touch. The spies are installed after boot, so what
+// they record is what the control did, never what loading the page did.
+function evidenceJumpPage(state, opts) {
+  const calls = [];
+  const settings = opts || {};
+  const page = bootPage(state, Object.assign({}, settings, {
+    fetch: async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, json: async () => settings.status || {} };
+    },
+  }));
+  const focused = [];
+  const scrolled = [];
+  for (const id of ['evidence-rail', 'evidence-rail-h', 'operator-shell', 'btn-show-evidence']) {
+    const node = page.document.getElementById(id);
+    node.focus = () => focused.push(id);
+    node.scrollIntoView = () => scrolled.push(id);
+  }
+  return { page, calls, focused, scrolled };
+}
+
+test('DOM: the Command View evidence jump discloses the rail, lands on its heading and reaches no API', () => {
+  const source = htmlSrc();
+  const shellStart = source.indexOf('<main class="command-shell" id="operator-shell"');
+  const railStart = source.indexOf('<section id="evidence-rail"');
+  const jumpAt = source.indexOf('id="btn-show-evidence"');
+  assert.ok(shellStart !== -1 && railStart > shellStart, 'the command shell or the evidence rail moved');
+  assert.ok(jumpAt > shellStart && jumpAt < railStart,
+    'the Show changes and checks control is not on the Command View first screen');
+  assert.ok(/<button type="button" class="action" id="btn-show-evidence"[\s\S]{0,160}>Show changes and checks<\/button>/.test(source),
+    'the way into the receipts is not a real button with a plain-English name');
+  assert.ok(/id="btn-show-evidence"[\s\S]{0,160}aria-describedby="evidence-jump-note"/.test(source) &&
+    /id="evidence-jump-note"/.test(source),
+    'the jump never says in words what it opens or that it changes nothing');
+
+  const { page, calls, focused, scrolled } = evidenceJumpPage(fixtureState());
+  const button = page.document.getElementById('btn-show-evidence');
+  assert.strictEqual((button._listeners.click || []).length, 1,
+    'the Show changes and checks control has no executable click handler');
+  const before = calls.length;
+  button._listeners.click[0]();
+
+  assert.strictEqual(page.document.body.getAttribute('data-detail'), 'true',
+    'the jump did not enter Detail view, so the rail it points at stays hidden');
+  assert.strictEqual(page.document.getElementById('view-detail').getAttribute('aria-pressed'), 'true',
+    'the view switch does not report the view the jump actually put the operator in');
+  assert.strictEqual(page.document.getElementById('view-command').getAttribute('aria-pressed'), 'false',
+    'Command view still reports itself as selected after the jump left it');
+  assert.strictEqual(page.document.getElementById('raw-state').open, true,
+    'the jump used a disclosure state of its own instead of the one the view switch owns');
+  assert.deepStrictEqual(scrolled, ['evidence-rail'],
+    'the jump did not bring the evidence rail into view');
+  assert.deepStrictEqual(focused, ['evidence-rail-h'],
+    'the jump moved the page and left the keyboard on the button rather than on the rail heading');
+  assert.match(page.text('live'), /Detail view\./, 'the jump is silent to a screen reader');
+  // Reading the evidence is not an action: no build, run, gate, review,
+  // checkpoint or connector route may be touched by looking at it.
+  assert.strictEqual(calls.length, before,
+    `the evidence jump issued a request: ${JSON.stringify(calls.slice(before))}`);
+  assert.ok(/<section id="evidence-rail"[^>]*tabindex="-1"/.test(source) &&
+    /<h2 id="evidence-rail-h" tabindex="-1"/.test(source),
+    'the rail heading cannot hold the focus the jump gives it, so the ring never appears');
+});
+
+test('DOM: Return to Command restores the command-first view and the keyboard position the jump left', () => {
+  const source = htmlSrc();
+  assert.ok(/<button type="button" class="action" id="btn-return-command"[\s\S]{0,160}>Return to Command view<\/button>/.test(source),
+    'the evidence rail offers no way back to Command view');
+  const railStart = source.indexOf('<section id="evidence-rail"');
+  const railBody = source.indexOf('id="evidence-rail-body"');
+  const backAt = source.indexOf('id="btn-return-command"');
+  assert.ok(backAt > railStart && backAt < railBody,
+    'the way back is not a static part of the rail above the receipts the renderer repaints');
+
+  const { page, calls, focused } = evidenceJumpPage(fixtureState());
+  page.document.getElementById('btn-show-evidence')._listeners.click[0]();
+  const back = page.document.getElementById('btn-return-command');
+  assert.strictEqual((back._listeners.click || []).length, 1, 'the way back has no executable click handler');
+  const before = calls.length;
+  focused.length = 0;
+  back._listeners.click[0]();
+
+  assert.strictEqual(page.document.body.getAttribute('data-detail'), 'false',
+    'Return to Command did not restore the command-first disclosure state');
+  assert.strictEqual(page.document.getElementById('view-command').getAttribute('aria-pressed'), 'true',
+    'the view switch does not report the view the way back put the operator in');
+  assert.strictEqual(page.document.getElementById('raw-state').open, false,
+    'Return to Command left the deep machine state disclosed behind the rail it closed');
+  assert.deepStrictEqual(focused, ['btn-show-evidence'],
+    'Return to Command stranded the keyboard in the region Command view has just hidden');
+  assert.match(page.text('live'), /Command view\./, 'the way back is silent to a screen reader');
+  assert.strictEqual(calls.length, before,
+    `the way back issued a request: ${JSON.stringify(calls.slice(before))}`);
+
+  // Reached by the view switch instead of by the jump there is no origin to
+  // restore, so the way back returns to the command deck rather than nowhere.
+  const other = evidenceJumpPage(fixtureState());
+  other.page.document.getElementById('view-detail')._listeners.click[0]();
+  other.focused.length = 0;
+  other.page.document.getElementById('btn-return-command')._listeners.click[0]();
+  assert.deepStrictEqual(other.focused, ['operator-shell'],
+    'a rail opened from the view switch has no sensible way back to the command deck');
+});
+
+test('DOM: the rail the jump opens is repainted from current canonical state and keeps absent evidence absent', () => {
+  const { page } = evidenceJumpPage(fixtureState());
+  page.document.getElementById('btn-show-evidence')._listeners.click[0]();
+  const unbound = evidencePanelsById(page);
+  assert.deepStrictEqual(Object.keys(unbound).sort(), [...DETAIL_PANEL_ORDER].sort(),
+    'the jump opened a rail that is missing a receipt');
+  assert.strictEqual(unbound.subject.attrs['data-evidence-state'], 'BINDING_UNAVAILABLE',
+    'an unproven code-version binding read as proven on the surface the jump advertises');
+  assert.strictEqual(unbound.checks.attrs['data-evidence-state'], 'UNAVAILABLE');
+  assert.match(unbound.action.textContent, /Bound run: UNAVAILABLE/,
+    'the jump invented a bound run to have something to show');
+
+  // The same page, one canonical push later. The receipts have to be the new
+  // ones: a jump that kept what it read when it was pressed would be a second
+  // evidence surface that can disagree with the rail.
+  const subject = 'd'.repeat(64);
+  renderMinimizedStatus(page, {
+    generatedAt: '2026-09-03T12:00:00.000Z', runsState: 'OK',
+    engineering: {
+      state: 'OK', verdict: 'BLOCKED', subjectSha256: subject,
+      subjectPaths: ['builder-control/dashboard/index.html', 'builder-control/test/dashboard-slice.test.cjs'],
+      problems: [], reviewerCompleteness: null, stages: [],
+    },
+    runs: [{
+      runId: 'RUN-JUMP', state: 'CHECKS_PASSED', objective: 'Open the receipts from Command view',
+      updatedAt: '2026-09-03T12:00:00.000Z',
+      checks: { passed: 5, total: 5, outcome: 'PASS', snapshotOutcome: 'PASS' },
+      checkpoint: null, rollbackPoint: null, checkpointState: 'ABSENT',
+    }],
+    runsBinding: { state: 'BOUND', runId: 'RUN-JUMP', updatedAt: '2026-09-03T12:00:00.000Z',
+      subjectState: 'UNLINKED', gateSubjectSha256: subject, reason: 'bound to current run' },
+    integration: { connectors: { state: 'OK', connectors: [] } }, reviewers: [], events: [],
+    cost: { state: 'UNAVAILABLE', reason: 'no transcripts' },
+    knowledge: { state: 'UNKNOWN', conflicts: null },
+  });
+  const bound = evidencePanelsById(page);
+  assert.match(bound.action.textContent, /Bound run: RUN-JUMP/,
+    'the rail held the reading it had when the jump was pressed instead of repainting from canonical state');
+  assert.match(evidencePanelValue(bound.paths), /2 exact changed path\(s\)/,
+    'the changed-path receipt did not repaint from the current gate subject');
+  assert.match(bound.paths.textContent, /builder-control\/test\/dashboard-slice\.test\.cjs/,
+    'the exact changed paths were summarised away rather than listed');
+  assert.match(bound.checks.textContent, /5\/5 checks passed/,
+    'the recorded check receipt did not repaint');
+
+  // A repaint is not permission to fill in what is still missing. The subject
+  // is UNLINKED, no cost was projected and no checkpoint was recorded, and all
+  // three have to keep saying so on the surface the jump advertises.
+  assert.strictEqual(bound.subject.attrs['data-evidence-state'], 'BINDING_UNAVAILABLE',
+    'an unlinked subject was upgraded to an exact binding by a repaint');
+  assert.match(evidencePanelValue(bound.cost), /CAD UNAVAILABLE/,
+    'a repainted rail invented a cost figure');
+  assert.strictEqual(evidencePanelValue(bound.checkpoint), 'No safe checkpoint is recorded for this run.',
+    'a repainted rail invented a saved checkpoint');
+  assert.ok(!/CAD 0|\$0|0 checks passed/i.test(page.text('evidence-rail-body')),
+    'an absent figure was back-filled as a zero');
+  assert.strictEqual(page.document.body.getAttribute('data-detail'), 'true',
+    'a canonical repaint closed the rail the operator had opened');
+});
+
+test('the evidence rail heads every receipt in plain English and the navigation adds no second truth source', () => {
+  const page = bootPage(fixtureState());
+  const headings = evidencePanels(page).map((panel) => {
+    const h3 = allNodes(panel).find((node) => node.tagName === 'H3');
+    assert.ok(h3, `evidence panel ${panel.attrs['data-evidence-panel']} rendered no heading`);
+    return h3.textContent;
+  });
+  assert.deepStrictEqual(headings, [
+    'What is happening now',
+    'Which exact version this is',
+    'What changed',
+    'What the checks recorded',
+    'What review covers',
+    'What it cost (CAD)',
+    'Where the safe point is',
+  ], 'the evidence rail stopped heading its receipts with the question each one answers');
+
+  // One rail, one renderer, one writer. The navigation may reveal the rail and
+  // move the keyboard; it may not paint, cache or re-derive anything in it.
+  assert.strictEqual((code.match(/function renderEvidenceRail\(/g) || []).length, 1,
+    'a second evidence rail renderer appeared beside the canonical one');
+  assert.strictEqual((code.match(/\$\('evidence-rail-body'\)/g) || []).length, 1,
+    'a second writer reaches into the evidence rail body');
+  const jumpStart = code.indexOf("var showEvidence = $('btn-show-evidence')");
+  assert.ok(jumpStart !== -1, 'the evidence navigation wiring was not found');
+  const jumpCode = code.slice(jumpStart, code.indexOf('── reduced motion', jumpStart))
+    .replace(/^\s*\/\/.*$/gm, '');
+  assert.ok(jumpCode.trim().length > 0, 'the evidence navigation wiring is empty');
+  assert.ok(!/callApi|fetch\(|\/api\//.test(jumpCode),
+    'the evidence navigation reaches a route rather than only disclosing what is already on the page');
+  assert.ok(!/renderEvidenceRail|evidence-rail-body|AEGIS_STATE|textContent\s*=/.test(jumpCode),
+    'the evidence navigation writes or re-derives evidence of its own');
+  assert.ok(/setDetailView\(true, 'evidence-rail-h'\)/.test(jumpCode),
+    'the jump does not reuse the one disclosure switch to land on the rail heading');
+});
+
+test('the evidence navigation stays usable on a 390px phone, by keyboard, with reduced motion', () => {
+  // Wrapping, not widening: the explanatory line beside each control is the
+  // longest thing in either row, and a row that refuses to wrap it is a
+  // horizontal scrollbar on the narrowest phone this deck supports.
+  assert.ok(/\.evidence-jump\{[^}]*display:flex[^}]*flex-wrap:wrap/.test(code),
+    'the evidence navigation rows do not wrap');
+  assert.ok(/\.evidence-jump>\.rail-note\{[^}]*min-width:0[^}]*overflow-wrap:anywhere/.test(code),
+    'the sentence beside the evidence controls can widen the page instead of wrapping');
+  assert.ok(!/\.evidence-jump[^{}]*\{[^}]*(?:overflow-x|overflow:|white-space:nowrap|position:fixed)/.test(code),
+    'the evidence navigation clips or pins itself instead of wrapping');
+  // Finger-sized on a phone, through the shipped hit-target rule rather than a
+  // second one of its own.
+  const phone = code.slice(code.indexOf('@media (max-width:680px)'));
+  assert.ok(/button\.action,[\s\S]{0,300}?\{min-height:44px\}/.test(phone),
+    'the evidence navigation buttons fall below the shipped phone hit-target floor');
+  // Nothing here may animate, so the reduced-motion control still has nothing
+  // on this page to suppress and a smooth scroll cannot outlive it.
+  assert.ok(!/scrollIntoView\([^)]*behavior/.test(code),
+    'the evidence navigation asks for animated scrolling');
+  assert.ok(!/\.evidence-jump[^{}]*\{[^}]*(?:transition|animation)\s*:/.test(code),
+    'the evidence navigation introduced motion of its own');
+});
+
 // ── V2 failure-state storyboard (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ──
 // Three failures read identically on a status page and need completely
 // different responses: work that stopped moving, a provider that could not do

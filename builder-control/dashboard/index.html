@@ -774,6 +774,16 @@
   .evidence-list>li{margin-top:3px;font:11px/1.5 var(--mono);color:var(--text-1);overflow-wrap:anywhere}
   .evidence-panel .chip{margin-top:7px}
 
+  /* The way into the evidence rail from the first screen, and the way back out
+     of it. Both rows are navigation only: they change disclosure and where the
+     keyboard is, and they render no receipt of their own, so neither can agree
+     or disagree with the rail they point at. They wrap rather than widen, so a
+     long explanatory line cannot push the page sideways on a phone. */
+  .evidence-jump{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .evidence-jump>.rail-note{flex:1 1 150px;min-width:0;overflow-wrap:anywhere}
+  #founder-summary>.evidence-jump{padding:0 16px 16px}
+  #evidence-rail>.evidence-jump{padding:14px 14px 0}
+
   body[data-reduced-motion="true"] *{transition:none!important;scroll-behavior:auto!important}
 
   @media (max-width:1599px){
@@ -866,6 +876,8 @@
     .command-shell{padding:10px 12px 14px}
     #founder-summary>h2{padding:8px 12px}
     #founder-summary>.body{padding:10px 12px}
+    #founder-summary>.evidence-jump{padding:0 12px 12px}
+    #evidence-rail>.evidence-jump{padding:10px 12px 0}
     #founder-summary .mission-head{flex-direction:row;flex-wrap:wrap;gap:8px;padding-bottom:6px}
     #founder-summary .mission-head>div{flex:1 1 200px;min-width:0}
     #founder-summary .mission-kicker{font-size:10px}
@@ -1360,6 +1372,19 @@
     <section aria-labelledby="founder-h" id="founder-summary">
       <h2 id="founder-h">Mission brief</h2>
       <div class="body" id="founder-body"><p class="empty">Loading current-run summary…</p></div>
+      <!-- The one signposted way from the first screen into the evidence rail.
+           It opens the disclosure the Detail view tab already owns and lands the
+           keyboard on the rail's own heading. It starts, cancels, retries,
+           checkpoints and re-decides nothing, and it holds no copy of the
+           evidence: the rail is still painted only by renderEvidenceRail from
+           the canonical view every other instrument here is painted from. -->
+      <div class="evidence-jump">
+        <button type="button" class="action" id="btn-show-evidence"
+          aria-describedby="evidence-jump-note">Show changes and checks</button>
+        <span class="rail-note" id="evidence-jump-note">Opens Detail view at the evidence rail: which exact
+          version this is, what changed, what the checks recorded, what review covers, what it cost and where
+          the safe point is. Reading only — nothing is started, cancelled or decided.</span>
+      </div>
     </section>
 
     <section class="objective-composer" aria-labelledby="intake-h" id="objective-composer">
@@ -1554,8 +1579,22 @@
         <div class="hud-summary-meta">Recorded checkpoint evidence only.</div></div>
     </section>
 
+    <!-- tabindex="-1" on the heading as well as on the section: the view switch
+         lands on the region, and the Command View jump lands on the heading, so
+         a keyboard operator arrives at the first thing they are meant to read
+         with the shipped inset focus ring on it. -->
     <section id="evidence-rail" aria-labelledby="evidence-rail-h" tabindex="-1">
-      <h2 id="evidence-rail-h">Evidence inspector <span class="rail-note">detail view · canonical receipts only</span></h2>
+      <h2 id="evidence-rail-h" tabindex="-1">Changes and checks <span class="rail-note">evidence inspector · detail view · canonical receipts only</span></h2>
+      <!-- The way back. It restores the Command View disclosure and returns the
+           keyboard to the control the jump was made from; reached any other way
+           it returns to the command deck. It records nothing and decides
+           nothing. -->
+      <div class="evidence-jump">
+        <button type="button" class="action" id="btn-return-command"
+          aria-describedby="evidence-return-note">Return to Command view</button>
+        <span class="rail-note" id="evidence-return-note">Closes the detail disclosure and puts the keyboard
+          back where Command view was left. No run, gate, review or checkpoint is touched.</span>
+      </div>
       <div class="body" id="evidence-rail-body">
         <p class="empty">Loading canonical evidence…</p>
       </div>
@@ -3160,7 +3199,7 @@
       meta.push('Last recorded failure evidence: ' + failure.evidence);
       if (failure.recorded) meta.push('One next governed action: ' + failure.next);
     }
-    return { id: 'action', title: 'Current action', chip: state, state: state, lead: true,
+    return { id: 'action', title: 'What is happening now', chip: state, state: state, lead: true,
       value: typeof ctx.currentAction === 'string' && ctx.currentAction
         ? ctx.currentAction
         : 'UNAVAILABLE — no current action was resolved for this page.',
@@ -3173,7 +3212,7 @@
   // nothing on its own: an unproven binding is stated as unproven, never as a
   // version that merely has not been checked yet.
   function evidenceSubjectPanel(e, bind, exactSubjectBound){
-    return { id: 'subject', title: 'Code-version evidence',
+    return { id: 'subject', title: 'Which exact version this is',
       chip: exactSubjectBound ? 'AVAILABLE' : 'UNAVAILABLE',
       state: exactSubjectBound ? 'EXACT_SUBJECT_BOUND' : 'BINDING_UNAVAILABLE',
       value: exactSubjectBound
@@ -3198,25 +3237,25 @@
           'paths of the gate subject, not a proven change of the run on screen.'
     ];
     if (!paths || !paths.length){
-      return { id: 'paths', title: 'Changed paths', chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
+      return { id: 'paths', title: 'What changed', chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
         value: 'Exact changed paths UNAVAILABLE — the gate projection carries no changed-path list for ' +
           'this subject. That is missing evidence, not a change with no files.',
         meta: meta, list: null };
     }
-    return { id: 'paths', title: 'Changed paths', chip: 'AVAILABLE', state: 'RECORDED',
+    return { id: 'paths', title: 'What changed', chip: 'AVAILABLE', state: 'RECORDED',
       value: paths.length + ' exact changed path(s) in the current gate subject.',
       meta: meta, list: paths.slice() };
   }
 
   function evidenceChecksPanel(run){
     if (!run){
-      return { id: 'checks', title: 'Deterministic checks', chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
+      return { id: 'checks', title: 'What the checks recorded', chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
         value: 'No run is bound to this page, so no deterministic check result can be attributed.',
         meta: [], list: null };
     }
     var checks = run.checks;
     if (!checks){
-      return { id: 'checks', title: 'Deterministic checks', chip: 'UNAVAILABLE', state: 'NOT_RECORDED',
+      return { id: 'checks', title: 'What the checks recorded', chip: 'UNAVAILABLE', state: 'NOT_RECORDED',
         value: 'Not recorded — this run carries no deterministic check result. Zero passing checks is ' +
           'not the same as none run.',
         meta: [], list: null };
@@ -3238,7 +3277,7 @@
       if (checks[field]) meta.push(field.replace(/State$/, '') + ': ' + checks[field]);
     });
     if (checks.preconditionCode) meta.push('Precondition code: ' + checks.preconditionCode);
-    return { id: 'checks', title: 'Deterministic checks',
+    return { id: 'checks', title: 'What the checks recorded',
       chip: CHECK_OUTCOME_CHIP[outcome] || 'UNVERIFIED', state: outcome,
       value: CHECK_OUTCOME_PLAIN[outcome] ||
         ('Recorded check outcome ' + outcome + ' is not one this page knows how to explain, so it is ' +
@@ -3247,7 +3286,7 @@
   }
 
   function evidenceReviewPanel(bind, rc, subjectMatches, mismatchKnown){
-    var title = 'Independent review';
+    var title = 'What review covers';
     var bindingMeta = [
       'Binding: ' + ((bind && bind.state) || 'UNAVAILABLE') +
         ' · subject ' + ((bind && bind.subjectState) || 'UNAVAILABLE'),
@@ -3297,7 +3336,7 @@
   }
 
   function evidenceCostPanel(cost){
-    var title = 'Cost (CAD)';
+    var title = 'What it cost (CAD)';
     if (!cost || cost.state !== 'OK'){
       return { id: 'cost', title: title, chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
         value: 'CAD UNAVAILABLE — ' + ((cost && cost.reason) || 'no cost projection was delivered to this page.'),
@@ -3348,7 +3387,7 @@
     ];
     if (run && run.checkpointState) meta.push('Checkpoint state: ' + run.checkpointState);
     if (run && run.checkpointReason) meta.push(run.checkpointReason);
-    return { id: 'checkpoint', title: 'Checkpoint & rollback', chip: CHIP[state] || 'UNAVAILABLE',
+    return { id: 'checkpoint', title: 'Where the safe point is', chip: CHIP[state] || 'UNAVAILABLE',
       state: state, value: checkpointText, meta: meta, list: null };
   }
 
@@ -5612,7 +5651,11 @@
   var commandView = $('view-command');
   var detailView = $('view-detail');
   var rawState = $('raw-state');
-  function setDetailView(enabled){
+  // landingId is optional and presentational: it names which already-disclosed
+  // element the keyboard should end on. It changes nothing about what is
+  // disclosed, so a caller can ask for the rail's heading or for the control it
+  // jumped from without gaining a second disclosure rule.
+  function setDetailView(enabled, landingId){
     document.body.setAttribute('data-detail', enabled ? 'true' : 'false');
     if (commandView) commandView.setAttribute('aria-pressed', enabled ? 'false' : 'true');
     if (detailView) detailView.setAttribute('aria-pressed', enabled ? 'true' : 'false');
@@ -5620,12 +5663,14 @@
     // Scrolling alone moves the eye and leaves the keyboard behind on the tab
     // that was just pressed, so the disclosed surface takes focus as well. The
     // landing target carries tabindex="-1" and the shipped inset focus ring, so
-    // a keyboard operator can see where the switch put them.
-    var landing = enabled ? ($('evidence-rail') || rawState) : $('operator-shell');
-    if (landing){
-      if (landing.scrollIntoView) landing.scrollIntoView({ block: 'start' });
-      if (landing.focus) landing.focus();
-    }
+    // a keyboard operator can see where the switch put them. The region is
+    // what scrolls; the landing is only where the keyboard stops, so asking for
+    // the rail's heading still brings the whole rail into view.
+    var landing = (landingId ? $(landingId) : null) ||
+      (enabled ? ($('evidence-rail') || rawState) : $('operator-shell'));
+    var region = enabled ? ($('evidence-rail') || landing) : landing;
+    if (region && region.scrollIntoView) region.scrollIntoView({ block: 'start' });
+    if (landing && landing.focus) landing.focus();
     // One sentence in the one live region, so the switch is not silent to a
     // screen reader. It states disclosure only — no run, gate, reviewer,
     // connector or evidence record is read, written or re-decided here.
@@ -5636,6 +5681,33 @@
   }
   if (commandView) commandView.addEventListener('click', function(){ setDetailView(false); });
   if (detailView) detailView.addEventListener('click', function(){ setDetailView(true); });
+
+  // ── "Show changes and checks": Command View → the evidence rail ──────
+  // A named way into the receipts, for an operator who should not have to know
+  // that "Detail view" is where the changed paths and the check outcome live.
+  // It reuses the one disclosure switch above and the one rail renderEvidenceRail
+  // already paints, so it adds no second truth source and no second copy of any
+  // receipt: after the jump the operator is reading whatever the current
+  // canonical state says, including the UNAVAILABLE and wrong-subject sentences
+  // the rail writes when a binding, a path list, a check receipt or a checkpoint
+  // is missing. It reaches no API — no build, run, gate, review, checkpoint or
+  // connector call is made, here or by the way back.
+  var showEvidence = $('btn-show-evidence');
+  var returnToCommand = $('btn-return-command');
+  // Where the keyboard was when the rail was opened, so the way back is a
+  // return rather than a second jump. Only the id of a shipped control is ever
+  // held here; a rail opened by the Detail view tab has no origin and returns
+  // to the command deck.
+  var evidenceOrigin = null;
+  if (showEvidence) showEvidence.addEventListener('click', function(){
+    evidenceOrigin = 'btn-show-evidence';
+    setDetailView(true, 'evidence-rail-h');
+  });
+  if (returnToCommand) returnToCommand.addEventListener('click', function(){
+    var origin = evidenceOrigin;
+    evidenceOrigin = null;
+    setDetailView(false, origin);
+  });
 
   // ── reduced motion: report the resolved state, never invent motion ──
   // This page ships with no animation and only a handful of transitions, so the
