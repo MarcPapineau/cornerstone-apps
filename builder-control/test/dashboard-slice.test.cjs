@@ -1370,6 +1370,116 @@ test('the wide HUD surface is flat, static, asset-free, gradient-free and identi
 });
 
 
+// ── Detail View tactical evidence surface (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// The failure guarded here is a Detail View that looks like an instrument and
+// behaves like a second dashboard: a rail that reaches its own reading of what
+// is happening, a plate that lights by state so the framing becomes a signal
+// nothing reported, prose clamped away on the one surface the operator opened
+// in order to read it whole, or a "tactical" treatment that quietly stops
+// drawing a receipt the Command View still shows.
+//
+// The block is located by its first shipped selector rather than by a media
+// query, because it deliberately has none: Detail View is the same surface at
+// every width, and a breakpoint here would be a place for a receipt to vanish
+// on a phone without any proof noticing.
+const detailStart = code.lastIndexOf('#evidence-rail{border-color');
+const DETAIL = detailStart === -1 ? '' : code.slice(detailStart, code.indexOf('</style>', detailStart));
+
+function detailRules() {
+  const rules = [];
+  for (const rule of DETAIL.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    rules.push({ selectors: rule[1].split(',').map((s) => s.trim()).filter(Boolean), body: rule[2] });
+  }
+  return rules;
+}
+
+test('the Detail View evidence surface frames shipped receipts and hides, clamps or animates nothing', () => {
+  assert.ok(DETAIL.length > 0, 'the Detail View evidence surface block was not located');
+  assert.ok(detailRules().length > 0, 'the Detail View evidence surface declares no rules');
+  for (const rule of detailRules()) {
+    const target = rule.selectors.join(',');
+    assert.ok(!/display:\s*none/.test(rule.body),
+      `${target} stops drawing a receipt on the surface the operator opened to read it`);
+    assert.ok(!/visibility:|content-visibility:|-webkit-line-clamp/.test(rule.body),
+      `${target} hides or truncates evidence in Detail View, which is where it must be read whole`);
+  }
+  assert.ok(!/@keyframes/.test(DETAIL) && !/\banimation\s*:/.test(DETAIL) &&
+    !/(?:^|;)\s*transition:(?!none)/.test(DETAIL),
+    'the Detail View surface introduced motion — reduced motion must still have nothing here to suppress');
+  // It is stylesheet text framing shipped boxes, so it carries no asset, no
+  // artwork, no script, no data source and no override of a shipped signal.
+  for (const banned of ['gradient(', 'url(', 'image-set(', 'element(', 'paint(', 'background-image',
+    'background-size', 'background-repeat', 'filter', 'backdrop-filter', 'mask', 'clip-path',
+    'setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'fetch(', 'AEGIS_STATE',
+    '!important']) {
+    assert.ok(!DETAIL.includes(banned),
+      `the Detail View surface uses ${banned} — it may only frame boxes the renderer already fills`);
+  }
+  // It writes no words and no glyphs of its own, so it can state nothing that
+  // canonical state has not already stated inside the panel.
+  for (const declared of DETAIL.matchAll(/content\s*:\s*([^;}]+)/g)) {
+    assert.strictEqual(declared[1].trim(), '""',
+      'the Detail View surface writes its own label or glyph into an evidence panel');
+  }
+  // Detail View has no breakpoint of its own, so no width can be given a
+  // different set of receipts from any other width.
+  assert.ok(!/@media/.test(DETAIL),
+    'the Detail View surface added a breakpoint, which is a place for a receipt to disappear at one width');
+});
+
+test('the Detail View rail wraps dense receipts at every width instead of scrolling the page sideways', () => {
+  // A fixed track minimum is what turns a receipt into a horizontal scrollbar
+  // on the narrowest phone, and clipping it would hide the evidence that
+  // overflowed along with the overflow.
+  assert.ok(/#evidence-rail>\.body\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(min\(232px,100%\),1fr\)\)/.test(code),
+    'the rail keeps a track minimum wider than the column it has to fit in');
+  assert.ok(/\.evidence-value\{[^}]*overflow-wrap:anywhere/.test(code) &&
+    /\.evidence-meta\{[^}]*overflow-wrap:anywhere/.test(code) &&
+    /\.evidence-list>li\{[^}]*overflow-wrap:anywhere/.test(code),
+    'a canonical subject, path or run identifier can still widen the page instead of wrapping');
+  assert.ok(!/(?:^|;)\s*overflow-x:/.test(DETAIL) && !/(?:^|;)\s*overflow:/.test(DETAIL),
+    'horizontal overflow is masked by clipping the rail rather than prevented by wrapping the value');
+});
+
+test('every Detail View plate is marked by receipt identity, never by a status the plate never reported', () => {
+  const stateToken = /var\(--(pass|fail|warn|blocked|active|stale|unknown|cyan|hud-blue|hud-violet|orange)\)/;
+  let marked = 0;
+  for (const rule of detailRules()) {
+    if (!stateToken.test(rule.body)) continue;
+    for (const selector of rule.selectors) {
+      assert.ok(!/\[data-evidence-state=|\[data-run-status=|\[data-ops-state=|\.s-[A-Z_]/.test(selector),
+        `${selector} changes a Detail View plate with a run or evidence state, which turns framing into a second signal`);
+      marked++;
+    }
+  }
+  assert.ok(marked > 0, 'the Detail View surface marks no panel by category at all');
+  // Colour is emphasis and never the reading: every panel prints its own
+  // canonical state word as a chip with a glyph, and repeats it as a machine
+  // attribute, so the rail is completely legible with colour removed.
+  assert.ok(/article\.appendChild\(chip\(panel\.chip\)\)/.test(code) &&
+    /article\.setAttribute\('data-evidence-state', panel\.state\)/.test(code),
+    'a Detail View panel carries a category tick without the canonical state word beside it');
+});
+
+test('Detail View leads with the evidence rail and demotes deep machine state without removing either', () => {
+  assert.ok(/body\[data-detail="true"\] #evidence-rail\{display:block\}/.test(code),
+    'the Detail control no longer discloses the evidence rail');
+  assert.ok(/body\[data-detail="true"\] #evidence-rail\{order:-1\}/.test(code),
+    'Detail View does not lead with the evidence rail');
+  assert.ok(/body\[data-detail="true"\] \.event-panel\{order:1\}/.test(code) &&
+    /body\[data-detail="true"\] #raw-state\{order:2\}/.test(code),
+    'the recent-decision log and the deep machine state are not demoted below the rail in Detail View');
+  assert.ok(/\.evidence-panel\.evidence-lead\{grid-column:1\/-1/.test(code),
+    'the current action is not the full-width lead instrument of the rail');
+  // Reordering is not removing: every demoted panel is still rendered, and
+  // Command View keeps the order and the disclosure state it shipped with.
+  for (const kept of ['class="event-panel"', 'id="raw-state"', 'id="evidence-rail"']) {
+    assert.ok(htmlSrc().includes(kept), `${kept} was removed rather than reordered in Detail View`);
+  }
+  assert.ok(!/body\[data-detail="false"\]/.test(code),
+    'Command View was given rules of its own by the Detail View packet');
+});
+
 // ── DOM harness: render the REAL page source, not a copy of it ─────────────
 // jsdom is not a dependency here and will not become one for a governance
 // dashboard, so this is a deliberately small DOM: enough of createElement /
@@ -1561,6 +1671,90 @@ test('DOM: Command and Detail controls execute the real disclosure switch', () =
   assert.strictEqual(detail.getAttribute('aria-pressed'), 'false',
     'Detail view remained selected after Command view activation');
   assert.strictEqual(raw.open, false, 'Command view did not close the deep evidence disclosure');
+});
+
+// The Detail View rail, in the order an operator reads it: what is being done
+// now, which exact code version that is, which paths changed, what the
+// deterministic checks recorded, what independent review covers, what it cost,
+// and where the last safe checkpoint is.
+const DETAIL_PANEL_ORDER = ['action', 'subject', 'paths', 'checks', 'review', 'cost', 'checkpoint'];
+
+function evidencePanels(page) {
+  return findByAttr(page.document.getElementById('evidence-rail-body'), 'data-evidence-panel');
+}
+
+function evidencePanelsById(page) {
+  return Object.fromEntries(evidencePanels(page).map((panel) => [panel.attrs['data-evidence-panel'], panel]));
+}
+
+function evidencePanelValue(panel) {
+  const value = allNodes(panel).find((node) => String(node.className) === 'evidence-value');
+  assert.ok(value, `evidence panel ${panel.attrs['data-evidence-panel']} rendered no value`);
+  return value.textContent;
+}
+
+test('DOM: Detail View leads with the canonical current action and then the seven receipts in operator order', () => {
+  const run = {
+    runId: 'RUN-DETAIL', state: 'BUILDING', objective: 'Refine the AEGIS Detail View',
+    updatedAt: '2026-08-27T14:10:00.000Z',
+    build: {
+      mode: 'async', status: 'RUNNING', workerPid: 4242,
+      startedAt: '2026-08-27T14:00:00.000Z', endedAt: null,
+      activity: { active: true, summary: 'Refining the founder-readable evidence surface.' },
+    },
+  };
+  const page = bootPage(fixtureState({
+    generatedAt: '2026-08-27T14:10:00.000Z',
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, reason: 'exact current run is bound',
+    } },
+  }));
+  const panels = evidencePanels(page);
+  assert.deepStrictEqual(panels.map((panel) => panel.attrs['data-evidence-panel']), DETAIL_PANEL_ORDER,
+    'the Detail View rail no longer prioritizes the operator questions in order');
+
+  const lead = panels[0];
+  assert.ok(lead.classList.contains('evidence-lead'),
+    'the current action is not rendered as the full-width lead instrument');
+
+  // One authority: the lead prints the exact sentence the Command View
+  // CURRENT ACTION card prints, and the exact control state the shell carries,
+  // so the two surfaces cannot answer "what is happening" differently.
+  const deckCurrentAction = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+    .find((node) => node.attrs['data-operator-field'] === 'current-action');
+  assert.ok(deckCurrentAction, 'the Command View CURRENT ACTION card was not rendered to compare against');
+  assert.ok(deckCurrentAction.textContent.endsWith(evidencePanelValue(lead)),
+    `the rail derived its own current action: ${evidencePanelValue(lead)}`);
+  assert.strictEqual(lead.attrs['data-evidence-state'],
+    page.document.getElementById('operator-shell').attrs['data-run-status'].toUpperCase(),
+    'the rail lead states a control-plane verdict the shell never recorded');
+  assert.match(lead.textContent, /Bound run: RUN-DETAIL/, 'the rail lead does not name the bound run');
+  assert.match(lead.textContent, /Next governed action: \S/,
+    'the rail lead does not carry the next governed action the gate module already states');
+  assert.match(lead.textContent, /Refining the founder-readable evidence surface\./,
+    'the rail lead lost the canonical builder activity the deck already renders');
+});
+
+test('DOM: an unbound Detail View states every missing receipt as missing and invents no run, cost or checkpoint', () => {
+  const page = bootPage(fixtureState());
+  const panels = evidencePanelsById(page);
+  assert.deepStrictEqual(Object.keys(panels).sort(), [...DETAIL_PANEL_ORDER].sort(),
+    'an unbound Detail View drops a receipt instead of reporting it as unavailable');
+  assert.match(panels.action.textContent, /Bound run: UNAVAILABLE — no run is bound to this page\./,
+    'the rail lead invented a bound run');
+  assert.strictEqual(panels.subject.attrs['data-evidence-state'], 'BINDING_UNAVAILABLE');
+  assert.match(evidencePanelValue(panels.subject),
+    /AEGIS cannot confirm an exact code-version binding for the current run\./,
+    'an unproven code-version binding is not stated as unproven');
+  assert.strictEqual(panels.checks.attrs['data-evidence-state'], 'UNAVAILABLE');
+  assert.match(panels.checks.textContent, /no deterministic check result can be attributed/,
+    'a run that recorded no checks is not reported as unattributable');
+  assert.strictEqual(panels.review.attrs['data-evidence-state'], 'UNAVAILABLE');
+  assert.match(panels.cost.textContent, /CAD UNAVAILABLE — no transcripts/,
+    'an absent cost projection is not stated as unavailable');
+  const rail = page.text('evidence-rail-body');
+  assert.ok(!/CAD 0|\$0|0 checks passed|no changes/i.test(rail),
+    'an absent figure or absent receipt was back-filled as a zero or as an empty change');
 });
 
 function passingReviewCompleteness(subject = 'a'.repeat(64), paths = ['builder-control/dashboard/index.html']) {

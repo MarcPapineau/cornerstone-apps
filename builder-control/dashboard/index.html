@@ -1036,6 +1036,72 @@
     .core-path-note{margin-top:8px;font-size:11px;line-height:1.4}
     .core-path-handoff{margin-top:6px}
   }
+
+  /* ── Detail View: the tactical evidence surface ───────────────────
+     Detail View is not a second dashboard and not a second authority. It is
+     the same canonical resolutions the Command View deck, the Strategic
+     Systems HUD and the operational strip were handed, re-read in the order an
+     operator uses once they have stopped asking "what is happening" and
+     started asking "show me": the action being performed now, the exact code
+     version it is bound to, the changed paths, the deterministic checks, the
+     independent review, the recorded cost and the last safe checkpoint.
+
+     Everything here is presentation: reading order, spacing, framing, and the
+     same seated-plate treatment the approved HUD evidence modules already use,
+     so the two surfaces read as one instrument rather than as a cockpit and a
+     printout. It is declared last, and every rule that changes hierarchy is
+     scoped to body[data-detail="true"], so Command View keeps exactly the
+     layout and order it shipped with.
+
+     Nothing is hidden and nothing is clamped: no display:none, no visibility,
+     no line clamp, so every canonical sentence the strip and the wide deck
+     abbreviate is read here in full. There is no gradient, image, url(),
+     timer, transition or animation in this block — a corner tick and a
+     hairline rule are the only marks it draws, exactly as the six HUD modules
+     draw them — so reduced motion still has nothing here to suppress. The tick
+     is module identity and never status: its colour is fixed by which receipt
+     the panel holds and cannot change with any value inside it, and every
+     panel prints its own canonical state word in its chip, so the rail is
+     completely readable with colour removed. */
+  #evidence-rail{border-color:#23516c;background:#07111b}
+  #evidence-rail>h2{color:var(--cyan);border-bottom-color:#23516c}
+  /* The track minimum can never exceed the column itself, so the narrowest
+     phone wraps the receipts instead of pushing the page sideways. A browser
+     without min() simply keeps the shipped 232px track rule above. */
+  #evidence-rail>.body{padding:14px;gap:12px;
+    grid-template-columns:repeat(auto-fit,minmax(min(232px,100%),1fr))}
+  .evidence-panel{position:relative;padding:11px 12px 12px;border-color:#2d4e66;background:#0a1622;
+    box-shadow:0 10px 24px rgba(0,0,0,.28),inset 0 1px 0 rgba(154,196,226,.07)}
+  .evidence-panel::before{content:"";position:absolute;left:0;top:0;width:34px;height:2px;
+    background:var(--hud-blue)}
+  /* A ruled header strip, not a first line of prose — the same three
+     typographic levels the HUD modules use for name, value and state. */
+  .evidence-panel>h3{padding-bottom:7px;border-bottom:1px solid #26425a;color:#a8c2d7}
+  /* Category identity, in the colours the HUD already gives these exact facts:
+     independent review is violet, the check gate is orange, and code-version
+     evidence and the checkpoint are the two receipts the HUD paints green. */
+  .evidence-panel[data-evidence-panel="action"]::before{background:var(--cyan)}
+  .evidence-panel[data-evidence-panel="review"]::before{background:var(--hud-violet)}
+  .evidence-panel[data-evidence-panel="checks"]::before{background:var(--orange)}
+  .evidence-panel[data-evidence-panel="subject"]::before,
+  .evidence-panel[data-evidence-panel="checkpoint"]::before{background:var(--pass)}
+  .evidence-panel .chip{margin-top:8px}
+  .evidence-value{margin-top:8px}
+  .evidence-meta{margin-top:6px;padding-top:5px;border-top:1px solid #1a2e3f}
+  .evidence-list{margin-top:7px;padding-top:6px;border-top:1px solid #1a2e3f}
+  /* The current action is the answer the operator arrived holding, so it is one
+     full-width instrument above the receipts that support it, at mission-brief
+     reading size. It spans the track at every width, which is also why it can
+     never be squeezed into a narrow column beside a list of changed paths. */
+  .evidence-panel.evidence-lead{grid-column:1/-1;border-color:#2b6280}
+  .evidence-panel.evidence-lead .evidence-value{font-size:15px;line-height:1.45}
+
+  /* Detail View hierarchy: the rail leads, and the recent-decision log and the
+     deep machine state follow it. Order only — no panel is removed, no panel is
+     hidden, and Command View is untouched. */
+  body[data-detail="true"] #evidence-rail{order:-1}
+  body[data-detail="true"] .event-panel{order:1}
+  body[data-detail="true"] #raw-state{order:2}
 </style>
 </head>
 <body>
@@ -2353,15 +2419,17 @@
   }
 
   // ── Detail View evidence inspector ────────────────────────────────
-  // Five receipts, side by side, for the operator who has stopped asking
-  // "what is happening" and started asking "show me": the exact changed
-  // paths, the deterministic check result, the independent-review binding and
-  // its coverage, the recorded CAD figure, and the checkpoint/rollback
-  // reference. Every value is a field the projector already delivered to this
-  // page and the deck above has already resolved — this rail recomputes no
-  // verdict, reads no second source, and reaches no second opinion.
+  // Seven receipts, in the order an operator reads them once they have stopped
+  // asking "what is happening" and started asking "show me": the action being
+  // performed right now, the exact code version it is bound to, the exact
+  // changed paths, the deterministic check result, the independent-review
+  // binding and its coverage, the recorded CAD figure, and the
+  // checkpoint/rollback reference. Every value is a field the projector already
+  // delivered to this page and the deck above has already resolved — this rail
+  // recomputes no verdict, reads no second source, and reaches no second
+  // opinion.
   //
-  // The one rule that governs all five: a receipt that is not present renders
+  // The one rule that governs all seven: a receipt that is not present renders
   // as Unavailable or Not recorded, in words, with the reason the projection
   // gave. Nothing here is estimated, defaulted, averaged or back-filled — an
   // absent figure never becomes a zero, and an absent path list never becomes
@@ -2386,14 +2454,66 @@
       ? value.slice(0, 12) + '…' : null;
   }
 
+  // The lead instrument of the rail: the one action the control plane says is
+  // being performed right now. It states nothing of its own — the verdict, the
+  // sentence, the builder-progress reading and the next governed action are the
+  // exact resolutions the mission brief, the AEGIS Core and the operational
+  // strip were handed, so the rail cannot answer "what is happening" differently
+  // from the surface above it. A resolution that produced no sentence is
+  // reported UNAVAILABLE rather than filled in.
+  function evidenceActionPanel(ctx){
+    var control = ctx.control || null;
+    var supervision = ctx.supervision || null;
+    var state = (control && control.state) || 'UNAVAILABLE';
+    var meta = [
+      'Bound run: ' + ((ctx.run && ctx.run.runId) ||
+        'UNAVAILABLE — no run is bound to this page.'),
+      'Control-plane verdict: ' + ((control && control.plain) ||
+        'UNAVAILABLE — no control-plane sentence was resolved.'),
+      'Next governed action: ' + (typeof ctx.nextAction === 'string' && ctx.nextAction
+        ? ctx.nextAction : 'UNAVAILABLE — no next governed action is recorded.')
+    ];
+    if (supervision){
+      meta.push('Builder progress: ' + (supervision.headline ||
+        'UNAVAILABLE — no supervision resolution produced this fact.'));
+      if (supervision.timeout) meta.push(supervision.timeout);
+    }
+    return { id: 'action', title: 'Current action', chip: state, state: state, lead: true,
+      value: typeof ctx.currentAction === 'string' && ctx.currentAction
+        ? ctx.currentAction
+        : 'UNAVAILABLE — no current action was resolved for this page.',
+      meta: meta, list: null };
+  }
+
+  // Which exact code version the receipts below are receipts for. This is the
+  // same binding fact the HUD Evidence module prints, in the same words, plus
+  // the recorded subject identities the HUD has no room for. It proves
+  // nothing on its own: an unproven binding is stated as unproven, never as a
+  // version that merely has not been checked yet.
+  function evidenceSubjectPanel(e, bind, exactSubjectBound){
+    return { id: 'subject', title: 'Code-version evidence',
+      chip: exactSubjectBound ? 'AVAILABLE' : 'UNAVAILABLE',
+      state: exactSubjectBound ? 'EXACT_SUBJECT_BOUND' : 'BINDING_UNAVAILABLE',
+      value: exactSubjectBound
+        ? 'The current run is bound to this exact code version.'
+        : 'AEGIS cannot confirm an exact code-version binding for the current run.',
+      meta: [
+        'Gate subject: ' + (shortSubject(e && e.subjectSha256) || 'UNAVAILABLE') +
+          ' · run subject: ' + (shortSubject(bind && bind.runSubjectSha256) || 'UNAVAILABLE'),
+        'Binding: ' + ((bind && bind.state) || 'UNAVAILABLE') +
+          ' · subject ' + ((bind && bind.subjectState) || 'UNAVAILABLE')
+      ], list: null };
+  }
+
   function evidencePathsPanel(e, exactSubjectBound){
     var paths = Array.isArray(e.subjectPaths) ? e.subjectPaths : null;
     var subject = shortSubject(e.subjectSha256);
     var meta = [
       'Gate subject: ' + (subject || 'UNAVAILABLE'),
       exactSubjectBound
-        ? 'The current run is bound to this exact code version.'
-        : 'No exact code-version binding is proven for the current run.'
+        ? 'These are the changed paths of the exact code version the current run is bound to.'
+        : 'No exact code-version binding is proven for the current run, so these are the changed ' +
+          'paths of the gate subject, not a proven change of the run on screen.'
     ];
     if (!paths || !paths.length){
       return { id: 'paths', title: 'Changed paths', chip: 'UNAVAILABLE', state: 'UNAVAILABLE',
@@ -2537,7 +2657,13 @@
     var host = $('evidence-rail-body');
     if (!host) return;
     host.textContent = '';
+    // Priority order, and it is the order of the questions, not of the code:
+    // what is being done now, which code version that is, which paths changed,
+    // what the checks recorded, what review covers, what it cost, and where the
+    // last safe checkpoint is.
     var panels = [
+      evidenceActionPanel(ctx),
+      evidenceSubjectPanel(ctx.engineering, ctx.binding, ctx.exactSubjectBound),
       evidencePathsPanel(ctx.engineering, ctx.exactSubjectBound),
       evidenceChecksPanel(ctx.run),
       evidenceReviewPanel(ctx.binding, ctx.reviewerCompleteness,
@@ -2546,7 +2672,7 @@
       evidenceCheckpointPanel(ctx.run, ctx.checkpointText)
     ];
     panels.forEach(function(panel){
-      var article = el('article','evidence-panel');
+      var article = el('article', panel.lead ? 'evidence-panel evidence-lead' : 'evidence-panel');
       article.setAttribute('data-evidence-panel', panel.id);
       article.setAttribute('data-evidence-state', panel.state);
       article.appendChild(el('h3',null,panel.title));
@@ -3294,6 +3420,15 @@
       engineering: e,
       binding: bind,
       run: boundRun,
+      // The lead instrument is handed the deck's own resolutions — the same
+      // control-plane verdict the mission chip prints, the same current-action
+      // sentence the CURRENT ACTION card prints, the same supervision
+      // resolution the strip prints, and the same next governed action the gate
+      // module prints — so Detail View restates them and derives none of them.
+      control: controlState,
+      supervision: supervision,
+      currentAction: currentAction,
+      nextAction: deckActions[0],
       exactSubjectBound: exactSubjectBound,
       reviewerCompleteness: deckRc,
       reviewerSubjectMatchesCurrent: reviewerSubjectMatchesCurrent,
