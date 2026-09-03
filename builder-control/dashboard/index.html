@@ -317,6 +317,11 @@
   .mission-objective-detail{margin-top:8px;color:var(--text-1);font-size:12px}
   .mission-objective-detail>summary{cursor:pointer;font-weight:650;color:#9fcdf0}
   .mission-objective-full{margin:8px 0 0;overflow-wrap:anywhere}
+  /* One disclosure for the technical cards the operator brief above already
+     answers in founder language. Same summary treatment as the deck's other
+     disclosures; the brief and every action control stay outside it. */
+  .command-details{margin-top:calc(var(--sp)*4);border-top:1px solid var(--line);padding-top:calc(var(--sp)*2)}
+  .command-details>summary{cursor:pointer;color:var(--text-1);font-weight:600;padding:calc(var(--sp)*2) 0}
   .command-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:calc(var(--sp)*3);margin-top:calc(var(--sp)*4)}
   .command-card{min-height:112px;padding:calc(var(--sp)*3);background:rgba(11,14,19,.58);
     border:1px solid var(--line);border-radius:var(--radius)}
@@ -968,8 +973,10 @@
        each disclosure that holds demoted evidence. */
     .view-tab,.hud-control,.ask-actions .action,button.action,.panel-summary,
     .control-boundary>summary,.composer-options>summary,.founder-details>summary,
+    .command-details>summary,
     .mission-objective-detail>summary,.output-evidence summary,#raw-state>summary{min-height:44px}
     .control-boundary>summary,.composer-options>summary,.founder-details>summary,
+    .command-details>summary,
     .mission-objective-detail>summary,.output-evidence summary{display:flex;align-items:center}
     .btn-row{gap:10px}
     .btn-row>button.action{flex:1 1 auto;padding:11px 14px}
@@ -3843,6 +3850,17 @@
     host.appendChild(gate);
   }
 
+  // The deck's one secondary disclosure, read out of the host that is about to
+  // be repainted. It holds no state of its own: the live DOM is the record.
+  function deckDisclosure(node){
+    var kids = (node && node.children) || [];
+    for (var i = 0; i < kids.length; i++){
+      if (kids[i].getAttribute &&
+        kids[i].getAttribute('data-operator-disclosure') === 'worker-evidence') return kids[i];
+    }
+    return null;
+  }
+
   function renderFounderSummary(view){
     var host = $('founder-body'); if (!host) return;
     var topologyHost = $('topology-live-body');
@@ -3850,6 +3868,13 @@
     var e = (view && view.engineering) || {};
     var runs = (view && view.runs) || [];
     var bind = (view && view.binding) || null;
+    // A repaint rebuilds this host, so the disclosure below carries its open
+    // state and the keyboard position on its summary across from the DOM being
+    // replaced. A live status push may not shut it while Marc is reading it.
+    var priorDisclosure = deckDisclosure(host);
+    var disclosureOpen = !!(priorDisclosure && priorDisclosure.open);
+    var disclosureFocused = !!(priorDisclosure &&
+      document.activeElement === priorDisclosure.firstElementChild);
     host.textContent = '';
     if (topologyHost) topologyHost.textContent = '';
     if (integrationHost) integrationHost.textContent = '';
@@ -4144,7 +4169,18 @@
       blockerClear ? 'is-clear' : 'is-blocked'));
     commandGrid.appendChild(commandCard('LAST SAFE CHECKPOINT', safeCheckpoint, 'is-checkpoint'));
     commandGrid.appendChild(commandCard('ELAPSED', elapsed, 'is-elapsed'));
-    host.appendChild(commandGrid);
+    // These cards restate, in instrument form, what the operator brief above has
+    // already answered in founder language. Nothing here is removed or
+    // recomputed — it is collapsed behind one native disclosure so the brief and
+    // the governed controls own the first screen.
+    var deckDetails = el('details','command-details');
+    deckDetails.setAttribute('data-operator-disclosure','worker-evidence');
+    var deckSummary = el('summary',null,'Worker and evidence details');
+    deckDetails.appendChild(deckSummary);
+    deckDetails.appendChild(commandGrid);
+    deckDetails.open = disclosureOpen;
+    host.appendChild(deckDetails);
+    if (disclosureFocused && deckSummary.focus) deckSummary.focus();
     if (retryableFailure || deckRetry.reason) {
       var retryControls = el('div','btn-row command-recovery-controls');
       var retryControl = el('button','action primary','Retry');

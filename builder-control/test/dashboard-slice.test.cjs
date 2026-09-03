@@ -675,7 +675,7 @@ test('ordinary laptop Command View keeps pilot instruments ahead of elapsed deta
     /objectiveDetail\.appendChild\(el\('p','mission-objective-full',deckObjective\)\)/.test(code),
     'the compact mission title does not retain an accessible exact full objective');
   const gridStart = code.indexOf("commandGrid.appendChild(commandCard('CREW / MODEL'");
-  const gridEnd = code.indexOf('host.appendChild(commandGrid)', gridStart);
+  const gridEnd = code.indexOf('deckDetails.appendChild(commandGrid)', gridStart);
   const grid = code.slice(gridStart, gridEnd);
   const next = grid.indexOf("commandCard('NEXT STEP'");
   const blocker = grid.indexOf("commandCard('BLOCKER'");
@@ -687,7 +687,7 @@ test('ordinary laptop Command View keeps pilot instruments ahead of elapsed deta
 
 test('the primary BLOCKER card summarizes gate count instead of dumping raw governance transcripts', () => {
   const start = code.indexOf('// The first screen is a pilot deck');
-  const end = code.indexOf('host.appendChild(commandGrid)', start);
+  const end = code.indexOf('deckDetails.appendChild(commandGrid)', start);
   const primaryDeck = code.slice(start, end);
   assert.ok(/unresolved gate requirement/.test(code), 'BLOCKER has no founder-readable count summary');
   assert.ok(/Open Evidence, reviewer coverage & run history/.test(code), 'BLOCKER does not route exact detail to evidence');
@@ -1910,7 +1910,10 @@ function makeNode(tag) {
     removeAttribute(k) { delete this.attrs[k]; },
     addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
     querySelectorAll() { return []; },
-    focus() {},
+    // Focus is observable here: the deck restores the keyboard position on a
+    // disclosure summary across a repaint, and a stub focus() would let that
+    // regress unnoticed.
+    focus() { if (node._doc) node._doc.activeElement = node; },
     scrollIntoView() {},
     _listeners: {},
     classList: {
@@ -1954,11 +1957,12 @@ function pageScripts() {
 function bootPage(state, opts = {}) {
   const byId = new Map();
   const document = {
+    activeElement: null,
     getElementById(id) {
-      if (!byId.has(id)) { const n = makeNode('div'); n.attrs.id = id; byId.set(id, n); }
+      if (!byId.has(id)) { const n = makeNode('div'); n.attrs.id = id; n._doc = document; byId.set(id, n); }
       return byId.get(id);
     },
-    createElement: (t) => makeNode(t),
+    createElement: (t) => { const n = makeNode(t); n._doc = document; return n; },
     createTextNode(t) { const n = makeNode('#text'); n._text = String(t); return n; },
     addEventListener() {},
     body: makeNode('body'),
@@ -3504,7 +3508,7 @@ test('the routing instrument is one pilot card built beside Crew / Model from ru
   assert.ok(/commandCard\('WHY THIS MODEL \/ TOOL'/.test(code),
     'the pilot deck has no WHY THIS MODEL / TOOL instrument');
   const grid = code.slice(code.indexOf("commandGrid.appendChild(commandCard('CREW / MODEL'"),
-    code.indexOf('host.appendChild(commandGrid)'));
+    code.indexOf('deckDetails.appendChild(commandGrid)'));
   assert.strictEqual((grid.match(/commandCard\('WHY THIS MODEL \/ TOOL'/g) || []).length, 1,
     'the routing instrument must appear exactly once in the primary pilot deck');
   assert.ok(grid.indexOf("commandCard('WHY THIS MODEL / TOOL'") < grid.indexOf("commandCard('CURRENT ACTION'"),
@@ -3606,7 +3610,7 @@ function liveEvidenceText(page) {
 
 test('the live evidence instrument is one pilot card beside CURRENT ACTION with no clock of its own', () => {
   const grid = code.slice(code.indexOf("commandGrid.appendChild(commandCard('CREW / MODEL'"),
-    code.indexOf('host.appendChild(commandGrid)'));
+    code.indexOf('deckDetails.appendChild(commandGrid)'));
   assert.strictEqual((grid.match(/commandCard\('LIVE EVIDENCE'/g) || []).length, 1,
     'the live evidence instrument must appear exactly once in the primary pilot deck');
   assert.ok(grid.indexOf("commandCard('CURRENT ACTION'") < grid.indexOf("commandCard('LIVE EVIDENCE'") &&
@@ -3755,8 +3759,9 @@ test('DOM: the operator brief names FINISHED, WHY VERIFY, NOW, NEXT and NEEDS MA
   const brief = classes.indexOf('operator-brief');
   assert.ok(brief !== -1, 'no operator brief is rendered in Command View');
   assert.ok(brief <= 1, `the brief is not near the top of Command View: ${classes.join(', ')}`);
-  assert.ok(brief < classes.indexOf('command-grid'),
-    'the brief must read before the dense pilot card grid, not after it');
+  // The dense cards now sit inside one disclosure; the brief still reads first.
+  assert.ok(brief < classes.indexOf('command-details'),
+    'the brief must read before the dense pilot card disclosure, not after it');
   assert.strictEqual(classes.filter((cls) => cls === 'operator-brief').length, 1,
     'exactly one operator brief may exist — a second copy would drift from the first');
 });
@@ -3864,6 +3869,120 @@ test('the brief is inert: it computes no time, no activity and no status of its 
     'an absent canonical field would render as blank or reassuring text instead of an honest UNAVAILABLE');
   assert.ok(!/@keyframes|animation\s*:/.test(code.slice(code.indexOf('.operator-brief{'),
     code.indexOf('.handoff{display:flex'))), 'the brief block introduced motion');
+});
+
+// ── V2 OPERATOR COCKPIT — one disclosure for the duplicated instruments ────
+// The brief above already answers crew, action, blocker, next and checkpoint in
+// founder language; the command cards restate the same canonical fields in
+// instrument form. They stay — nothing is deleted, moved to a second resolution
+// or recomputed — but they sit behind one native disclosure so the answers and
+// the governed controls own the first screen. The properties that matter are
+// therefore: the cards are all still there, the brief and the controls are not
+// inside with them, and a live repaint cannot shut the disclosure or drop the
+// keyboard while Marc is reading it.
+function deckDisclosureNode(page) {
+  const nodes = findByAttr(page.document.getElementById('founder-body'), 'data-operator-disclosure');
+  assert.strictEqual(nodes.length, 1, `expected exactly one deck disclosure, found ${nodes.length}`);
+  return nodes[0];
+}
+
+function deckCardPairs(root) {
+  return findByAttr(root, 'data-operator-field')
+    .map((node) => [node.attrs['data-operator-field'], node.textContent]);
+}
+
+// The same building run the brief fixtures use, in the flat /api/status shape,
+// so a repaint arrives through the real live seam rather than a re-render.
+function briefBuildingStatus() {
+  const state = briefBuildingFixture();
+  return {
+    generatedAt: state.generatedAt,
+    engineering: state.engineering,
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: state.runs.runs, runsBinding: state.runs.current,
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  };
+}
+
+test('DOM: the duplicated technical cards sit in one labelled disclosure, collapsed, with the brief and controls outside it', () => {
+  const page = bootPage(briefBuildingFixture());
+  const disclosure = deckDisclosureNode(page);
+  assert.strictEqual(disclosure.tagName, 'DETAILS',
+    'the secondary instruments are not a native disclosure, so they are not keyboard-operable');
+  assert.strictEqual(disclosure.open, false,
+    'the secondary instruments are disclosed by default, which is the clutter this replaced');
+  const summary = disclosure.firstElementChild;
+  assert.strictEqual(summary.tagName, 'SUMMARY', 'the disclosure has no summary to operate');
+  assert.strictEqual(summary.textContent, 'Worker and evidence details',
+    'the disclosure does not say what it holds');
+  // Every command card is inside it, once, and the grid is whole.
+  assert.deepStrictEqual(findByAttr(disclosure, 'data-operator-field')
+    .map((node) => node.attrs['data-operator-field']),
+  ['crew-/-model', 'why-this-model-/-tool', 'current-action', 'live-evidence',
+    'builder-progress', 'failure-state', 'next-step', 'blocker', 'last-safe-checkpoint', 'elapsed'],
+  'the disclosure changed which instruments exist instead of only collapsing them');
+  const founder = page.document.getElementById('founder-body');
+  assert.strictEqual(findByAttr(founder, 'data-operator-field').length,
+    findByAttr(disclosure, 'data-operator-field').length,
+    'a command card was duplicated or left behind outside the disclosure');
+  // The primary answers and every control stay outside and visible.
+  assert.strictEqual(findByAttr(disclosure, 'data-operator-brief').length, 0,
+    'the operator brief was collapsed along with the cards it explains');
+  assert.deepStrictEqual(allNodes(disclosure).filter((node) => node.tagName === 'BUTTON'), [],
+    'a governed control was moved inside the collapsed disclosure');
+  assert.strictEqual(page.text('hud-crew'), deckCardText(page, 'crew-/-model'),
+    'the crew the disclosure holds is no longer stated in the visible HUD');
+  for (const answer of ['now', 'next', 'needs-marc']) {
+    assert.ok(briefField(page, answer).value.length > 0,
+      `the ${answer} answer was hidden or emptied by the disclosure`);
+  }
+});
+
+test('DOM: the disclosure survives a real status repaint with its open state, its keyboard position and every card', () => {
+  const page = bootPage(briefBuildingFixture());
+  renderMinimizedStatus(page, briefBuildingStatus());
+  const opened = deckDisclosureNode(page);
+  // What a browser does when the summary is operated by keyboard: the element
+  // opens. Nothing here reaches past the real rendered node.
+  opened.open = true;
+  opened.firstElementChild.focus();
+  const before = deckCardPairs(opened);
+  assert.ok(before.length === 10, 'the fixture did not render the full instrument grid');
+
+  renderMinimizedStatus(page, briefBuildingStatus());
+  const after = deckDisclosureNode(page);
+  assert.notStrictEqual(after, opened, 'the deck was never repainted, so this proves nothing');
+  assert.strictEqual(after.open, true,
+    'a live status repaint shut the disclosure while the owner was inspecting it');
+  assert.strictEqual(page.document.activeElement, after.firstElementChild,
+    'the repaint left the keyboard behind on a discarded summary');
+  assert.deepStrictEqual(deckCardPairs(after), before,
+    'the repaint removed or recomputed evidence inside the disclosure');
+});
+
+test('the disclosure is presentation only: no timer, no state of its own, no forced close', () => {
+  const start = code.indexOf("var deckDetails = el('details','command-details')");
+  const end = code.indexOf('currentOperatorContext = {', start);
+  assert.ok(start !== -1 && end > start, 'the deck disclosure renderer boundary was not found');
+  const block = code.slice(start, end);
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'fetch(', 'innerHTML', 'localStorage', 'sessionStorage']) {
+    assert.ok(!block.includes(banned),
+      `the disclosure uses ${banned} — it may only carry over the state already in the DOM`);
+  }
+  assert.ok(/deckDetails\.open = disclosureOpen;/.test(block),
+    'the disclosure no longer restores the open state the repaint is replacing');
+  assert.ok(/document\.activeElement === priorDisclosure\.firstElementChild/.test(code),
+    'the keyboard position on the summary is read from something other than the live DOM');
+  // Existing tokens only: a summary already carries the page's focus ring, and
+  // the phone rules already size every disclosure as a finger-sized target.
+  assert.ok(/\.command-details>summary\{cursor:pointer;color:var\(--text-1\);font-weight:600/.test(code),
+    'the disclosure summary does not use the deck\'s existing disclosure treatment');
+  assert.ok(phoneSelectorsDeclaring(/min-height:44px/).has('.command-details>summary'),
+    'the disclosure summary is not a finger-sized target at phone width');
+  assert.ok(!/animation|transition/.test(code.slice(code.indexOf('.command-details{'),
+    code.indexOf('.command-grid{display:grid'))), 'the disclosure block introduced motion');
 });
 
 // ── V2 FOUNDER LANGUAGE — one explanation, not the gate's own vocabulary ────
