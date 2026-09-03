@@ -597,6 +597,71 @@ const PUBLIC_WORKER_STATES = new Set([
   'TERMINATION_UNVERIFIED', 'ORPHANED',
 ]);
 const PUBLIC_RECOVERY_CODES = new Set(['TERMINATION_UNVERIFIED', 'ORPHANED']);
+
+// ── governed builder failover, projected ────────────────────────────────────
+// The worker's failover record is trusted for CODES only. Every sentence the
+// browser receives is written here, so no model output, provider message or
+// ledger prose can reach the dashboard through these fields. An unrecognised
+// code yields null rather than travelling verbatim.
+const PUBLIC_BUILDER_PROVIDERS = new Set(['claude-subscription', 'grok-subscription']);
+const PUBLIC_BUILDER_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const PUBLIC_FAILURE_SUMMARIES = Object.freeze({
+  MODEL_AUTH_FAILURE: 'Claude authentication failed.',
+  PROVIDER_OVERLOAD: 'Claude reported a provider overload and never started this work.',
+  BUILDER_TIMEOUT: 'The Claude builder reached its bounded time limit without changing any file.',
+});
+const PUBLIC_HANDOFF_REASONS = Object.freeze({
+  ELIGIBLE: 'A next eligible builder is identified, but no handoff has been authorized.',
+  AUTHORIZED: 'The unchanged run is authorized to pass to the next eligible builder once.',
+  COMPLETED: 'The unchanged run was handed to the next eligible builder once.',
+  FAILED: 'The authorized handoff to the next eligible builder could not be executed.',
+});
+const PUBLIC_HANDOFF_BLOCKED_REASONS = Object.freeze({
+  AUTHORIZED_MUTATION_OBSERVED: 'The original builder had already changed a file it was authorized to write, so this run was not handed on.',
+  HANDOFF_ALREADY_USED: 'This run already used its one automatic builder handoff.',
+  PROCESS_GROUP_DRAIN_UNVERIFIED: 'The original builder was not verifiably stopped, so no replacement builder was allowed to start.',
+  FALLBACK_ROUTES_EXHAUSTED: 'No further eligible builder is declared for this role.',
+  DATA_CLASS_REFUSED: 'This run carries data above the replacement builder’s permitted ceiling.',
+  DATA_CLASS_UNRANKED: 'The data sensitivity check could not be evaluated, so the handoff failed closed.',
+  DATA_CLASS_AUTHORITY_MISMATCH: 'The routing policy and the capability canon disagree on the replacement builder’s data ceiling.',
+  REVIEWER_INDEPENDENCE_CONFLICT: 'The replacement builder has no independent reviewer, so its work could not be reviewed by anyone else.',
+  CANON_TOOL_UNAVAILABLE: 'The replacement builder is not currently available with dated evidence.',
+  BUILDER_APPROVAL_AUTHORITY_REFUSED: 'The replacement builder is not declared free of approval authority.',
+  FAILOVER_AUTHORITY_UNAVAILABLE: 'The builder handoff authority could not be evaluated, so no handoff was made.',
+  FAILOVER_ROUTE_REFUSED: 'No eligible replacement builder could be selected.',
+});
+
+function minimizeBuilderFailure(failure) {
+  if (!failure || typeof failure !== 'object' || Array.isArray(failure) ||
+      !Object.prototype.hasOwnProperty.call(PUBLIC_FAILURE_SUMMARIES, failure.code) ||
+      !PUBLIC_BUILDER_PROVIDERS.has(failure.provider)) return null;
+  return {
+    code: failure.code,
+    provider: failure.provider,
+    summary: PUBLIC_FAILURE_SUMMARIES[failure.code],
+  };
+}
+
+function minimizeBuilderHandoff(handoff, failure) {
+  if (!failure || !handoff || typeof handoff !== 'object' || Array.isArray(handoff)) return null;
+  const provider = PUBLIC_BUILDER_PROVIDERS.has(handoff.toProvider) ? handoff.toProvider : null;
+  const model = handoff.launchSpec && typeof handoff.launchSpec.model === 'string' &&
+    PUBLIC_BUILDER_MODEL_RE.test(handoff.launchSpec.model) ? handoff.launchSpec.model : null;
+  if (handoff.state === 'BLOCKED') {
+    const code = Object.prototype.hasOwnProperty.call(
+      PUBLIC_HANDOFF_BLOCKED_REASONS, handoff.blockedReason) ? handoff.blockedReason : null;
+    return {
+      state: 'BLOCKED',
+      provider,
+      model,
+      reason: code ? PUBLIC_HANDOFF_BLOCKED_REASONS[code]
+        : 'Automatic handoff to a replacement builder was refused, and no canonical reason is recorded.',
+    };
+  }
+  if (!Object.prototype.hasOwnProperty.call(PUBLIC_HANDOFF_REASONS, handoff.state) ||
+      provider === null || model === null) return null;
+  return { state: handoff.state, provider, model, reason: PUBLIC_HANDOFF_REASONS[handoff.state] };
+}
 const WORKER_ACTIVITY = Object.freeze({
   LAUNCH_CLAIMED: Object.freeze({ code: 'LAUNCH_CLAIMED', phase: 'CLAIMED', active: false,
     summary: 'Builder launch is claimed; process startup is not yet verified' }),
@@ -731,33 +796,19 @@ function structuredWorkerActivity(status, runState, exit) {
 function minimizeWorker(build, runState) {
   if (!build || build.mode !== 'async') return null;
   const status = PUBLIC_WORKER_STATES.has(build.workerState) ? build.workerState : 'UNKNOWN';
-  const failureKeys = build.failure && typeof build.failure === 'object' && !Array.isArray(build.failure)
-    ? Object.keys(build.failure).sort().join('\u0000') : '';
-  const modelAuthFailure = failureKeys === 'code\u0000provider\u0000summary' &&
-    build.failure.code === 'MODEL_AUTH_FAILURE' &&
-    build.failure.provider === 'claude-subscription' &&
-    build.failure.summary === 'Claude authentication failed.'
-    ? { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
-        summary: 'Claude authentication failed.' }
-    : null;
-  const failoverKeys = build.failover && typeof build.failover === 'object' && !Array.isArray(build.failover)
-    ? Object.keys(build.failover).sort().join('\u0000') : '';
-  const failover = modelAuthFailure && failoverKeys === 'model\u0000provider\u0000reason\u0000state' &&
-    build.failover.state === 'NOT_EXECUTABLE' && build.failover.provider === 'grok-subscription' &&
-    typeof build.failover.model === 'string' && build.failover.model.length > 0 &&
-    build.failover.model.length <= 128 &&
-    build.failover.reason === 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.'
-    ? { state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: build.failover.model,
-        reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.' }
-    : null;
+  // The canonical failover record lives on build.failure and build.handoff.
+  // Both are projected through closed vocabularies, so the browser never
+  // receives the worker's own prose, a provider message, or raw builder output.
+  const builderFailure = minimizeBuilderFailure(build.failure);
+  const builderHandoff = minimizeBuilderHandoff(build.handoff, builderFailure);
   const unsafeTermination = build.recovery && build.recovery.terminationVerified === false;
   const unsafeTerminationStatus = status === 'ORPHANED' ? 'ORPHANED' : 'TERMINATION_UNVERIFIED';
   const activity = unsafeTermination
     ? Object.freeze({ ...WORKER_ACTIVITY[unsafeTerminationStatus] })
-    : modelAuthFailure && runState === 'BUILD_FAILED' &&
+    : builderFailure && runState === 'BUILD_FAILED' &&
       Number.isInteger(build.exit) && build.exit !== 0
-    ? Object.freeze({ code: 'MODEL_AUTH_FAILURE', phase: 'BLOCKED', active: false,
-        summary: 'Claude authentication failed' })
+    ? Object.freeze({ code: builderFailure.code, phase: 'BLOCKED', active: false,
+        summary: builderFailure.summary })
     : structuredWorkerActivity(status, runState, Number.isInteger(build.exit) ? build.exit : null);
   return {
     mode: 'async',
@@ -775,10 +826,10 @@ function minimizeWorker(build, runState) {
     timedOut: build.timedOut === true,
     retrySafe: build.recovery ? build.recovery.retrySafe === true : null,
     recoveryCode: build.recovery && (PUBLIC_RECOVERY_CODES.has(build.recovery.reason) ||
-      (modelAuthFailure && build.recovery.reason === 'MODEL_AUTH_FAILURE'))
+      (builderFailure && build.recovery.reason === builderFailure.code))
       ? build.recovery.reason : null,
-    failure: modelAuthFailure,
-    failover,
+    failure: builderFailure,
+    failover: builderHandoff,
     activity,
     // Live supervision travels beside the lifecycle facts, never instead of
     // them: timeout, failure and recovery availability stay on the fields

@@ -100,6 +100,11 @@ if (process.env.FAKE_CLAUDE_MODE === 'auth-fail') {
   console.error('Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.');
   process.exit(1);
 }
+if (process.env.FAKE_CLAUDE_MODE === 'overloaded') {
+  console.error('API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}');
+  process.exit(1);
+}
+if (process.env.FAKE_CLAUDE_MODE === 'silent-stall') { setInterval(() => {}, 1000); return; }
 if (process.env.FAKE_CLAUDE_MODE === 'progress') {
   const delay = Number(process.env.FAKE_SLEEP_MS || 800);
   const timer = setInterval(() => console.log('progress'), 75);
@@ -130,6 +135,22 @@ const delay = Number(process.env.FAKE_SLEEP_MS || 0);
 if (delay) setTimeout(() => process.exit(0), delay); else { console.log('ok'); process.exit(0); }
 `, { mode: 0o755 });
 
+  // Every fixture carries a fake Grok so the governed handoff is exercised
+  // against a bounded stand-in. Without it, a run that becomes eligible for
+  // failover would resolve the operator's real pinned Grok binary, and the
+  // suite's result would depend on what happens to be installed.
+  fs.writeFileSync(path.join(bin, 'grok'), `#!${process.execPath}
+'use strict';
+const fs = require('fs');
+if (process.env.FAKE_GROK_ARGS_FILE) fs.writeFileSync(process.env.FAKE_GROK_ARGS_FILE, JSON.stringify(process.argv.slice(2)));
+if (process.env.FAKE_GROK_CWD_FILE) fs.writeFileSync(process.env.FAKE_GROK_CWD_FILE, process.cwd());
+if (process.env.FAKE_GROK_MODE === 'fail') { console.error('grok refused the objective'); process.exit(5); }
+if (process.env.FAKE_GROK_MODE === 'no-write') { console.log('grok made no change'); process.exit(0); }
+fs.appendFileSync('allowed.txt', 'grok-applied\\n');
+console.log('grok applied the unchanged objective');
+process.exit(0);
+`, { mode: 0o755 });
+
   const runId = 'RUN-20260827-deadbeef';
   const runFile = path.join(runs, `${runId}.json`);
   fs.writeFileSync(runFile, JSON.stringify({
@@ -141,6 +162,7 @@ if (delay) setTimeout(() => process.exit(0), delay); else { console.log('ok'); p
   }, null, 2));
   const env = {
     ...process.env, NODE_ENV: 'test', AEGIS_TEST_CLAUDE_EXECUTABLE: path.join(bin, 'claude'),
+    AEGIS_TEST_GROK_EXECUTABLE: path.join(bin, 'grok'),
     AEGIS_TEST_CONTAINMENT_MODE: 'DETERMINISTIC_PROFILE_ONLY',
     AEGIS_RUNS_DIR: runs, AEGIS_CHECKPOINTS_DIR: path.join(tmp, 'checkpoints'),
     AEGIS_LEDGER_FILE: ledger,
@@ -1430,16 +1452,19 @@ test('builder no-progress watchdog is fixed at five minutes and cannot be operat
 });
 
 test('no-output builder is stopped as stalled before its hard timeout', () => {
+  // A stall is now a failover-eligible provider-owned failure, so build.exit
+  // reports the REPLACEMENT builder's outcome. The stall proof itself is the
+  // original attempt's record, which survives the handoff intact.
   const f = fixture('stop the genuinely idle builder', {
-    FAKE_SLEEP_MS: '4000', FAKE_NO_PROGRESS_TIMEOUT_MS: '250',
+    FAKE_SLEEP_MS: '4000', FAKE_NO_PROGRESS_TIMEOUT_MS: '250', FAKE_GROK_MODE: 'fail',
   }, 5);
   const done = waitFor(f.read, (r) => r.state === 'BUILD_FAILED', 8000);
-  assert.strictEqual(done.build.exit, 124);
+  assert.strictEqual(done.build.originalExit, 124);
   assert.strictEqual(done.build.timedOut, true);
   assert.strictEqual(done.build.timeoutReason, 'NO_PROGRESS_TIMEOUT');
   assert.strictEqual(done.build.timeoutTerminationEvidence.timeoutReason, 'NO_PROGRESS_TIMEOUT');
   assert.strictEqual(done.build.timeoutTerminationEvidence.childCloseObserved, true);
-  assert.strictEqual(done.build.workerState, 'FAILED');
+  assert.strictEqual(done.build.failure.code, 'BUILDER_TIMEOUT');
   assert.strictEqual(done.build.progressKind, 'STARTED');
   fs.rmSync(f.tmp, { recursive: true, force: true });
 });
@@ -1896,7 +1921,7 @@ test('Claude expired OAuth is classified as MODEL_AUTH_FAILURE only on a termina
   assert.deepStrictEqual(failure, {
     code: 'MODEL_AUTH_FAILURE',
     provider: 'claude-subscription',
-    summary: 'Claude authentication expired. AEGIS marked Claude unavailable and identified the next eligible builder, but governed failover execution is not activated for this beta.',
+    summary: 'Claude subscription authentication failed before any authorized file change.',
     retrySafe: true,
     failoverEligible: true,
   });
@@ -1904,27 +1929,39 @@ test('Claude expired OAuth is classified as MODEL_AUTH_FAILURE only on a termina
   assert.strictEqual(WORKER.classifyBuilderFailure('grok-subscription', 1, text, ''), null);
 });
 
-test('Claude auth failure records a non-executable Grok candidate and blocks unsafe retry', () => {
-  const f = fixture('Preserve this objective exactly across provider failover.',
-    { FAKE_CLAUDE_MODE: 'auth-fail' });
+test('Claude auth failure hands the unchanged run to Grok exactly once and blocks unsafe retry', () => {
+  // The replacement is pinned to a refusing stand-in so the run's terminal
+  // state is the same whether or not the fixture Grok is able to start. What
+  // is asserted here is the governed handoff RECORD, never the replacement's
+  // own exit code.
+  const objective = 'Preserve this objective exactly across provider failover.';
+  const f = fixture(objective, { FAKE_CLAUDE_MODE: 'auth-fail', FAKE_GROK_MODE: 'fail' });
   const failed = waitFor(f.read, (run) => run.state === 'BUILD_FAILED');
   assert.strictEqual(failed.build.failure.code, 'MODEL_AUTH_FAILURE');
+  // The original provider's failure stays recorded beside the outcome, never as it.
+  assert.strictEqual(failed.build.originalExit, 1);
   assert.deepStrictEqual(failed.build.providerSelection, {
     provider: 'grok-subscription',
     model: 'grok-4.6',
     reason: failed.build.providerSelection.reason,
   });
   assert.match(failed.build.providerSelection.reason, /next eligible canonical subscription builder/);
-  assert.match(failed.build.providerSelection.reason, /failover execution is not activated/);
-  assert.strictEqual(failed.build.handoff.state, 'UNAVAILABLE');
-  assert.strictEqual(failed.build.handoff.executable, false);
-  assert.match(failed.build.handoff.reason, /not activated for this beta/);
+  assert.doesNotMatch(failed.build.providerSelection.reason, /not activated/);
+  assert.strictEqual(failed.build.handoff.state, 'COMPLETED');
+  assert.strictEqual(failed.build.handoff.executable, true);
+  assert.strictEqual(failed.build.handoff.handoffCount, 1);
+  assert.strictEqual(failed.build.failoverHandoffs, 1);
+  assert.doesNotMatch(failed.build.handoff.reason, /not activated/);
   assert.strictEqual(failed.build.handoff.sameProviderRetryAllowed, false);
   assert.strictEqual(failed.build.handoff.unchangedObjective, true);
+  assert.strictEqual(failed.build.handoff.objectiveSha256,
+    crypto.createHash('sha256').update(objective).digest('hex'));
+  assert.strictEqual(failed.build.replacement.provider, 'grok-subscription');
+  assert.strictEqual(failed.build.replacement.model, 'grok-4.6');
   assert.strictEqual(failed.build.recovery.retrySafe, false);
-  assert.strictEqual(failed.build.recovery.providerFailoverRequired, true);
+  assert.strictEqual(failed.build.recovery.handoffState, 'COMPLETED');
+  assert.strictEqual(failed.build.recovery.providerFailoverRequired, false);
   assert.strictEqual(failed.build.recovery.selectedProvider, 'grok-subscription');
-  assert.strictEqual(failed.build.authorizedMutationObserved, false);
   const retry = control(f,
     `try{R.retryRun(${JSON.stringify(f.runId)});process.exit(9)}catch(e){console.log(e.code)}`);
   assert.strictEqual(retry.status, 0, retry.stderr);
@@ -1942,7 +1979,9 @@ test('unchanged objective never reselects the unavailable Claude provider', () =
   assert.strictEqual(selected.launchSpec.provider, 'grok-subscription');
   assert.notStrictEqual(selected.launchSpec.provider, launch.provider);
   assert.strictEqual(selected.launchSpec.prompt, prompt);
-  assert.strictEqual(selected.handoff.state, 'UNAVAILABLE');
+  // Selection alone is a CANDIDATE: it stays non-executable until the bounded
+  // handoff authority authorizes it.
+  assert.strictEqual(selected.handoff.state, 'ELIGIBLE');
   assert.strictEqual(selected.handoff.executable, false);
   assert.strictEqual(selected.handoff.sameProviderRetryAllowed, false);
   assert.strictEqual(selected.handoff.unchangedObjective, true);
@@ -1959,11 +1998,168 @@ test('canonical policy selects Grok 4.6 as the next eligible subscription builde
     { objective: 'same objective' }, policy);
   assert.strictEqual(selected.launchSpec.model, 'grok-4.6');
   assert.match(selected.selectionReason, /next eligible canonical subscription builder/);
-  assert.match(selected.selectionReason, /failover execution is not activated/);
-  assert.strictEqual(selected.handoff.state, 'UNAVAILABLE');
+  assert.doesNotMatch(selected.selectionReason, /not activated/);
+  assert.strictEqual(selected.handoff.state, 'ELIGIBLE');
   assert.strictEqual(selected.handoff.executable, false);
   assert.match(selected.handoff.objectiveSha256, /^[0-9a-f]{64}$/);
   assert.match(selected.handoff.promptSha256, /^[0-9a-f]{64}$/);
+});
+
+// ── governed builder failover: the bounded handoff authority ────────────────
+// Shared canonical inputs for the direct handoff-gate proofs below. The drain
+// evidence is the exact shape both the timeout path and the natural-close path
+// produce when the original builder's process group is PROVEN empty.
+const DRAINED_EVIDENCE = Object.freeze({
+  processGroupId: 4242,
+  terminated: true,
+  childCloseObserved: true,
+  processGroupDrained: true,
+  remainingProcessGroupMembers: [],
+  reason: 'EXACT_CHILD_CLOSE_AND_GROUP_DRAIN_OBSERVED',
+});
+const AUTH_FAILURE = Object.freeze({
+  code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription', failoverEligible: true,
+});
+const CLAUDE_LAUNCH = Object.freeze({
+  provider: 'claude-subscription', model: 'opus', prompt: 'the exact unchanged builder prompt',
+});
+const CANONICAL_RUN = Object.freeze({ objective: 'the exact unchanged canonical objective' });
+
+function authorizeHandoff(overrides = {}) {
+  return WORKER.authorizeBuilderFailover({
+    launchSpec: CLAUDE_LAUNCH,
+    failure: AUTH_FAILURE,
+    run: CANONICAL_RUN,
+    authorizedMutationObserved: false,
+    drainEvidence: DRAINED_EVIDENCE,
+    ...overrides,
+  });
+}
+
+test('only overload, auth and a no-mutation timeout are failover-eligible failures', () => {
+  assert.deepStrictEqual([...WORKER.FAILOVER_FAILURE_CODES],
+    ['MODEL_AUTH_FAILURE', 'PROVIDER_OVERLOAD', 'BUILDER_TIMEOUT']);
+
+  const overload = WORKER.classifyBuilderFailure('claude-subscription', 1, '',
+    'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}');
+  assert.strictEqual(overload.code, 'PROVIDER_OVERLOAD');
+  assert.strictEqual(overload.failoverEligible, true);
+  assert.strictEqual(overload.summary, WORKER.FAILOVER_FAILURE_SUMMARIES.PROVIDER_OVERLOAD);
+  // A bare 529 in a byte count or file name is not provider capacity loss.
+  assert.strictEqual(
+    WORKER.classifyBuilderFailure('claude-subscription', 1, 'wrote 529 bytes to file-529.txt', ''), null);
+
+  // A timeout is the supervisor's own observation, never inferred from output text.
+  assert.strictEqual(WORKER.classifyBuilderFailure('claude-subscription', 124, 'timed out', ''), null);
+  for (const timeoutReason of ['NO_PROGRESS_TIMEOUT', 'WALL_CLOCK_TIMEOUT']) {
+    const timeout = WORKER.classifyBuilderFailure('claude-subscription', 124, '', '',
+      { timedOut: true, timeoutReason });
+    assert.strictEqual(timeout.code, 'BUILDER_TIMEOUT', timeoutReason);
+    assert.strictEqual(timeout.failoverEligible, true, timeoutReason);
+    // Not retry-safe on its own: the drain proof is applied downstream.
+    assert.strictEqual(timeout.retrySafe, false, timeoutReason);
+  }
+
+  // A failure the WORK owns is never handed somewhere else.
+  assert.strictEqual(WORKER.classifyBuilderFailure('claude-subscription', 7, 'hello', 'bad'), null);
+  assert.strictEqual(WORKER.classifyBuilderFailure('grok-subscription', 1, '', 'overloaded_error'), null);
+});
+
+test('an authorized mutation or an unproven process-group drain refuses the handoff', () => {
+  // A builder that already wrote inside its authority owns the worktree.
+  const mutated = authorizeHandoff({ authorizedMutationObserved: true });
+  assert.strictEqual(mutated.state, 'BLOCKED');
+  assert.strictEqual(mutated.executable, false);
+  assert.strictEqual(mutated.blockedReason, 'AUTHORIZED_MUTATION_OBSERVED');
+  assert.strictEqual(mutated.toProvider, null);
+  assert.strictEqual(mutated.sameProviderRetryAllowed, false);
+
+  // No replacement writer starts while the original group may still be live.
+  // An unverifiable membership snapshot is refused, never read as empty.
+  for (const drainEvidence of [
+    null,
+    { ...DRAINED_EVIDENCE, terminated: false },
+    { ...DRAINED_EVIDENCE, childCloseObserved: false },
+    { ...DRAINED_EVIDENCE, processGroupDrained: false },
+    { ...DRAINED_EVIDENCE, remainingProcessGroupMembers: [4243] },
+    { ...DRAINED_EVIDENCE, remainingProcessGroupMembers: null },
+  ]) {
+    const blocked = authorizeHandoff({ drainEvidence });
+    assert.strictEqual(blocked.blockedReason, 'PROCESS_GROUP_DRAIN_UNVERIFIED',
+      JSON.stringify(drainEvidence));
+    assert.strictEqual(blocked.executable, false);
+    assert.strictEqual(WORKER.processGroupDrainVerified(drainEvidence), false);
+  }
+  assert.strictEqual(WORKER.processGroupDrainVerified(DRAINED_EVIDENCE), true);
+});
+
+test('data class, reviewer independence and exhausted routes each refuse the handoff', () => {
+  const policy = WORKER.loadModelRoutingPolicy();
+  const canon = WORKER.loadToolCapabilityCanon();
+
+  // Data sensitivity vetoes first: grok-builder's canonical ceiling is INTERNAL.
+  assert.strictEqual(policy.models['grok-builder'].maxDataClass, 'INTERNAL');
+  assert.strictEqual(authorizeHandoff({
+    run: { ...CANONICAL_RUN, dataClass: 'CONFIDENTIAL' }, policy, canon,
+  }).blockedReason, 'DATA_CLASS_REFUSED');
+  // A class with no canonical rank cannot be evaluated, so it fails closed.
+  assert.strictEqual(authorizeHandoff({
+    run: { ...CANONICAL_RUN, dataClass: 'NOT-A-DECLARED-CLASS' }, policy, canon,
+  }).blockedReason, 'DATA_CLASS_UNRANKED');
+  // Two authorities disagreeing on the ceiling is not resolved upward.
+  const raisedCanon = JSON.parse(JSON.stringify(canon));
+  raisedCanon.tools.find((t) => t.toolId === 'grok-cli').maxDataClassification = 'CONFIDENTIAL';
+  assert.strictEqual(authorizeHandoff({ policy, canon: raisedCanon }).blockedReason,
+    'DATA_CLASS_AUTHORITY_MISMATCH');
+
+  // A builder whose only declared reviewers share its provider family could
+  // only ever be reviewed by its own family.
+  const grokOnlyReviewers = JSON.parse(JSON.stringify(policy));
+  delete grokOnlyReviewers.roles['implementation-review'];
+  assert.strictEqual(authorizeHandoff({ policy: grokOnlyReviewers, canon }).blockedReason,
+    'REVIEWER_INDEPENDENCE_CONFLICT');
+
+  // No further declared subscription worker route: refuse, never self-review.
+  const noBuilderRoute = JSON.parse(JSON.stringify(policy));
+  noBuilderRoute.fallbacks.orchestrator = ['claude', 'codex'];
+  assert.strictEqual(authorizeHandoff({ policy: noBuilderRoute, canon }).blockedReason,
+    'FALLBACK_ROUTES_EXHAUSTED');
+});
+
+test('the handoff authority grants one handoff maximum, bound to the unchanged objective', () => {
+  const authorized = authorizeHandoff();
+  assert.strictEqual(authorized.state, 'AUTHORIZED');
+  assert.strictEqual(authorized.executable, true);
+  assert.strictEqual(authorized.blockedReason, null);
+  assert.strictEqual(authorized.toProvider, 'grok-subscription');
+  assert.strictEqual(authorized.toPolicyModel, 'grok-builder');
+  assert.strictEqual(authorized.launchSpec.model, 'grok-4.6');
+  assert.strictEqual(authorized.originalDrainReason, DRAINED_EVIDENCE.reason);
+
+  // The objective and the prompt bytes are carried, not rewritten, and the
+  // failed provider is never reselected.
+  assert.strictEqual(authorized.unchangedObjective, true);
+  assert.strictEqual(authorized.sameProviderRetryAllowed, false);
+  assert.notStrictEqual(authorized.launchSpec.provider, CLAUDE_LAUNCH.provider);
+  assert.strictEqual(authorized.launchSpec.prompt, CLAUDE_LAUNCH.prompt);
+  assert.strictEqual(authorized.objectiveSha256,
+    crypto.createHash('sha256').update(CANONICAL_RUN.objective).digest('hex'));
+  assert.strictEqual(authorized.promptSha256,
+    crypto.createHash('sha256').update(CLAUDE_LAUNCH.prompt).digest('hex'));
+  assert.strictEqual(authorized.builderMayApproveOwnWork, false);
+
+  // A run that already spent its one handoff is refused a second.
+  const second = authorizeHandoff({ run: { ...CANONICAL_RUN, build: { failoverHandoffs: 1 } } });
+  assert.strictEqual(second.state, 'BLOCKED');
+  assert.strictEqual(second.executable, false);
+  assert.strictEqual(second.blockedReason, 'HANDOFF_ALREADY_USED');
+
+  // A failure outside the eligible set produces no handoff record at all.
+  assert.strictEqual(authorizeHandoff({ failure: null }), null);
+  assert.strictEqual(authorizeHandoff({
+    failure: { code: 'PACKET_REFUSED', provider: 'claude-subscription', failoverEligible: true },
+  }), null);
+  assert.strictEqual(authorizeHandoff({ failure: { ...AUTH_FAILURE, failoverEligible: false } }), null);
 });
 
 test('Grok launch descriptor pins exact file-only argv inside the outer deny-default packet boundary', () => {

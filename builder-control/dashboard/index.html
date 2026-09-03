@@ -1909,6 +1909,15 @@
     return FOUNDER.VERIFY;
   }
 
+  // The one place this page reads the recorded builder handoff. It restates the
+  // projection's own sentence and never composes a failover claim of its own,
+  // so the deck and the storyboard cannot disagree about what happened.
+  function recordedHandoffReason(run){
+    var recorded = run && run.build && run.build.failover;
+    return recorded && typeof recorded.reason === 'string' && recorded.reason
+      ? recorded.reason : 'No replacement builder handoff is recorded.';
+  }
+
   function operationalState(run){
     if (!run) return { state: 'IDLE', plain: 'Nothing is currently running.' };
     var build = run.build || {};
@@ -1929,11 +1938,18 @@
       return { state: 'BLOCKED', plain: run.build.activity.summary ||
         'Builder termination is unverified; retry is blocked.' };
     }
+    // A recorded provider failure is read from the slice, never asserted here.
+    // Both halves — what failed, and what happened to the handoff — come from
+    // the projection, so this surface cannot claim a failover policy of its own.
     if (run.state === 'BUILD_FAILED' && run.build && run.build.failure &&
-        run.build.failure.code === 'MODEL_AUTH_FAILURE') {
-      return { state: 'BLOCKED', plain: run.build.failover && run.build.failover.state === 'NOT_EXECUTABLE'
-        ? 'Claude authentication failed. Grok is the next eligible builder, but automatic failover is not enabled for this beta.'
-        : 'Claude authentication failed. No executable failover is available.' };
+        run.build.failure.code) {
+      var recordedFailover = run.build.failover || null;
+      var failureText = typeof run.build.failure.summary === 'string' && run.build.failure.summary
+        ? run.build.failure.summary : 'The recorded builder provider could not do this work.';
+      var handoffText = recordedFailover && typeof recordedFailover.reason === 'string' &&
+        recordedFailover.reason ? recordedFailover.reason
+        : 'No replacement builder handoff is recorded.';
+      return { state: 'BLOCKED', plain: failureText + ' ' + handoffText };
     }
     if (run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED') {
       return { state: 'BLOCKED', plain: 'The current run stopped on a failed build or check.' };
@@ -3492,7 +3508,7 @@
     if (controlBlocks) {
       currentAction = controlState.plain;
       deckActions = modelAuthBlocked
-        ? ['Re-authenticate Claude before continuing. Grok is identified as the next eligible builder, but automatic failover is not enabled for this beta.']
+        ? ['Re-authenticate Claude before continuing. ' + recordedHandoffReason(boundRun)]
         : deckRetry.reason
         ? [deckRetry.reason]
         : retryableFailure
@@ -4786,11 +4802,19 @@
       supervisionBlock.appendChild(el('div', 'meta', line));
     });
     host.appendChild(supervisionBlock);
-    if (build.failure && build.failure.code === 'MODEL_AUTH_FAILURE') {
-      host.appendChild(el('div', 'meta', 'Failure: MODEL_AUTH_FAILURE — Claude authentication failed.'));
-      host.appendChild(el('div', 'meta', build.failover && build.failover.state === 'NOT_EXECUTABLE'
-        ? build.failover.reason
-        : 'No executable model failover is available.'));
+    // Both lines restate the projection's own closed vocabulary. The detail
+    // view names no failure code and no handoff state the server did not
+    // already publish, so it cannot outlive a change to either vocabulary the
+    // way a hardcoded MODEL_AUTH_FAILURE / NOT_EXECUTABLE pair did.
+    if (build.failure && build.failure.code) {
+      host.appendChild(el('div', 'meta', 'Failure: ' + build.failure.code + ' — ' +
+        (typeof build.failure.summary === 'string' && build.failure.summary
+          ? build.failure.summary : 'no summary is recorded.')));
+      var recordedHandoff = build.failover || null;
+      host.appendChild(el('div', 'meta', recordedHandoff && typeof recordedHandoff.reason === 'string' &&
+        recordedHandoff.reason
+        ? 'Handoff ' + (recordedHandoff.state || 'UNAVAILABLE') + ': ' + recordedHandoff.reason
+        : 'No replacement builder handoff is recorded.'));
     }
     return host;
   }
@@ -5025,7 +5049,7 @@
     // imitate to make two different updates compare equal.
     var identity = [update.code, raw, update.what, update.who, update.moved, update.next]
       .map(function(part){ var value = String(part); return value.length + ':' + value; }).join('');
-    var UNUSED_MARKER_TO_REMOVE = [update.code, raw, update.what, update.who, update.moved, update.next].join('\n \n');
+    var UNUSED_MARKER_TO_REMOVE = [update.code, raw, update.what, update.who, update.moved, update.next].join('\n\u0000\n');
 
     if (update.repeatable === true && repeatSentence && lastActivity &&
         lastActivity.node === host.firstElementChild && lastActivity.identity === identity) {

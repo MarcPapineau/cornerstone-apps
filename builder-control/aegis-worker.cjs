@@ -8,12 +8,17 @@ const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const CONTAINMENT = require('./sandbox-containment.cjs');
 const PACKET_TOOLS = require('./packet-tools.cjs');
+// The canonical policy-model -> canon-tool mapping is owned by the router. It is
+// imported rather than restated so the failover path cannot drift into a second
+// routing table.
+const TOOL_ROUTER = require('./tool-router.cjs');
 
 const HERE = __dirname;
 const ROOT = path.resolve(HERE, '..');
 const PACKETS_DIR = path.join(HERE, 'packets');
 const RUNTIME = path.join(HERE, 'aegis-run.cjs');
 const MODEL_ROUTING_POLICY = path.join(HERE, 'MODEL-ROUTING-POLICY.json');
+const TOOL_CAPABILITY_CANON = path.join(HERE, 'TOOL-CAPABILITY-CANON.json');
 const TAIL_LINES = 24;
 const HEARTBEAT_MS = 1000;
 const TERMINATION_DEADLINE_MS = 2000;
@@ -432,15 +437,56 @@ function resolveGrokExecutable() {
   return real;
 }
 
-function classifyBuilderFailure(provider, exit, stdout, stderr) {
+// ── governed builder failover ───────────────────────────────────────────────
+// One automatic handoff, and only from a proven pre-mutation failure. Each code
+// below names a failure the ORIGINAL provider owns, so handing the identical
+// objective to a different subscription builder is a route change rather than a
+// retry. A failure whose cause is the work itself (a non-zero builder exit, a
+// refused packet, a rejected write) is deliberately absent: retrying that
+// somewhere else would launder a real result.
+const FAILOVER_FAILURE_CODES = Object.freeze([
+  'MODEL_AUTH_FAILURE', 'PROVIDER_OVERLOAD', 'BUILDER_TIMEOUT',
+]);
+const FAILOVER_FAILURE_SUMMARIES = Object.freeze({
+  MODEL_AUTH_FAILURE: 'Claude subscription authentication failed before any authorized file change.',
+  PROVIDER_OVERLOAD: 'Claude reported a provider overload before any authorized file change.',
+  BUILDER_TIMEOUT: 'The Claude builder reached its bounded timeout without making an authorized file change.',
+});
+
+function failoverRefusal(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+/**
+ * Classify a terminal builder outcome as a provider-owned failure.
+ *
+ * `observed` carries the supervisor's own bounded-timeout facts. A timeout is
+ * never inferred from output text, and this function never decides whether a
+ * handoff may happen — mutation, drain and route eligibility are the handoff
+ * authority's job.
+ */
+function classifyBuilderFailure(provider, exit, stdout, stderr, observed = {}) {
+  if (provider !== 'claude-subscription' || exit === 0) return null;
   const output = `${stdout || ''}\n${stderr || ''}`;
-  if (provider === 'claude-subscription' && exit !== 0 &&
-      /(401[^\n]*(?:oauth|token)|oauth access token has expired|failed to authenticate)/i.test(output)) {
-    return Object.freeze({
-      code: 'MODEL_AUTH_FAILURE', provider,
-      summary: 'Claude authentication expired. AEGIS marked Claude unavailable and identified the next eligible builder, but governed failover execution is not activated for this beta.',
-      retrySafe: true, failoverEligible: true,
-    });
+  const classified = (code, retrySafe) => Object.freeze({
+    code, provider, summary: FAILOVER_FAILURE_SUMMARIES[code], retrySafe, failoverEligible: true,
+  });
+  if (/(401[^\n]*(?:oauth|token)|oauth access token has expired|failed to authenticate)/i.test(output)) {
+    return classified('MODEL_AUTH_FAILURE', true);
+  }
+  // Bounded to overload-shaped text. A bare "529" appearing in a pid, byte
+  // count or file name must not be read as provider capacity loss.
+  if (/(overloaded_error|\boverloaded\b|api error:\s*529\b|\b529\b[^\n]{0,80}(?:overload|capacity|unavailable))/i
+    .test(output)) {
+    return classified('PROVIDER_OVERLOAD', true);
+  }
+  if (observed.timedOut === true &&
+      (observed.timeoutReason === 'NO_PROGRESS_TIMEOUT' || observed.timeoutReason === 'WALL_CLOCK_TIMEOUT')) {
+    // retrySafe stays false: a timeout is only safe to hand on once the
+    // original group is PROVEN drained, and that proof is applied downstream.
+    return classified('BUILDER_TIMEOUT', false);
   }
   return null;
 }
@@ -453,10 +499,40 @@ function loadModelRoutingPolicy() {
   return parsed;
 }
 
-function selectFailoverBuilder(launchSpec, failure, run, policy = loadModelRoutingPolicy()) {
+function loadToolCapabilityCanon() {
+  const parsed = JSON.parse(fs.readFileSync(TOOL_CAPABILITY_CANON, 'utf8'));
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.tools)) {
+    throw invalidLaunch('tool capability canon must declare a tools array');
+  }
+  return parsed;
+}
+
+function policyDataClassRank(policy, name) {
+  const declared = policy && policy.dataClasses && policy.dataClasses[name];
+  return declared && Number.isInteger(declared.rank) ? declared.rank : null;
+}
+
+/**
+ * Identify the next eligible canonical subscription builder for an unchanged
+ * objective.
+ *
+ * Two authorities are consulted, each for exactly what it declares it owns, so
+ * no third table is introduced:
+ *   MODEL-ROUTING-POLICY.json   who may hold this role, and in what order
+ *   TOOL-CAPABILITY-CANON.json  whether that tool is available right now, and
+ *                               the data ceiling its evidence supports
+ * The canon's own note is explicit that availability lives only there; the
+ * policy's is explicit that a route is an assignment. Reading availability from
+ * the policy, or fallback order from the canon, would put the same fact in two
+ * files and eventually trust the wrong one.
+ *
+ * This returns a CANDIDATE. It authorizes nothing on its own.
+ */
+function selectFailoverBuilder(launchSpec, failure, run, policy = loadModelRoutingPolicy(),
+  canon = loadToolCapabilityCanon()) {
   const current = normalizeLaunchSpec(launchSpec);
-  if (!failure || failure.code !== 'MODEL_AUTH_FAILURE' || failure.provider !== current.provider ||
-      failure.failoverEligible !== true) return null;
+  if (!failure || !FAILOVER_FAILURE_CODES.includes(failure.code) ||
+      failure.provider !== current.provider || failure.failoverEligible !== true) return null;
   if (!run || typeof run.objective !== 'string' || !run.objective.trim()) {
     throw invalidLaunch('provider failover requires the canonical run objective');
   }
@@ -486,9 +562,49 @@ function selectFailoverBuilder(launchSpec, failure, run, policy = loadModelRouti
       break;
     } catch { /* an unsupported policy route is ineligible */ }
   }
-  if (!selected) throw invalidLaunch('canonical builder failover routes are exhausted');
-
-  const selectedFamily = ((policy.models || {})[selectedPolicyModel] || {}).providerFamily || selectedPolicyModel;
+  if (!selected) {
+    throw failoverRefusal('FALLBACK_ROUTES_EXHAUSTED',
+      'canonical builder failover routes are exhausted');
+  }
+  const declaration = policy.models[selectedPolicyModel];
+  const canonToolId = TOOL_ROUTER.POLICY_MODEL_TO_CANON_TOOL[selectedPolicyModel];
+  const tool = canonToolId && Array.isArray(canon.tools)
+    ? canon.tools.find((entry) => entry && entry.toolId === canonToolId) : null;
+  if (!tool) {
+    throw failoverRefusal('CANON_TOOL_UNAVAILABLE',
+      `${selectedPolicyModel} has no Tool Capability Canon availability record`);
+  }
+  if (tool.enabled !== true || tool.availability !== 'AVAILABLE' || !tool.availabilityEvidence ||
+      !Number.isFinite(Date.parse(tool.availabilityEvidence.observedAt || '')) ||
+      typeof tool.availabilityEvidence.result !== 'string' || !tool.availabilityEvidence.result.trim()) {
+    throw failoverRefusal('CANON_TOOL_UNAVAILABLE',
+      `${canonToolId} is not canonically available with dated positive evidence`);
+  }
+  // The two authorities must agree on the ceiling. Disagreement is not resolved
+  // in favour of the higher one; it fails closed.
+  if (declaration.maxDataClass !== tool.maxDataClassification) {
+    throw failoverRefusal('DATA_CLASS_AUTHORITY_MISMATCH',
+      `${selectedPolicyModel} policy ceiling ${JSON.stringify(declaration.maxDataClass)} conflicts with ` +
+      `${canonToolId} canonical ceiling ${JSON.stringify(tool.maxDataClassification)}`);
+  }
+  const dataClass = run.dataClass === undefined || run.dataClass === null ? 'INTERNAL' : run.dataClass;
+  const wantRank = policyDataClassRank(policy, dataClass);
+  const ceilingRank = policyDataClassRank(policy, declaration.maxDataClass);
+  if (wantRank === null || ceilingRank === null) {
+    throw failoverRefusal('DATA_CLASS_UNRANKED',
+      `data class ${JSON.stringify(dataClass)} or ceiling ${JSON.stringify(declaration.maxDataClass)} ` +
+      'has no canonical rank, so the sensitivity veto cannot be evaluated');
+  }
+  if (wantRank > ceilingRank) {
+    throw failoverRefusal('DATA_CLASS_REFUSED',
+      `${dataClass} run data may not be handed to ${selectedPolicyModel} ` +
+      `(ceiling ${declaration.maxDataClass}). Data sensitivity vetoes before availability.`);
+  }
+  if (declaration.approvalAuthority !== 'NONE') {
+    throw failoverRefusal('BUILDER_APPROVAL_AUTHORITY_REFUSED',
+      `${selectedPolicyModel} must declare approvalAuthority NONE to receive a governed handoff`);
+  }
+  const selectedFamily = declaration.providerFamily || selectedPolicyModel;
   const reviewers = Object.entries(policy.roles || {})
     .filter(([roleId, role]) => roleId.endsWith('review') && role && role.mayApproveOwnWork === false)
     .map(([roleId, role]) => ({
@@ -498,17 +614,21 @@ function selectFailoverBuilder(launchSpec, failure, run, policy = loadModelRouti
     }));
   const independentReviewers = reviewers.filter((reviewer) => reviewer.providerFamily !== selectedFamily);
   if (independentReviewers.length === 0) {
-    throw invalidLaunch('selected failover builder has no independent reviewer');
+    throw failoverRefusal('REVIEWER_INDEPENDENCE_CONFLICT',
+      `${selectedPolicyModel} has no reviewer from a different provider family, so its own work ` +
+      'could not be independently reviewed');
   }
   const objectiveSha256 = sha256(run.objective);
   const promptSha256 = sha256(current.prompt);
   return Object.freeze({
     launchSpec: selected,
-    selectionReason: `${failure.code}: ${currentModel[0]} is unavailable for the unchanged objective; identified ${selectedPolicyModel} as the next eligible canonical subscription builder, but governed failover execution is not activated for this beta`,
+    policyModel: selectedPolicyModel,
+    selectionReason: `${failure.code}: ${currentModel[0]} is unavailable for the unchanged objective; ` +
+      `${selectedPolicyModel} is the next eligible canonical subscription builder`,
     handoff: Object.freeze({
-      state: 'UNAVAILABLE',
+      state: 'ELIGIBLE',
       executable: false,
-      reason: 'Governed Grok builder failover execution is not activated for this beta.',
+      reason: 'A canonical replacement builder is identified. The bounded handoff gate has not authorized execution yet.',
       fromProvider: current.provider,
       toProvider: selected.provider,
       fromPolicyModel: currentModel[0],
@@ -518,12 +638,123 @@ function selectFailoverBuilder(launchSpec, failure, run, policy = loadModelRouti
       unchangedObjective: true,
       objectiveSha256,
       promptSha256,
+      dataClass,
+      canonToolId,
       builderMayApproveOwnWork: false,
       independentReviewers: Object.freeze(independentReviewers),
       excludedSelfReviewModels: Object.freeze(reviewers
         .filter((reviewer) => reviewer.providerFamily === selectedFamily)
         .map((reviewer) => reviewer.model)),
     }),
+  });
+}
+
+/**
+ * The original builder's process group drained, proven rather than assumed.
+ * Both the timeout path (terminateOwnedChild) and the natural-close path
+ * (observeOwnedGroupDrain) produce this shape, and an unverifiable membership
+ * snapshot yields null members, which is refused rather than treated as empty.
+ */
+function processGroupDrainVerified(evidence) {
+  return Boolean(evidence) && evidence.terminated === true &&
+    evidence.childCloseObserved === true && evidence.processGroupDrained === true &&
+    Array.isArray(evidence.remainingProcessGroupMembers) &&
+    evidence.remainingProcessGroupMembers.length === 0;
+}
+
+function observeOwnedGroupDrain(childIdentity, childCloseObserved) {
+  const members = processGroupMembers(process.pid, 250);
+  const remaining = Array.isArray(members) ? members.filter((pid) => pid !== process.pid) : null;
+  const drained = remaining !== null && remaining.length === 0;
+  return {
+    processGroupId: process.pid,
+    childCloseObserved: Boolean(childCloseObserved),
+    processGroupDrained: drained,
+    remainingProcessGroupMembers: remaining,
+    terminated: Boolean(childCloseObserved) && drained,
+    reason: remaining === null ? 'GROUP_MEMBERSHIP_UNVERIFIED'
+      : !drained ? 'GROUP_STILL_ALIVE'
+        : childCloseObserved ? 'EXACT_CHILD_CLOSE_AND_GROUP_DRAIN_OBSERVED' : 'CHILD_CLOSE_UNVERIFIED',
+    observedAt: nowIso(),
+    childIdentity,
+  };
+}
+
+function recordedAutomaticHandoffs(run) {
+  const recorded = run && run.build && run.build.failoverHandoffs;
+  return Number.isInteger(recorded) && recorded > 0 ? recorded : 0;
+}
+
+/**
+ * The single bounded authority that decides whether one automatic handoff may
+ * execute. It answers exactly one question and returns a record either way, so
+ * a refusal is as legible on the dashboard as an authorization.
+ *
+ * The "exactly once" property is structural, not a counter: executePayload
+ * calls this once and executes at most one replacement, and there is no loop
+ * for a second pass to re-enter. The recorded count is evidence of that fact
+ * rather than the mechanism enforcing it.
+ */
+function authorizeBuilderFailover(context) {
+  const {
+    launchSpec, failure, run, authorizedMutationObserved, drainEvidence,
+    policy = loadModelRoutingPolicy(), canon = loadToolCapabilityCanon(),
+  } = context || {};
+  if (!failure || !FAILOVER_FAILURE_CODES.includes(failure.code) ||
+      failure.failoverEligible !== true) return null;
+  const current = normalizeLaunchSpec(launchSpec);
+  const blocked = (blockedReason, reason, candidate = null) => Object.freeze({
+    state: 'BLOCKED',
+    executable: false,
+    blockedReason,
+    reason,
+    failureCode: failure.code,
+    fromProvider: current.provider,
+    toProvider: candidate ? candidate.launchSpec.provider : null,
+    toPolicyModel: candidate ? candidate.policyModel : null,
+    sameProviderRetryAllowed: false,
+    unchangedObjective: true,
+  });
+
+  // 1. A builder that already wrote inside its authority owns the worktree. Its
+  //    partial work is real, and a replacement would be a concurrent writer over
+  //    another builder's output rather than a clean handoff.
+  if (authorizedMutationObserved === true) {
+    return blocked('AUTHORIZED_MUTATION_OBSERVED',
+      'The original builder already applied an authorized file change, so the run may not be handed to a ' +
+      'replacement builder. Automatic failover is available only before any authorized mutation.');
+  }
+  // 2. One automatic handoff, never a chain.
+  if (recordedAutomaticHandoffs(run) >= 1) {
+    return blocked('HANDOFF_ALREADY_USED',
+      'This run already used its one automatic builder handoff. A second automatic handoff would be a ' +
+      'retry loop across providers.');
+  }
+  // 3. No replacement writer starts while the original group may still be live.
+  if (!processGroupDrainVerified(drainEvidence)) {
+    return blocked('PROCESS_GROUP_DRAIN_UNVERIFIED',
+      'The original builder process group was not verifiably drained, so a replacement builder could ' +
+      'become a concurrent writer in the same worktree.');
+  }
+  let candidate;
+  try {
+    candidate = selectFailoverBuilder(current, failure, run, policy, canon);
+  } catch (error) {
+    return blocked(error && error.code ? error.code : 'FAILOVER_ROUTE_REFUSED',
+      `No eligible replacement builder: ${error && error.message ? error.message : 'route refused'}.`);
+  }
+  if (!candidate) return null;
+  return Object.freeze({
+    ...candidate.handoff,
+    state: 'AUTHORIZED',
+    executable: true,
+    blockedReason: null,
+    reason: 'The original builder failed before any authorized file change and its process group is ' +
+      'verifiably drained, so the unchanged run may be handed to the next eligible canonical builder once.',
+    launchSpec: candidate.launchSpec,
+    policyModel: candidate.policyModel,
+    selectionReason: candidate.selectionReason,
+    originalDrainReason: drainEvidence.reason || null,
   });
 }
 
@@ -1299,6 +1530,95 @@ function prepareGrokLaunch(run, launchSpec, disposableHome) {
   });
 }
 
+function createGrokDisposableHome() {
+  const home = fs.realpathSync(fs.mkdtempSync(GROK_HOME_PREFIX));
+  fs.chmodSync(home, 0o700);
+  fs.mkdirSync(path.join(home, '.grok'), { mode: 0o700 });
+  fs.mkdirSync(path.join(home, 'tmp'), { mode: 0o700 });
+  return home;
+}
+
+/**
+ * Execute the one authorized handoff.
+ *
+ * The replacement inherits the exact run: same runId, same objective, same
+ * approved packet, same isolated worktree and the same prompt bytes. It is
+ * launched only after the original group drained, joins THIS worker's process
+ * group so the existing termination proof covers it too, and is bounded by the
+ * same wall clock the original attempt carried. Nothing here re-selects a
+ * provider or model — both arrive already decided by the handoff authority.
+ */
+async function executeFailoverBuilder(run, authorized, timeoutMs, testInternals) {
+  const { spawnImpl } = testLaunchInternals(testInternals);
+  const normalized = normalizeLaunchSpec(authorized.launchSpec);
+  const startedAt = nowIso();
+  const disposableHome = createGrokDisposableHome();
+  let child = null;
+  let stdout = '';
+  let stderr = '';
+  let timedOut = false;
+  try {
+    const prepared = prepareGrokLaunch(run, normalized, disposableHome);
+    const productionGrok = !(process.env.NODE_ENV === 'test' && process.env.AEGIS_TEST_GROK_EXECUTABLE);
+    child = spawnImpl(prepared.command.bin, [...prepared.command.argv], {
+      cwd: run.worktree.path,
+      env: prepared.env,
+      detached: false,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (child.stdout) child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-24000); });
+    if (child.stderr) child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-24000); });
+    const childIdentity = child.pid ? { pid: child.pid } : null;
+    const outcome = new Promise((resolve) => {
+      child.once('error', (error) => resolve({ exit: 127, signal: null, error }));
+      child.once('close', (code, signal) =>
+        resolve({ exit: code === null ? (timedOut ? 124 : 1) : code, signal, error: null }));
+    });
+    let timeout;
+    const reached = new Promise((resolve) => { timeout = setTimeout(resolve, timeoutMs); });
+    const first = await Promise.race([
+      outcome.then((value) => ({ kind: 'child', value })),
+      reached.then(() => ({ kind: 'timeout' })),
+    ]);
+    let result;
+    let terminationEvidence = null;
+    if (first.kind === 'child') {
+      result = first.value;
+      terminationEvidence = observeOwnedGroupDrain(childIdentity, true);
+    } else {
+      timedOut = true;
+      terminationEvidence = await terminateOwnedChild(outcome, childIdentity, 1000);
+      result = { exit: 124, signal: null, error: null };
+    }
+    clearTimeout(timeout);
+    const authorizedMutationObserved = authorizedWriteDigest(
+      prepared.contained.allowlists.writePaths, run.worktree.path) !==
+      prepared.authorizedWriteBaselineSha256;
+    let exit = result.exit;
+    // The same honesty rule the original builder is held to: exit 0 with no
+    // authorized file change is not a completed build.
+    if (exit === 0 && productionGrok && !authorizedMutationObserved) exit = 3;
+    return Object.freeze({
+      provider: normalized.provider,
+      model: normalized.model,
+      startedAt,
+      endedAt: nowIso(),
+      exit,
+      signal: result.signal || null,
+      timedOut,
+      authorizedMutationObserved,
+      terminationEvidence,
+      stdoutTail: boundedTail(stdout),
+      stderrTail: boundedTail(result.error ? `${stderr}\n${result.error.message}` : stderr),
+    });
+  } finally {
+    try { if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
+    catch { /* the replacement may already be gone */ }
+    try { fs.rmSync(disposableHome, { recursive: true, force: true }); } catch { /* disposable */ }
+  }
+}
+
 function assertLaunchBinding(payload, run) {
   const payloadSpec = normalizeLaunchSpec(payload && payload.launchSpec);
   const runSpec = normalizeLaunchSpec(run && run.build && run.build.launchSpec);
@@ -1734,44 +2054,89 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   }
 
   const failure = classifyBuilderFailure(launchSpec.provider, result.exit, stdout,
-    result.error ? `${stderr}\n${result.error.message}` : stderr);
-  const failover = failure && !authorizedMutationObserved
-    ? selectFailoverBuilder(launchSpec, failure, run) : null;
+    result.error ? `${stderr}\n${result.error.message}` : stderr,
+    { timedOut, timeoutReason });
+
+  // The drain proof the handoff gate consumes. A timeout already produced one
+  // by terminating the owned group; a natural close is proven the same way, by
+  // one bounded membership snapshot rather than by assuming the exit was tidy.
+  const originalDrainEvidence = timedOut ? timeoutTerminationEvidence
+    : observeOwnedGroupDrain(childIdentity, !result.error);
+
+  let handoff = null;
+  if (failure) {
+    try {
+      handoff = authorizeBuilderFailover({
+        launchSpec, failure, run, authorizedMutationObserved,
+        drainEvidence: originalDrainEvidence,
+      });
+    } catch (error) {
+      // The gate itself failing is not permission to hand off.
+      handoff = Object.freeze({
+        state: 'BLOCKED', executable: false, blockedReason: 'FAILOVER_AUTHORITY_UNAVAILABLE',
+        reason: `The builder handoff authority could not be evaluated: ${boundedTail(error.message)}`,
+        failureCode: failure.code, fromProvider: launchSpec.provider, toProvider: null,
+        toPolicyModel: null, sameProviderRetryAllowed: false, unchangedObjective: true,
+      });
+    }
+  }
+
+  let replacement = null;
+  if (handoff && handoff.state === 'AUTHORIZED') {
+    try {
+      replacement = await executeFailoverBuilder(run, handoff, timeoutMs);
+      handoff = Object.freeze({ ...handoff, state: 'COMPLETED', handoffCount: 1 });
+    } catch (error) {
+      handoff = Object.freeze({
+        ...handoff, state: 'FAILED', executable: false, handoffCount: 1,
+        reason: `The authorized handoff could not be executed: ${boundedTail(error.message)}`,
+      });
+    }
+  }
+
+  const effectiveExit = replacement ? replacement.exit : result.exit;
 
   let fresh = updateBuild(R, run.runId, payload.attemptId, {
-    workerState: result.exit === 0 ? 'EXITED' : 'FAILED',
+    workerState: effectiveExit === 0 ? 'EXITED' : 'FAILED',
     endedAt: nowIso(),
     heartbeatAt: nowIso(),
-    exit: result.exit,
+    exit: effectiveExit,
+    originalExit: result.exit,
     signal: result.signal || null,
     timedOut,
     timeoutReason,
     lastProgressAt,
     progressKind,
-    authorizedMutationObserved,
+    authorizedMutationObserved: replacement
+      ? replacement.authorizedMutationObserved : authorizedMutationObserved,
     timeoutTerminationEvidence,
+    originalDrainEvidence,
     failure,
-    providerSelection: failover ? {
-      provider: failover.launchSpec.provider,
-      model: failover.launchSpec.model,
-      reason: failover.selectionReason,
+    providerSelection: handoff && handoff.toProvider ? {
+      provider: handoff.toProvider,
+      model: handoff.launchSpec ? handoff.launchSpec.model : null,
+      reason: handoff.selectionReason || handoff.reason,
     } : null,
-    handoff: failover ? failover.handoff : null,
-    recovery: failover ? {
+    handoff,
+    failoverHandoffs: replacement ? 1 : recordedAutomaticHandoffs(run),
+    replacement,
+    recovery: handoff ? {
       reason: failure.code,
       observedAt: nowIso(),
-      terminationVerified: true,
+      terminationVerified: processGroupDrainVerified(originalDrainEvidence),
       retrySafe: false,
       sameProviderRetryAllowed: false,
-      providerFailoverRequired: true,
-      selectedProvider: failover.launchSpec.provider,
-      selectedModel: failover.launchSpec.model,
+      providerFailoverRequired: handoff.state !== 'COMPLETED',
+      handoffState: handoff.state,
+      blockedReason: handoff.blockedReason || null,
+      selectedProvider: handoff.toProvider || null,
+      selectedModel: handoff.launchSpec ? handoff.launchSpec.model : null,
       attemptId: payload.attemptId,
     } : null,
     stdoutTail: boundedTail(stdout),
     stderrTail: boundedTail(result.error ? `${stderr}\n${result.error.message}` : stderr),
   });
-  if (fresh.build && fresh.build.cancelRequestedAt) return result.exit;
+  if (fresh.build && fresh.build.cancelRequestedAt) return effectiveExit;
   if (timedOut && (!timeoutTerminationEvidence || !timeoutTerminationEvidence.terminated ||
       !timeoutTerminationEvidence.childCloseObserved)) {
     R.transitionWorkerAttempt(run.runId, payload.attemptId, process.pid, 'BUILD_FAILED',
@@ -1785,11 +2150,18 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     return 124;
   }
   if (fresh.state === 'BUILDING') {
+    // After a completed handoff the run's outcome is the REPLACEMENT builder's
+    // outcome. The original provider failure stays recorded beside it as
+    // build.failure and build.originalExit; it is never presented as the result.
+    const outcomeNote = replacement
+      ? `governed failover builder ${replacement.provider} exited ${effectiveExit} after ` +
+        `${failure.code} on ${launchSpec.provider}`
+      : effectiveExit === 0 ? 'asynchronous builder exited 0'
+        : `asynchronous builder exited ${effectiveExit}`;
     R.transitionWorkerAttempt(run.runId, payload.attemptId, process.pid,
-      result.exit === 0 ? 'BUILT' : 'BUILD_FAILED',
-      result.exit === 0 ? 'asynchronous builder exited 0' : `asynchronous builder exited ${result.exit}`);
+      effectiveExit === 0 ? 'BUILT' : 'BUILD_FAILED', outcomeNote);
   }
-  return result.exit;
+  return effectiveExit;
   } catch (error) {
     return failOwnedAttempt(R, payload, error, childOutcome, childIdentity);
   }
@@ -1824,7 +2196,10 @@ module.exports = {
   authorizedWriteDigest,
   baseEnvironment, workerEnvironment, claudeEnvironment, grokEnvironment,
   assertClaudeModelSandboxPolicy,
-  classifyBuilderFailure, selectFailoverBuilder, loadModelRoutingPolicy,
+  classifyBuilderFailure, selectFailoverBuilder, authorizeBuilderFailover,
+  loadModelRoutingPolicy, loadToolCapabilityCanon,
+  processGroupDrainVerified, observeOwnedGroupDrain, executeFailoverBuilder,
+  FAILOVER_FAILURE_CODES, FAILOVER_FAILURE_SUMMARIES,
   MAX_PROMPT_BYTES, MAX_TIMEOUT_SEC, DEFAULT_NO_PROGRESS_TIMEOUT_SEC,
   builderNoProgressTimeoutMs, CLAUDE_SETTINGS, CLAUDE_FILE_TOOLS,
   CLAUDE_DISALLOWED_TOOLS, CLAUDE_VERSION, CLAUDE_EXECUTABLE, CLAUDE_STREAM_PROGRESS_ARGV,

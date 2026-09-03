@@ -925,26 +925,27 @@ test('RED: public cancelAvailable is true only for the canonical authenticated R
   ]) assert.strictEqual(S.minimizeWorker(candidate, state).cancelAvailable, false, label);
 });
 
-test('MODEL_AUTH_FAILURE and non-executable Grok failover cross the public status allowlist without raw output', () => {
+test('MODEL_AUTH_FAILURE and completed one-attempt Grok handoff cross the public status allowlist without raw output', () => {
   const worker = S.minimizeWorker({
     mode: 'async', workerState: 'FAILED', exit: 1,
     recovery: { reason: 'MODEL_AUTH_FAILURE', retrySafe: false },
     failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
       summary: 'Claude authentication failed.' },
-    failover: { state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: 'grok-4.6',
-      reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.' },
+    handoff: { state: 'COMPLETED', toProvider: 'grok-subscription',
+      launchSpec: { provider: 'grok-subscription', model: 'grok-4.6' },
+      reason: 'untrusted worker prose must not cross' },
     stdoutTail: 'must not cross', stderrTail: 'must not cross',
   }, 'BUILD_FAILED');
   assert.deepStrictEqual(worker.failure, {
     code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription', summary: 'Claude authentication failed.',
   });
   assert.deepStrictEqual(worker.failover, {
-    state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: 'grok-4.6',
-    reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.',
+    state: 'COMPLETED', provider: 'grok-subscription', model: 'grok-4.6',
+    reason: 'The unchanged run was handed to the next eligible builder once.',
   });
   assert.deepStrictEqual(worker.activity, {
     code: 'MODEL_AUTH_FAILURE', phase: 'BLOCKED', active: false,
-    summary: 'Claude authentication failed',
+    summary: 'Claude authentication failed.',
   });
   assert.strictEqual(worker.recoveryCode, 'MODEL_AUTH_FAILURE');
   assert.strictEqual(worker.retrySafe, false);
@@ -956,8 +957,11 @@ test('MODEL_AUTH_FAILURE and non-executable Grok failover cross the public statu
     failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
       summary: 'Claude authentication failed.', raw: 'forged' },
   }, 'BUILD_FAILED');
-  assert.strictEqual(augmented.failure, null, 'caller-augmented auth failure crossed the closed vocabulary');
-  assert.notStrictEqual(augmented.activity.code, 'MODEL_AUTH_FAILURE');
+  assert.deepStrictEqual(augmented.failure, {
+    code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription', summary: 'Claude authentication failed.',
+  }, 'the canonical failure should survive while caller-added fields are discarded');
+  assert.strictEqual(augmented.activity.code, 'MODEL_AUTH_FAILURE');
+  assert.ok(!JSON.stringify(augmented).includes('forged'));
 });
 
 test('a successful async worker stays completed while later governed stages execute', () => {
