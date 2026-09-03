@@ -1812,9 +1812,44 @@
       'only after independent review of this exact code version completes.',
     RETRY_UNCONFIRMED: 'Retry this run through its bounded correction route. The ' +
       'recorded review failure stays unconfirmed until evidence for this exact code ' +
-      'version is available.',
-    RESOLVE_BLOCKER: 'Resolve the recorded blocker before continuing.'
+      'version is available.'
   };
+
+  // The last-resort next step, for a fail-closed control verdict with no
+  // authentication failure, no valid retry route and no named reviewer action
+  // left to give. It used to read "Resolve the recorded blocker before
+  // continuing", which told the owner neither what was missing nor where to
+  // look. It now names which piece of existing evidence is absent and which
+  // shipped panel records it, and it derives that from the same canonical
+  // inputs the deck already resolved — no new gate, lifecycle or verdict.
+  // Reading evidence is inert: it starts no check, review or retry, and none of
+  // these sentences claims a gate passed.
+  function missingEvidenceNextStep(engineering, run, subjectState, exactSubjectBound){
+    var read = ' Use "Show changes and checks" and read ';
+    var inert = ' Viewing evidence starts no check, review or retry.';
+    if (!run) {
+      return 'No current run is bound to this page, so there is no recorded code ' +
+        'version the blocker can be attributed to.' +
+        read + '"What is happening now" for the recorded binding reason.' + inert;
+    }
+    if (subjectState === 'MISMATCHED') {
+      return 'This run is recorded against a different code version than the one ' +
+        'being gated now, so its evidence is not coverage of the current change.' +
+        read + '"Which exact version this is" for both recorded subject hashes.' + inert;
+    }
+    if (!engineering || engineering.state !== 'OK') {
+      return 'The gate evidence for this code version could not be read, so the ' +
+        'unmet requirements are unknown — not zero.' +
+        read + '"What the checks recorded" for the last recorded receipt.' + inert;
+    }
+    if (!exactSubjectBound) {
+      return 'AEGIS cannot show which exact code version this run was checked ' +
+        'against, so nothing here is confirmed.' +
+        read + '"Which exact version this is" for the recorded binding.' + inert;
+    }
+    return 'A blocker is recorded, but no canonical evidence names what is missing.' +
+      read + '"What is happening now" and the panels below it for the exact recorded state.' + inert;
+  }
 
   // What actually finished, in one plain sentence, from the canonical run state
   // alone. An unrecognised state reports UNAVAILABLE rather than implying
@@ -3757,7 +3792,7 @@
           : 'Retry this failed run through its bounded recovery route.']
         : reviewRun && reviewRun.state === 'CHECKS_PASSED' && namedReviewActions.length
         ? namedReviewActions.concat([reviewBindBoundary])
-        : [FOUNDER.RESOLVE_BLOCKER];
+        : [missingEvidenceNextStep(e, boundRun, bindingSubjectState, exactSubjectBound)];
     }
     // The warning instrument and the headline consume the same control-plane
     // verdict. A locally empty problem list can never turn the BLOCKER card

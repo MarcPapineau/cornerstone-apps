@@ -3820,6 +3820,28 @@ function founderSurfaceText(page) {
   ].join(' ');
 }
 
+// ── the missing-evidence next step ──────────────────────────────────────────
+// The fail-closed fallback used to be "Resolve the recorded blocker before
+// continuing", which named neither the absent evidence nor a place to read it.
+// These are the four sentences it was replaced with, written out here so a
+// silent rewording of any of them fails a proof instead of shipping.
+const MISSING_EVIDENCE_READ = ' Use "Show changes and checks" and read ';
+const MISSING_EVIDENCE_INERT = ' Viewing evidence starts no check, review or retry.';
+const MISSING_EVIDENCE_NEXT = Object.freeze({
+  noRun: 'No current run is bound to this page, so there is no recorded code version ' +
+    'the blocker can be attributed to.' + MISSING_EVIDENCE_READ +
+    '"What is happening now" for the recorded binding reason.' + MISSING_EVIDENCE_INERT,
+  mismatched: 'This run is recorded against a different code version than the one being ' +
+    'gated now, so its evidence is not coverage of the current change.' + MISSING_EVIDENCE_READ +
+    '"Which exact version this is" for both recorded subject hashes.' + MISSING_EVIDENCE_INERT,
+  gateUnreadable: 'The gate evidence for this code version could not be read, so the unmet ' +
+    'requirements are unknown — not zero.' + MISSING_EVIDENCE_READ +
+    '"What the checks recorded" for the last recorded receipt.' + MISSING_EVIDENCE_INERT,
+  bindingMissing: 'AEGIS cannot show which exact code version this run was checked against, ' +
+    'so nothing here is confirmed.' + MISSING_EVIDENCE_READ +
+    '"Which exact version this is" for the recorded binding.' + MISSING_EVIDENCE_INERT,
+});
+
 test('DOM: a finished-but-unverified run is explained in founder language, not internal phrasing', () => {
   const gateSubject = 'a'.repeat(64);
   const runSubject = 'b'.repeat(64);
@@ -3860,8 +3882,7 @@ test('DOM: a finished-but-unverified run is explained in founder language, not i
   assert.doesNotMatch(briefField(page, 'needs-marc').value,
     /No owner decision is canonically required/,
     'a real blocker was reported as needing nothing from the owner');
-  assert.strictEqual(briefField(page, 'next').value,
-    'Resolve the recorded blocker before continuing.',
+  assert.strictEqual(briefField(page, 'next').value, MISSING_EVIDENCE_NEXT.mismatched,
     'the next valid action is not stated in founder language');
 
   assert.doesNotMatch(founderSurfaceText(page), FOUNDER_JARGON,
@@ -3920,10 +3941,104 @@ test('the founder explanation has exactly one source, so no two surfaces can phr
     'a second founder-language source would drift from the first');
   assert.ok(/founder: FOUNDER/.test(code),
     'the run-card renderer cannot reach the same founder sentences the deck reads');
-  for (const key of ['STATUS_UNCONFIRMED', 'RESOLVE_BLOCKER', 'REVIEW_FAILED_UNCONFIRMED',
+  for (const key of ['STATUS_UNCONFIRMED', 'REVIEW_FAILED_UNCONFIRMED',
     'HOST_PENDING', 'RETRY_UNCONFIRMED']) {
     assert.ok(new RegExp('(FOUNDER|D\\.founder)\\.' + key).test(code),
       `${key} is defined but never used, so some surface still carries its own wording`);
+  }
+});
+
+// ── V2 MISSING EVIDENCE — say what is missing and where it is readable ──────
+// A fail-closed control verdict with no auth failure, no valid retry and no
+// named reviewer action used to print one sentence: "Resolve the recorded
+// blocker before continuing." The owner could not tell whether the run, the
+// code-version link or the gate projection was the absent piece, and was given
+// nowhere to look. The replacement names the absent evidence and the shipped
+// panel that records it. It stays a presentation mapping: it invents no gate,
+// turns nothing green, and the route it names is read-only.
+function missingEvidencePage(engineeringOver, run, currentOver) {
+  return bootPage(fixtureState({
+    engineering: Object.assign({}, fixtureState().engineering, engineeringOver || {}),
+    runs: { state: 'OK', runs: [run], current: Object.assign(
+      { state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt }, currentOver || {}) },
+  }));
+}
+
+function missingEvidenceRun(over) {
+  return Object.assign({ runId: 'RUN-MISSING-EVIDENCE', state: 'CHECKS_PASSED',
+    objective: 'Explain which evidence is missing', updatedAt: '2026-09-03T12:00:00.000Z' }, over || {});
+}
+
+test('DOM: an unreadable run ledger names the absent run and a read-only route to its record', () => {
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, briefUnreadableLedgerStatus());
+  assert.strictEqual(briefField(page, 'next').value, MISSING_EVIDENCE_NEXT.noRun,
+    'a missing current run was still reported as an unexplained recorded blocker');
+});
+
+test('DOM: an absent code-version link says so and points at the version panel', () => {
+  const page = missingEvidencePage(null, missingEvidenceRun(),
+    { subjectState: 'MISSING', subjectSha256: null, reason: 'no subject is bound to this run' });
+  assert.strictEqual(briefField(page, 'next').value, MISSING_EVIDENCE_NEXT.bindingMissing,
+    'a missing code-version binding was not explained to the owner');
+});
+
+test('DOM: an unavailable engineering projection reports unknown requirements, never zero', () => {
+  const page = missingEvidencePage({ state: 'UNAVAILABLE', reason: 'the gate projection could not be read' },
+    missingEvidenceRun({ runId: 'RUN-GATE-UNREADABLE' }),
+    { subjectState: 'UNAVAILABLE', subjectSha256: null });
+  assert.strictEqual(briefField(page, 'next').value, MISSING_EVIDENCE_NEXT.gateUnreadable,
+    'unreadable gate evidence was not distinguished from a met requirement list');
+  assert.doesNotMatch(briefField(page, 'next').value, /passed|approved|complete/i,
+    'absent gate evidence was phrased as a passing or completed state');
+});
+
+test('DOM: Command and Detail read the SAME missing-evidence sentence, from one resolution', () => {
+  const page = missingEvidencePage(null, missingEvidenceRun({ runId: 'RUN-ONE-RESOLUTION' }),
+    { subjectState: 'MISSING', subjectSha256: null });
+  assert.strictEqual(briefField(page, 'next').value, deckCardText(page, 'next-step'),
+    'the brief and the NEXT STEP card reached two readings of one missing-evidence state');
+  assert.ok(evidencePanelsById(page).action.textContent.includes(
+    'Next governed action: ' + MISSING_EVIDENCE_NEXT.bindingMissing),
+  'Detail View did not restate the deck\'s own missing-evidence resolution');
+  // The route is an inspection route. Naming it must not make an unproven
+  // binding look proven anywhere the deck reports version state.
+  assert.strictEqual(evidencePanelsById(page).subject.attrs['data-evidence-state'],
+    'BINDING_UNAVAILABLE',
+    'the missing-evidence route reported an unbound code version as bound');
+  assert.doesNotMatch(founderSurfaceText(page), FOUNDER_JARGON,
+    `the missing-evidence sentences reintroduced internal phrasing: ${founderSurfaceText(page)}`);
+});
+
+test('DOM: auth, retry, named-reviewer and running-builder guidance still outrank the missing-evidence route', () => {
+  const cases = [
+    ['re-authentication', missingEvidencePage(null, missingEvidenceRun({
+      runId: 'RUN-AUTH', state: 'BUILD_FAILED',
+      build: { failure: { code: 'MODEL_AUTH_FAILURE', summary: 'The builder could not authenticate.' } },
+    }), { subjectState: 'MISSING', subjectSha256: null }),
+    /^Re-authenticate Claude before continuing\./],
+    ['a refused retry', missingEvidencePage(null, missingEvidenceRun({
+      runId: 'RUN-RETRY-LIMIT', state: 'CHECKS_FAILED', corrections: 2, maxCorrections: 2,
+    }), { subjectState: 'MISSING', subjectSha256: null }),
+    /^All 2 bounded correction cycle\(s\) are already used/],
+    ['an available retry', missingEvidencePage(null, missingEvidenceRun({
+      runId: 'RUN-RETRY-OK', state: 'BUILD_FAILED',
+    }), { subjectState: 'MISSING', subjectSha256: null }),
+    /^Retry this failed run through its bounded recovery route\./],
+    ['a named missing reviewer', missingEvidencePage({
+      reviewerCompleteness: { complete: false, rows: [
+        { reviewer: 'grok', required: 'REQUIRED', executed: 'NOT_EXECUTED', missingPaths: [] }] },
+    }, missingEvidenceRun({ runId: 'RUN-NAMED-REVIEWER' }),
+    { subjectState: 'MISSING', subjectSha256: null }),
+    /^Get grok to review this exact change\./],
+    ['a running builder', bootPage(briefBuildingFixture()),
+      /^Wait for the governed builder to finish this change\./],
+  ];
+  for (const [name, page, expected] of cases) {
+    const next = briefField(page, 'next').value;
+    assert.match(next, expected, `${name} lost precedence to the missing-evidence route: ${next}`);
+    assert.doesNotMatch(next, /Show changes and checks/,
+      `${name} was replaced by the missing-evidence route instead of keeping precedence`);
   }
 });
 
@@ -6419,8 +6534,10 @@ async function asyncTests() {
         subjectSha256: 'a'.repeat(64) },
         expected: /Independent-review evidence is not yet complete or its status is unavailable/,
         forbidden: /Run the deterministic checks/, reviewBoundary: true },
+      // Unreadable gate evidence must say which evidence is absent and where it
+      // is readable, not hand back an unexplained "resolve the blocker".
       { label: 'unavailable engineering', engineering: { state: 'UNAVAILABLE' },
-        expected: /Resolve the recorded blocker before continuing/,
+        expected: /The gate evidence for this code version could not be read.*Use "Show changes and checks"/,
         forbidden: /No next action is recorded yet/, reviewBoundary: false },
     ]) {
       const status = Object.assign({}, checked, { engineering: scenario.engineering });
@@ -6502,11 +6619,31 @@ async function asyncTests() {
       for (let i = 0; i < 10; i++) await Promise.resolve();
       assert.ok(!/appears ready for server verification/.test(guarded.text('founder-body')),
         `${scenario.label} was presented as ready to bind`);
-      assert.ok((scenario.controlBlocked
-        ? /Resolve the recorded blocker before continuing|Get [a-z0-9._-]+ to review this exact change/i
-        : /Independent-review evidence is not yet complete or its status is unavailable/).test(
+      if (scenario.controlBlocked) {
+        // The blocked lane no longer says "Resolve the recorded blocker before
+        // continuing" — that sentence named neither the absent evidence nor
+        // where it is recorded. The fail-closed explanation must now name the
+        // missing piece, point at the shipped panel that holds it, and state
+        // that reading it is inert, so this asserts all three parts on the
+        // NEXT STEP surface rather than accepting any blocked-sounding text.
+        const blockedNextStep = (findByAttr(guarded.document.getElementById('founder-body'),
+          'data-operator-field').find((n) => n.attrs['data-operator-field'] === 'next-step') || {}).textContent;
+        assert.ok(blockedNextStep, `${scenario.label} exposes no NEXT STEP field to fail closed in`);
+        assert.match(blockedNextStep,
+          /AEGIS cannot show which exact code version this run was checked against, so nothing here is confirmed\./,
+          `${scenario.label} did not retain the fail-closed missing-evidence explanation: ${blockedNextStep}`);
+        assert.match(blockedNextStep,
+          /Use "Show changes and checks" and read "Which exact version this is" for the recorded binding\./,
+          `${scenario.label} dropped the read-only navigation to the panel recording that evidence: ${blockedNextStep}`);
+        assert.match(blockedNextStep, /Viewing evidence starts no check, review or retry\./,
+          `${scenario.label} stopped stating that viewing the evidence starts nothing: ${blockedNextStep}`);
+        assert.doesNotMatch(blockedNextStep, /Resolve the recorded blocker before continuing/,
+          `${scenario.label} restored the superseded blocker sentence: ${blockedNextStep}`);
+      } else {
+        assert.ok(/Independent-review evidence is not yet complete or its status is unavailable/.test(
           guarded.text('founder-body')),
-      `${scenario.label} did not retain the fail-closed founder explanation`);
+        `${scenario.label} did not retain the fail-closed founder explanation`);
+      }
       assert.notStrictEqual(guarded.text('hud-review-state'),
         'EVIDENCE APPEARS READY FOR SERVER VERIFICATION',
         `${scenario.label} lit the HUD server-verification readiness signal`);
