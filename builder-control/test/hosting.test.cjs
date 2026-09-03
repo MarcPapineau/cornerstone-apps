@@ -304,17 +304,26 @@ test('RED: cancel and retry render only in states where they are operational', (
       `${terminal} is listed as cancelable — a terminal run cannot be cancelled, and offering it is theater`);
   }
 
-  assert.ok(/run\.state\s*===\s*'BUILD_FAILED'\s*\|\|\s*run\.state\s*===\s*'CHECKS_FAILED'\s*\|\|\s*run\.state\s*===\s*'REVIEW_FAILED'/.test(row),
-    'Retry is not gated to the failed states it can actually re-enter');
-  const retryHelper = html.slice(html.indexOf('async function requestRunRetry'),
-    html.indexOf('function renderFounderSummary'));
-  assert.match(retryHelper,
+  // The failed-state list lives in retryAvailability(), the one authority the
+  // action row, the command deck and the POST helper all read. Prove it there:
+  // a second copy of the list inline in runActionRow would be exactly the
+  // duplicated state authority this page refuses. The row's obligation is to
+  // consult that authority and to wire the click only where it says allowed.
+  const retryGate = html.slice(html.indexOf('function retryAvailability'),
+    html.indexOf('async function requestRunRetry'));
+  assert.match(retryGate,
     /\['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'\]\.indexOf\(run\.state\)\s*===\s*-1/,
+    'Retry is not gated to the failed states it can actually re-enter');
+  assert.match(row, /window\.AEGIS_DASHBOARD\.retryAvailability\(run\)/,
+    'the action row does not read the shared Retry authority');
+  const retryStart = html.indexOf('async function requestRunRetry');
+  const retryHelper = html.slice(retryStart, html.indexOf('\n  }\n', retryStart));
+  assert.match(retryHelper, /if \(!retryAvailability\(run\)\.allowed\) return;/,
     'the shared Retry helper does not fail closed outside canonical failed states');
   assert.match(retryHelper, /callApi\('\/api\/retry',\s*\{\s*runId:\s*run\.runId\s*\}\)/,
     'Retry must send only the canonical runId to /api/retry');
   assert.match(row,
-    /run\.state\s*===\s*'BUILD_FAILED'[\s\S]*?retryBtn\.addEventListener\('click',[\s\S]*?window\.AEGIS_DASHBOARD\.requestRunRetry\(run,\s*retryBtn\)/,
+    /if \(retryState\.allowed\) \{\s*retryBtn\.addEventListener\('click', function\(\)\{\s*return window\.AEGIS_DASHBOARD\.requestRunRetry\(run, retryBtn\);/,
     'the failed-state guard must enclose wiring to the one exported Retry helper');
   assert.match(html, /requestRunRetry:\s*requestRunRetry/,
     'the canonical Retry helper is not exported through the shared dashboard seam');
@@ -689,7 +698,13 @@ test('RED: /api/status carries the CAD projection, including its UNAVAILABLE sta
 test('RED: the founder summary repaints from the live push, through one shared renderer', () => {
   const html = dashboardHtml();
   assert.ok(/window\.AEGIS_DASHBOARD\s*=/.test(html), 'no shared renderer seam between the snapshot and the live surface');
-  const apply = html.slice(html.indexOf('function applyStatus'), html.indexOf('function applyStatus') + 1400);
+  // applyStatus()'s own body, ended at its closing brace. A fixed character
+  // window silently stops proving the repaints that sit past it, so the last
+  // renderer wired into the function would be the first one to go unguarded.
+  const applyStart = html.indexOf('function applyStatus');
+  const applyEnd = html.indexOf('\n  }\n', applyStart);
+  assert.ok(applyStart !== -1 && applyEnd !== -1, 'no applyStatus() boundary found');
+  const apply = html.slice(applyStart, applyEnd);
   assert.ok(/renderFounderSummary/.test(apply), 'applyStatus does not repaint the founder summary');
   assert.ok(/status\.runsBinding/.test(apply), 'the repaint does not use the pushed binding');
   assert.ok(/renderCost/.test(apply), 'applyStatus does not repaint the spend panel, which would leave a stale figure');
@@ -875,7 +890,10 @@ test('RED: the public worker projection is an exact lifecycle allowlist with no 
   const worker = min.runs[0].build;
   assert.deepStrictEqual(Object.keys(worker).sort(),
     ['activity', 'cancelAvailable', 'endedAt', 'exit', 'failover', 'failure', 'heartbeatAt', 'mode',
-      'recoveryCode', 'retrySafe', 'startedAt', 'status', 'timedOut', 'workerPid'].sort());
+      'recoveryCode', 'retrySafe', 'startedAt', 'status', 'supervision', 'timedOut', 'workerPid'].sort());
+  assert.deepStrictEqual(Object.keys(worker.supervision).sort(),
+    ['lastProgressAt', 'noProgressLimitSec', 'progressKind', 'progressReason', 'progressState',
+      'progressSummary', 'timeoutReason', 'timeoutSummary', 'wallClockLimitSec'].sort());
   assert.strictEqual(worker.status, 'RUNNING');
   assert.strictEqual(worker.cancelAvailable, false,
     'RUNNING plus PID must not imply authenticated cancellation authority');
@@ -1008,6 +1026,176 @@ test('RED: unknown lifecycle values and malformed public fields fail closed', ()
   assert.deepStrictEqual(mismatch.activity,
     { code: 'STATE_MISMATCH', phase: 'BLOCKED', active: false,
       summary: 'Worker reports running outside an active build' });
+});
+
+// ── live supervision (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ──────────────
+// The defect this guards is a dashboard that reports a heartbeating but idle
+// builder as working. The projection therefore has to keep real progress and
+// supervisor liveness apart, publish the fixed limits it is actually judged
+// against, and refuse anything that is not in its closed vocabulary.
+test('supervision publishes real progress from canonical run state and never from the heartbeat', () => {
+  const worker = S.minimizeWorker({
+    mode: 'async', workerState: 'RUNNING', workerPid: 4242,
+    startedAt: '2026-09-02T10:00:00.000Z',
+    heartbeatAt: '2026-09-02T10:09:59.000Z',
+    lastProgressAt: '2026-09-02T10:04:00.000Z',
+    progressKind: 'AUTHORIZED_WRITE',
+    stdoutTail: HOSTILE_WORKER_OUTPUT.source,
+    stderrTail: HOSTILE_WORKER_OUTPUT.pem,
+  }, 'BUILDING');
+  assert.strictEqual(worker.supervision.progressState, 'RECORDED');
+  assert.strictEqual(worker.supervision.progressKind, 'AUTHORIZED_WRITE');
+  assert.strictEqual(worker.supervision.lastProgressAt, '2026-09-02T10:04:00.000Z');
+  assert.strictEqual(worker.supervision.progressSummary,
+    'Builder changed a file it is authorized to write');
+  assert.strictEqual(worker.supervision.progressReason, null);
+  // The heartbeat stays exactly where it was. Copying it into the supervision
+  // object would create a second place a renderer could mistake for progress.
+  assert.strictEqual(worker.heartbeatAt, '2026-09-02T10:09:59.000Z');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(worker.supervision, 'heartbeatAt'), false,
+    'the heartbeat was republished inside the progress object it must stay distinct from');
+  assert.notStrictEqual(worker.supervision.lastProgressAt, worker.heartbeatAt,
+    'this fixture must keep a live heartbeat separable from older real progress');
+  assertNoHostileWorkerOutput(worker, 'supervision projection');
+});
+
+test('RED: a heartbeating builder with no recorded progress fails closed to UNRECORDED', () => {
+  const supervision = S.minimizeWorker({
+    mode: 'async', workerState: 'RUNNING',
+    heartbeatAt: '2026-09-02T10:09:59.000Z',
+  }, 'BUILDING').supervision;
+  assert.strictEqual(supervision.progressState, 'UNRECORDED');
+  assert.strictEqual(supervision.progressKind, null);
+  assert.strictEqual(supervision.lastProgressAt, null);
+  assert.match(supervision.progressReason, /heartbeat alone/,
+    'an unrecorded progress state must say what liveness actually rests on');
+
+  // Half a pair proves nothing about when the builder last did work, so a kind
+  // without a time, or a time without a kind, is refused rather than published.
+  for (const [label, partial] of [
+    ['kind without a timestamp', { progressKind: 'STDOUT' }],
+    ['timestamp without a kind', { lastProgressAt: '2026-09-02T10:04:00.000Z' }],
+    ['unknown vocabulary', { progressKind: 'THINKING', lastProgressAt: '2026-09-02T10:04:00.000Z' }],
+    ['model prose as a phase', { progressKind: HOSTILE_WORKER_OUTPUT.source,
+      lastProgressAt: '2026-09-02T10:04:00.000Z' }],
+    ['unparseable timestamp', { progressKind: 'STDOUT', lastProgressAt: 'just now' }],
+  ]) {
+    const refused = S.minimizeWorker({ mode: 'async', workerState: 'RUNNING', ...partial }, 'BUILDING')
+      .supervision;
+    assert.strictEqual(refused.progressState, 'UNRECORDED', label);
+    assert.strictEqual(refused.progressKind, null, label);
+    assert.strictEqual(refused.lastProgressAt, null, label);
+    assertNoHostileWorkerOutput(refused, `supervision (${label})`);
+  }
+});
+
+test('the published watchdog and wall-clock limits are read from their enforcing authorities', () => {
+  const AegisWorker = require('../aegis-worker.cjs');
+  const supervision = S.minimizeWorker({ mode: 'async', workerState: 'RUNNING' }, 'BUILDING').supervision;
+  assert.strictEqual(supervision.wallClockLimitSec, S.GOVERNED_BUILDER.timeoutSec,
+    'the published wall-clock limit is not the one every governed launch is given');
+  // Resolved exactly as hosting resolves it, including the fail-closed null, so
+  // this proof compares two readings of one authority rather than a constant.
+  let enforcedMs = null;
+  try { enforcedMs = AegisWorker.builderNoProgressTimeoutMs(S.GOVERNED_BUILDER.timeoutSec * 1000); }
+  catch { enforcedMs = null; }
+  assert.strictEqual(supervision.noProgressLimitSec,
+    Number.isInteger(enforcedMs) && enforcedMs > 0 ? enforcedMs / 1000 : null,
+    'the published no-progress limit is not the one aegis-worker actually arms');
+  assert.strictEqual(S.GOVERNED_NO_PROGRESS_LIMIT_SEC, supervision.noProgressLimitSec);
+  // Restating either bound as a literal here would create a second limit
+  // authority that drifts silently from the one that kills the build.
+  const source = fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8');
+  const block = source.slice(source.indexOf('const GOVERNED_NO_PROGRESS_LIMIT_SEC'),
+    source.indexOf('function structuredWorkerActivity'));
+  assert.ok(block.length > 0, 'the supervision projection source boundary was not found');
+  assert.match(block, /AegisWorker\.builderNoProgressTimeoutMs\(GOVERNED_BUILDER\.timeoutSec \* 1000\)/);
+  assert.doesNotMatch(block, /\b(?:300|900)\b/,
+    'a hard-coded limit second-guesses the authority that enforces it');
+  assert.doesNotMatch(block, /Date\.now\(|setTimeout\(|setInterval\(/,
+    'the supervision projection introduced its own clock or timer');
+});
+
+test('RED: only a canonical timeout reason travels, and it never invents a stop cause', () => {
+  const timedOut = S.minimizeWorker({
+    mode: 'async', workerState: 'FAILED', exit: 124, timedOut: true,
+    timeoutReason: 'NO_PROGRESS_TIMEOUT',
+    lastProgressAt: '2026-09-02T10:04:00.000Z', progressKind: 'STDOUT',
+  }, 'BUILD_FAILED');
+  assert.strictEqual(timedOut.timedOut, true);
+  assert.strictEqual(timedOut.supervision.timeoutReason, 'NO_PROGRESS_TIMEOUT');
+  assert.match(timedOut.supervision.timeoutSummary, /no real builder progress was observed/);
+
+  const wall = S.minimizeWorker({
+    mode: 'async', workerState: 'FAILED', exit: 124, timedOut: true,
+    timeoutReason: 'WALL_CLOCK_TIMEOUT',
+  }, 'BUILD_FAILED').supervision;
+  assert.strictEqual(wall.timeoutReason, 'WALL_CLOCK_TIMEOUT');
+  assert.match(wall.timeoutSummary, /fixed wall-clock limit/);
+
+  // A reason with no recorded timeout, an unknown reason, and hostile text all
+  // fail closed. A recorded timeout with no reason says so rather than picking.
+  for (const [label, build, expectSummary] of [
+    ['reason without a recorded timeout',
+      { mode: 'async', workerState: 'FAILED', exit: 1, timeoutReason: 'WALL_CLOCK_TIMEOUT' }, null],
+    ['unknown reason',
+      { mode: 'async', workerState: 'FAILED', exit: 124, timedOut: true, timeoutReason: 'GAVE_UP' },
+      /no canonical timeout reason is recorded/],
+    ['hostile reason',
+      { mode: 'async', workerState: 'FAILED', exit: 124, timedOut: true,
+        timeoutReason: HOSTILE_WORKER_OUTPUT.jwt }, /no canonical timeout reason is recorded/],
+  ]) {
+    const supervision = S.minimizeWorker(build, 'BUILD_FAILED').supervision;
+    assert.strictEqual(supervision.timeoutReason, null, label);
+    if (expectSummary === null) assert.strictEqual(supervision.timeoutSummary, null, label);
+    else assert.match(supervision.timeoutSummary, expectSummary, label);
+    assertNoHostileWorkerOutput(supervision, `timeout supervision (${label})`);
+  }
+});
+
+test('supervision adds no second timeout, failure, recovery, checkpoint or cost authority', () => {
+  const worker = S.minimizeWorker({
+    mode: 'async', workerState: 'FAILED', exit: 1, timedOut: false,
+    recovery: { reason: 'TERMINATION_UNVERIFIED', retrySafe: false, terminationVerified: false },
+    lastProgressAt: '2026-09-02T10:04:00.000Z', progressKind: 'STDOUT',
+  }, 'BUILD_FAILED');
+  // These five remain the only places the browser reads availability from.
+  assert.strictEqual(worker.retrySafe, false);
+  assert.strictEqual(worker.recoveryCode, 'TERMINATION_UNVERIFIED');
+  assert.strictEqual(worker.cancelAvailable, false);
+  assert.strictEqual(worker.timedOut, false);
+  assert.strictEqual(worker.exit, 1);
+  for (const forbidden of ['retrySafe', 'retryAvailable', 'recoveryCode', 'cancelAvailable',
+    'timedOut', 'exit', 'checkpoint', 'rollbackPoint', 'cost', 'cad', 'totalUsd']) {
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(worker.supervision, forbidden), false,
+      `supervision republished ${forbidden} and became a second authority for it`);
+  }
+});
+
+test('supervision reaches the whole minimized status surface with cost and checkpoint untouched', () => {
+  const min = S.minimizeApiStatus({
+    generatedAt: 'T', engineering: { state: 'UNAVAILABLE' },
+    cost: { state: 'OK', recordedUsdDisplay: 1.5, totalUsd: 'AT LEAST 1.5', recordedRuns: 1,
+      unrecordedRuns: 2, caveat: '2 run(s) have no cost telemetry', byReviewer: {},
+      cad: { state: 'OK', totalCad: 'AT LEAST 2.05', plain: 'USD 1 = CAD 1.37 on 2026-09-01',
+        source: 'builder-control/fx-canon.json' } },
+    runs: { state: 'OK', runs: [{
+      runId: 'RUN-SUPERVISION', state: 'BUILDING', objective: 'o',
+      checkpoint: 'CKPT-1', rollbackPoint: 'f'.repeat(40), checkpointState: 'VALIDATED',
+      build: { mode: 'async', workerState: 'RUNNING', heartbeatAt: '2026-09-02T10:09:59.000Z',
+        lastProgressAt: '2026-09-02T10:09:00.000Z', progressKind: 'STDOUT' },
+    }] },
+  });
+  const run = min.runs[0];
+  assert.strictEqual(run.build.supervision.progressKind, 'STDOUT');
+  assert.strictEqual(run.build.supervision.progressState, 'RECORDED');
+  // The existing checkpoint and CAD projections are carried through unchanged;
+  // supervision neither recomputes nor estimates either of them.
+  assert.strictEqual(run.checkpoint, 'CKPT-1');
+  assert.strictEqual(run.rollbackPoint, 'f'.repeat(40));
+  assert.strictEqual(run.checkpointState, 'VALIDATED');
+  assert.strictEqual(min.cost.cad.totalCad, 'AT LEAST 2.05');
+  assert.strictEqual(min.cost.totalUsd, 'AT LEAST 1.5');
 });
 
 test('RED: status reads never invoke worker reconciliation', () => {

@@ -627,6 +627,72 @@ function publicTimestamp(value) {
   return Number.isFinite(Date.parse(value)) ? value : null;
 }
 
+// ── live supervision, from recorded run state only ──────────────────────────
+// An operator watching a build cannot tell a working builder from a stalled one
+// unless the surface separates two facts the run record keeps apart:
+//
+//   heartbeatAt     the supervisor process wrote its periodic liveness stamp
+//   lastProgressAt  the BUILDER did something real — stream output, diagnostic
+//                   output, or a change to a file it is authorized to write
+//
+// Only the second arms and resets aegis-worker's no-progress watchdog, so
+// merging them would show a stalled build as busy right up to the moment it is
+// killed. progressKind is a closed lifecycle vocabulary the worker writes; it
+// is never model prose, a tool input, or a fragment of stdout, and an unknown
+// value fails closed to "not recorded" rather than travelling verbatim.
+const PUBLIC_PROGRESS_KINDS = Object.freeze({
+  STARTED: 'Builder process started; no output or authorized file change has been observed yet',
+  STDOUT: 'Builder is emitting model and tool stream activity',
+  STDERR: 'Builder is emitting diagnostic stream activity',
+  AUTHORIZED_WRITE: 'Builder changed a file it is authorized to write',
+});
+const PUBLIC_TIMEOUT_REASONS = Object.freeze({
+  NO_PROGRESS_TIMEOUT: 'Stopped because no real builder progress was observed inside the fixed no-progress limit',
+  WALL_CLOCK_TIMEOUT: 'Stopped because the build reached its fixed wall-clock limit',
+});
+
+// Both limits are READ from the authorities that enforce them and restated
+// nowhere: the wall clock is the one bound GOVERNED_BUILDER already hands to
+// every launch, and the no-progress bound is whatever aegis-worker's own
+// watchdog derives from it. A configuration in which the watchdog does not arm
+// yields null, which is published as UNAVAILABLE rather than as a zero.
+const GOVERNED_NO_PROGRESS_LIMIT_SEC = (() => {
+  try {
+    const ms = AegisWorker.builderNoProgressTimeoutMs(GOVERNED_BUILDER.timeoutSec * 1000);
+    return Number.isInteger(ms) && ms > 0 ? ms / 1000 : null;
+  } catch {
+    return null;
+  }
+})();
+
+function minimizeSupervision(build) {
+  const progressKind = typeof build.progressKind === 'string' &&
+    Object.prototype.hasOwnProperty.call(PUBLIC_PROGRESS_KINDS, build.progressKind)
+    ? build.progressKind : null;
+  const lastProgressAt = publicTimestamp(build.lastProgressAt);
+  // A phase without a time, or a time without a phase, proves nothing about
+  // when the builder last did work, so the pair travels or neither does.
+  const recorded = progressKind !== null && lastProgressAt !== null;
+  const timeoutReason = build.timedOut === true && typeof build.timeoutReason === 'string' &&
+    Object.prototype.hasOwnProperty.call(PUBLIC_TIMEOUT_REASONS, build.timeoutReason)
+    ? build.timeoutReason : null;
+  return {
+    progressState: recorded ? 'RECORDED' : 'UNRECORDED',
+    progressKind: recorded ? progressKind : null,
+    progressSummary: recorded ? PUBLIC_PROGRESS_KINDS[progressKind] : null,
+    lastProgressAt: recorded ? lastProgressAt : null,
+    progressReason: recorded ? null
+      : 'No real builder progress is recorded for this attempt, so builder liveness rests on the supervisor heartbeat alone.',
+    noProgressLimitSec: GOVERNED_NO_PROGRESS_LIMIT_SEC,
+    wallClockLimitSec: GOVERNED_BUILDER.timeoutSec,
+    timeoutReason,
+    timeoutSummary: timeoutReason ? PUBLIC_TIMEOUT_REASONS[timeoutReason]
+      : (build.timedOut === true
+        ? 'The builder timed out, but no canonical timeout reason is recorded with it'
+        : null),
+  };
+}
+
 function structuredWorkerActivity(status, runState, exit) {
   // A numeric timeout/failure exit is not proof that the owned process group
   // drained. Closed unsafe-recovery states therefore outrank generic exit
@@ -714,6 +780,11 @@ function minimizeWorker(build, runState) {
     failure: modelAuthFailure,
     failover,
     activity,
+    // Live supervision travels beside the lifecycle facts, never instead of
+    // them: timeout, failure and recovery availability stay on the fields
+    // above (timedOut, exit, failure, recoveryCode, retrySafe, cancelAvailable)
+    // so this object adds no second verdict about any of them.
+    supervision: minimizeSupervision(build),
   };
 }
 
@@ -1419,7 +1490,8 @@ module.exports = {
   minimizeApiStatus, buildApiStatus, sanitizePublicText, sanitizePublicValue, parseRunIdBody, checkOrigin,
   resolveCanonicalLedgerFile, GOVERNED_BUILDER, MODEL_ROUTING_POLICY, loadModelRoutingPolicy,
   canonicalWorkerRoute, buildGovernedLaunchSpec, startGovernedRun,
-  minimizeWorker,
+  minimizeWorker, minimizeSupervision,
+  PUBLIC_PROGRESS_KINDS, PUBLIC_TIMEOUT_REASONS, GOVERNED_NO_PROGRESS_LIMIT_SEC,
   startRunReconciler, RUN_RECONCILE_INTERVAL_MS,
   DEFAULT_CONTROL_AUTHORITIES, resolveControlAuthorities,
 };

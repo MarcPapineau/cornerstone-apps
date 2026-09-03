@@ -202,6 +202,11 @@
   .build-evidence h4{margin:0 0 calc(var(--sp)*2);font:600 11px/1.3 var(--mono);
     letter-spacing:.08em;text-transform:uppercase;color:var(--text-1)}
   .build-evidence .meta{margin-top:calc(var(--sp)*1.5)}
+  /* Deep supervision facts read as one grouped block, separated from the
+     lifecycle lines above it. No motion and no colour-only signal: every state
+     it can be in is already stated in the words inside it. */
+  .build-supervision{margin-top:calc(var(--sp)*2);padding-top:calc(var(--sp)*2);
+    border-top:1px solid var(--line)}
   .output-evidence{margin-top:calc(var(--sp)*2);border-top:1px solid var(--line);padding-top:calc(var(--sp)*2)}
   .output-evidence summary{cursor:pointer;color:var(--text-1);font-size:12px;font-weight:600}
   .output-evidence pre{margin:calc(var(--sp)*2) 0 0;padding:calc(var(--sp)*2);white-space:pre-wrap;
@@ -1332,6 +1337,80 @@
       '. This card reads the canonical run record only; it is not a heartbeat.';
   }
 
+  // ── live builder supervision ──────────────────────────────────────
+  // The one distinction an operator cannot make from a spinner, stated in
+  // words: a HEARTBEAT proves the supervisor process is alive, and LAST REAL
+  // PROGRESS proves the builder itself emitted stream output, diagnostics, or
+  // changed a file it is authorized to write. Only the second resets the
+  // no-progress watchdog, so a build can be heartbeating steadily and be
+  // minutes away from being killed for doing nothing. They are two lines here
+  // and are never merged into one reassuring "active".
+  //
+  // Every value is read from the canonical supervision projection the host
+  // already resolved. Nothing is timed, counted, estimated or back-filled: no
+  // clock is consulted, an absent phase is NOT RECORDED rather than "starting",
+  // and an absent limit is UNAVAILABLE rather than zero. The recorded fields
+  // this restates — timeout, cancellation and retry-safety — are reported
+  // verbatim, because retryAvailability() remains their only interpreter.
+  function recoveryFacts(build){
+    return 'cancel capability ' + (build.cancelAvailable === true ? 'RECORDED' : 'NOT RECORDED') +
+      ' · retry-safe ' + (build.retrySafe === true ? 'YES'
+        : (build.retrySafe === false ? 'NO' : 'UNVERIFIED')) +
+      (build.recoveryCode ? ' · recovery code ' + build.recoveryCode : '');
+  }
+
+  function supervisionFacts(build){
+    if (!build) {
+      return { state: 'UNAVAILABLE',
+        headline: 'Builder supervision UNAVAILABLE — no builder attempt is recorded.',
+        detail: ['No builder attempt is recorded, so there is nothing to supervise.'] };
+    }
+    var heartbeat = typeof build.heartbeatAt === 'string' && build.heartbeatAt
+      ? build.heartbeatAt : 'UNAVAILABLE';
+    var s = build.supervision || null;
+    if (!s) {
+      return { state: 'UNAVAILABLE',
+        headline: 'Builder supervision UNAVAILABLE — the current projection carries no supervision evidence. ' +
+          'Supervisor heartbeat ' + heartbeat + ' is liveness only, never progress.',
+        detail: ['Supervision UNAVAILABLE — no supervision projection reached this page.',
+          'Recovery: ' + recoveryFacts(build)] };
+    }
+    var seconds = function(value){
+      return Number.isFinite(value) ? value + 's' : 'UNAVAILABLE';
+    };
+    var recorded = s.progressState === 'RECORDED';
+    var headline = (s.timeoutReason ? s.timeoutSummary + '. ' : '') +
+      (recorded
+        ? s.progressSummary + ' — last real progress ' + s.lastProgressAt + '.'
+        : (s.progressReason || 'No real builder progress is recorded for this attempt.')) +
+      ' Supervisor heartbeat ' + heartbeat + ' is liveness only, never progress.';
+    return {
+      state: s.timeoutReason ? 'TIMED_OUT' : (recorded ? 'PROGRESS_RECORDED' : 'PROGRESS_UNRECORDED'),
+      headline: headline,
+      detail: [
+        'Progress phase: ' + (recorded ? s.progressKind + ' — ' + s.progressSummary : 'NOT RECORDED'),
+        'Last real progress: ' + (recorded ? s.lastProgressAt
+          : 'NOT RECORDED — ' + (s.progressReason || 'no real builder progress is recorded.')),
+        'Fixed no-progress watchdog: the build is stopped after ' + seconds(s.noProgressLimitSec) +
+          ' without real progress · fixed wall-clock limit ' + seconds(s.wallClockLimitSec) + '.',
+        'Timeout: ' + (s.timeoutReason
+          ? s.timeoutReason + ' — ' + s.timeoutSummary
+          : (build.timedOut === true
+            ? (s.timeoutSummary || 'recorded, but no canonical reason travelled with it')
+            : 'none recorded')),
+        'Recovery: ' + recoveryFacts(build)
+      ]
+    };
+  }
+
+  function supervisionEvidence(run){
+    if (!run) {
+      return { state: 'NOT_RUNNING',
+        headline: 'No run is active, so there is no builder to supervise.', detail: [] };
+    }
+    return supervisionFacts(run.build || null);
+  }
+
   function missionHeadline(objective){
     var exact = typeof objective === 'string' ? objective.trim().replace(/\s+/g, ' ') : '';
     if (!exact) return 'No current mission is recorded.';
@@ -2016,6 +2095,7 @@
           : 'Checks passed. Existing review evidence for the current gate subject appears ready for server verification. Only AEGIS can approve and bind it to this run.');
     }
     var elapsed = elapsedEvidence(boundRun, view && view.generatedAt);
+    var supervision = supervisionEvidence(boundRun);
     var cleanIdle = !boundRun && !runs.length &&
       cleanIdleEvidence(bind, emptyRunsAvailable);
     var controlBlocks = controlState.state === 'BLOCKED' || controlState.state === 'UNAVAILABLE';
@@ -2126,6 +2206,13 @@
     // Kept immediately beside CURRENT ACTION so the recorded evidence the live
     // surface rests on is read at the same moment as the claim it supports.
     commandGrid.appendChild(commandCard('LIVE EVIDENCE', liveEvidence(boundRun), 'is-live-evidence'));
+    // One compact line of genuine builder supervision. The deeper facts — the
+    // exact phase, both fixed limits, the timeout reason and the recorded
+    // recovery fields — stay in the Detail View builder-evidence block, which
+    // reads the same supervisionFacts() resolution this card does.
+    var supervisionCard = commandCard('BUILDER PROGRESS', supervision.headline, 'is-progress');
+    supervisionCard.setAttribute('data-supervision-state', supervision.state);
+    commandGrid.appendChild(supervisionCard);
     commandGrid.appendChild(commandCard('NEXT STEP', deckActions.join(' '), 'is-next'));
     commandGrid.appendChild(commandCard('BLOCKER', operatorBlocker,
       blockerClear ? 'is-clear' : 'is-blocked'));
@@ -2996,6 +3083,7 @@
     noteLaunchedBuilder: noteLaunchedBuilder,
     reviewerEvidenceReady: reviewerEvidenceReady,
     checkpointEvidence: checkpointEvidence,
+    supervisionFacts: supervisionFacts,
     requestRunRetry: requestRunRetry,
     retryAvailability: retryAvailability,
     availableEmptyRuns: availableEmptyRuns,
@@ -3168,11 +3256,27 @@
     host.appendChild(el('div', 'meta', 'Activity: ' + (activity.code || 'UNKNOWN') +
       ' · Phase: ' + (activity.phase || 'UNKNOWN') +
       ' · Active: ' + (activity.active === true ? 'YES' : 'NO')));
-    host.appendChild(el('div', 'meta', 'Heartbeat: ' + (build.heartbeatAt || 'UNAVAILABLE')));
+    // The heartbeat keeps its own line and gains the qualifier it always needed:
+    // it proves the supervisor process is alive and nothing about the builder.
+    host.appendChild(el('div', 'meta', 'Heartbeat: ' + (build.heartbeatAt || 'UNAVAILABLE') +
+      ' — supervisor liveness only; it is not builder progress.'));
     host.appendChild(el('div', 'meta', 'Started: ' + (build.startedAt || 'UNAVAILABLE') +
       ' · Ended: ' + (build.endedAt || 'not ended')));
     host.appendChild(el('div', 'meta', 'Exit: ' + (Number.isInteger(build.exit) ? build.exit : 'not recorded') +
       ' · Timed out: ' + (build.timedOut === true ? 'YES' : 'NO')));
+    // Detail View supervision, resolved by the SAME authority the Command View
+    // BUILDER PROGRESS card reads, so the compact line and the deep facts can
+    // never disagree. The heartbeat is stated here, inside that resolution,
+    // rather than as a separate line that could read as progress on its own.
+    var supervision = window.AEGIS_DASHBOARD && window.AEGIS_DASHBOARD.supervisionFacts
+      ? window.AEGIS_DASHBOARD.supervisionFacts(build)
+      : { state: 'UNAVAILABLE', detail: ['Supervision UNAVAILABLE — the shared resolution is not loaded.'] };
+    var supervisionBlock = el('div', 'build-supervision');
+    supervisionBlock.setAttribute('data-supervision-state', supervision.state);
+    (supervision.detail || []).forEach(function(line){
+      supervisionBlock.appendChild(el('div', 'meta', line));
+    });
+    host.appendChild(supervisionBlock);
     if (build.failure && build.failure.code === 'MODEL_AUTH_FAILURE') {
       host.appendChild(el('div', 'meta', 'Failure: MODEL_AUTH_FAILURE — Claude authentication failed.'));
       host.appendChild(el('div', 'meta', build.failover && build.failover.state === 'NOT_EXECUTABLE'

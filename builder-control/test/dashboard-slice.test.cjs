@@ -2179,8 +2179,15 @@ test('the live evidence instrument is one pilot card beside CURRENT ACTION with 
   assert.ok(grid.indexOf("commandCard('CURRENT ACTION'") < grid.indexOf("commandCard('LIVE EVIDENCE'") &&
     grid.indexOf("commandCard('LIVE EVIDENCE'") < grid.indexOf("commandCard('NEXT STEP'"),
     'the live evidence instrument was separated from CURRENT ACTION by other pilot cards');
-  const fn = code.slice(code.indexOf('function liveEvidence'), code.indexOf('function missionHeadline'));
-  assert.ok(fn.length > 0, 'no liveEvidence() boundary found');
+  // Slice liveEvidence()'s OWN body, ended at its closing brace rather than at
+  // the next named function. Sibling helpers declared after it are governed by
+  // their own proofs; sweeping them in here would report their vocabulary —
+  // heartbeat, progress — as an invention of this card, which reads neither.
+  const fnStart = code.indexOf('function liveEvidence');
+  const fnEnd = code.indexOf('\n  }\n', fnStart);
+  assert.ok(fnStart !== -1 && fnEnd !== -1 && fnEnd < code.indexOf('function missionHeadline'),
+    'no liveEvidence() boundary found');
+  const fn = code.slice(fnStart, fnEnd);
   assert.ok(/run\.updatedAt/.test(fn), 'the lifecycle event time is not read from run.updatedAt');
   assert.ok(/run\.transitions/.test(fn), 'the transition count is not read from the canonical run record');
   assert.ok(!/Date\.now\s*\(/.test(fn), 'the live card reads the browser clock instead of the run record');
@@ -4189,6 +4196,178 @@ async function asyncTests() {
     assert.strictEqual(retryCalls.length, 1, 'the available Retry did not POST exactly one request');
     assert.deepStrictEqual(JSON.parse(retryCalls[0].options.body), { runId: 'RUN-CORRECTION-AVAILABLE' },
       'Retry crossed fields beyond the canonical runId');
+  });
+
+  // ── live supervision (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ────────────
+  // The failure guarded here is the one an operator cannot see through: a build
+  // that heartbeats steadily, does nothing, and is presented as working until
+  // the watchdog kills it. The page must therefore state real progress and
+  // supervisor liveness as two separate facts, publish the fixed limits the
+  // build is judged against, and say "not recorded" rather than reassure.
+  function supervisionStatusFixture(build, generatedAt) {
+    const runId = 'RUN-SUPERVISION';
+    return {
+      generatedAt, runsState: 'OK',
+      engineering: { state: 'OK', verdict: 'BLOCKED', problems: [], stages: [] },
+      runsBinding: { state: 'BOUND', runId, updatedAt: generatedAt, reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [{ runId, state: 'BUILDING', objective: 'Prove live supervision',
+        updatedAt: generatedAt, transitions: 4, build }],
+    };
+  }
+
+  const RECORDED_SUPERVISION_BUILD = {
+    mode: 'async', status: 'RUNNING', workerPid: 4242,
+    startedAt: '2026-09-02T10:00:00.000Z', heartbeatAt: '2026-09-02T10:09:59.000Z',
+    endedAt: null, timedOut: false, retrySafe: null, cancelAvailable: true,
+    activity: { code: 'RUNNING', phase: 'RUNNING', active: true, summary: 'Builder is running' },
+    supervision: {
+      progressState: 'RECORDED', progressKind: 'AUTHORIZED_WRITE',
+      progressSummary: 'Builder changed a file it is authorized to write',
+      lastProgressAt: '2026-09-02T10:04:00.000Z', progressReason: null,
+      noProgressLimitSec: 300, wallClockLimitSec: 900,
+      timeoutReason: null, timeoutSummary: null,
+    },
+  };
+
+  function supervisionCard(page) {
+    return findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+      .find((node) => node.attrs['data-operator-field'] === 'builder-progress') || null;
+  }
+
+  await atest('DOM: Command View states real progress and the heartbeat as two different facts', async () => {
+    const status = supervisionStatusFixture(RECORDED_SUPERVISION_BUILD, '2026-09-02T10:10:00.000Z');
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const card = supervisionCard(page);
+    assert.ok(card, 'Command View exposes no builder-progress instrument');
+    assert.strictEqual(card.attrs['data-supervision-state'], 'PROGRESS_RECORDED');
+    assert.match(card.textContent, /Builder changed a file it is authorized to write/,
+      `the sanitized progress phase is missing: ${card.textContent}`);
+    assert.match(card.textContent, /last real progress 2026-09-02T10:04:00\.000Z/,
+      `the last real progress timestamp is missing: ${card.textContent}`);
+    assert.match(card.textContent,
+      /Supervisor heartbeat 2026-09-02T10:09:59\.000Z is liveness only, never progress/,
+      `Command View merged the heartbeat into progress: ${card.textContent}`);
+
+    // Detail View carries the deeper facts, resolved by the same authority.
+    const detail = page.text('runs-list');
+    assert.match(detail, /Progress phase: AUTHORIZED_WRITE/);
+    assert.match(detail, /Last real progress: 2026-09-02T10:04:00\.000Z/);
+    assert.match(detail,
+      /Heartbeat: 2026-09-02T10:09:59\.000Z — supervisor liveness only; it is not builder progress\./,
+      `Detail View left the heartbeat unqualified, where it reads as progress: ${detail}`);
+    assert.match(detail,
+      /Fixed no-progress watchdog: the build is stopped after 300s without real progress · fixed wall-clock limit 900s\./,
+      `Detail View omitted the fixed watchdog and wall-clock limits: ${detail}`);
+    assert.match(detail, /Timeout: none recorded/);
+    assert.match(detail, /Recovery: cancel capability RECORDED · retry-safe UNVERIFIED/,
+      `Detail View omitted the recorded recovery availability: ${detail}`);
+    // Raw output, prompts and model prose stay out of both surfaces.
+    const whole = page.text('founder-body') + detail;
+    assert.ok(whole.length > 0, 'the supervision surfaces rendered nothing to inspect');
+    for (const [kind, sentinel] of Object.entries(HOSTILE_WORKER_OUTPUT)) {
+      assert.ok(!whole.includes(sentinel), `the supervision surface rendered ${kind} worker output`);
+    }
+  });
+
+  await atest('DOM: a heartbeating build with no recorded progress is never rendered as working', async () => {
+    const status = supervisionStatusFixture(Object.assign({}, RECORDED_SUPERVISION_BUILD, {
+      supervision: Object.assign({}, RECORDED_SUPERVISION_BUILD.supervision, {
+        progressState: 'UNRECORDED', progressKind: null, progressSummary: null,
+        lastProgressAt: null,
+        progressReason: 'No real builder progress is recorded for this attempt, so builder liveness rests on the supervisor heartbeat alone.',
+      }),
+    }), '2026-09-02T10:11:00.000Z');
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const card = supervisionCard(page);
+    assert.ok(card, 'Command View exposes no builder-progress instrument');
+    assert.strictEqual(card.attrs['data-supervision-state'], 'PROGRESS_UNRECORDED');
+    assert.match(card.textContent, /No real builder progress is recorded for this attempt/,
+      `an unrecorded progress state was not stated plainly: ${card.textContent}`);
+    assert.match(card.textContent, /liveness rests on the supervisor heartbeat alone/);
+    assert.ok(!/last real progress 2026/.test(card.textContent),
+      'an absent progress timestamp was back-filled');
+    assert.match(page.text('runs-list'), /Last real progress: NOT RECORDED/,
+      'Detail View turned an absent progress record into a value');
+  });
+
+  await atest('DOM: a recorded no-progress timeout names its canonical stop reason', async () => {
+    const status = supervisionStatusFixture({
+      mode: 'async', status: 'FAILED', exit: 124, timedOut: true, retrySafe: false,
+      heartbeatAt: '2026-09-02T10:14:00.000Z',
+      activity: { code: 'FAILED', phase: 'STOPPED', active: false, summary: 'Builder stopped with exit 124' },
+      supervision: {
+        progressState: 'RECORDED', progressKind: 'STDOUT',
+        progressSummary: 'Builder is emitting model and tool stream activity',
+        lastProgressAt: '2026-09-02T10:04:00.000Z', progressReason: null,
+        noProgressLimitSec: 300, wallClockLimitSec: 900,
+        timeoutReason: 'NO_PROGRESS_TIMEOUT',
+        timeoutSummary: 'Stopped because no real builder progress was observed inside the fixed no-progress limit',
+      },
+    }, '2026-09-02T10:15:00.000Z');
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const card = supervisionCard(page);
+    assert.strictEqual(card.attrs['data-supervision-state'], 'TIMED_OUT');
+    assert.match(card.textContent, /Stopped because no real builder progress was observed/,
+      `the recorded stop reason is missing from Command View: ${card.textContent}`);
+    assert.match(page.text('runs-list'), /Timeout: NO_PROGRESS_TIMEOUT — Stopped because no real builder progress/);
+    assert.match(page.text('runs-list'), /Recovery: cancel capability NOT RECORDED · retry-safe NO/);
+  });
+
+  await atest('DOM: an absent supervision projection is UNAVAILABLE, never an assumed start', async () => {
+    const status = supervisionStatusFixture({
+      mode: 'async', status: 'RUNNING', heartbeatAt: '2026-09-02T10:16:00.000Z',
+      activity: { code: 'RUNNING', phase: 'RUNNING', active: true, summary: 'Builder is running' },
+    }, '2026-09-02T10:16:30.000Z');
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const card = supervisionCard(page);
+    assert.strictEqual(card.attrs['data-supervision-state'], 'UNAVAILABLE');
+    assert.match(card.textContent, /Builder supervision UNAVAILABLE/,
+      `a missing supervision projection was rendered as a healthy state: ${card.textContent}`);
+    assert.ok(!/STARTED|AUTHORIZED_WRITE/.test(card.textContent),
+      'a missing supervision projection invented a progress phase');
+  });
+
+  await atest('supervision is one shared resolution with no clock, timer or duplicated authority', async () => {
+    const facts = code.slice(code.indexOf('function supervisionFacts'),
+      code.indexOf('function supervisionEvidence'));
+    assert.ok(facts.length > 0, 'no supervisionFacts() boundary found');
+    for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+      'Math.random', 'fetch(', 'innerHTML']) {
+      assert.ok(!facts.includes(banned),
+        `supervision uses ${banned} — it may only restate facts the projection already recorded`);
+    }
+    // Cost and checkpoint keep their existing renderers; supervision neither
+    // recomputes nor estimates either of them.
+    for (const foreign of ['checkpoint', 'rollbackPoint', 'cost', 'cad', 'totalUsd', 'elapsed']) {
+      assert.ok(!facts.includes(foreign),
+        `supervision reached into ${foreign}, which already has its own renderer`);
+    }
+    assert.ok(/evidenceCostPanel\(view && view\.cost\)/.test(code) &&
+      /evidenceCheckpointPanel\(ctx\.run, ctx\.checkpointText\)/.test(code),
+      'the Detail View rail no longer reuses the existing CAD cost and checkpoint/rollback renderers');
+    assert.ok(/commandCard\('LAST SAFE CHECKPOINT', safeCheckpoint/.test(code),
+      'Command View stopped reading checkpoint status through checkpointEvidence()');
+
+    // One authority, read twice: the Command View card and the Detail View
+    // builder-evidence block must not resolve supervision independently.
+    assert.strictEqual((code.match(/function supervisionFacts/g) || []).length, 1,
+      'supervision was resolved by more than one function');
+    assert.ok(/supervisionFacts:\s*supervisionFacts/.test(code),
+      'the shared supervision resolution is not exported to the switchboard layer');
+    const workerRenderer = code.slice(code.indexOf('function buildEvidence'),
+      code.indexOf('function runActionRow'));
+    assert.ok(/window\.AEGIS_DASHBOARD\.supervisionFacts\(build\)/.test(workerRenderer),
+      'the Detail View builder evidence does not read the shared supervision resolution');
+    assert.ok(!/progressKind|noProgressLimitSec|lastProgressAt/.test(workerRenderer),
+      'the Detail View rebuilt its own supervision vocabulary instead of reusing the resolved facts');
+    assert.ok(/var supervision = supervisionEvidence\(boundRun\);/.test(code) &&
+      /commandCard\('BUILDER PROGRESS', supervision\.headline/.test(code),
+      'the Command View progress card is not driven by the shared supervision resolution');
   });
 }
 
