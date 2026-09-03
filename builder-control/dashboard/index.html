@@ -1526,7 +1526,7 @@
           </article>
           <div class="aegis-core" id="aegis-core" role="status" aria-live="polite">
             <div class="core-mark">AEGIS CORE</div>
-            <div class="core-sub">Control plane</div>
+            <div class="core-sub">Gate readiness</div>
             <div class="core-status" id="hud-core-status">UNAVAILABLE</div>
           </div>
           <article class="core-node is-gate">
@@ -4188,7 +4188,14 @@
       (controlState.state !== opState.state ? ' Run lifecycle: ' + opState.plain : ''));
     hudText('hud-core-status', controlState.state);
     hudText('hud-crew', crew);
-    hudText('hud-crew-state', boundRun ? currentAction : 'NO ACTIVE WORKER');
+    // currentAction is overwritten with the gate's reason whenever the control
+    // plane blocks, so reading it here described a stopped or finished worker
+    // with unrelated gate wording. Crew & models answers the worker question
+    // from the same lifecycle/finished pair the ops identity line already uses;
+    // the gate keeps its own state on the core, now labelled Gate readiness.
+    hudText('hud-crew-state', boundRun
+      ? opState.state + ' — ' + (opState.state === 'UNVERIFIED' ? opState.plain : deckFinished)
+      : 'NO ACTIVE WORKER — ' + deckFinished);
     var hudReview = 'No independent-review evidence is attached to this exact code version.';
     var hudReviewState = 'EVIDENCE UNAVAILABLE';
     if (deckRc && deckRc.rows && deckRc.rows.length && !reviewerSubjectMatchesCurrent){

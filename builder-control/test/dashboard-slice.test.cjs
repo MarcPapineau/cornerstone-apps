@@ -7794,6 +7794,44 @@ async function asyncTests() {
       `the unresolved gate requirement is no longer reachable from the current evidence view: ${evidence}`);
   });
 
+  // The same two questions on the central HUD: Crew & models had been fed
+  // currentAction, which the control plane overwrites with its own reason
+  // whenever the gate blocks, and the core named its state only "Control plane".
+  await atest('DOM: the central HUD separates worker state from gate readiness', async () => {
+    const page = bootPage(fixtureState(), { status: REVIEW_PENDING_STATUS });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const crew = page.text('hud-crew-state');
+    assert.match(crew, /The build finished and its automated checks passed\./,
+      `the finished worker is not stated on the crew instrument: ${crew}`);
+    assert.ok(!/required checks on this exact code version|unmet requirements/.test(crew),
+      `the crew instrument substituted the gate's reason for the worker state: ${crew}`);
+    // The gate itself is untouched: same state word, now explicitly labelled.
+    assert.strictEqual(page.text('hud-core-status'), 'BLOCKED');
+    assert.match(code, /<div class="core-sub">Gate readiness<\/div>\s*<div class="core-status" id="hud-core-status">/,
+      'the core does not name which question its state word answers');
+  });
+
+  await atest('DOM: a running worker and an unbound run state the worker plainly, not the gate', async () => {
+    const running = JSON.parse(JSON.stringify(REVIEW_PENDING_STATUS));
+    running.runs[0].state = 'BUILDING';
+    running.runs[0].build = { status: 'RUNNING', activity: { active: true, summary: 'Editing the dashboard renderer.' } };
+    const live = bootPage(fixtureState(), { status: running });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.match(live.text('hud-crew-state'), /^RUNNING — /,
+      `an active worker was not stated as running: ${live.text('hud-crew-state')}`);
+
+    // No bound run: unknown is stated plainly, and nothing claims live work.
+    const unbound = JSON.parse(JSON.stringify(REVIEW_PENDING_STATUS));
+    unbound.runsBinding = { state: 'UNAVAILABLE', runId: null, reason: 'no run ledger binding is recorded' };
+    unbound.runs = [];
+    const idle = bootPage(fixtureState(), { status: unbound });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const idleCrew = idle.text('hud-crew-state');
+    assert.match(idleCrew, /NO ACTIVE WORKER/, `a missing worker was not stated plainly: ${idleCrew}`);
+    assert.ok(!/RUNNING|working on right now/.test(idleCrew),
+      `a historical activity claimed a live worker: ${idleCrew}`);
+  });
+
   await atest('DOM: recorded check counters without a verified receipt never read as checks that passed', async () => {
     const unverified = JSON.parse(JSON.stringify(REVIEW_PENDING_STATUS));
     unverified.runs[0].checks = { total: 12, passed: 12 };
