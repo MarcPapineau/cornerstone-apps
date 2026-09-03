@@ -862,6 +862,23 @@ test('the bound-run identity line names the current run ahead of the five operat
   }
 });
 
+// The gap the first packet left: the provenance line was inside the mission
+// brief, below the operational strip, so the top CURRENT RUN was still read
+// before the sentence saying it might be saved evidence. There is still exactly
+// ONE of these — a second banner would be a second authority on where the page
+// got its evidence.
+test('the one provenance line is read before every run fact on the page', () => {
+  const source = htmlSrc();
+  const prov = source.indexOf('id="state-provenance"');
+  assert.ok(prov !== -1, 'the page never says where its evidence came from');
+  assert.strictEqual((source.match(/id="state-provenance"/g) || []).length, 1,
+    'a second provenance banner would let two lines disagree about the same evidence');
+  assert.ok(source.indexOf('id="ops-strip-h"') < prov && prov < source.indexOf('id="ops-strip-run"'),
+    'provenance is not read under the operational heading ahead of the run it labels');
+  assert.ok(prov < source.indexOf('id="founder-summary"'),
+    'the mission brief is read before the sentence saying whether it is confirmed current work');
+});
+
 test('the identity line wraps at every width and is never clamped, hidden or animated', () => {
   const rules = [];
   for (const rule of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
@@ -1987,7 +2004,10 @@ function bootPage(state, opts = {}) {
       sse.opened = true;
       return {
         addEventListener(type, fn) { (sse.listeners[type] = sse.listeners[type] || []).push(fn); },
-        set onerror(_f) {}, set onopen(_f) {},
+        // The transport handlers are captured rather than dropped, so a proof
+        // can open and drop the stream exactly as the browser does — and can
+        // therefore observe what the page claims from transport alone.
+        set onerror(f) { sse.onerror = f; }, set onopen(f) { sse.onopen = f; },
       };
     },
   };
@@ -8061,6 +8081,231 @@ async function asyncTests() {
       'a refused decision left the controls locked, so the refusal cannot be acted on');
     assert.match(page.text('live-activity'), /so nothing was decided/,
       'a refused decision was not published as having decided nothing');
+  });
+
+  // ── startup and reconnect provenance ─────────────────────────────────────
+  // OBSERVED ON A REAL RELOAD: a September 1 saved snapshot painted CURRENT RUN
+  // and BLOCKED with nothing saying it was saved evidence, so an old run read as
+  // freshly confirmed current work until the September 3 authenticated status
+  // replaced it. These proofs drive the shipped bootstrap, the shipped
+  // applyStatus seam and the shipped stream handlers — the page is never told
+  // what to say, and no second status authority is introduced to say it.
+  const SNAPSHOT_RUN = {
+    runId: 'RUN-20260901-SNAPSHOT', state: 'BUILDING',
+    objective: 'Saved snapshot objective recorded on September 1',
+    updatedAt: '2026-09-01T09:00:00.000Z',
+    build: { mode: 'async', status: 'RUNNING', exit: null,
+      activity: { code: 'RUNNING', phase: 'RUNNING', active: true,
+        summary: 'Builder was recorded working when this snapshot was written' } },
+  };
+  const savedSnapshot = () => fixtureState({
+    generatedAt: '2026-09-01T09:00:00.000Z',
+    runs: { state: 'OK', runs: [SNAPSHOT_RUN], current: {
+      state: 'BOUND', runId: SNAPSHOT_RUN.runId, updatedAt: SNAPSHOT_RUN.updatedAt,
+      evidenceState: 'OK', reason: 'the saved snapshot recorded this run as current',
+    } },
+  });
+  const LIVE_RUN = {
+    runId: 'RUN-20260903-LIVE', state: 'BUILD_FAILED',
+    objective: 'Authenticated live objective recorded on September 3',
+    updatedAt: '2026-09-03T14:00:00.000Z',
+    build: { mode: 'async', status: 'FAILED', exit: 1, endedAt: '2026-09-03T14:00:00.000Z',
+      activity: { active: false, phase: 'STOPPED', code: 'FAILED', summary: 'Builder exited' } },
+  };
+  const LIVE_STATUS = {
+    generatedAt: '2026-09-03T14:00:00.000Z', runsState: 'OK',
+    engineering: { state: 'OK', verdict: 'BLOCKED', subjectSha256: '7'.repeat(64), problems: [],
+      reviewerCompleteness: { complete: false, rows: [] }, stages: [] },
+    runs: [LIVE_RUN],
+    runsBinding: { state: 'BOUND', runId: LIVE_RUN.runId, updatedAt: LIVE_RUN.updatedAt,
+      evidenceState: 'OK', subjectState: 'UNLINKED', subjectSha256: null,
+      gateSubjectSha256: '7'.repeat(64), reason: 'the authenticated live status selected this current run' },
+    integration: { connectors: { state: 'OK', connectors: [] } },
+    reviewers: [], events: [], cost: { state: 'UNAVAILABLE', reason: 'no cost receipt' },
+  };
+  const provenance = (page) => page.text('state-provenance');
+  const provenanceState = (page) =>
+    page.document.getElementById('state-provenance').getAttribute('data-provenance');
+
+  await atest('DOM: startup names the saved snapshot as saved evidence with the live check still outstanding', async () => {
+    // The bootstrap never answers, which is exactly the window in which the old
+    // page presented September 1 as the current run.
+    const page = bootPage(savedSnapshot(), { fetch: () => new Promise(() => {}) });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(provenanceState(page), 'SNAPSHOT',
+      'the startup view did not mark itself as saved snapshot evidence');
+    assert.match(provenance(page),
+      /SAVED SNAPSHOT \(2026-09-01T09:00:00\.000Z\) — not confirmed current work/,
+      'the startup view did not name itself as saved evidence recorded at its own canonical time');
+    assert.match(provenance(page), /Live status is being checked now/,
+      'the startup view did not state that the live check is still outstanding');
+    assert.doesNotMatch(provenance(page), /CURRENT AUTHENTICATED STATUS/,
+      'a saved snapshot was presented as confirmed current status');
+    // The saved evidence itself stays on the page, labelled rather than hidden.
+    assert.match(page.text('runs-list'), /RUN-20260901-SNAPSHOT/,
+      'the saved run evidence was erased instead of being labelled');
+    assert.match(page.text('founder-body'), /Saved snapshot objective recorded/i,
+      'the saved objective was dropped from the brief it was recorded for');
+  });
+
+  await atest('DOM: only a validated authenticated status promotes provenance — an open stream cannot', async () => {
+    // The bootstrap answers with a payload carrying no canonical evidence, so
+    // the stream opens with nothing validated behind it.
+    const page = bootPage(savedSnapshot(), { status: {} });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(provenanceState(page), 'UNVERIFIED',
+      'a response with no canonical evidence was accepted as live status');
+    assert.match(provenance(page), /Nothing here is confirmed current work/,
+      'an unusable status response left the page claiming confirmed work');
+    assert.match(provenance(page),
+      /saved snapshot evidence from state\.js \(2026-09-01T09:00:00\.000Z\)/,
+      'the unverified reading stopped naming the evidence the page can actually account for');
+    assert.match(page.text('runs-list'), /RUN-20260901-SNAPSHOT/,
+      'an empty response blanked run evidence instead of leaving it labelled');
+
+    assert.ok(page.sse.opened && typeof page.sse.onopen === 'function',
+      'the page never opened the live stream, so transport cannot be proven inert');
+    page.sse.onopen();
+    assert.strictEqual(provenanceState(page), 'UNVERIFIED',
+      'an open transport promoted the page to live status on its own');
+    assert.match(page.text('live-conn-state'), /stream open — waiting for the first status push/,
+      'the connection line claimed status evidence the stream had not delivered');
+
+    page.sse.listeners.status[0]({ data: JSON.stringify(LIVE_STATUS) });
+    assert.strictEqual(provenanceState(page), 'LIVE',
+      'a validated authenticated status did not change the provenance of the page');
+    assert.match(provenance(page), /CURRENT AUTHENTICATED STATUS \(2026-09-03T14:00:00\.000Z\)/,
+      'live provenance did not cite the canonical time of the status it was granted by');
+    assert.match(page.text('runs-list'), /RUN-20260903-LIVE/,
+      'the validated live status did not replace the saved run view');
+  });
+
+  await atest('DOM: a dropped stream states the connection is unavailable and keeps the last received evidence intact', async () => {
+    const page = bootPage(savedSnapshot(), { status: LIVE_STATUS });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(provenanceState(page), 'LIVE',
+      'an authenticated bootstrap did not establish live provenance');
+
+    page.sse.onerror();
+    assert.strictEqual(provenanceState(page), 'DISCONNECTED',
+      'a dropped stream left the page claiming confirmed current status');
+    assert.match(provenance(page), /LIVE STATUS UNAVAILABLE — the connection could not be confirmed/,
+      'the dropped connection was not stated');
+    assert.match(provenance(page),
+      /the last authenticated status received \(2026-09-03T14:00:00\.000Z\)/,
+      'the disconnected view did not name the last evidence it actually received');
+    assert.match(provenance(page), /no recorded run outcome has been changed/,
+      'the disconnected view did not state that it rewrote nothing');
+    assert.match(page.text('live-conn-state'), /disconnected/,
+      'the connection line kept claiming a live stream');
+    assert.match(page.text('runs-list'), /RUN-20260903-LIVE/,
+      'the last received run evidence was erased by the disconnection');
+    assert.match(page.text('runs-list'), /BUILD_FAILED/,
+      'a recorded run outcome was rewritten by the disconnection');
+
+    // Reconnect: only a validated status may restore live provenance.
+    page.sse.listeners.status[0]({ data: 'not json' });
+    assert.strictEqual(provenanceState(page), 'DISCONNECTED',
+      'a malformed push restored live provenance');
+    page.sse.listeners.status[0]({ data: JSON.stringify(LIVE_STATUS) });
+    assert.strictEqual(provenanceState(page), 'LIVE',
+      'a validated push after a reconnect did not restore live provenance');
+  });
+
+  await atest('DOM: a failed bootstrap keeps the saved snapshot visible and labelled as unconfirmed', async () => {
+    const page = bootPage(savedSnapshot(),
+      { fetch: async () => { throw new Error('live status unavailable'); } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.match(page.text('live-conn-state'), /UNAVAILABLE — could not bootstrap \/api\/status/);
+    assert.strictEqual(provenanceState(page), 'DISCONNECTED',
+      'a failed bootstrap left the saved snapshot reading as confirmed current work');
+    assert.match(provenance(page),
+      /saved snapshot evidence from state\.js \(2026-09-01T09:00:00\.000Z\)/,
+      'the failed bootstrap did not name the saved evidence still on the screen');
+    assert.match(provenance(page), /It is not confirmed current work/,
+      'saved evidence was left unqualified after the live check failed');
+    assert.match(page.text('runs-list'), /RUN-20260901-SNAPSHOT/,
+      'the saved run evidence was erased when the live check failed');
+  });
+
+  await atest('DOM: with no snapshot and no live status the provenance line claims no evidence at all', async () => {
+    const page = bootPage(null, { fetch: async () => { throw new Error('live status unavailable'); } });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(provenanceState(page), 'DISCONNECTED');
+    assert.match(provenance(page), /no saved snapshot and no authenticated status/,
+      'a page with no evidence at all still named some');
+    assert.match(page.text('fatal'), /UNAVAILABLE — no AEGIS state is loaded/,
+      'the missing-snapshot warning was rewritten by the provenance line');
+  });
+
+  // The second gap: the validator accepted ANY named field that was not null,
+  // so a bare timestamp or a plane arriving as false bought live provenance,
+  // and the stream handler wrote "receiving authenticated status" before
+  // anything had been validated at all.
+  await atest('DOM: a timestamp alone and a malformed plane are not live status evidence', async () => {
+    for (const [label, payload] of [
+      ['a bare timestamp', { generatedAt: '2026-09-03T14:00:00.000Z' }],
+      ['a plane arriving as false', { generatedAt: '2026-09-03T14:00:00.000Z', engineering: false }],
+      ['a plane arriving as a list', { runsBinding: [] }],
+      ['a plane arriving as a string', { engineering: 'OK' }],
+      ['a list where the envelope belongs', [{ runs: [] }]],
+    ]) {
+      const page = bootPage(savedSnapshot(), { status: payload });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      assert.strictEqual(provenanceState(page), 'UNVERIFIED',
+        `${label} was accepted as an authenticated evidence plane`);
+      assert.match(page.text('live-conn-state'), /UNVERIFIED/,
+        `${label} left the connection line claiming confirmed status`);
+      assert.match(page.text('runs-list'), /RUN-20260901-SNAPSHOT/,
+        `${label} blanked the previous run evidence instead of keeping it labelled`);
+      assert.match(provenance(page),
+        /saved snapshot evidence from state\.js \(2026-09-01T09:00:00\.000Z\)/,
+        `${label} stopped the page naming the evidence it can actually account for`);
+    }
+  });
+
+  // The bar is minimal, not a schema: an honestly partial answer is still
+  // evidence, and rejecting it would blank instruments over an UNAVAILABLE
+  // envelope the projector recorded on purpose.
+  await atest('DOM: one correctly typed plane is enough, including an authentic partial answer', async () => {
+    for (const [label, payload] of [
+      ['an UNAVAILABLE cost envelope', { generatedAt: '2026-09-03T14:00:00.000Z',
+        cost: { state: 'UNAVAILABLE', reason: 'no cost receipt' } }],
+      ['an empty runs list', { generatedAt: '2026-09-03T14:00:00.000Z', runs: [] }],
+      ['a runs state word', { generatedAt: '2026-09-03T14:00:00.000Z', runsState: 'UNAVAILABLE' }],
+    ]) {
+      const page = bootPage(savedSnapshot(), { status: payload });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      assert.strictEqual(provenanceState(page), 'LIVE',
+        `${label} was refused, so an authentic partial answer was treated as malformed`);
+    }
+  });
+
+  await atest('DOM: an unusable push never labels the stream as receiving status, and clears the motion cue', async () => {
+    const page = bootPage(savedSnapshot(), { status: LIVE_STATUS });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+
+    // A genuine push labels the stream and cues the core; the unusable push
+    // that follows must take both back rather than leave them standing.
+    page.sse.listeners.status[0]({ data: JSON.stringify(
+      activityStatus(activityEvidence('2026-09-03T14:10:04.000Z', 'EDITING'))) });
+    assert.match(page.text('live-conn-state'), /connected — receiving authenticated status/,
+      'a validated push did not establish the connection line');
+    page.sse.listeners.status[0]({ data: JSON.stringify(
+      activityStatus(activityEvidence('2026-09-03T14:10:06.000Z', 'EDITING'))) });
+    const cued = coreCue(page);
+    assert.ok(cued === 'a' || cued === 'b',
+      `a genuinely new recorded activity produced no core cue to clear: ${cued}`);
+
+    page.sse.listeners.status[0]({ data: JSON.stringify({ generatedAt: '2026-09-03T14:11:00.000Z' }) });
+    assert.strictEqual(provenanceState(page), 'UNVERIFIED',
+      'a push carrying only a timestamp was promoted to live status');
+    assert.doesNotMatch(page.text('live-conn-state'), /receiving authenticated status/,
+      'the stream was labelled as receiving authenticated status before anything validated it');
+    assert.match(page.text('live-conn-state'), /UNVERIFIED/,
+      'an unusable push left the connection line unqualified');
+    assert.strictEqual(coreCue(page), null,
+      'an unusable push left a motion cue standing for activity nothing confirmed');
   });
 }
 

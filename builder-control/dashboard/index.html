@@ -224,6 +224,21 @@
     color:var(--text-1);font-size:12px}
   .fatal{border-left-color:var(--fail)}
 
+  /* Provenance line, directly below the Operational status heading and above
+     every run fact on the page. It says where the evidence on screen came from
+     and whether anything has confirmed it is current. The distinction is
+     carried by the words; the border colour only repeats them (§J), and nothing
+     here moves — a page that animates while it waits is implying work it
+     cannot see. */
+  #state-provenance{margin:8px 0 0;padding:7px 10px;background:var(--bg-2);
+    border-left:2px solid var(--warn);border-radius:0 var(--radius) var(--radius) 0;
+    color:var(--text-1);font-size:12px;line-height:1.45}
+  #state-provenance strong{color:var(--text-0)}
+  #state-provenance[data-provenance="LIVE"]{border-left-color:var(--pass)}
+  #state-provenance[data-provenance="DISCONNECTED"],
+  #state-provenance[data-provenance="UNVERIFIED"],
+  #state-provenance[data-provenance="MISSING"]{border-left-color:var(--fail)}
+
   /* Disclosures and links are keyboard controls too. A <summary> and an <a>
      carry no focus treatment of their own in this palette, and the disclosures
      are the only route to demoted evidence in Command View and to the deep
@@ -1420,6 +1435,15 @@
 <section class="ops-strip" id="ops-strip" aria-labelledby="ops-strip-h">
   <h2 class="ops-strip-title" id="ops-strip-h"><span>Operational status</span>
     <span class="rail-note">canonical status only · no timer of its own</span></h2>
+  <!-- The ONE provenance line, painted only by renderStateSource(). It stands
+       ahead of every run fact on the page — this strip's bound run, the mission
+       brief, the deck — because it says where all of them came from: saved
+       snapshot, current authenticated status, or a connection that could not be
+       confirmed. It resolves no run state of its own. The default is the
+       fail-closed reading for a page whose scripts never ran. -->
+  <p id="state-provenance" data-provenance="UNVERIFIED" role="status" aria-live="polite">
+    <strong>EVIDENCE PROVENANCE UNAVAILABLE.</strong>
+    Nothing below is confirmed current work.</p>
   <!-- Which run every instrument on this page is describing. The five cells
        below answer what is happening without ever naming the run it happened
        to, so a finished or failed run the canonical binding still points at
@@ -1800,7 +1824,83 @@
       events: { state: 'UNAVAILABLE', reason: reason, events: [] }
     };
   }
-  function renderStateSource(mode){
+  // ── provenance: saved evidence vs confirmed current status ────────────────
+  // CONFIRMED FINDING: on a real reload the generated snapshot — recorded days
+  // earlier — painted CURRENT RUN and a verdict with nothing saying it was
+  // saved evidence, so an old run read as freshly confirmed work until the
+  // authenticated push replaced it. This seam already existed for the missing
+  // -snapshot warning and is now the ONE place that says where what is on
+  // screen came from. It resolves no run state, promotes nothing, and reads no
+  // wall clock: every time printed here is a canonical generatedAt, or the
+  // recorded absence of one.
+  var snapshotGeneratedAt = (S && S.generatedAt) || null;
+  var liveEvidenceSeen = false;   // an authenticated status was validated once
+  var liveEvidenceAt = null;      // generatedAt of that last validated status
+
+  // Transport is not evidence, and neither is a bare timestamp. A payload counts
+  // as live status only if it is an object carrying at least one canonical
+  // evidence plane of the shape that plane is actually read as: generatedAt
+  // DATES evidence rather than being evidence, and a plane arriving as false, a
+  // number or a list where an envelope is read is malformed, not authentic. The
+  // bar is minimal on purpose — one correctly typed plane — so an authentic
+  // partial answer still passes: an UNAVAILABLE envelope is an envelope and an
+  // empty runs list is a list. This is the ONE place that decides.
+  function isEnvelope(v){ return !!v && typeof v === 'object' && !Array.isArray(v); }
+  function isStateWord(v){ return typeof v === 'string' && v !== ''; }
+  var STATUS_PLANES = {
+    engineering: isEnvelope, runsBinding: isEnvelope, cost: isEnvelope,
+    integration: isEnvelope, research: isEnvelope,
+    runs: Array.isArray, reviewers: Array.isArray, events: Array.isArray,
+    runsState: isStateWord
+  };
+  function validatedLiveStatus(status){
+    if (!isEnvelope(status)) return false;
+    for (var plane in STATUS_PLANES){
+      if (!Object.prototype.hasOwnProperty.call(STATUS_PLANES, plane)) continue;
+      if (status[plane] != null && STATUS_PLANES[plane](status[plane])) return true;
+    }
+    return false;
+  }
+  function recordedAt(ts){ return ts ? ' (' + ts + ')' : ' (no recorded timestamp)'; }
+  // What the page is showing right now, whatever the connection is doing.
+  function evidenceOnScreen(){
+    if (liveEvidenceSeen) return 'the last authenticated status received' + recordedAt(liveEvidenceAt);
+    if (stateSnapshotMissing) return 'no saved snapshot and no authenticated status';
+    return 'saved snapshot evidence from state.js' + recordedAt(snapshotGeneratedAt);
+  }
+  function provenanceLine(mode){
+    if (mode === 'LIVE') return { state: 'LIVE',
+      head: 'CURRENT AUTHENTICATED STATUS' + recordedAt(liveEvidenceAt),
+      body: 'Rendered from an authenticated /api/status response, current as of that recorded time.' };
+    if (mode === 'DISCONNECTED') return { state: 'DISCONNECTED',
+      head: 'LIVE STATUS UNAVAILABLE — the connection could not be confirmed',
+      body: 'Showing ' + evidenceOnScreen() + '. It is not confirmed current work, and no recorded run outcome has been changed.' };
+    if (mode === 'UNVERIFIED') return { state: 'UNVERIFIED',
+      head: 'LIVE STATUS UNVERIFIED — the response carried no canonical evidence',
+      body: 'Nothing here is confirmed current work. The last evidence this page can name is ' +
+        evidenceOnScreen() + '.' };
+    if (stateSnapshotMissing) return { state: 'MISSING',
+      head: 'NO SAVED SNAPSHOT — state.js is missing or failed to parse',
+      body: 'Live status is being checked. Every instrument stays UNAVAILABLE until authenticated evidence arrives.' };
+    return { state: 'SNAPSHOT',
+      head: 'SAVED SNAPSHOT' + recordedAt(snapshotGeneratedAt) + ' — not confirmed current work',
+      body: 'This is saved evidence recorded at that time. Live status is being checked now.' };
+  }
+  function renderStateSource(mode, detail){
+    // LIVE is granted by a validated status payload alone — never by a stream
+    // opening — so the caller records its canonical time here and nowhere else.
+    if (mode === 'LIVE') {
+      liveEvidenceSeen = true;
+      liveEvidenceAt = (detail && detail.generatedAt) || null;
+    }
+    var line = provenanceLine(mode);
+    var provHost = $('state-provenance');
+    if (provHost) {
+      provHost.textContent = '';
+      provHost.setAttribute('data-provenance', line.state);
+      provHost.appendChild(el('strong', null, line.head + '.'));
+      provHost.appendChild(el('span', null, ' ' + line.body));
+    }
     if (!stateSnapshotMissing) return;
     var host = $('fatal');
     if (!host) return;
@@ -1810,6 +1910,12 @@
       d.appendChild(el('strong',null,'LIVE STATUS ACTIVE — generated state.js is unavailable.'));
       d.appendChild(el('div',null,
         'The instruments are now rendered from the authenticated live /api/status projection. Regenerate state.js to restore the initial offline snapshot.'));
+    } else if (liveEvidenceSeen) {
+      // Live evidence arrived and then the connection stopped. Saying "no state
+      // is loaded" here would erase the run evidence still on the screen.
+      d.appendChild(el('strong',null,'LAST RECEIVED LIVE STATUS — generated state.js is unavailable.'));
+      d.appendChild(el('div',null,
+        'The instruments still show ' + evidenceOnScreen() + '. Nothing has been rewritten and nothing is confirmed current until authenticated /api/status evidence arrives again.'));
     } else {
       d.appendChild(el('strong',null,'UNAVAILABLE — no AEGIS state is loaded.'));
       d.appendChild(el('div',null,
@@ -1817,10 +1923,8 @@
     }
     host.appendChild(d);
   }
-  if (stateSnapshotMissing) {
-    S = unavailableInitialState(missingStateReason);
-    renderStateSource('MISSING');
-  }
+  if (stateSnapshotMissing) S = unavailableInitialState(missingStateReason);
+  renderStateSource(stateSnapshotMissing ? 'MISSING' : 'SNAPSHOT');
 
   var eng = S.engineering || {};
   var lastLaunchedBuilder = null;
@@ -5483,6 +5587,9 @@
     retryAvailability: retryAvailability,
     availableEmptyRuns: availableEmptyRuns,
     renderStateSource: renderStateSource,
+    // The switchboard must not own a second opinion about what counts as live
+    // evidence, so it asks this one validator before it claims live provenance.
+    validatedLiveStatus: validatedLiveStatus,
     // The switchboard owns two facts this renderer cannot see — the operator's
     // own reduced-motion press, and the moment the live stream drops — and both
     // must take the core cue off the screen. It is given the one clearing seam,
@@ -6111,6 +6218,29 @@
   // snapshot uses, from the SAME binding the projector computed.
   function applyStatus(status){
     var D = window.AEGIS_DASHBOARD;
+    // Arrival is not evidence. Provenance is promoted to live ONLY by a payload
+    // the one validator accepts; a missing, empty or malformed response keeps
+    // the unknown reading and rewrites no recorded outcome.
+    var validator = D && D.validatedLiveStatus;
+    // Without the renderer seam there is no provenance to claim and no
+    // validator to ask, so the repaint keeps exactly the behaviour it had.
+    var liveEvidence = validator ? !!validator(status) : !!status;
+    if (D && D.renderStateSource) {
+      D.renderStateSource(liveEvidence ? 'LIVE' : 'UNVERIFIED',
+        { generatedAt: (status && status.generatedAt) || null });
+    }
+    // A response carrying no usable evidence plane repaints nothing: an empty or
+    // malformed answer may not blank instruments that are already labelled with
+    // the evidence they were painted from. It may not leave the connection line
+    // claiming authenticated status either, and it may not leave a motion cue
+    // standing — a highlight for activity nothing has confirmed is this page
+    // implying work it cannot see.
+    if (!liveEvidence) {
+      var conn = $('live-conn-state');
+      if (conn) conn.textContent = 'UNVERIFIED — the last status response carried no usable evidence';
+      if (D && D.clearCoreActivityCue) D.clearCoreActivityCue();
+      return false;
+    }
     var boundRun = status && status.runsBinding && status.runsBinding.state === 'BOUND' &&
       Array.isArray(status.runs)
       ? status.runs.filter(function(run){ return run.runId === status.runsBinding.runId; })[0] || null
@@ -6120,7 +6250,6 @@
     renderRuns(status && status.runs, status && status.runsBinding,
       status && status.runsState);
     if (D && status) {
-      if (D.renderStateSource) D.renderStateSource('LIVE');
       if (D.renderContext) D.renderContext(status);
       D.renderFounderSummary({
         engineering: status.engineering || {},
@@ -6156,6 +6285,7 @@
       ' current=' + ((status.runsBinding && status.runsBinding.runId) || 'UNAVAILABLE'),
     { code: 'STATUS_SNAPSHOT', ts: (status && status.generatedAt) || null,
       runId: (status && status.runsBinding && status.runsBinding.runId) || null });
+    return true;
   }
 
   // Keep live repaint on the same explicit renderer seam as the generated
@@ -6173,6 +6303,12 @@
   // fails, the page states so honestly rather than opening EventSource blind.
   (async function bootstrap(){
     var connState = $('live-conn-state');
+    // The one seam that says the connection could not be confirmed. It states
+    // the provenance of what is already on screen; it rewrites no run outcome.
+    function noteDisconnected(){
+      var D = window.AEGIS_DASHBOARD;
+      if (D && D.renderStateSource) D.renderStateSource('DISCONNECTED');
+    }
     try {
       var res = await fetch('/api/status', { credentials: 'same-origin' });
       if (!res.ok) throw new Error('status ' + res.status);
@@ -6180,17 +6316,28 @@
       applyStatus(status);
     } catch (e) {
       if (connState) connState.textContent = 'UNAVAILABLE — could not bootstrap /api/status';
+      noteDisconnected();
       return;
     }
 
     if (typeof EventSource === 'undefined') {
       if (connState) connState.textContent = 'UNAVAILABLE — EventSource unsupported';
+      noteDisconnected();
       return;
     }
     var es = new EventSource('/api/events');
     es.addEventListener('status', function(ev){
-      if (connState) connState.textContent = 'connected';
-      try { applyStatus(JSON.parse(ev.data)); } catch (e) { void e; } // malformed push, ignored
+      // The parse AND the validation both come before the label. A push that is
+      // not readable evidence may not move the connection line at all, and one
+      // that parses but carries no usable plane must not be described as
+      // authenticated status being received — applyStatus is the single place
+      // that decides that, and it answers here.
+      try {
+        var pushed = JSON.parse(ev.data);
+        if (applyStatus(pushed) && connState) {
+          connState.textContent = 'connected — receiving authenticated status';
+        }
+      } catch (e) { void e; } // malformed push, ignored
     });
     es.onerror = function(){
       if (connState) connState.textContent = 'disconnected — the browser will retry automatically';
@@ -6199,8 +6346,13 @@
       if (window.AEGIS_DASHBOARD && window.AEGIS_DASHBOARD.clearCoreActivityCue) {
         window.AEGIS_DASHBOARD.clearCoreActivityCue();
       }
+      noteDisconnected();
     };
-    es.onopen = function(){ if (connState) connState.textContent = 'connected'; };
+    // An open transport is a socket, not evidence: it says the stream exists,
+    // and it may never touch provenance. Only a validated status push does.
+    es.onopen = function(){
+      if (connState) connState.textContent = 'stream open — waiting for the first status push';
+    };
   })();
 })();
 </script>
