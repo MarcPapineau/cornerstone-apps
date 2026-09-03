@@ -1666,7 +1666,11 @@ function bootPage(state, opts = {}) {
   };
   sandbox.window = sandbox;
   sandbox.window.AEGIS_STATE = state;
-  sandbox.window.matchMedia = () => ({ matches: false });
+  // Device-level presentation preferences the page reads but cannot set:
+  // width and prefers-reduced-motion. A fixture may supply its own resolver so
+  // a proof can boot the page as the device it is claiming to describe; the
+  // default answers "no" to everything, which is the shipped desktop case.
+  sandbox.window.matchMedia = opts.matchMedia || (() => ({ matches: false }));
   vm.createContext(sandbox);
   for (const src of pageScripts()) vm.runInContext(src, sandbox, { filename: 'dashboard/index.html' });
   return { sandbox, document, byId, sse, text: (id) => document.getElementById(id).textContent };
@@ -3662,6 +3666,160 @@ test('the founder explanation has exactly one source, so no two surfaces can phr
     assert.ok(new RegExp('(FOUNDER|D\\.founder)\\.' + key).test(code),
       `${key} is defined but never used, so some surface still carries its own wording`);
   }
+});
+
+// ── V2 reduced motion and keyboard presentation (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// Four presentation gaps, all of them on both Command View and Detail View:
+//
+//   1. The reduced-motion state was simply ABSENT until the control was first
+//      pressed, and the control never read the device's own setting — so on a
+//      machine that asks for reduced motion the page said "Reduced motion" with
+//      aria-pressed="false" while the media query was suppressing every
+//      transition. The control was describing a state nobody had resolved.
+//   2. <summary> and <a> are keyboard controls with no focus treatment in this
+//      palette, and the disclosures are the only route to demoted evidence in
+//      Command View and to the deep machine state in Detail View.
+//   3. The view switch moved the scroll position and left the keyboard on the
+//      tab that was pressed, and said nothing to a screen reader.
+//   4. An inert control explained itself only through a hover tooltip.
+//
+// None of this touches lifecycle, routing, ledger, review, checkpoint, cost or
+// run-selection authority, and none of it may introduce motion: the fix for a
+// reduced-motion gap can never be something new to reduce.
+
+test('the reduced-motion state is resolved from the first byte, never an absent third state', () => {
+  assert.ok(/<body[^>]*\sdata-reduced-motion="false"/.test(htmlSrc()),
+    'the page ships with no reduced-motion state at all, so the control describes nothing until it is pressed');
+  assert.ok(/body\[data-reduced-motion="true"\] \*\{transition:none!important;scroll-behavior:auto!important\}/.test(code),
+    'the operator control no longer suppresses transitions and smooth scrolling');
+  // "off" is the shipped no-animation default and owns no rules of its own.
+  // Giving it any would mean the page had something to switch back on.
+  assert.ok(!/body\[data-reduced-motion="false"\]/.test(code),
+    'the unreduced state was given rules of its own, which is a page inventing motion in order to remove it');
+});
+
+test('the device setting and the on-page control apply exactly the same suppression', () => {
+  const media = code.slice(code.indexOf('@media (prefers-reduced-motion: reduce)'));
+  const block = media.slice(0, media.indexOf('\n  }'));
+  assert.ok(block.length > 0, 'the reduced-motion media block was not located');
+  for (const declaration of ['transition:none!important', 'scroll-behavior:auto!important']) {
+    assert.ok(block.includes(declaration),
+      `the device setting does not apply ${declaration}, so it and the control leave the page in two different states`);
+  }
+  assert.ok(!/@keyframes|animation\s*:/.test(block),
+    'the reduced-motion block introduced motion, which is the one thing it may never do');
+});
+
+test('every keyboard-operable control carries a visible focus ring, disclosures included', () => {
+  const focusable = new Set();
+  for (const rule of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (!/outline:2px solid var\(--focus\)/.test(rule[2])) continue;
+    for (const selector of rule[1].split(',')) focusable.add(selector.trim());
+  }
+  for (const selector of ['.stage:focus-visible', '.route-node:focus-visible', '.view-tab:focus-visible',
+    '.hud-control:focus-visible', 'button.action:focus-visible', 'summary:focus-visible',
+    'a:focus-visible', '[tabindex="-1"]:focus']) {
+    assert.ok(focusable.has(selector), `${selector} can be reached by keyboard with no visible focus`);
+  }
+  // Drawn outside the control, so it is a shape rather than a colour change
+  // inside it — except on the full-width landing regions, where an outward ring
+  // is exactly what would widen the page at 390px.
+  assert.ok(/\[tabindex="-1"\]:focus\{outline:2px solid var\(--focus\);outline-offset:-2px\}/.test(code),
+    'a full-width landing region draws its focus ring outside itself, which can push a 390px viewport sideways');
+});
+
+test('the reduced-motion state line wraps instead of widening the header at any width', () => {
+  assert.ok(/\.header-state\{display:flex;[^}]*flex-wrap:wrap/.test(code),
+    'the header band cannot wrap, so one extra line of text overflows an ordinary laptop width');
+  assert.ok(/\.motion-state\{[^}]*overflow-wrap:anywhere/.test(code),
+    'the reduced-motion state sentence can push the viewport sideways');
+  assert.ok(/\.header-state \.motion-state\{order:4;flex:1 0 100%/.test(PHONE),
+    'the reduced-motion state sentence competes with the brand for one phone row');
+  assert.ok(!/motion-state\{[^}]*display:none/.test(PHONE),
+    'the phone cockpit removed the reduced-motion state instead of reflowing it');
+});
+
+test('an unavailable control is inert by shape and explains itself without a tooltip', () => {
+  assert.ok(/\.hud-control:disabled,\.hud-control\[aria-disabled="true"\]\{border-style:dashed;cursor:not-allowed\}/.test(code),
+    'an inert control is drawn exactly like an operable one, or is told apart by colour alone');
+  const flat = /<button type="button" class="hud-control" disabled[^>]*>([\s\S]*?)<\/button>/.exec(htmlSrc());
+  assert.ok(flat, 'the inert Flat 2D control was removed rather than explained');
+  assert.ok(/class="sr"[^>]*>\s*—\s*unavailable/.test(flat[1]),
+    'an inert control is explained only by a hover tooltip a keyboard or touch operator never opens');
+});
+
+test('DOM: the reduced-motion control reports the device setting instead of claiming "off"', () => {
+  const asksForReduce = (query) => ({ matches: /prefers-reduced-motion/.test(query) });
+  const held = bootPage(fixtureState(), { matchMedia: asksForReduce });
+  const toggle = held.document.getElementById('toggle-motion');
+  assert.strictEqual(held.document.body.getAttribute('data-reduced-motion'), 'true',
+    'a device that asks for reduced motion booted the page in the unreduced state');
+  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'true',
+    'the control reported "off" while the stylesheet was already suppressing every transition');
+  assert.strictEqual(toggle.textContent, 'Reduced motion: on',
+    `the control state is not readable in words: ${toggle.textContent}`);
+  assert.strictEqual(toggle.getAttribute('aria-disabled'), 'true',
+    'a control the media query outranks was still presented as switchable');
+  assert.match(held.text('motion-state'), /Reduced motion ON · device setting/,
+    `where the state came from is not stated: ${held.text('motion-state')}`);
+  // A media query cannot be outranked by an attribute on <body>, so pressing
+  // the control may not print a state the stylesheet contradicts.
+  toggle._listeners.click[0]();
+  assert.strictEqual(held.document.body.getAttribute('data-reduced-motion'), 'true',
+    'the control switched off a suppression the device setting still applies');
+  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'true',
+    'the control reported an unreduced page the media query contradicts');
+
+  const plain = bootPage(fixtureState());
+  const plainToggle = plain.document.getElementById('toggle-motion');
+  assert.strictEqual(plain.document.body.getAttribute('data-reduced-motion'), 'false',
+    'a device with no preference did not resolve to the shipped default');
+  assert.strictEqual(plainToggle.textContent, 'Reduced motion: off',
+    `the control state is not readable in words: ${plainToggle.textContent}`);
+  assert.strictEqual(plainToggle.getAttribute('aria-disabled'), 'false',
+    'the control is inert on a device that has asked for nothing');
+  assert.match(plain.text('motion-state'), /Reduced motion OFF · no device setting/,
+    `the resolved state and its source are not stated: ${plain.text('motion-state')}`);
+  plainToggle._listeners.click[0]();
+  assert.strictEqual(plain.document.body.getAttribute('data-reduced-motion'), 'true',
+    'the operator could not set reduced motion on a device with no preference of its own');
+  assert.strictEqual(plainToggle.getAttribute('aria-pressed'), 'true');
+  assert.match(plain.text('motion-state'), /Reduced motion ON · set here/,
+    `an operator-set state is not distinguished from a device setting: ${plain.text('motion-state')}`);
+  plainToggle._listeners.click[0]();
+  assert.strictEqual(plain.document.body.getAttribute('data-reduced-motion'), 'false',
+    'the operator control is one-way and cannot be released again');
+});
+
+test('DOM: the Command and Detail switch moves the keyboard, not only the scroll position', () => {
+  const page = bootPage(fixtureState());
+  const command = page.document.getElementById('view-command');
+  const detail = page.document.getElementById('view-detail');
+  const focused = [];
+  page.document.getElementById('evidence-rail').focus = () => focused.push('evidence-rail');
+  page.document.getElementById('operator-shell').focus = () => focused.push('operator-shell');
+
+  detail._listeners.click[0]();
+  assert.deepStrictEqual(focused, ['evidence-rail'],
+    'Detail view scrolled the page and left the keyboard on the tab that was pressed');
+  assert.match(page.text('live'), /Detail view\./,
+    'switching to Detail view is silent to a screen reader');
+
+  command._listeners.click[0]();
+  assert.deepStrictEqual(focused, ['evidence-rail', 'operator-shell'],
+    'Command view did not return the keyboard to the command deck');
+  assert.match(page.text('live'), /Command view\./,
+    'returning to Command view is silent to a screen reader');
+
+  // A landing region has to be able to hold focus at all, or the ring above
+  // never appears and the switch is scroll-only again.
+  const source = htmlSrc();
+  assert.ok(/<main class="command-shell" id="operator-shell"[^>]*tabindex="-1"/.test(source),
+    'the command deck cannot receive focus from the view switch or the skip link');
+  assert.ok(/<section id="evidence-rail"[^>]*tabindex="-1"/.test(source),
+    'the Detail View evidence rail cannot receive focus from the view switch');
+  assert.ok(/<a class="sr" href="#operator-shell">/.test(source),
+    'the first keyboard target still skips into a collapsed engineer disclosure rather than the command deck');
 });
 
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────

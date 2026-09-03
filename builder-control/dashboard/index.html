@@ -133,8 +133,14 @@
   /* ACTIVE is visible without decorative motion. */
   .stage.is-active .dot{background:color-mix(in srgb,var(--active) 22%,var(--bg-0));
     box-shadow:0 0 0 3px color-mix(in srgb,var(--active) 24%,transparent)}
+  /* The device's own setting, applied with exactly the declarations the on-page
+     control applies, so the two can never leave the page in different states.
+     Nothing anywhere in this file turns a transition back ON, so this block can
+     only be added to and never subtracted from: while the device asks for
+     reduce, the control reports it as held on rather than offering an "off" the
+     stylesheet would go on contradicting. */
   @media (prefers-reduced-motion: reduce){
-    *{transition:none!important}
+    *{transition:none!important;scroll-behavior:auto!important}
     /* The handoff strip is the only element that changes appearance when a
        stage moves, so its one transition is named here as well as covered by
        the wildcard: under reduced motion the border simply is the new colour,
@@ -164,6 +170,23 @@
     border-left:2px solid var(--warn);border-radius:0 var(--radius) var(--radius) 0;
     color:var(--text-1);font-size:12px}
   .fatal{border-left-color:var(--fail)}
+
+  /* Disclosures and links are keyboard controls too. A <summary> and an <a>
+     carry no focus treatment of their own in this palette, and the disclosures
+     are the only route to demoted evidence in Command View and to the deep
+     machine state in Detail View — so without this rule a keyboard operator can
+     open one without ever seeing where they are. The ring is a shape drawn
+     outside the control rather than a colour change inside it, so it survives
+     colour removal and forced-colours rendering. */
+  summary:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  /* Landing targets for the skip links and the Command/Detail switch. :focus
+     and not :focus-visible on purpose: these regions are focused
+     programmatically, and whether a UA then calls that focus "visible" is a
+     heuristic — an occasional ring after a pointer click is a far smaller cost
+     than a keyboard operator being moved somewhere with no ring at all. The
+     offset is negative so a full-width region draws its ring inside itself and
+     cannot widen the page at 390px. */
+  [tabindex="-1"]:focus{outline:2px solid var(--focus);outline-offset:-2px}
 
   .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
   .sr:focus,.sr:focus-visible{position:fixed;left:12px;top:12px;width:auto;height:auto;overflow:visible;
@@ -523,11 +546,24 @@
     font:650 10px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase;cursor:pointer}
   .view-tab[aria-pressed="true"]{background:#123149;color:#d8f5ff;box-shadow:inset 0 -2px 0 var(--cyan)}
   .view-tab:focus-visible,.hud-control:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-  .header-state{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
+  /* Wraps rather than overflows: the reduced-motion state sentence sits in this
+     band, and a header that cannot wrap is how a laptop width gets a horizontal
+     scrollbar for one line of text. */
+  .header-state{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;gap:8px;min-width:0}
   .header-state .context-strip{flex:0 1 auto}
   .hud-control{appearance:none;border:1px solid #29465d;border-radius:4px;padding:7px 9px;background:#0b1722;
     color:var(--text-1);font:600 10px/1.2 var(--mono);cursor:pointer;white-space:nowrap}
   .hud-control[aria-pressed="true"]{border-color:var(--cyan);color:#d8f5ff}
+  /* An inert control must not read as an available one, and the difference may
+     not be a colour: a dashed edge and a not-allowed cursor say it as a shape,
+     and the reason is written into the page rather than into a hover tooltip a
+     keyboard or touch operator never opens. aria-disabled is used where the
+     control still needs to stay in the tab order and explain itself. */
+  .hud-control:disabled,.hud-control[aria-disabled="true"]{border-style:dashed;cursor:not-allowed}
+  .hud-control:disabled{color:var(--text-2)}
+  /* The reduced-motion state, in words, beside the control that sets it. */
+  .motion-state{color:var(--text-1);font:600 10px/1.3 var(--mono);letter-spacing:.04em;
+    overflow-wrap:anywhere}
   .command-shell{grid-template-columns:minmax(280px,320px) minmax(660px,1fr) minmax(300px,340px)}
   .left-rail #founder-summary{order:-2}
   .left-rail .objective-composer{order:-1}
@@ -709,6 +745,10 @@
     .header-state .hud-control{order:1}
     .view-nav{order:2;width:100%;padding:3px}.view-nav .view-tab{flex:1}
     .header-state .context-strip{order:3;flex:1 0 100%;justify-content:flex-start;flex-wrap:wrap;gap:6px}
+    /* The reduced-motion state sentence reads on its own line under the
+       controls rather than competing with the brand for the same row. It is
+       reordered, never removed, and it wraps instead of widening the page. */
+    .header-state .motion-state{order:4;flex:1 0 100%;padding-left:8px}
     .ctx{font-size:11px}
     .context-cell{padding:5px 8px}
     .core-stage{display:flex;flex-direction:column;min-height:0}
@@ -1131,7 +1171,16 @@
   body[data-detail="true"] #raw-state{order:2}
 </style>
 </head>
-<body>
+<!-- data-reduced-motion is present from the first byte and never absent: an
+     unset attribute is a third, unstated state, and the operator control would
+     then be describing a page whose actual suppression nobody had resolved. The
+     switchboard resolves it against this device's own setting before the
+     control is offered. -->
+<body data-reduced-motion="false">
+<!-- The command deck is the first screen, so it is the first skip target. The
+     topology link is kept because the eleven-stage evidence is inside a
+     collapsed disclosure and is otherwise several controls away. -->
+<a class="sr" href="#operator-shell">Skip to the command deck</a>
 <a class="sr" href="#topology">Skip to workflow topology</a>
 
 <header class="command-header">
@@ -1151,8 +1200,21 @@
       <span class="ctx context-cell mono" id="ctx-generated">—</span>
       <span class="ctx" id="ctx-verdict"></span>
     </div>
-    <button type="button" class="hud-control" id="toggle-motion" aria-pressed="false">Reduced motion</button>
-    <button type="button" class="hud-control" disabled title="2D is the authoritative AEGIS view">Flat 2D</button>
+    <button type="button" class="hud-control" id="toggle-motion" aria-pressed="false"
+      aria-describedby="motion-state motion-note">Reduced motion</button>
+    <!-- The control's state and where that state came from, in words, next to
+         the control. role="status" so a change is announced once; the sentence
+         is written by the switchboard after it reads this device's setting, so
+         the static text claims nothing it has not resolved yet. -->
+    <span class="motion-state" id="motion-state" role="status">Reading this device's motion preference…</span>
+    <!-- The standing fact this control sits on, stated once and never repainted:
+         there is nothing to slow down here, only transitions to suppress. -->
+    <span class="sr" id="motion-note">This page has no animation. Reduced motion additionally suppresses every
+      state transition, and this device's own setting cannot be switched off from here.</span>
+    <!-- Inert, and it says so where a tooltip cannot be reached: the title stays
+         for the pointer, and the same reason is in the control's own text for
+         assistive technology and for touch. -->
+    <button type="button" class="hud-control" disabled title="2D is the authoritative AEGIS view">Flat 2D<span class="sr"> — unavailable: 2D is the authoritative AEGIS view</span></button>
   </div>
 </header>
 
@@ -1180,7 +1242,10 @@
 
 <div id="fatal"></div>
 
-<main class="command-shell" id="operator-shell" data-run-status="idle">
+<!-- tabindex="-1" makes this a landing target for the skip link and for the
+     Command/Detail switch: without it the keyboard is left on the control that
+     was just pressed while only the scroll position moves. -->
+<main class="command-shell" id="operator-shell" data-run-status="idle" tabindex="-1">
   <aside class="left-rail" aria-label="Objective and controls">
     <section aria-labelledby="founder-h" id="founder-summary">
       <h2 id="founder-h">Mission brief</h2>
@@ -1361,7 +1426,7 @@
         <div class="hud-summary-meta">Recorded checkpoint evidence only.</div></div>
     </section>
 
-    <section id="evidence-rail" aria-labelledby="evidence-rail-h">
+    <section id="evidence-rail" aria-labelledby="evidence-rail-h" tabindex="-1">
       <h2 id="evidence-rail-h">Evidence inspector <span class="rail-note">detail view · canonical receipts only</span></h2>
       <div class="body" id="evidence-rail-body">
         <p class="empty">Loading canonical evidence…</p>
@@ -1378,7 +1443,7 @@
         <p class="mono" id="ctx-subject">subject —</p>
       </div>
     </section>
-    <section id="topology" aria-labelledby="topology-h">
+    <section id="topology" aria-labelledby="topology-h" tabindex="-1">
       <h2 id="topology-h">Exact eleven-stage evidence</h2>
       <div class="body">
         <ul class="stages" id="stages" aria-describedby="stages-help"></ul>
@@ -4506,17 +4571,70 @@
     if (commandView) commandView.setAttribute('aria-pressed', enabled ? 'false' : 'true');
     if (detailView) detailView.setAttribute('aria-pressed', enabled ? 'true' : 'false');
     if (rawState) rawState.open = enabled;
-    if (enabled && rawState) rawState.scrollIntoView({ block: 'start' });
-    if (!enabled) document.getElementById('operator-shell').scrollIntoView({ block: 'start' });
+    // Scrolling alone moves the eye and leaves the keyboard behind on the tab
+    // that was just pressed, so the disclosed surface takes focus as well. The
+    // landing target carries tabindex="-1" and the shipped inset focus ring, so
+    // a keyboard operator can see where the switch put them.
+    var landing = enabled ? ($('evidence-rail') || rawState) : $('operator-shell');
+    if (landing){
+      if (landing.scrollIntoView) landing.scrollIntoView({ block: 'start' });
+      if (landing.focus) landing.focus();
+    }
+    // One sentence in the one live region, so the switch is not silent to a
+    // screen reader. It states disclosure only — no run, gate, reviewer,
+    // connector or evidence record is read, written or re-decided here.
+    var live = $('live');
+    if (live) live.textContent = enabled
+      ? 'Detail view. Canonical evidence receipts and deep machine state are disclosed.'
+      : 'Command view. Deep machine state is collapsed.';
   }
   if (commandView) commandView.addEventListener('click', function(){ setDetailView(false); });
   if (detailView) detailView.addEventListener('click', function(){ setDetailView(true); });
+
+  // ── reduced motion: report the resolved state, never invent motion ──
+  // This page ships with no animation and only a handful of transitions, so the
+  // control can only ever ADD suppression. Two facts have to be told apart and
+  // both have to be visible in words:
+  //
+  //   1. This device already asks for reduced motion. That is applied by a
+  //      @media (prefers-reduced-motion: reduce) block, and nothing in this page
+  //      turns a transition back on, so no attribute on the body element can undo it —
+  //      control therefore reports it as held on, and pressing it changes nothing
+  //      rather than printing an "off" the stylesheet would go on contradicting.
+  //      aria-disabled, not disabled, so it stays in the tab order and can still
+  //      be reached, read and explained.
+  //   2. Nobody asked, and the operator set it here anyway.
+  //
+  // data-reduced-motion is therefore never absent and never guessed: it is the
+  // resolution of those two inputs, and the sentence beside the control names
+  // which one produced it.
   var motionToggle = $('toggle-motion');
+  var motionCell = $('motion-state');
+  var motionQuery = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  var motionHeldBySystem = !!(motionQuery && motionQuery.matches);
+  var motionSetHere = false;
+  function applyMotion(){
+    var reduced = motionHeldBySystem || motionSetHere;
+    document.body.setAttribute('data-reduced-motion', reduced ? 'true' : 'false');
+    if (motionToggle){
+      motionToggle.setAttribute('aria-pressed', reduced ? 'true' : 'false');
+      motionToggle.setAttribute('aria-disabled', motionHeldBySystem ? 'true' : 'false');
+      motionToggle.textContent = reduced ? 'Reduced motion: on' : 'Reduced motion: off';
+    }
+    if (motionCell){
+      motionCell.textContent = motionHeldBySystem
+        ? 'Reduced motion ON · device setting'
+        : (motionSetHere ? 'Reduced motion ON · set here' : 'Reduced motion OFF · no device setting');
+    }
+  }
+  applyMotion();
+  if (motionQuery && motionQuery.addEventListener) motionQuery.addEventListener('change', function(ev){
+    motionHeldBySystem = !!(ev && ev.matches);
+    applyMotion();
+  });
   if (motionToggle) motionToggle.addEventListener('click', function(){
-    var enabled = document.body.getAttribute('data-reduced-motion') !== 'true';
-    document.body.setAttribute('data-reduced-motion', enabled ? 'true' : 'false');
-    motionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-    motionToggle.textContent = enabled ? 'Reduced motion on' : 'Reduced motion';
+    if (!motionHeldBySystem) motionSetHere = !motionSetHere;
+    applyMotion();
   });
 
   // CONFIRMED FINDING #7: this used to refresh run cards and the activity list
