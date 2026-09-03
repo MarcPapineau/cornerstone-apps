@@ -1459,7 +1459,7 @@ test('every wide HUD accent restates a canonical state word the page already pri
       `${id} lost the written state that its module's accent only repeats`);
   }
   assert.ok(/node\.setAttribute\('data-ops-state', cell\.state\)/.test(code) &&
-    /node\.appendChild\(chip\(cell\.chip\)\)/.test(code),
+    /node\.appendChild\(opsChip\(cell\.chip, cell\.chipPlain\)\)/.test(code),
     'an operational cell carries a status rail without the chip and state word the rail repeats');
   assert.ok(/item\.appendChild\(el\('span','core-station-mark',/.test(code),
     'a handoff station carries a rail without the written mark the rail repeats');
@@ -7072,12 +7072,16 @@ async function asyncTests() {
   }
 
   // A cell states its condition three ways: the machine attribute, a written
-  // state word, and a glyph. Colour is never the only carrier. The chip word
-  // may be the evidence renderer's own vocabulary (a recorded CAD figure is an
-  // AVAILABLE chip over a RECORDED state); both are asserted, never inferred.
+  // word, and a glyph. Colour is never the only carrier. The written word is
+  // the operator's plain English; the canonical token the renderer resolved —
+  // which may be the evidence renderer's own vocabulary, as a recorded CAD
+  // figure is an AVAILABLE chip over a RECORDED state — stays exact in the
+  // machine attribute and in the chip title. All three are asserted.
   function assertCellStates(cell, expected, label) {
     const state = typeof expected === 'string' ? expected : expected.state;
-    const chipWord = typeof expected === 'string' ? expected : expected.chip;
+    const chipWord = typeof expected === 'string' ? expected
+      : (expected.chip || expected.state);
+    const plain = typeof expected === 'string' ? null : expected.plain;
     assert.ok(cell, `the strip has no ${label} cell`);
     assert.strictEqual(cell.attrs['data-ops-state'], state,
       `the ${label} cell does not carry the canonical state ${state}`);
@@ -7087,8 +7091,13 @@ async function asyncTests() {
       `the ${label} chip must carry a glyph and a written state, not colour alone`);
     assert.ok(chipNode.children[0].textContent.trim().length > 0,
       `the ${label} chip glyph is empty, leaving colour as the only shape`);
-    assert.strictEqual(chipNode.children[1].textContent, chipWord,
-      `the ${label} chip does not write out its canonical state`);
+    assert.ok(plain, `the ${label} expectation names no plain-English chip word`);
+    assert.strictEqual(chipNode.children[1].textContent, plain,
+      `the ${label} chip does not read in plain English`);
+    assert.strictEqual(chipNode.attrs.title, 'Canonical state code: ' + chipWord,
+      `the ${label} chip does not keep its exact canonical code accessible`);
+    assert.ok(String(chipNode.className).includes('s-' + chipWord),
+      `the ${label} chip lost the canonical state style behind its plain word`);
   }
 
   const IDLE_STATUS = {
@@ -7108,17 +7117,17 @@ async function asyncTests() {
     assert.deepStrictEqual(Object.keys(cells).sort(),
       ['checkpoint', 'cost', 'progress', 'run-state', 'watchdog'],
       'the strip does not expose exactly the five operational answers');
-    assertCellStates(cells['run-state'], 'IDLE', 'run state');
+    assertCellStates(cells['run-state'], { state: 'IDLE', plain: 'Nothing running' }, 'run state');
     assert.match(cells['run-state'].textContent, /RUN STATE/);
     assert.match(cells['run-state'].textContent, /Nothing is currently running\./);
-    assertCellStates(cells.progress, 'NOT_RUNNING', 'progress');
+    assertCellStates(cells.progress, { state: 'NOT_RUNNING', plain: 'Nothing running' }, 'progress');
     assert.match(cells.progress.textContent, /No run is active, so there is no builder to supervise\./);
-    assertCellStates(cells.watchdog, 'NOT_RUNNING', 'watchdog');
+    assertCellStates(cells.watchdog, { state: 'NOT_RUNNING', plain: 'Nothing running' }, 'watchdog');
     assert.match(cells.watchdog.textContent, /no builder watchdog is armed/);
-    assertCellStates(cells.cost, 'UNAVAILABLE', 'cost');
+    assertCellStates(cells.cost, { state: 'UNAVAILABLE', plain: 'Not recorded' }, 'cost');
     assert.match(cells.cost.textContent, /CAD UNAVAILABLE — no transcripts are recorded/,
       `an absent cost projection was not stated as explicitly unavailable: ${cells.cost.textContent}`);
-    assertCellStates(cells.checkpoint, 'UNAVAILABLE', 'checkpoint');
+    assertCellStates(cells.checkpoint, { state: 'UNAVAILABLE', plain: 'Not recorded' }, 'checkpoint');
     assert.match(cells.checkpoint.textContent, /LAST SAFE CHECKPOINT/);
     assert.match(cells.checkpoint.textContent, /No run is active\./);
 
@@ -7127,26 +7136,28 @@ async function asyncTests() {
     renderMinimizedStatus(page, supervisionStatusFixture(RECORDED_SUPERVISION_BUILD,
       '2026-09-02T10:10:00.000Z'));
     cells = opsCells(page);
-    assertCellStates(cells['run-state'], 'RUNNING', 'run state');
+    assertCellStates(cells['run-state'], { state: 'RUNNING', plain: 'Running' }, 'run state');
     assert.match(cells['run-state'].textContent, /Builder is running/,
       `the strip did not repaint the running run state: ${cells['run-state'].textContent}`);
-    assertCellStates(cells.progress, 'PROGRESS_RECORDED', 'progress');
+    assertCellStates(cells.progress,
+      { state: 'PROGRESS_RECORDED', plain: 'Activity recorded' }, 'progress');
     assert.match(cells.progress.textContent,
       /Builder changed a file it is authorized to write — last real progress 2026-09-02T10:04:00\.000Z\./,
       `the strip did not state real progress: ${cells.progress.textContent}`);
     assert.match(cells.progress.textContent,
       /Supervisor heartbeat 2026-09-02T10:09:59\.000Z is liveness only, never progress/,
       `the strip merged the heartbeat into progress: ${cells.progress.textContent}`);
-    assertCellStates(cells.watchdog, 'RECORDED', 'watchdog');
+    assertCellStates(cells.watchdog, { state: 'RECORDED', plain: 'Limits recorded' }, 'watchdog');
     assert.match(cells.watchdog.textContent,
       /Fixed no-progress watchdog: the build is stopped after 300s without real progress · fixed wall-clock limit 900s\./,
       `the strip omitted the fixed watchdog limits: ${cells.watchdog.textContent}`);
     assert.match(cells.watchdog.textContent, /Timeout: none recorded/);
     // This projection carries no cost envelope at all, which is not zero.
-    assertCellStates(cells.cost, 'UNAVAILABLE', 'cost');
+    assertCellStates(cells.cost, { state: 'UNAVAILABLE', plain: 'Not recorded' }, 'cost');
     assert.match(cells.cost.textContent, /CAD UNAVAILABLE/);
     assert.ok(!/CAD 0|\$0/.test(cells.cost.textContent), 'a missing cost projection was rendered as zero');
-    assertCellStates(cells.checkpoint, { state: 'NOT_RECORDED', chip: 'UNAVAILABLE' }, 'checkpoint');
+    assertCellStates(cells.checkpoint,
+      { state: 'NOT_RECORDED', chip: 'UNAVAILABLE', plain: 'Not recorded' }, 'checkpoint');
     assert.match(cells.checkpoint.textContent, /No safe checkpoint is recorded for this run\./);
   });
 
@@ -7160,14 +7171,15 @@ async function asyncTests() {
     const page = bootPage(fixtureState(), { status });
     for (let i = 0; i < 10; i++) await Promise.resolve();
     const cells = opsCells(page);
-    assertCellStates(cells.progress, 'PROGRESS_UNRECORDED', 'progress');
+    assertCellStates(cells.progress,
+      { state: 'PROGRESS_UNRECORDED', plain: 'No activity recorded' }, 'progress');
     assert.match(cells.progress.textContent, /No real builder progress is recorded for this attempt/);
     assert.match(cells.progress.textContent, /liveness rests on the supervisor heartbeat alone/);
     assert.ok(!/last real progress 2026/.test(cells.progress.textContent),
       'the strip back-filled an absent progress timestamp');
     // The watchdog has not fired, and the strip says exactly that rather than
     // implying the build is fine.
-    assertCellStates(cells.watchdog, 'RECORDED', 'watchdog');
+    assertCellStates(cells.watchdog, { state: 'RECORDED', plain: 'Limits recorded' }, 'watchdog');
     assert.match(cells.watchdog.textContent, /Timeout: none recorded/);
   });
 
@@ -7188,14 +7200,14 @@ async function asyncTests() {
     const page = bootPage(fixtureState(), { status });
     for (let i = 0; i < 10; i++) await Promise.resolve();
     const cells = opsCells(page);
-    assertCellStates(cells.watchdog, 'TIMED_OUT', 'watchdog');
+    assertCellStates(cells.watchdog, { state: 'TIMED_OUT', plain: 'Timed out' }, 'watchdog');
     assert.match(cells.watchdog.textContent,
       /Timeout: NO_PROGRESS_TIMEOUT — Stopped because no real builder progress was observed inside the fixed no-progress limit/,
       `the strip did not name the canonical stop reason: ${cells.watchdog.textContent}`);
-    assertCellStates(cells.progress, 'TIMED_OUT', 'progress');
+    assertCellStates(cells.progress, { state: 'TIMED_OUT', plain: 'Timed out' }, 'progress');
     // A run record still saying BUILDING against a terminal exit is a
     // contradiction the control plane already resolves; the strip repeats it.
-    assertCellStates(cells['run-state'], 'BLOCKED', 'run state');
+    assertCellStates(cells['run-state'], { state: 'BLOCKED', plain: 'Needs attention' }, 'run state');
     assert.match(cells['run-state'].textContent, /recorded terminal exit 124/);
   });
 
@@ -7207,9 +7219,9 @@ async function asyncTests() {
     const page = bootPage(fixtureState(), { status });
     for (let i = 0; i < 10; i++) await Promise.resolve();
     const cells = opsCells(page);
-    assertCellStates(cells.progress, 'UNAVAILABLE', 'progress');
+    assertCellStates(cells.progress, { state: 'UNAVAILABLE', plain: 'Not recorded' }, 'progress');
     assert.match(cells.progress.textContent, /Builder supervision UNAVAILABLE/);
-    assertCellStates(cells.watchdog, 'UNAVAILABLE', 'watchdog');
+    assertCellStates(cells.watchdog, { state: 'UNAVAILABLE', plain: 'Not recorded' }, 'watchdog');
     assert.match(cells.watchdog.textContent, /Watchdog limits UNAVAILABLE/,
       `an absent watchdog limit was not stated as unavailable: ${cells.watchdog.textContent}`);
     assert.ok(!/300s|900s|AUTHORIZED_WRITE/.test(cells.watchdog.textContent + cells.progress.textContent),
@@ -7226,10 +7238,11 @@ async function asyncTests() {
     const page = bootPage(fixtureState(), { status });
     for (let i = 0; i < 10; i++) await Promise.resolve();
     const cells = opsCells(page);
-    assertCellStates(cells.cost, { state: 'RECORDED', chip: 'AVAILABLE' }, 'cost');
+    assertCellStates(cells.cost, { state: 'RECORDED', chip: 'AVAILABLE', plain: 'Recorded' }, 'cost');
     assert.match(cells.cost.textContent, /CAD 3\.38/,
       `the recorded CAD figure is missing from the strip: ${cells.cost.textContent}`);
-    assertCellStates(cells.checkpoint, { state: 'RECORDED', chip: 'AVAILABLE' }, 'checkpoint');
+    assertCellStates(cells.checkpoint,
+      { state: 'RECORDED', chip: 'AVAILABLE', plain: 'Recorded' }, 'checkpoint');
     assert.match(cells.checkpoint.textContent,
       new RegExp('Checkpoint CKPT-2026-09-02 · rollback commit ' + 'f'.repeat(40)),
       `the recorded checkpoint is missing from the strip: ${cells.checkpoint.textContent}`);
@@ -7251,6 +7264,50 @@ async function asyncTests() {
     assert.ok(stripText.length > 0, 'the strip rendered nothing to inspect');
     for (const [kind, sentinel] of Object.entries(HOSTILE_WORKER_OUTPUT)) {
       assert.ok(!stripText.includes(sentinel), `the status strip rendered ${kind} worker output`);
+    }
+  });
+
+  // The five badges are read by the owner, not by a machine. PROGRESS_UNRECORDED,
+  // TIMED_OUT and UNAVAILABLE are precise and unreadable, and a badge nobody can
+  // read is a badge nobody acts on. The canonical token still has to be here —
+  // in the machine attribute and on the chip — or the plain word becomes the
+  // only record of what the evidence actually said.
+  await atest('DOM: the five strip badges read in plain English and keep their exact codes', async () => {
+    const status = supervisionStatusFixture(Object.assign({}, RECORDED_SUPERVISION_BUILD, {
+      supervision: Object.assign({}, RECORDED_SUPERVISION_BUILD.supervision, {
+        progressState: 'UNRECORDED', progressKind: null, progressSummary: null, lastProgressAt: null,
+        progressReason: 'No real builder progress is recorded for this attempt.',
+      }),
+    }), '2026-09-02T10:12:00.000Z');
+    const page = bootPage(fixtureState(), { status });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    for (const [id, cell] of Object.entries(opsCells(page))) {
+      const chipNode = (cell.children || []).find((c) => String(c.className).includes('chip'));
+      const word = chipNode.children[1].textContent;
+      assert.ok(!/[A-Z]{2,}|_/.test(word), `the ${id} badge still reads as a machine code: ${word}`);
+      const token = cell.attrs['data-ops-state'];
+      assert.ok(/^[A-Z_]+$/.test(token), `the ${id} cell lost its canonical state token`);
+      assert.match(chipNode.attrs.title, /^Canonical state code: [A-Z_]+$/,
+        `the ${id} badge does not keep its exact canonical code accessible`);
+    }
+  });
+
+  // A token this page has never seen must not be smoothed into a friendly word.
+  // The strip is fed resolutions, so the unmapped case is proved through the
+  // same seam the renderer uses rather than through an invented fixture state.
+  await atest('an unmapped canonical token stays visibly unknown with its exact code', async () => {
+    const page = bootPage(fixtureState());
+    const unknown = 'FUTURE_STATE_TOKEN';
+    const panel = { state: unknown, chip: unknown, value: 'a resolved sentence' };
+    const cells = page.sandbox.AEGIS_DASHBOARD.opsStripCells(
+      { state: unknown, plain: 'a resolved sentence' },
+      { state: unknown, watchdogState: unknown, headline: 'h', watchdog: 'w', timeout: 't' },
+      panel, panel);
+    assert.strictEqual(cells.length, 5, 'the strip no longer resolves exactly five cells');
+    for (const cell of cells) {
+      assert.strictEqual(cell.state, unknown, `the ${cell.id} cell rewrote its canonical state`);
+      assert.strictEqual(cell.chipPlain, 'Unknown state ' + unknown,
+        `the ${cell.id} cell invented a readable word for an unmapped code: ${cell.chipPlain}`);
     }
   });
 

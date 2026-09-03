@@ -3538,6 +3538,36 @@
   function opsCellState(value){
     return typeof value === 'string' && value.trim() ? value : 'UNAVAILABLE';
   }
+  // The word the operator reads. The canonical token is unchanged and stays in
+  // data-ops-state and on the chip's exact-code title; only the wording differs,
+  // and a token this closed map does not name stays visibly unknown with its
+  // exact code in the label itself.
+  var OPS_CHIP_PLAIN = {
+    'run-state': { RUNNING: 'Running', WAITING: 'Waiting', BLOCKED: 'Needs attention',
+      COMPLETE: 'Finished', UNVERIFIED: 'Not confirmed', IDLE: 'Nothing running',
+      UNAVAILABLE: 'Not recorded' },
+    progress: { PROGRESS_RECORDED: 'Activity recorded', PROGRESS_UNRECORDED: 'No activity recorded',
+      TIMED_OUT: 'Timed out', NOT_RUNNING: 'Nothing running', UNAVAILABLE: 'Not recorded' },
+    watchdog: { RECORDED: 'Limits recorded', TIMED_OUT: 'Timed out',
+      NOT_RUNNING: 'Nothing running', UNAVAILABLE: 'Not recorded' },
+    cost: { AVAILABLE: 'Recorded', INCOMPLETE: 'Incomplete estimate', STALE: 'Older estimate',
+      UNAVAILABLE: 'Not recorded' },
+    checkpoint: { AVAILABLE: 'Recorded', INCOMPLETE: 'Incomplete record',
+      BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded' }
+  };
+  function opsChipLabel(id, token){
+    var known = OPS_CHIP_PLAIN[id] || {};
+    return known[token] || ('Unknown state ' + token);
+  }
+  // The same chip shape used everywhere — colour, glyph and a written word — with
+  // the plain word in front and the exact canonical code carried in the title.
+  function opsChip(token, label){
+    var c = el('span','chip s-'+token);
+    c.setAttribute('title','Canonical state code: '+token);
+    c.appendChild(el('span','g', GLYPH[token] || '?'));
+    c.appendChild(el('span',null,label));
+    return c;
+  }
   function opsStripCells(control, supervision, costPanel, checkpointPanel){
     return [
       { id: 'run-state', label: 'RUN STATE',
@@ -3555,12 +3585,15 @@
       { id: 'checkpoint', label: 'LAST SAFE CHECKPOINT',
         state: opsCellState(checkpointPanel.state), chip: opsCellState(checkpointPanel.chip),
         value: opsCellText(checkpointPanel.value) }
-    ];
+    ].map(function(cell){
+      cell.chipPlain = opsChipLabel(cell.id, cell.chip);
+      return cell;
+    });
   }
 
-  // Text, shape and state word in every cell. The canonical token is written
-  // out as the chip label and repeated as a machine attribute; the border
-  // emphasis in the stylesheet adds nothing that these words do not say.
+  // Text, shape and state word in every cell. The chip reads in plain English,
+  // the canonical token is repeated as a machine attribute and kept exact on the
+  // chip title; the border emphasis adds nothing that these words do not say.
   function renderOpsStrip(cells){
     var host = $('ops-strip-cells'); if (!host) return;
     host.textContent = '';
@@ -3569,7 +3602,7 @@
       node.setAttribute('data-ops-cell', cell.id);
       node.setAttribute('data-ops-state', cell.state);
       node.appendChild(el('div','ops-label',cell.label));
-      node.appendChild(chip(cell.chip));
+      node.appendChild(opsChip(cell.chip, cell.chipPlain));
       node.appendChild(el('div','ops-value',cell.value));
       host.appendChild(node);
     });
