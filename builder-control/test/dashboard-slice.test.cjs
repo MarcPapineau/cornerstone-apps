@@ -1812,6 +1812,102 @@ test('DOM: a run with no routing evidence states UNAVAILABLE and names no model'
     'an idle dashboard claims a routing decision it does not have');
 });
 
+// ── LIVE EVIDENCE — the live surface must name what it is actually made of ─
+// "Live" here means exactly one thing: the canonical run record changed. The
+// card may therefore report only the two facts aegis-run writes down — the
+// updatedAt stamp of the last lifecycle event and the ledger's transition
+// counter — and must say UNAVAILABLE when either is missing or unusable. The
+// failure this guards is a card that reads the browser clock and presents it as
+// evidence of a running build.
+function liveEvidenceFixture(run) {
+  return fixtureState({
+    generatedAt: '2026-09-02T12:10:00.000Z',
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt || null,
+      reason: 'exact current run is bound',
+    } },
+  });
+}
+
+// The card is label + value; the rendered claim under test is the value.
+function liveEvidenceText(page) {
+  const card = operatorFields(page).find((node) => node.attrs['data-operator-field'] === 'live-evidence');
+  assert.ok(card, 'the LIVE EVIDENCE card is missing from the pilot deck');
+  assert.strictEqual(card.firstChild.textContent, 'LIVE EVIDENCE',
+    'the live evidence instrument lost its founder-readable label');
+  return card.lastChild.textContent;
+}
+
+test('the live evidence instrument is one pilot card beside CURRENT ACTION with no clock of its own', () => {
+  const grid = code.slice(code.indexOf("commandGrid.appendChild(commandCard('CREW / MODEL'"),
+    code.indexOf('host.appendChild(commandGrid)'));
+  assert.strictEqual((grid.match(/commandCard\('LIVE EVIDENCE'/g) || []).length, 1,
+    'the live evidence instrument must appear exactly once in the primary pilot deck');
+  assert.ok(grid.indexOf("commandCard('CURRENT ACTION'") < grid.indexOf("commandCard('LIVE EVIDENCE'") &&
+    grid.indexOf("commandCard('LIVE EVIDENCE'") < grid.indexOf("commandCard('NEXT STEP'"),
+    'the live evidence instrument was separated from CURRENT ACTION by other pilot cards');
+  const fn = code.slice(code.indexOf('function liveEvidence'), code.indexOf('function missionHeadline'));
+  assert.ok(fn.length > 0, 'no liveEvidence() boundary found');
+  assert.ok(/run\.updatedAt/.test(fn), 'the lifecycle event time is not read from run.updatedAt');
+  assert.ok(/run\.transitions/.test(fn), 'the transition count is not read from the canonical run record');
+  assert.ok(!/Date\.now\s*\(/.test(fn), 'the live card reads the browser clock instead of the run record');
+  const executable = fn.replace(/\/\/[^\n]*/g, '');
+  for (const invented of ['setInterval', 'setTimeout', 'heartbeatAt', 'progress', 'percent', 'score', 'fetch']) {
+    assert.ok(!new RegExp(invented, 'i').test(executable),
+      `the live evidence instrument invents a "${invented}" mechanism the run record does not carry`);
+  }
+});
+
+test('DOM: a completed run reports its exact recorded lifecycle time and transition count', () => {
+  const page = bootPage(liveEvidenceFixture({
+    runId: 'RUN-LIVE-EVIDENCE', state: 'CHECKPOINTED',
+    objective: 'Show the founder what the live surface is based on',
+    updatedAt: '2026-09-02T12:09:30.000Z', transitions: 7,
+  }));
+  assert.strictEqual(liveEvidenceText(page),
+    'Last recorded lifecycle event: 2026-09-02T12:09:30.000Z. Recorded transitions: 7. ' +
+    'This card reads the canonical run record only; it is not a heartbeat.',
+    'the recorded lifecycle evidence was not rendered exactly as the run record wrote it');
+});
+
+test('DOM: an active run reports the same two recorded facts, including a zero transition count', () => {
+  const page = bootPage(liveEvidenceFixture({
+    runId: 'RUN-LIVE-EVIDENCE-ACTIVE', state: 'BUILDING',
+    objective: 'Prove an active run reports recorded evidence, not elapsed time',
+    updatedAt: '2026-09-02T12:00:00.000Z', transitions: 0,
+    build: { mode: 'async', status: 'RUNNING', startedAt: '2026-09-02T11:59:00.000Z', endedAt: null },
+  }));
+  assert.strictEqual(liveEvidenceText(page),
+    'Last recorded lifecycle event: 2026-09-02T12:00:00.000Z. Recorded transitions: 0. ' +
+    'This card reads the canonical run record only; it is not a heartbeat.',
+    'a recorded zero transition count must be reported as 0, never as an absence');
+});
+
+test('DOM: missing or invalid lifecycle evidence is reported as UNAVAILABLE, never reconstructed', () => {
+  const invalid = bootPage(liveEvidenceFixture({
+    runId: 'RUN-LIVE-EVIDENCE-INVALID', state: 'BUILDING',
+    objective: 'Prove unusable evidence is refused',
+    updatedAt: 'not-a-timestamp', transitions: 'several',
+  }));
+  assert.strictEqual(liveEvidenceText(invalid),
+    'Last recorded lifecycle event: UNAVAILABLE. Recorded transitions: UNAVAILABLE. ' +
+    'This card reads the canonical run record only; it is not a heartbeat.',
+    'unparseable lifecycle evidence was rendered as if it were a fact');
+
+  const missing = bootPage(liveEvidenceFixture({
+    runId: 'RUN-LIVE-EVIDENCE-MISSING', state: 'BUILT',
+    objective: 'Prove absent evidence is refused',
+  }));
+  assert.strictEqual(liveEvidenceText(missing),
+    'Last recorded lifecycle event: UNAVAILABLE. Recorded transitions: UNAVAILABLE. ' +
+    'This card reads the canonical run record only; it is not a heartbeat.',
+    'absent lifecycle evidence produced something other than an honest absence');
+
+  assert.strictEqual(liveEvidenceText(bootPage(fixtureState())),
+    'No canonical run is recorded, so live evidence is UNAVAILABLE.',
+    'an idle dashboard claims live evidence it does not have');
+});
+
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────
 // The panel used to render once from the generated snapshot and never again,
 // so a founder watching the page saw an old objective and an old verdict

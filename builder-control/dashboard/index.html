@@ -1210,6 +1210,23 @@
     return 'Checkpoint ' + checkpoint + ' is recorded; rollback commit UNAVAILABLE.';
   }
 
+  // What "live" on this page is actually made of. Two facts, both read straight
+  // off the canonical run record: the updatedAt stamp aegis-run wrote for the
+  // last lifecycle event, and the transition counter the ledger keeps. There is
+  // no clock, no poll, no derived freshness here — a value the record does not
+  // carry, or one that cannot be parsed as a time or counted as a whole number,
+  // is reported as UNAVAILABLE rather than filled in from the browser's own
+  // sense of time, which is exactly what a "live" label invites.
+  function liveEvidence(run){
+    if (!run) return 'No canonical run is recorded, so live evidence is UNAVAILABLE.';
+    var at = typeof run.updatedAt === 'string' && Number.isFinite(Date.parse(run.updatedAt))
+      ? run.updatedAt : 'UNAVAILABLE';
+    var count = Number.isInteger(run.transitions) && run.transitions >= 0
+      ? String(run.transitions) : 'UNAVAILABLE';
+    return 'Last recorded lifecycle event: ' + at + '. Recorded transitions: ' + count +
+      '. This card reads the canonical run record only; it is not a heartbeat.';
+  }
+
   function missionHeadline(objective){
     var exact = typeof objective === 'string' ? objective.trim().replace(/\s+/g, ' ') : '';
     if (!exact) return 'No current mission is recorded.';
@@ -1662,6 +1679,9 @@
     // active build never shows a worker without its recorded routing evidence.
     commandGrid.appendChild(commandCard('WHY THIS MODEL / TOOL', routing, 'is-routing'));
     commandGrid.appendChild(commandCard('CURRENT ACTION', currentAction, 'is-now'));
+    // Kept immediately beside CURRENT ACTION so the recorded evidence the live
+    // surface rests on is read at the same moment as the claim it supports.
+    commandGrid.appendChild(commandCard('LIVE EVIDENCE', liveEvidence(boundRun), 'is-live-evidence'));
     commandGrid.appendChild(commandCard('NEXT STEP', deckActions.join(' '), 'is-next'));
     commandGrid.appendChild(commandCard('BLOCKER', operatorBlocker,
       blockerClear ? 'is-clear' : 'is-blocked'));
