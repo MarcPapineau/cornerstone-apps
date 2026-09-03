@@ -72,7 +72,21 @@ const API_POST_ROUTES = {
   '/api/retry': 'retry',
   '/api/checks': 'checks',
   '/api/review-bind': 'review-bind',
+  '/api/research-approve': 'research-approve',
+  '/api/research-park': 'research-park',
+  '/api/research-reject': 'research-reject',
 };
+
+// The decision word lives HERE, in a server-owned table keyed by route, and
+// never in a request body. A browser chooses which of three named endpoints to
+// call; it cannot post a verdict, a report, a packet, an objective, a proposal
+// or a hash. Approve, park and reject are three distinct recorded decisions,
+// so they are three distinct routes rather than one route with a parameter.
+const API_RESEARCH_DECISION_ROUTES = Object.freeze({
+  '/api/research-approve': 'APPROVE',
+  '/api/research-park': 'PARK',
+  '/api/research-reject': 'REJECT',
+});
 
 // The ONLY packet objective intake may build a run against. It never comes
 // from the POSTed body — normalizeObjective already refuses a `packet` key —
@@ -460,6 +474,30 @@ function parseRunIdBody(body) {
     throw new AegisRun.AegisControlError('INVALID_REQUEST', 'runId must be a non-empty string', 400);
   }
   return body.runId;
+}
+
+// The same single-field discipline as parseRunIdBody, for the same reason. A
+// decision body names ONE recommendation; everything else the receipt binds —
+// the report, its Notion page id, its digest, the recommendation digest, the
+// proposal — is re-read from canonical evidence by the decision authority. A
+// body carrying a second key is refused rather than ignored.
+const PUBLIC_RECOMMENDATION_ID_RE = /^REC-[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
+
+function parseRecommendationIdBody(body) {
+  if (!isPlainObjectBody(body)) {
+    throw new AegisRun.AegisControlError('INVALID_REQUEST', 'request body must be a JSON object', 400);
+  }
+  const keys = Object.keys(body);
+  if (keys.length !== 1 || keys[0] !== 'recommendationId') {
+    throw new AegisRun.AegisControlError('INVALID_REQUEST',
+      `a decision body must contain exactly one field ("recommendationId"); got: ${keys.join(', ') || 'none'}`, 400);
+  }
+  if (typeof body.recommendationId !== 'string' ||
+      !PUBLIC_RECOMMENDATION_ID_RE.test(body.recommendationId)) {
+    throw new AegisRun.AegisControlError('INVALID_REQUEST',
+      'recommendationId must be a canonical REC- identifier', 400);
+  }
+  return body.recommendationId;
 }
 
 // Every value on this surface is stripped to the fields a browser panel
@@ -890,6 +928,142 @@ function minimizeReviewFailure(value) {
   };
 }
 
+// ── the Monday research report and Marc's decision queue, minimized ─────────
+// The projector already validated this artifact and already refused it whole
+// if any part failed the contract. Hosting still restates its own allowlist
+// here, for the same reason every other panel has one: WHICH fields reach a
+// browser is a hosting decision, and a field the projector adds later must be
+// added here deliberately, with a visible diff.
+//
+// Two things are checked rather than copied. Every lifecycle word is looked up
+// in the projector's CLOSED vocabulary, so an unrecognised state fails closed
+// instead of travelling verbatim; and every plain-English lifecycle sentence
+// is taken from that same map rather than from the report, so no document
+// prose can describe what AEGIS concluded about a recommendation.
+const PUBLIC_RESEARCH_STATES = new Set(['OK', 'STALE', 'INVALID', 'UNAVAILABLE']);
+const PUBLIC_RESEARCH_DECISION_STATES = new Set(['APPROVED_BY_MARC', 'PARKED', 'REJECTED']);
+const PUBLIC_RESEARCH_COST_STATES = new Set(['RECORDED', 'ESTIMATED', 'UNAVAILABLE']);
+const PUBLIC_RESEARCH_EMPTY_COUNTS = Object.freeze({
+  total: 0, awaitingMarc: 0, approved: 0, parked: 0, rejected: 0,
+});
+
+function knownLifecycle(state) {
+  return typeof state === 'string' &&
+    Object.prototype.hasOwnProperty.call(AegisState.RESEARCH_LIFECYCLE_LABELS, state);
+}
+
+function minimizeResearchCost(cost) {
+  if (!cost || typeof cost !== 'object' || !PUBLIC_RESEARCH_COST_STATES.has(cost.state)) {
+    return { state: 'UNAVAILABLE', display: 'COST UNAVAILABLE', amountUsd: null, basis: null,
+      reason: 'no canonical cost projection travelled with this recommendation' };
+  }
+  return {
+    state: cost.state,
+    display: typeof cost.display === 'string' ? cost.display : 'COST UNAVAILABLE',
+    amountUsd: typeof cost.amountUsd === 'number' && Number.isFinite(cost.amountUsd) ? cost.amountUsd : null,
+    basis: typeof cost.basis === 'string' ? cost.basis : null,
+    reason: typeof cost.reason === 'string' ? cost.reason : null,
+  };
+}
+
+function minimizeResearchRecommendation(item) {
+  if (!item || typeof item !== 'object' || !item.lifecycle ||
+      !knownLifecycle(item.lifecycle.state)) return null;
+  const state = item.lifecycle.state;
+  const decision = item.decision && PUBLIC_RESEARCH_DECISION_STATES.has(item.decision.state)
+    ? item.decision : null;
+  const proposal = decision && decision.proposal ? decision.proposal : null;
+  return {
+    recommendationId: item.recommendationId,
+    title: item.title,
+    whatChanged: item.whatChanged,
+    whyItMatters: item.whyItMatters,
+    marcMustDecide: item.marcMustDecide,
+    evidence: (item.evidence || []).map((link) => ({ label: link.label, url: link.url })),
+    risks: item.risks || [],
+    cost: minimizeResearchCost(item.cost),
+    verification: item.verification
+      ? { verifiedAt: publicTimestamp(item.verification.verifiedAt),
+          verifiedBy: item.verification.verifiedBy, method: item.verification.method }
+      : null,
+    lifecycle: {
+      state,
+      label: AegisState.RESEARCH_LIFECYCLE_LABELS[state],
+      plain: AegisState.RESEARCH_LIFECYCLE_PLAIN[state],
+      source: typeof item.lifecycle.source === 'string' ? item.lifecycle.source : null,
+    },
+    decision: decision
+      ? { state: decision.state, decisionId: decision.decisionId,
+          decidedAt: publicTimestamp(decision.decidedAt), decidedBy: decision.decidedBy,
+          // A proposal travels as a proposal. builderStarted is republished as a
+          // strict boolean so a missing field can never read as "not started"
+          // by accident — it reads false because it was recorded false.
+          proposal: proposal
+            ? { proposalId: proposal.proposalId, state: proposal.state,
+                proposedPacketId: proposal.proposedPacketId, objective: proposal.objective,
+                sourceRecommendationId: proposal.sourceRecommendationId,
+                builderStarted: proposal.builderStarted === true }
+            : null }
+      : null,
+    outcome: item.outcome && knownLifecycle(item.outcome.state)
+      ? { state: item.outcome.state, observedAt: publicTimestamp(item.outcome.observedAt),
+          evidence: item.outcome.evidence || [] }
+      : null,
+    decidable: item.decidable === true,
+    notDecidableReason: typeof item.notDecidableReason === 'string' ? item.notDecidableReason : null,
+  };
+}
+
+function minimizeResearch(research) {
+  const state = research && PUBLIC_RESEARCH_STATES.has(research.state) ? research.state : 'UNAVAILABLE';
+  const reason = research && typeof research.reason === 'string' ? research.reason : null;
+  if (state !== 'OK' && state !== 'STALE') {
+    const closed = reason ||
+      'No verified Monday research report is available, so there is nothing to read and nothing to approve.';
+    return {
+      state, reason: closed, report: null, recommendations: [],
+      decisionsAvailable: false, decisionsUnavailableReason: closed,
+      counts: { ...PUBLIC_RESEARCH_EMPTY_COUNTS },
+    };
+  }
+  const report = research.report || {};
+  const source = Array.isArray(research.recommendations) ? research.recommendations : [];
+  const recommendations = source.map(minimizeResearchRecommendation).filter(Boolean);
+  const counts = research.counts || {};
+  return {
+    state,
+    reason,
+    report: {
+      reportId: report.reportId,
+      title: report.title,
+      weekOf: report.weekOf,
+      notionPageId: report.notionPageId,
+      notionUrl: report.notionUrl,
+      fetchedAt: publicTimestamp(report.fetchedAt),
+      fetchedBy: report.fetchedBy,
+      fetchedAgeMinutes: Number.isInteger(report.fetchedAgeMinutes) ? report.fetchedAgeMinutes : null,
+      thresholdMinutes: Number.isInteger(report.thresholdMinutes) ? report.thresholdMinutes : null,
+      reportSha256: /^[0-9a-f]{64}$/.test(report.reportSha256 || '') ? report.reportSha256 : null,
+    },
+    // A decision is offered only when the projector says so AND every
+    // recommendation it produced survived minimization. A surface that silently
+    // dropped an item is a surface that disagrees with its own authority, and it
+    // must not also be the surface that takes an approval.
+    decisionsAvailable: research.decisionsAvailable === true &&
+      recommendations.length === source.length && recommendations.length > 0,
+    decisionsUnavailableReason: typeof research.decisionsUnavailableReason === 'string'
+      ? research.decisionsUnavailableReason : null,
+    recommendations,
+    counts: {
+      total: Number.isInteger(counts.total) ? counts.total : recommendations.length,
+      awaitingMarc: Number.isInteger(counts.awaitingMarc) ? counts.awaitingMarc : 0,
+      approved: Number.isInteger(counts.approved) ? counts.approved : 0,
+      parked: Number.isInteger(counts.parked) ? counts.parked : 0,
+      rejected: Number.isInteger(counts.rejected) ? counts.rejected : 0,
+    },
+  };
+}
+
 function minimizeApiStatus(snap) {
   const eng = snap.engineering || {};
   const minimizedStages = Array.isArray(eng.stages)
@@ -1031,6 +1205,7 @@ function minimizeApiStatus(snap) {
     runsBinding,
     events,
     knowledge,
+    research: minimizeResearch(snap.research),
   });
 }
 
@@ -1056,6 +1231,7 @@ function buildApiStatus() {
         reason: 'the engineering snapshot is unavailable, so no run could be bound' },
       events: [],
       knowledge: { state: 'UNKNOWN', conflicts: null },
+      research: minimizeResearch(null),
     };
   }
   // AegisState.snapshot captures lifecycle state and worker evidence in one
@@ -1406,6 +1582,18 @@ async function handleApi(req, res, config, pathname, ctx, started, controlAuthor
       return;
     }
 
+    // A founder decision on one research recommendation. The route chooses the
+    // decision word; the body may name only the recommendation. This is a thin
+    // pass-through to the single aegis-run authority that appends the receipt —
+    // hosting records nothing, promotes nothing to canon, and starts nothing.
+    if (Object.prototype.hasOwnProperty.call(API_RESEARCH_DECISION_ROUTES, pathname)) {
+      const decided = AegisRun.recordResearchDecision(
+        parseRecommendationIdBody(body), API_RESEARCH_DECISION_ROUTES[pathname]);
+      sendJson(res, 200, decided, headers);
+      log(req, 200, started);
+      return;
+    }
+
     const runId = parseRunIdBody(body);
     let result;
     if (pathname === '/api/start') result = startGovernedRun(runId, launchWorker);
@@ -1539,6 +1727,8 @@ module.exports = {
   validateConfig, handler, start, sessionFor, SERVABLE, NEVER_SERVE, isNeverServe, LOOPBACK,
   API_STATUS_PATH, API_EVENTS_PATH, API_POST_ROUTES, SWITCHBOARD_PACKET, MAX_API_BODY_BYTES, CSP,
   minimizeApiStatus, buildApiStatus, sanitizePublicText, sanitizePublicValue, parseRunIdBody, checkOrigin,
+  API_RESEARCH_DECISION_ROUTES, parseRecommendationIdBody,
+  minimizeResearch, minimizeResearchRecommendation, minimizeResearchCost,
   resolveCanonicalLedgerFile, GOVERNED_BUILDER, MODEL_ROUTING_POLICY, loadModelRoutingPolicy,
   canonicalWorkerRoute, buildGovernedLaunchSpec, startGovernedRun,
   minimizeWorker, minimizeSupervision,

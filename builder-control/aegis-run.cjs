@@ -1537,6 +1537,174 @@ function persistCanonicalPreHostCheckReceipt(run, receipt) {
   return Object.freeze({ entryId, receiptSha256: receipt.receiptSha256 });
 }
 
+// ── Marc's research decisions ───────────────────────────────────────────────
+// The ONLY way a research recommendation becomes anything other than a
+// recommendation. Nothing an agent proposes becomes build canon by being
+// proposed; it becomes a bounded PROPOSAL when — and only when — Marc records
+// an approval here, and even then no builder starts.
+//
+// Three properties are load-bearing:
+//
+//   * Approve, park and reject are three DISTINCT recorded decisions. None of
+//     them is the absence of another, and none overwrites an earlier one: the
+//     ledger is append-only and the projector reads the FIRST recorded
+//     decision, so a second write cannot quietly reverse the first.
+//   * The decision word is chosen by the CALLER'S ROUTE, not by a request
+//     body. This function accepts a fixed keyword from a closed set; hosting
+//     supplies it from its own route table, so a browser cannot post a verdict.
+//   * The subject is re-read from the canonical projection. A caller names one
+//     recommendation id and nothing else — never a report, a path, a packet, a
+//     hash, an objective or a proposal — so every field bound into the receipt
+//     comes from validated canonical evidence rather than from the request.
+const RESEARCH_DECISION_NOTE_PREFIX = 'aegis-marc-decision-v1:';
+const RESEARCH_DECISIONS = Object.freeze({
+  APPROVE: 'APPROVED', PARK: 'PARKED', REJECT: 'REJECTED',
+});
+
+function researchDecisionStamp(iso) {
+  return iso.replace(/[^0-9]/g, '').slice(0, 14);
+}
+
+function recordResearchDecision(recommendationId, decision) {
+  const AegisState = require('./aegis-state.cjs');
+  if (typeof recommendationId !== 'string' ||
+      !AegisState.RECOMMENDATION_ID_RE.test(recommendationId)) {
+    throw new AegisControlError('INVALID_RECOMMENDATION_ID',
+      'a decision names exactly one canonical recommendation id', 400);
+  }
+  if (!Object.prototype.hasOwnProperty.call(RESEARCH_DECISIONS, decision)) {
+    throw new AegisControlError('INVALID_DECISION',
+      'the decision word comes from the server route, never from a request body', 400);
+  }
+  const recorded = RESEARCH_DECISIONS[decision];
+
+  let projection;
+  try {
+    projection = AegisState.projectResearchReport(Date.now(), {
+      ledgerFile: canonicalLedgerFile(),
+    });
+  }
+  catch {
+    throw new AegisControlError('RESEARCH_REPORT_UNAVAILABLE',
+      'the canonical research-report projection could not be read, so no decision was recorded', 503);
+  }
+  if (!projection || projection.state !== 'OK' || !projection.report) {
+    throw new AegisControlError('RESEARCH_REPORT_UNAVAILABLE',
+      (projection && projection.reason) ||
+      'no current validated research report is available, so there is nothing to decide', 409);
+  }
+  const item = projection.recommendations
+    .find((row) => row.recommendationId === recommendationId);
+  if (!item) {
+    throw new AegisControlError('RECOMMENDATION_NOT_FOUND',
+      'the current validated research report contains no such recommendation', 404);
+  }
+  if (!item.decidable) {
+    throw new AegisControlError('DECISION_ALREADY_RECORDED',
+      item.notDecidableReason || 'this recommendation is not open for a decision', 409);
+  }
+
+  const decidedAt = nowIso();
+  const stamp = researchDecisionStamp(decidedAt);
+  const decisionId = `DEC-${stamp}-${crypto.randomBytes(4).toString('hex')}`;
+  // An approval creates a PROPOSAL and nothing else. It is not a packet file,
+  // it grants no file authority, it declares no allowlist, and builderStarted
+  // is a recorded false rather than an omission — scoping a packet and running
+  // a governed build stay separate, deliberate acts after this point.
+  const proposal = recorded === 'APPROVED' ? Object.freeze({
+    proposalId: `PROP-${stamp}-${crypto.randomBytes(4).toString('hex')}`,
+    state: 'PROPOSED',
+    proposedPacketId: `PKT-PROPOSED-${stamp}-${recommendationId}`,
+    objective: item.title,
+    sourceRecommendationId: recommendationId,
+    sourceReportId: projection.report.reportId,
+    builderStarted: false,
+  }) : null;
+
+  const payload = {
+    version: 'aegis-marc-decision-v1',
+    decisionId,
+    decidedAt,
+    // The AUTHORITY that decided. It is deliberately not the agentId below:
+    // agentId names the process that appended the entry, which is never the
+    // thing that may approve.
+    decidedBy: 'MARC',
+    decision: recorded,
+    reportId: projection.report.reportId,
+    notionPageId: projection.report.notionPageId,
+    reportSha256: projection.report.reportSha256,
+    recommendationId,
+    recommendationSha256: item.recommendationSha256,
+    proposal,
+  };
+  const bundleHash = sha256(JSON.stringify(payload));
+  const entryId = `LED-DECISION-${bundleHash.slice(0, 32)}`;
+  try {
+    appendCanonicalLedgerEntry({
+      entryId,
+      ts: decidedAt,
+      packetId: null,
+      agentId: 'claude-code',
+      gate: 'aegis-marc-decision',
+      status: 'PASS',
+      plane: 'CONTROL',
+      operationId: `${projection.report.reportId}:marc-decision:${recommendationId}`,
+      correlationId: projection.report.reportId,
+      attempt: 1,
+      operation: `Marc recorded ${recorded} for ${recommendationId}`,
+      result: recorded,
+      changed: [],
+      commandsRun: [],
+      testsRun: [],
+      screenshots: [],
+      commitSha: null,
+      bundleHash,
+      evidencePaths: [
+        `research-report:${projection.source}#${projection.report.reportSha256}`,
+        `notion-page:${projection.report.notionPageId}`,
+        `recommendation:${recommendationId}#${item.recommendationSha256}`,
+        ...(proposal ? [`packet-proposal:${proposal.proposalId}`] : []),
+      ],
+      driftChecks: [],
+      notes: RESEARCH_DECISION_NOTE_PREFIX +
+        Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url'),
+    });
+  } catch (error) {
+    throw new AegisControlError('DECISION_LEDGER_REFUSED',
+      `the canonical ledger refused this decision, so nothing was decided: ${String(error.message || error).slice(0, 240)}`,
+      503);
+  }
+  // A decision that cannot be read back did not happen.
+  let ledger;
+  try { ledger = JSON.parse(fs.readFileSync(canonicalLedgerFile(), 'utf8')); }
+  catch {
+    throw new AegisControlError('DECISION_LEDGER_UNREADABLE',
+      'the canonical ledger could not be re-read after this decision was appended', 503);
+  }
+  const persisted = Array.isArray(ledger)
+    ? ledger.filter((entry) => entry && entry.entryId === entryId) : [];
+  if (persisted.length !== 1) {
+    throw new AegisControlError('DECISION_NOT_RECORDED',
+      'the canonical ledger did not retain exactly one entry for this decision', 503);
+  }
+
+  return Object.freeze({
+    decision: recorded,
+    lifecycleState: AegisState.RESEARCH_DECISION_STATES[recorded],
+    decisionId,
+    decidedAt,
+    decidedBy: 'MARC',
+    recommendationId,
+    reportId: projection.report.reportId,
+    entryId,
+    proposal,
+    builderStarted: false,
+    nextAction: recorded === 'APPROVED'
+      ? 'A bounded packet proposal is recorded against this recommendation. No builder was started; scoping the packet and starting a governed build remain separate decisions.'
+      : 'Recorded. Nothing is being built from this recommendation.',
+  });
+}
+
 function loadCanonicalCheckReceipt(checks, expected = {}) {
   const ref = checks && checks.receiptRef;
   if (!ref || !/^LED-CHECK-[0-9a-f]{32}$/.test(ref.entryId || '') ||
@@ -6016,4 +6184,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, bindIndependentReview, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };

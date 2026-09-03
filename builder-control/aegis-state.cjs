@@ -786,6 +786,544 @@ function projectReviewers(now, canonPath = CANON) {
   return { state: 'OK', reviewers };
 }
 
+// ── the Monday research report: a validated projection, never a source ──────
+// Notion stays the document the research agent and Marc actually write. This
+// projector never reaches Notion, never calls a connector, and never composes a
+// recommendation. It reads ONE local artifact — a projection a fetcher wrote —
+// and it refuses that artifact whole unless every field of the contract below
+// is present and well formed.
+//
+// The refusal is deliberately TOTAL. A partly valid report is exactly the shape
+// in which an unchecked item reaches a founder wearing the authority of the
+// verified ones beside it, so one malformed recommendation makes the whole
+// report INVALID and leaves the queue empty rather than quietly shorter.
+//
+// THREE THINGS THIS PROJECTION IS NOT
+//   * It is not canon. A recommendation is a proposal until Marc decides.
+//   * It is not a lifecycle authority. Every state at or past a decision is
+//     read from the canonical append-only ledger, never from the report file.
+//     The report may claim SIGNAL, VERIFIED or RECOMMENDED about its own
+//     research and nothing beyond that, because those are the only three
+//     states an agent can be the evidence for.
+//   * It is not an approval. Nothing here can create a packet or start a
+//     builder; only a recorded decision may propose one, and only aegis-run
+//     may record a decision.
+const RESEARCH_REPORT = path.join(HERE, 'research-report.json');
+const ENV_RESEARCH_REPORT = 'AEGIS_RESEARCH_REPORT';
+// One Monday cycle. A projection older than this is not "the current report"
+// however valid it is, so it is shown as history and offers no decision.
+const RESEARCH_REPORT_STALE_MINUTES = 10080;
+
+// The canonical evidence coordinates. Decisions and build outcomes are ordinary
+// CONTROL-plane ledger entries; there is no second decision store.
+const RESEARCH_DECISION_GATE = 'aegis-marc-decision';
+const RESEARCH_DECISION_NOTE_PREFIX = 'aegis-marc-decision-v1:';
+const RESEARCH_OUTCOME_GATE = 'aegis-research-outcome';
+const RESEARCH_OUTCOME_NOTE_PREFIX = 'aegis-research-outcome-v1:';
+
+// The complete lifecycle vocabulary, and the exact words the surface prints.
+// Nothing outside this map may be rendered as a lifecycle state.
+const RESEARCH_LIFECYCLE_LABELS = Object.freeze({
+  SIGNAL: 'SIGNAL',
+  VERIFIED: 'VERIFIED',
+  RECOMMENDED: 'RECOMMENDED',
+  APPROVED_BY_MARC: 'APPROVED BY MARC',
+  PARKED: 'PARKED',
+  REJECTED: 'REJECTED',
+  BUILT: 'BUILT',
+  VERIFIED_IN_RUNTIME: 'VERIFIED IN RUNTIME',
+  CANON_PROMOTED: 'CANON PROMOTED',
+});
+const RESEARCH_LIFECYCLE_PLAIN = Object.freeze({
+  SIGNAL: 'An agent noticed this. Nobody has checked it, so it is not a recommendation and there is nothing to approve yet.',
+  VERIFIED: 'The claim behind this was checked against the evidence linked below. It is still not a recommendation.',
+  RECOMMENDED: 'Checked, and the research agent recommends doing it. It becomes real work only if you approve it.',
+  APPROVED_BY_MARC: 'You approved this. A bounded packet proposal was recorded against it. No builder was started.',
+  PARKED: 'You parked this. It keeps its evidence, and nothing is being built from it.',
+  REJECTED: 'You rejected this. It is closed, and nothing is being built from it.',
+  BUILT: 'The approved work was built. It has not been observed working in runtime yet.',
+  VERIFIED_IN_RUNTIME: 'The approved work was built and then observed working in runtime.',
+  CANON_PROMOTED: 'The approved work was promoted into build canon.',
+});
+// Which report-declared stages an agent may claim about its own research.
+const RESEARCH_REPORT_STAGES = new Set(['SIGNAL', 'VERIFIED', 'RECOMMENDED']);
+// Which decision word maps onto which lifecycle state.
+const RESEARCH_DECISION_STATES = Object.freeze({
+  APPROVED: 'APPROVED_BY_MARC', PARKED: 'PARKED', REJECTED: 'REJECTED',
+});
+// Build outcomes, ranked so a later-recorded weaker claim can never demote a
+// stronger one that was already recorded against the same approval.
+const RESEARCH_OUTCOME_RANK = Object.freeze({
+  BUILT: 1, VERIFIED_IN_RUNTIME: 2, CANON_PROMOTED: 3,
+});
+
+const RESEARCH_REPORT_ID_RE = /^RR-\d{8}-[a-z0-9][a-z0-9-]{0,31}$/;
+const RECOMMENDATION_ID_RE = /^REC-[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
+const RESEARCH_DECISION_ID_RE = /^DEC-\d{14}-[0-9a-f]{8}$/;
+const RESEARCH_PROPOSAL_ID_RE = /^PROP-\d{14}-[0-9a-f]{8}$/;
+const NOTION_PAGE_ID_RE =
+  /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+const RESEARCH_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+const RESEARCH_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const RESEARCH_SHA256_RE = /^[0-9a-f]{64}$/;
+// Evidence and the source document must be absolute https links. A relative,
+// file: or javascript: link on this surface is either useless or an injection,
+// and there is no third case worth supporting.
+const RESEARCH_LINK_RE = /^https:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]{3,300}$/;
+
+// Control characters are rejected by an explicit code test rather than an
+// escape class, so the rule stays legible in the source that ships it.
+function researchControlChars(value) {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
+}
+
+function researchText(value, max) {
+  return typeof value === 'string' && value.length >= 1 && value.length <= max &&
+    value.trim() === value && !researchControlChars(value);
+}
+
+function researchInstant(value) {
+  return RESEARCH_INSTANT_RE.test(value || '') && Number.isFinite(Date.parse(value));
+}
+
+function unexpectedResearchKeys(value, allowed) {
+  return Object.keys(value).filter((key) => allowed.indexOf(key) === -1);
+}
+
+// A stable byte form for hashing. JSON.stringify alone is not stable across two
+// objects that carry the same fields in a different order, and a decision
+// receipt that binds to an unstable hash binds to nothing.
+function canonicalResearchJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalResearchJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalResearchJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+function researchSha256(value) {
+  return crypto.createHash('sha256').update(canonicalResearchJson(value), 'utf8').digest('hex');
+}
+
+const RESEARCH_REPORT_KEYS = ['contract', 'reportId', 'title', 'weekOf', 'notionPageId',
+  'notionUrl', 'fetchedAt', 'fetchedBy', 'recommendations'];
+const RECOMMENDATION_KEYS = ['recommendationId', 'title', 'stage', 'whatChanged', 'whyItMatters',
+  'marcMustDecide', 'evidence', 'cost', 'risks', 'verification'];
+const RESEARCH_EVIDENCE_KEYS = ['label', 'url'];
+const RESEARCH_VERIFICATION_KEYS = ['verifiedAt', 'verifiedBy', 'method'];
+
+/**
+ * The data contract, expressed as the only function that decides whether a
+ * fetched projection may be shown at all. It returns the list of problems; an
+ * empty list is the sole meaning of "valid". No caller may accept a subset.
+ */
+function validateResearchReport(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return ['the research report projection must be a JSON object'];
+  }
+  const problems = [];
+  const bad = (message) => problems.push(message);
+  for (const key of unexpectedResearchKeys(raw, RESEARCH_REPORT_KEYS)) {
+    bad(`unknown report field "${key}"; the contract is a closed set of fields`);
+  }
+  if (raw.contract !== 'aegis-research-report-v1') {
+    bad('contract must be exactly "aegis-research-report-v1"');
+  }
+  if (!RESEARCH_REPORT_ID_RE.test(raw.reportId || '')) bad('reportId must match RR-YYYYMMDD-<slug>');
+  if (!researchText(raw.title, 200)) bad('title must be a bounded single-line string');
+  if (!RESEARCH_DATE_RE.test(raw.weekOf || '')) bad('weekOf must be a YYYY-MM-DD date');
+  if (typeof raw.notionPageId !== 'string' || !NOTION_PAGE_ID_RE.test(raw.notionPageId.toLowerCase())) {
+    bad('notionPageId must be the 32-character Notion page id of the source document');
+  }
+  if (!RESEARCH_LINK_RE.test(raw.notionUrl || '')) {
+    bad('notionUrl must be an absolute https link to the source document');
+  }
+  if (!researchInstant(raw.fetchedAt)) bad('fetchedAt must be an ISO-8601 UTC instant');
+  if (!researchText(raw.fetchedBy, 120)) {
+    bad('fetchedBy must name what fetched this projection from the source document');
+  }
+  if (!Array.isArray(raw.recommendations) || raw.recommendations.length < 1 ||
+      raw.recommendations.length > 20) {
+    bad('recommendations must be an array of 1 to 20 items');
+    return problems;
+  }
+  const seen = new Set();
+  raw.recommendations.forEach((item, index) => {
+    const at = `recommendations[${index}]`;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      bad(`${at} must be a JSON object`);
+      return;
+    }
+    for (const key of unexpectedResearchKeys(item, RECOMMENDATION_KEYS)) {
+      bad(`${at} carries unknown field "${key}"`);
+    }
+    if (!RECOMMENDATION_ID_RE.test(item.recommendationId || '')) {
+      bad(`${at}.recommendationId must match REC-<id>`);
+    } else if (seen.has(item.recommendationId)) {
+      bad(`${at}.recommendationId "${item.recommendationId}" is not unique in this report`);
+    } else {
+      seen.add(item.recommendationId);
+    }
+    if (!researchText(item.title, 160)) bad(`${at}.title must be a bounded single-line string`);
+    if (!researchText(item.whatChanged, 600)) bad(`${at}.whatChanged must be bounded plain English`);
+    if (!researchText(item.whyItMatters, 600)) bad(`${at}.whyItMatters must be bounded plain English`);
+    if (!researchText(item.marcMustDecide, 400)) {
+      bad(`${at}.marcMustDecide must state, in bounded plain English, what Marc has to decide`);
+    }
+    if (!RESEARCH_REPORT_STAGES.has(item.stage)) {
+      bad(`${at}.stage must be SIGNAL, VERIFIED or RECOMMENDED; every later state is read from the ledger`);
+    }
+    // A recommendation that rests on nothing checked is a signal wearing a
+    // recommendation's clothes, so the contract refuses it rather than
+    // rendering it beside items that were actually verified.
+    if (item.stage === 'SIGNAL') {
+      if (item.verification !== null) bad(`${at}.verification must be null for a SIGNAL`);
+    } else if (!item.verification || typeof item.verification !== 'object' ||
+        Array.isArray(item.verification)) {
+      bad(`${at}.verification is required for ${item.stage}`);
+    } else {
+      for (const key of unexpectedResearchKeys(item.verification, RESEARCH_VERIFICATION_KEYS)) {
+        bad(`${at}.verification carries unknown field "${key}"`);
+      }
+      if (!researchInstant(item.verification.verifiedAt)) {
+        bad(`${at}.verification.verifiedAt must be an ISO-8601 UTC instant`);
+      }
+      if (!researchText(item.verification.verifiedBy, 120)) {
+        bad(`${at}.verification.verifiedBy must name who or what checked this`);
+      }
+      if (!researchText(item.verification.method, 200)) {
+        bad(`${at}.verification.method must state how it was checked`);
+      }
+    }
+    if (!Array.isArray(item.evidence) || item.evidence.length < 1 || item.evidence.length > 10) {
+      bad(`${at}.evidence must carry 1 to 10 links; an unevidenced item is not shown`);
+    } else {
+      item.evidence.forEach((link, linkIndex) => {
+        const linkAt = `${at}.evidence[${linkIndex}]`;
+        if (!link || typeof link !== 'object' || Array.isArray(link)) {
+          bad(`${linkAt} must be a {label, url} object`);
+          return;
+        }
+        for (const key of unexpectedResearchKeys(link, RESEARCH_EVIDENCE_KEYS)) {
+          bad(`${linkAt} carries unknown field "${key}"`);
+        }
+        if (!researchText(link.label, 120)) bad(`${linkAt}.label must be a bounded single-line string`);
+        if (!RESEARCH_LINK_RE.test(link.url || '')) bad(`${linkAt}.url must be an absolute https link`);
+      });
+    }
+    if (!Array.isArray(item.risks) || item.risks.length < 1 || item.risks.length > 8) {
+      bad(`${at}.risks must carry 1 to 8 stated risks; "no risks" is itself a risk statement`);
+    } else {
+      item.risks.forEach((risk, riskIndex) => {
+        if (!researchText(risk, 300)) bad(`${at}.risks[${riskIndex}] must be bounded plain English`);
+      });
+    }
+    const cost = item.cost;
+    if (!cost || typeof cost !== 'object' || Array.isArray(cost)) {
+      bad(`${at}.cost must be a JSON object`);
+    } else if (cost.state === 'RECORDED' || cost.state === 'ESTIMATED') {
+      for (const key of unexpectedResearchKeys(cost, ['state', 'amountUsd', 'basis'])) {
+        bad(`${at}.cost carries unknown field "${key}"`);
+      }
+      if (typeof cost.amountUsd !== 'number' || !Number.isFinite(cost.amountUsd) ||
+          cost.amountUsd < 0 || cost.amountUsd > 1000000) {
+        bad(`${at}.cost.amountUsd must be a finite non-negative US-dollar amount`);
+      }
+      if (!researchText(cost.basis, 300)) bad(`${at}.cost.basis must say where the figure comes from`);
+    } else if (cost.state === 'UNAVAILABLE') {
+      for (const key of unexpectedResearchKeys(cost, ['state', 'reason'])) {
+        bad(`${at}.cost carries unknown field "${key}"`);
+      }
+      if (!researchText(cost.reason, 300)) bad(`${at}.cost.reason must say why no figure exists`);
+    } else {
+      bad(`${at}.cost.state must be RECORDED, ESTIMATED or UNAVAILABLE`);
+    }
+  });
+  return problems;
+}
+
+// ── decisions and outcomes, read from the canonical ledger only ─────────────
+function decodeResearchPayload(entry, prefix) {
+  if (!entry || typeof entry.notes !== 'string' || !entry.notes.startsWith(prefix)) return null;
+  try {
+    return JSON.parse(Buffer.from(entry.notes.slice(prefix.length), 'base64url').toString('utf8'));
+  } catch { return null; }
+}
+
+function validResearchDecisionPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  if (payload.version !== 'aegis-marc-decision-v1') return false;
+  if (!RESEARCH_DECISION_ID_RE.test(payload.decisionId || '')) return false;
+  if (!researchInstant(payload.decidedAt)) return false;
+  // The one authority this receipt may name. A receipt that says anybody else
+  // decided is not a Marc decision and never reaches the queue.
+  if (payload.decidedBy !== 'MARC') return false;
+  if (!Object.prototype.hasOwnProperty.call(RESEARCH_DECISION_STATES, payload.decision)) return false;
+  if (!RESEARCH_REPORT_ID_RE.test(payload.reportId || '')) return false;
+  if (!RECOMMENDATION_ID_RE.test(payload.recommendationId || '')) return false;
+  if (typeof payload.notionPageId !== 'string' ||
+      !NOTION_PAGE_ID_RE.test(payload.notionPageId.toLowerCase())) return false;
+  if (!RESEARCH_SHA256_RE.test(payload.reportSha256 || '')) return false;
+  if (!RESEARCH_SHA256_RE.test(payload.recommendationSha256 || '')) return false;
+  const proposal = payload.proposal;
+  if (payload.decision !== 'APPROVED') return proposal === null;
+  // Only an approval may carry a proposal, and a proposal is a PROPOSAL: it
+  // records what could be built, never that anything was started.
+  return !!proposal && typeof proposal === 'object' && !Array.isArray(proposal) &&
+    RESEARCH_PROPOSAL_ID_RE.test(proposal.proposalId || '') &&
+    proposal.state === 'PROPOSED' &&
+    researchText(proposal.proposedPacketId, 120) &&
+    researchText(proposal.objective, 4000) &&
+    proposal.sourceRecommendationId === payload.recommendationId &&
+    proposal.sourceReportId === payload.reportId &&
+    proposal.builderStarted === false;
+}
+
+function validResearchOutcomePayload(payload) {
+  return !!payload && typeof payload === 'object' && !Array.isArray(payload) &&
+    payload.version === 'aegis-research-outcome-v1' &&
+    Object.prototype.hasOwnProperty.call(RESEARCH_OUTCOME_RANK, payload.outcome) &&
+    RESEARCH_REPORT_ID_RE.test(payload.reportId || '') &&
+    RECOMMENDATION_ID_RE.test(payload.recommendationId || '') &&
+    RESEARCH_DECISION_ID_RE.test(payload.decisionId || '') &&
+    researchInstant(payload.observedAt) &&
+    Array.isArray(payload.evidence) && payload.evidence.length >= 1 &&
+    payload.evidence.length <= 10 &&
+    payload.evidence.every((item) => researchText(item, 300));
+}
+
+// The same schema gate the connector-usage reader uses, for the same reason: an
+// entry the canonical writer would have refused is not weaker evidence of a
+// decision, it is evidence that something wrote around the approved path.
+function normalizeResearchLedgerEvents(entries) {
+  const decisions = [];
+  const outcomes = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.plane !== 'CONTROL' || entry.status !== 'PASS') continue;
+    const isDecision = entry.gate === RESEARCH_DECISION_GATE;
+    const isOutcome = entry.gate === RESEARCH_OUTCOME_GATE;
+    if (!isDecision && !isOutcome) continue;
+    if (validateLedgerEntry(entry).length) continue;
+    if (isDecision) {
+      const payload = decodeResearchPayload(entry, RESEARCH_DECISION_NOTE_PREFIX);
+      if (!validResearchDecisionPayload(payload)) continue;
+      decisions.push({ ...payload, ts: Date.parse(payload.decidedAt), entryId: entry.entryId || null });
+    } else {
+      const payload = decodeResearchPayload(entry, RESEARCH_OUTCOME_NOTE_PREFIX);
+      if (!validResearchOutcomePayload(payload)) continue;
+      outcomes.push({ ...payload, ts: Date.parse(payload.observedAt), entryId: entry.entryId || null });
+    }
+  }
+  return { decisions, outcomes };
+}
+
+function researchLedgerEvents(ledgerFile) {
+  try { return normalizeResearchLedgerEvents(readJSON(ledgerFile || LEDGER)); }
+  catch { return { decisions: [], outcomes: [] }; }
+}
+
+// The FIRST recorded decision is the decision. Approve, park and reject are
+// separate recorded events and none of them overwrites another, so a later
+// entry can never quietly reverse what the ledger already holds; a reversal is
+// a new founder decision, made deliberately, not a silent last-write-wins.
+function firstRecordedDecision(list) {
+  const ordered = list.slice().sort((a, b) =>
+    (a.ts - b.ts)
+    || (a.decisionId > b.decisionId ? 1 : a.decisionId < b.decisionId ? -1 : 0));
+  return ordered.length ? ordered[0] : null;
+}
+
+function strongestOutcome(list) {
+  const ordered = list.slice().sort((a, b) =>
+    (RESEARCH_OUTCOME_RANK[a.outcome] - RESEARCH_OUTCOME_RANK[b.outcome])
+    || (a.ts - b.ts)
+    || (String(a.entryId) > String(b.entryId) ? 1 : String(a.entryId) < String(b.entryId) ? -1 : 0));
+  return ordered.length ? ordered[ordered.length - 1] : null;
+}
+
+function researchCostDisplay(cost) {
+  if (cost.state === 'UNAVAILABLE') return 'COST UNAVAILABLE';
+  const amount = `US$${cost.amountUsd.toFixed(2)}`;
+  return cost.state === 'RECORDED' ? `${amount} recorded` : `${amount} estimated`;
+}
+
+/**
+ * Project the current Monday research report and the decision queue built on
+ * it. Every returned state is one of:
+ *
+ *   OK           a current, validated report with a decidable queue
+ *   STALE        a validated report older than one Monday cycle — readable
+ *                history, and no decision is offered against it
+ *   INVALID      the artifact exists and fails the contract; nothing is shown
+ *   UNAVAILABLE  there is no artifact at all
+ *
+ * `reportPath` and `ledgerFile` inject the two artifacts read here. Both
+ * default to the canonical production path and both are confined by
+ * resolveEvidencePath, so a fixture can never be projected as canonical
+ * evidence.
+ */
+function projectResearchReport(now = Date.now(), opts = {}) {
+  const reportPath = resolveEvidencePath(opts && opts.reportPath, RESEARCH_REPORT, ENV_RESEARCH_REPORT);
+  const ledgerPath = resolveEvidencePath(opts && opts.ledgerFile, LEDGER, null);
+  const source = rel(reportPath);
+  const emptyCounts = { total: 0, awaitingMarc: 0, approved: 0, parked: 0, rejected: 0 };
+  const closed = (state, reason, extra) => ({
+    state, reason, source, report: null, recommendations: [],
+    decisionsAvailable: false, decisionsUnavailableReason: reason,
+    counts: { ...emptyCounts }, ledgerSource: rel(ledgerPath), ...(extra || {}),
+  });
+
+  if (!fs.existsSync(reportPath)) {
+    return closed('UNAVAILABLE',
+      'No verified Monday research report is available. Nothing has been fetched from the source document, ' +
+      'so there is nothing to read and nothing to approve.');
+  }
+  let bytes;
+  let raw;
+  try {
+    bytes = fs.readFileSync(reportPath);
+    raw = JSON.parse(bytes.toString('utf8'));
+  } catch (error) {
+    return closed('INVALID',
+      `The Monday research report projection could not be read: ${error.message}. Nothing is shown from it.`,
+      { problems: [String(error.message)] });
+  }
+  const problems = validateResearchReport(raw);
+  if (problems.length) {
+    return closed('INVALID',
+      `The Monday research report projection failed ${problems.length} contract check(s), so none of it is shown. ` +
+      'A partly valid report would present unchecked items beside checked ones.',
+      { problems });
+  }
+
+  const reportSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  const fetchedAgeMinutes = ageMinutes(raw.fetchedAt, now);
+  if (fetchedAgeMinutes === null || fetchedAgeMinutes < 0) {
+    return closed('INVALID',
+      `The report records a fetch time ("${raw.fetchedAt}") that is dated in the future, so nothing was observed at ` +
+      'it and the report cannot be trusted.',
+      { problems: ['fetchedAt is dated in the future'] });
+  }
+
+  const { decisions, outcomes } = researchLedgerEvents(ledgerPath);
+  const stale = fetchedAgeMinutes > RESEARCH_REPORT_STALE_MINUTES;
+  const staleReason = stale
+    ? `This projection was fetched ${fetchedAgeMinutes} minute(s) ago, older than the ${RESEARCH_REPORT_STALE_MINUTES}-minute ` +
+      'Monday cycle. It is shown as history; approving from an out-of-date report is not offered.'
+    : null;
+
+  const counts = { ...emptyCounts };
+  const recommendations = raw.recommendations.map((item) => {
+    const recommendationSha256 = researchSha256(item);
+    const decision = firstRecordedDecision(decisions.filter((row) =>
+      row.reportId === raw.reportId && row.recommendationId === item.recommendationId));
+    // A build outcome must cite the exact approval it came from. Without that
+    // binding an outcome entry could lift an unapproved item straight to BUILT.
+    const outcome = decision && decision.decision === 'APPROVED'
+      ? strongestOutcome(outcomes.filter((row) =>
+        row.reportId === raw.reportId && row.recommendationId === item.recommendationId &&
+        row.decisionId === decision.decisionId))
+      : null;
+
+    let lifecycleState;
+    let lifecycleSource;
+    if (outcome) {
+      lifecycleState = outcome.outcome;
+      lifecycleSource = `${rel(ledgerPath)}#${outcome.entryId || outcome.decisionId}`;
+    } else if (decision) {
+      lifecycleState = RESEARCH_DECISION_STATES[decision.decision];
+      lifecycleSource = `${rel(ledgerPath)}#${decision.entryId || decision.decisionId}`;
+    } else {
+      lifecycleState = item.stage;
+      lifecycleSource = source;
+    }
+    if (!decision) counts.awaitingMarc += 1;
+    else if (decision.decision === 'APPROVED') counts.approved += 1;
+    else if (decision.decision === 'PARKED') counts.parked += 1;
+    else counts.rejected += 1;
+    counts.total += 1;
+
+    const notDecidableReason = stale
+      ? staleReason
+      : (decision
+        ? `You already recorded ${RESEARCH_LIFECYCLE_LABELS[RESEARCH_DECISION_STATES[decision.decision]]} for this on ` +
+          `${decision.decidedAt}. Decisions are appended, never overwritten.`
+        : null);
+
+    return {
+      recommendationId: item.recommendationId,
+      title: item.title,
+      whatChanged: item.whatChanged,
+      whyItMatters: item.whyItMatters,
+      marcMustDecide: item.marcMustDecide,
+      evidence: item.evidence.map((link) => ({ label: link.label, url: link.url })),
+      risks: [...item.risks],
+      cost: { ...item.cost, display: researchCostDisplay(item.cost) },
+      verification: item.verification
+        ? { verifiedAt: item.verification.verifiedAt, verifiedBy: item.verification.verifiedBy,
+            method: item.verification.method }
+        : null,
+      reportedStage: item.stage,
+      lifecycle: {
+        state: lifecycleState,
+        label: RESEARCH_LIFECYCLE_LABELS[lifecycleState],
+        plain: RESEARCH_LIFECYCLE_PLAIN[lifecycleState],
+        source: lifecycleSource,
+      },
+      decision: decision
+        ? { state: RESEARCH_DECISION_STATES[decision.decision], decisionId: decision.decisionId,
+            decidedAt: decision.decidedAt, decidedBy: decision.decidedBy,
+            entryId: decision.entryId,
+            proposal: decision.proposal
+              ? { proposalId: decision.proposal.proposalId, state: decision.proposal.state,
+                  proposedPacketId: decision.proposal.proposedPacketId,
+                  objective: decision.proposal.objective,
+                  sourceRecommendationId: decision.proposal.sourceRecommendationId,
+                  builderStarted: decision.proposal.builderStarted }
+              : null }
+        : null,
+      outcome: outcome
+        ? { state: outcome.outcome, observedAt: outcome.observedAt,
+            decisionId: outcome.decisionId, evidence: [...outcome.evidence],
+            entryId: outcome.entryId }
+        : null,
+      decidable: !stale && !decision,
+      notDecidableReason,
+      recommendationSha256,
+      source,
+    };
+  });
+
+  return {
+    state: stale ? 'STALE' : 'OK',
+    reason: staleReason,
+    source,
+    ledgerSource: rel(ledgerPath),
+    report: {
+      reportId: raw.reportId,
+      title: raw.title,
+      weekOf: raw.weekOf,
+      notionPageId: raw.notionPageId,
+      notionUrl: raw.notionUrl,
+      fetchedAt: raw.fetchedAt,
+      fetchedBy: raw.fetchedBy,
+      fetchedAgeMinutes,
+      thresholdMinutes: RESEARCH_REPORT_STALE_MINUTES,
+      reportSha256,
+    },
+    decisionsAvailable: !stale,
+    decisionsUnavailableReason: staleReason,
+    recommendations,
+    counts,
+  };
+}
+
 // ── engineering state (the gate's own verdict — never re-judged here) ───────
 function unavailableEngineering(reason, context = {}) {
   const runs = Array.isArray(context.runs) ? context.runs : [];
@@ -2285,6 +2823,22 @@ function snapshot(args, deps = {}) {
         return { state: 'REFUSED', reason: e.message, records: [], conflicts: 0 };
       }
     })(),
+    // A FOURTH plane, separate for the same reason knowledge is separate: a
+    // research recommendation holds no engineering authority, and a decision
+    // Marc has not made is not a gate result. It is projected from its own
+    // validated artifact and from the canonical ledger, and it can neither
+    // darken nor brighten anything above it.
+    research: (() => {
+      try { return projectResearchReport(now, { ledgerFile: deps.ledgerFile, reportPath: deps.researchReportPath }); }
+      catch (e) {
+        // A refused evidence path is a real, reportable state — never omitted,
+        // and never rendered as "no report exists".
+        return { state: 'INVALID', reason: e.message, source: rel(RESEARCH_REPORT),
+          report: null, recommendations: [], decisionsAvailable: false,
+          decisionsUnavailableReason: e.message,
+          counts: { total: 0, awaitingMarc: 0, approved: 0, parked: 0, rejected: 0 } };
+      }
+    })(),
     reviewers,
     cost,
     runs: bindCapturedRuns(
@@ -2364,4 +2918,14 @@ module.exports = {
   resolveEvidencePath, ENV_REGISTRY, REGISTRY, LEDGER,
   RUN_ID_RE,
   ACTIVE_ASYNC_WORKER_STATES,
+  // The Monday research report data contract and its read-only projection.
+  // validateResearchReport is exported so the contract can be proven directly
+  // rather than only through a rendered surface.
+  projectResearchReport, validateResearchReport, canonicalResearchJson, researchSha256,
+  normalizeResearchLedgerEvents, researchLedgerEvents,
+  RESEARCH_REPORT, ENV_RESEARCH_REPORT, RESEARCH_REPORT_STALE_MINUTES,
+  RESEARCH_DECISION_GATE, RESEARCH_DECISION_NOTE_PREFIX,
+  RESEARCH_OUTCOME_GATE, RESEARCH_OUTCOME_NOTE_PREFIX,
+  RESEARCH_LIFECYCLE_LABELS, RESEARCH_LIFECYCLE_PLAIN, RESEARCH_DECISION_STATES,
+  RECOMMENDATION_ID_RE, RESEARCH_REPORT_ID_RE, RESEARCH_DECISION_ID_RE, RESEARCH_PROPOSAL_ID_RE,
 };
