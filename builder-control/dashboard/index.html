@@ -99,6 +99,14 @@
   .cost-total{font-variant-numeric:tabular-nums;font-size:1.05rem;font-weight:600}
   .cost-caveat{color:var(--warn);font-size:.8rem;line-height:1.45}
   .cost-auth{color:var(--muted);font-size:.8rem}
+  /* Recorded spend and unrecorded runs are the same panel's two different
+     answers, so they are shaped differently as well as worded differently: the
+     unknown one keeps a warn rule beside it and never sits flat in the muted
+     run of supporting text. Both wrap; neither relies on colour to be read. */
+  .cost-recorded,.cost-unrecorded{font:600 .72rem/1.5 var(--mono);letter-spacing:.06em;
+    overflow-wrap:anywhere}
+  .cost-recorded{color:var(--text-1)}
+  .cost-unrecorded{color:var(--warn);border-left:2px solid var(--warn);padding-left:7px}
   .stage{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:calc(var(--sp)*3);
     align-items:center;padding:calc(var(--sp)*3);border:1px solid transparent;
     border-radius:var(--radius);cursor:pointer;background:none;color:inherit;
@@ -240,7 +248,11 @@
   .command-card.is-blocked{border-color:rgba(229,72,77,.45);box-shadow:inset 3px 0 0 var(--fail)}
   .command-card.is-clear{border-color:rgba(63,185,138,.45);box-shadow:inset 3px 0 0 var(--pass)}
   .command-label{font:600 10px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--text-2)}
-  .command-value{font-size:14px;line-height:1.45;margin-top:calc(var(--sp)*2)}
+  /* A pilot card carries canonical identifiers — run ids, checkpoint ids, a
+     40-character rollback commit — inside a half-width grid column. Without
+     this the commit is one unbreakable word and it drags the deck sideways at
+     every desktop width, not only on a phone. */
+  .command-value{font-size:14px;line-height:1.45;margin-top:calc(var(--sp)*2);overflow-wrap:anywhere}
   .deck-heading{display:flex;align-items:center;justify-content:space-between;gap:calc(var(--sp)*3);
     margin:calc(var(--sp)*5) 0 calc(var(--sp)*2)}
   .deck-heading h3{font:600 11px/1.3 var(--mono);letter-spacing:.11em;text-transform:uppercase;color:var(--text-1)}
@@ -1955,8 +1967,28 @@
     return !!(run && typeof run.rollbackPoint === 'string' && ROLLBACK_COMMIT.test(run.rollbackPoint));
   }
 
+  // The founder question behind this instrument is not "what is the receipt
+  // id" — it is "is there a safe state to go back to, and is the way back
+  // recorded". So every answer leads in plain English and the canonical
+  // identifiers follow it, only when the evidence actually carries them.
+  //
+  // Nothing here proposes an action. A recovery route is stated as recorded
+  // evidence, never as a command to run: rollback control is not exposed on
+  // this page, so a blocked or missing route must read as a closed door rather
+  // than as a next step the owner could take.
   function checkpointEvidence(run){
     if (!run) return 'No run is active.';
+    // The canonical projector already judged the receipt. INVALID means one
+    // exists and did not validate, which is materially worse than none at all,
+    // so it fails closed here instead of reporting the absent id below as an
+    // absent checkpoint.
+    if (run.checkpointState === 'INVALID') {
+      return 'A checkpoint receipt exists for this run but AEGIS could not validate it, so no ' +
+        'safe state and no way back can be named. Recorded reason: ' +
+        (typeof run.checkpointReason === 'string' && run.checkpointReason
+          ? run.checkpointReason
+          : 'UNAVAILABLE');
+    }
     var checkpoint = run.checkpoint;
     if (!checkpoint) return 'No safe checkpoint is recorded for this run.';
     // Public /api/status exposes the checkpoint id as a string and the safe
@@ -1966,20 +1998,38 @@
       return 'A checkpoint exists, but its public checkpoint id is UNAVAILABLE.';
     }
     if (rollbackCommitRecorded(run)) {
-      return 'Checkpoint ' + checkpoint + ' · rollback commit ' + run.rollbackPoint;
+      return 'This run has a recorded safe state and a recorded way back. ' +
+        'Checkpoint ' + checkpoint + ' · rollback commit ' + run.rollbackPoint;
     }
-    return 'Checkpoint ' + checkpoint + ' is recorded; rollback commit UNAVAILABLE.';
+    return 'This run reached a safe checkpoint, but no rollback commit is recorded, so there is ' +
+      'no recorded way back. Checkpoint ' + checkpoint + ' is recorded; rollback commit UNAVAILABLE.';
   }
 
-  // The same four facts checkpointEvidence() states in words, as one machine
-  // token. It reads the same fields through the same predicate, so a panel
-  // cannot label a sentence with a state that sentence does not say.
+  // The same five facts checkpointEvidence() states in words, as one machine
+  // token. It reads the same fields through the same predicate and in the same
+  // order, so a panel cannot label a sentence with a state that sentence does
+  // not say.
   function checkpointEvidenceState(run){
     if (!run) return 'UNAVAILABLE';
+    if (run.checkpointState === 'INVALID') return 'BLOCKED';
     if (!run.checkpoint) return 'NOT_RECORDED';
     if (typeof run.checkpoint !== 'string') return 'UNAVAILABLE';
     return rollbackCommitRecorded(run) ? 'RECORDED' : 'ROLLBACK_UNAVAILABLE';
   }
+
+  // The recovery route, named once, for every checkpoint state the page can
+  // reach. Each sentence says what is recorded and stops there — none of them
+  // names a command, a branch, a tool or a step the reader could execute.
+  var RECOVERY_ROUTE_PLAIN = {
+    RECORDED: 'Recovery route: recorded. Restoring it is a governed action AEGIS does not expose here.',
+    ROLLBACK_UNAVAILABLE: 'Recovery route: UNAVAILABLE — this checkpoint records no rollback commit, ' +
+      'so AEGIS cannot name a safe commit to return to.',
+    BLOCKED: 'Recovery route: BLOCKED — the checkpoint receipt did not validate, so no rollback ' +
+      'commit from it can be treated as safe.',
+    NOT_RECORDED: 'Recovery route: UNAVAILABLE — no checkpoint is recorded for this run, so there ' +
+      'is no safe state to return to.',
+    UNAVAILABLE: 'Recovery route: UNAVAILABLE — no checkpoint evidence reached this page.'
+  };
 
   // What "live" on this page is actually made of. Two facts, both read straight
   // off the canonical run record: the updatedAt stamp aegis-run wrote for the
@@ -2646,28 +2696,45 @@
     }
     var cad = cost.cad || { state: 'UNAVAILABLE', reason: 'no CAD projection was produced' };
     var audit = 'Source audit values, as recorded: USD ' + cost.totalUsd + '.';
-    var counts = cost.recordedRuns + ' run(s) reported cost, ' + cost.unrecordedRuns + ' did not.';
+    // Recorded spend and unrecorded runs are two different facts and are read
+    // as two lines, because a single sentence lets the second one disappear
+    // behind the first. An unrecorded run is spend that happened and was never
+    // written down — it is neither zero nor part of the figure above.
+    var counts = [
+      'Recorded spend: ' + cost.recordedRuns + ' run(s) reported what they cost.',
+      cost.unrecordedRuns > 0
+        ? 'UNRECORDED spend: ' + cost.unrecordedRuns + ' run(s) wrote no cost telemetry. That ' +
+          'spend is real and its amount is unknown; it is not zero and it is not in the figure above.'
+        : 'UNRECORDED spend: none — every run in this projection reported what it cost.'
+    ];
     if (cad.state !== 'OK' && cad.state !== 'STALE'){
       return { id: 'cost', title: title, chip: 'UNAVAILABLE', state: 'CAD_UNAVAILABLE',
         value: 'CAD UNAVAILABLE — ' + (cad.reason || 'no dated FX evidence is recorded.'),
-        meta: [audit, counts, COST_SCOPE], list: null };
+        meta: [audit].concat(counts).concat([COST_SCOPE]), list: null };
     }
     var incomplete = cost.unrecordedRuns > 0;
+    // A stale rate is named in the figure itself, not only in the chip beside
+    // it: the number is a dated reading, and it must never be read as today's.
+    var stale = cad.state === 'STALE';
     return { id: 'cost', title: title,
-      chip: cad.state === 'STALE' ? 'STALE' : (incomplete ? 'INCOMPLETE' : 'AVAILABLE'),
+      chip: stale ? 'STALE' : (incomplete ? 'INCOMPLETE' : 'AVAILABLE'),
       state: incomplete ? 'AT_LEAST_RECORDED' : 'RECORDED',
-      value: 'CAD ' + cad.totalCad,
+      value: 'CAD ' + cad.totalCad + (stale
+        ? ' — dated CAD, converted at FX evidence observed ' + (cad.asOf || 'UNAVAILABLE') +
+          ', not a current rate.'
+        : ''),
       meta: [
         'Converted at ' + cad.plain + ' Rate evidence: ' + (cad.source || 'UNKNOWN') + '.',
-        audit, counts
-      ].concat(cost.caveat ? [cost.caveat] : []).concat([COST_SCOPE]), list: null };
+        audit
+      ].concat(counts).concat(cost.caveat ? [cost.caveat] : []).concat([COST_SCOPE]), list: null };
   }
 
   function evidenceCheckpointPanel(run, checkpointText){
     var state = checkpointEvidenceState(run);
     var CHIP = { RECORDED: 'AVAILABLE', ROLLBACK_UNAVAILABLE: 'INCOMPLETE',
-      NOT_RECORDED: 'UNAVAILABLE', UNAVAILABLE: 'UNAVAILABLE' };
+      BLOCKED: 'BLOCKED', NOT_RECORDED: 'UNAVAILABLE', UNAVAILABLE: 'UNAVAILABLE' };
     var meta = [
+      RECOVERY_ROUTE_PLAIN[state] || RECOVERY_ROUTE_PLAIN.UNAVAILABLE,
       'Rollback commit: ' + (rollbackCommitRecorded(run) ? run.rollbackPoint : 'UNAVAILABLE')
     ];
     if (run && run.checkpointState) meta.push('Checkpoint state: ' + run.checkpointState);
@@ -3198,7 +3265,10 @@
       : 'AEGIS cannot confirm an exact code-version binding for the current run.');
     hudText('hud-evidence-state', exactSubjectBound ? 'EXACT SUBJECT BOUND' : 'BINDING UNAVAILABLE');
     hudText('hud-checkpoint', safeCheckpoint);
-    hudText('hud-checkpoint-state', boundRun && boundRun.checkpoint ? 'RECORDED' : 'NOT RECORDED');
+    // The written state comes from the same resolution as the sentence above
+    // it. Reading run.checkpoint directly here would report an unvalidated
+    // receipt as NOT RECORDED while the sentence beside it says BLOCKED.
+    hudText('hud-checkpoint-state', checkpointEvidenceState(boundRun).replace(/_/g, ' '));
     hudText('hud-system-health', cleanIdle ? 'READY FOR AN OBJECTIVE' : controlState.state);
     hudText('hud-system-health-meta', cleanIdle ? 'No active run and no recorded blocker.' : operatorBlocker);
     hudText('hud-decisions', cleanIdle ? 'None right now' : deckActions[0]);
@@ -3595,12 +3665,27 @@
       head.appendChild(el('span','cost-total', 'CAD UNAVAILABLE'));
       head.appendChild(chip('UNAVAILABLE'));
     }
-    head.appendChild(el('span','muted', c.recordedRuns + ' run(s) reported cost, ' + c.unrecordedRuns + ' did not'));
+    // Two counts, two elements, two treatments. Rolled into one grey sentence
+    // the runs that never reported their spend read like a footnote to the
+    // figure, when they are the reason the figure is a floor rather than a
+    // total. The words carry the distinction, so it survives without colour.
+    head.appendChild(el('span','cost-recorded', 'RECORDED: ' + c.recordedRuns + ' run(s) reported cost'));
+    head.appendChild(el('span', c.unrecordedRuns > 0 ? 'cost-unrecorded' : 'cost-recorded',
+      c.unrecordedRuns > 0
+        ? 'UNRECORDED: ' + c.unrecordedRuns + ' run(s) reported none — real spend, amount unknown, never zero'
+        : 'UNRECORDED: none'));
     host.appendChild(head);
 
     if (cad.state === 'OK' || cad.state === 'STALE'){
       host.appendChild(el('p','cost-auth', 'Converted at ' + cad.plain +
         ' Rate evidence: ' + (cad.source || 'UNKNOWN') + '.'));
+      // The chip says STALE; this says what stale means for the number above it.
+      if (cad.state === 'STALE'){
+        host.appendChild(el('p','cost-caveat', 'Dated CAD evidence: the rate above was observed ' +
+          (cad.asOf || 'UNAVAILABLE') + ' and is ' +
+          (cad.ageDays != null ? cad.ageDays + ' day(s) old' : 'of an UNAVAILABLE age') +
+          ', so this CAD figure is dated, not current. The USD audit values below are unaffected.'));
+      }
     } else {
       host.appendChild(el('p','cost-caveat', cad.reason));
     }
@@ -4381,7 +4466,11 @@
           (D && D.founder ? D.founder.REVIEW_FAILED_UNCONFIRMED
             : 'A review failure is recorded, but its supporting evidence is unavailable.')));
       }
-      if (run.checkpoint && D && D.checkpointEvidence) {
+      // A receipt that exists and did not validate is the one case worth
+      // reading here as loudly as a valid one: the projector clears run
+      // .checkpoint for it, so keying only off that id would leave a blocked
+      // recovery route indistinguishable from a run that never had one.
+      if ((run.checkpoint || run.checkpointState === 'INVALID') && D && D.checkpointEvidence) {
         card.appendChild(el('div', 'meta', D.checkpointEvidence(run)));
       }
       var isBoundCurrent = !!(binding && binding.state === 'BOUND' && binding.runId === run.runId);

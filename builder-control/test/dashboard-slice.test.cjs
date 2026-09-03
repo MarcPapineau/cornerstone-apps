@@ -2277,6 +2277,7 @@ test('DOM: CHECKPOINTED is COMPLETE only for positively bound current-subject cl
       assert.ok(/Checkpoint CP-CURRENT · rollback commit 4{40}/.test(page.text('founder-body')),
         'positive completion lost its checkpoint receipt');
       assert.strictEqual(page.text('hud-safe-checkpoint'),
+        'This run has a recorded safe state and a recorded way back. ' +
         'Checkpoint CP-CURRENT · rollback commit ' + '4'.repeat(40),
         'the strategic HUD did not consume the real public checkpoint/rollbackPoint shape');
     }
@@ -2302,11 +2303,16 @@ test('DOM: the public checkpoint id and rollbackPoint render together in the run
     } },
   });
   const page = bootPage(state);
-  const expected = 'Checkpoint CHK-20260829-001 · rollback commit 0123456789abcdef0123456789abcdef01234567';
+  // Plain English first, canonical identifiers after it — and the identifiers
+  // appear only because this fixture actually carries both of them.
+  const expected = 'This run has a recorded safe state and a recorded way back. ' +
+    'Checkpoint CHK-20260829-001 · rollback commit 0123456789abcdef0123456789abcdef01234567';
   assert.ok(page.text('founder-body').includes(expected),
     'the pilot deck did not render the checkpoint receipt from the public contract');
   assert.strictEqual(page.text('hud-checkpoint'), expected);
   assert.strictEqual(page.text('hud-safe-checkpoint'), expected);
+  assert.strictEqual(page.text('hud-checkpoint-state'), 'RECORDED',
+    'the HUD checkpoint state word drifted from the checkpoint resolution beside it');
   assert.ok(!/\[object Object\]/.test(page.text('founder-body')),
     'a fixture-only checkpoint object leaked into visible text');
 });
@@ -2945,6 +2951,181 @@ test('no FX rate is hardcoded anywhere in the page — a rate may only arrive as
     'a literal exchange-rate-shaped constant appears in the page');
   assert.ok(!/exchangerate|openexchange|fixer\.io|api\.frankfurter/i.test(code),
     'the page must never fetch a live FX rate');
+});
+
+// ── SAFE STATE, RECOVERY ROUTE, SPEND AND FRESHNESS ───────────────────────
+// Four founder questions the instruments below already carry the evidence for,
+// and four ways they used to answer them badly: a receipt id printed without
+// saying what it means; an unvalidated receipt reported as no receipt at all;
+// runs that never wrote their spend folded into the same grey line as the runs
+// that did; and a dated exchange rate rendered as a plain number. Every proof
+// here reads the shipped page's own DOM, so a regression fails here rather than
+// in front of the owner.
+function checkpointRunPage(run) {
+  return bootPage(fixtureState({
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      reason: 'exact current run is bound',
+    } },
+  }));
+}
+
+test('DOM: checkpoint and rollback truth is plain English, and identifiers appear only with evidence', () => {
+  const commit = 'b'.repeat(40);
+  const base = { state: 'CHECKPOINTED', objective: 'Prove the safe state reads in plain English',
+    updatedAt: '2026-09-03T10:00:00.000Z' };
+
+  const both = checkpointRunPage(Object.assign({}, base, { runId: 'RUN-CKPT-BOTH',
+    checkpoint: 'CHK-BOTH', rollbackPoint: commit, checkpointState: 'VALIDATED' }));
+  const bothPanel = evidencePanelsById(both).checkpoint;
+  assert.strictEqual(bothPanel.attrs['data-evidence-state'], 'RECORDED');
+  assert.match(evidencePanelValue(bothPanel),
+    /^This run has a recorded safe state and a recorded way back\./,
+    'the recorded case cites identifiers before it answers the question');
+  assert.match(evidencePanelValue(bothPanel),
+    new RegExp('Checkpoint CHK-BOTH · rollback commit ' + commit),
+    'the recorded case dropped the identifiers its evidence actually carries');
+
+  // A checkpoint with no rollback commit: the id is real and is named, the way
+  // back is not, and the sentence says which is which rather than implying one.
+  const noRoute = checkpointRunPage(Object.assign({}, base, { runId: 'RUN-CKPT-NOROUTE',
+    checkpoint: 'CHK-NOROUTE', rollbackPoint: null, checkpointState: 'VALIDATED' }));
+  const noRoutePanel = evidencePanelsById(noRoute).checkpoint;
+  assert.strictEqual(noRoutePanel.attrs['data-evidence-state'], 'ROLLBACK_UNAVAILABLE');
+  assert.match(evidencePanelValue(noRoutePanel),
+    /no rollback commit is recorded, so there is no recorded way back/,
+    'a checkpoint with no recovery route did not say so in plain English');
+  assert.match(evidencePanelValue(noRoutePanel), /Checkpoint CHK-NOROUTE/);
+  assert.match(evidencePanelValue(noRoutePanel), /rollback commit UNAVAILABLE/);
+  assert.match(noRoutePanel.textContent,
+    /Recovery route: UNAVAILABLE — this checkpoint records no rollback commit/);
+  assert.ok(!new RegExp(commit).test(noRoutePanel.textContent),
+    'a commit this run never recorded appeared beside a checkpoint that has none');
+
+  // Nothing recorded at all: no identifier is invented on any surface.
+  const none = checkpointRunPage(Object.assign({}, base, { runId: 'RUN-CKPT-NONE',
+    checkpoint: null, rollbackPoint: null, checkpointState: 'ABSENT' }));
+  const nonePanel = evidencePanelsById(none).checkpoint;
+  assert.strictEqual(nonePanel.attrs['data-evidence-state'], 'NOT_RECORDED');
+  assert.strictEqual(evidencePanelValue(nonePanel), 'No safe checkpoint is recorded for this run.');
+  assert.ok(!/CHK-/.test(none.text('founder-body') + none.text('evidence-rail-body')),
+    'an absent checkpoint was given an identifier');
+  assert.strictEqual(none.text('hud-checkpoint-state'), 'NOT RECORDED');
+});
+
+test('DOM: an unvalidated checkpoint receipt is a BLOCKED recovery route, never a simple absence', () => {
+  // Exactly what the canonical projector emits for a receipt that failed
+  // validation: no public id, no rollback commit, and its recorded reason.
+  const reason = 'the checkpoint digest does not authenticate the complete canonical receipt';
+  const page = checkpointRunPage({
+    runId: 'RUN-CKPT-INVALID', state: 'CHECKPOINTED',
+    objective: 'Prove a blocked recovery route fails closed',
+    updatedAt: '2026-09-03T10:05:00.000Z',
+    checkpoint: null, rollbackPoint: null,
+    checkpointState: 'INVALID', checkpointReason: reason,
+  });
+  const panel = evidencePanelsById(page).checkpoint;
+  assert.strictEqual(panel.attrs['data-evidence-state'], 'BLOCKED',
+    'an unvalidated checkpoint receipt was not reported as a blocked recovery route');
+  assert.match(evidencePanelValue(panel),
+    /AEGIS could not validate it, so no safe state and no way back can be named/,
+    'a blocked recovery route did not fail closed in words');
+  assert.match(panel.textContent, new RegExp('Recorded reason: ' + reason),
+    'the canonical refusal reason was replaced by the page\'s own explanation');
+  assert.match(panel.textContent, /Recovery route: BLOCKED/);
+  assert.match(panel.textContent, /Rollback commit: UNAVAILABLE/);
+  assert.strictEqual(page.text('hud-checkpoint-state'), 'BLOCKED',
+    'the HUD state word disagreed with the blocked sentence beside it');
+
+  // Failing closed is not an invitation to repair it by hand: no surface that
+  // carries this state may hand the owner something to execute.
+  for (const id of ['founder-body', 'hud-checkpoint', 'hud-safe-checkpoint',
+    'evidence-rail-body', 'ops-strip-cells', 'runs-list']) {
+    const text = page.text(id);
+    assert.ok(!/No safe checkpoint is recorded for this run\./.test(text),
+      `${id} reported an unvalidated receipt as a run that simply has none`);
+    for (const executable of [/\bgit\s/i, /\bnpm\s/i, /\bnode\s+builder-control/i,
+      /--force/, /--hard/, /\bcheckout\b/i, /\bsudo\b/i]) {
+      assert.ok(!executable.test(text),
+        `${id} proposed an executable recovery action matching ${executable}`);
+    }
+  }
+  // The run card is where a blocked receipt used to vanish entirely, because
+  // the projector clears run.checkpoint for it.
+  assert.match(page.text('runs-list'), /could not validate it/,
+    'run history hid a blocked recovery route behind an absent checkpoint id');
+});
+
+test('RED: recorded spend and unrecorded runs are shaped apart, and stale CAD evidence is named as dated', () => {
+  const staleFx = {
+    state: 'STALE', rate: 1.41, asOf: '2026-08-01', ageDays: 33,
+    fxSource: 'Bank of Canada daily rate', source: 'builder-control/fx-canon.json',
+    plain: '1 USD = 1.41 CAD, observed 2026-08-01 (Bank of Canada daily rate). ' +
+      'That evidence is 33 days old, so every CAD figure here is dated, not current.',
+    recordedCad: 3.47, totalCad: 'AT LEAST 3.47',
+    byReviewerCad: { codex: { recordedCad: 3.47, unrecordedRuns: 2 } },
+  };
+  const page = bootPage(fixtureState({ cost: {
+    state: 'OK', recordedUsdDisplay: 2.46, totalUsd: 'AT LEAST 2.46',
+    recordedRuns: 3, unrecordedRuns: 2, caveat: null,
+    byReviewer: { codex: { recordedUsd: 2.46, unrecordedRuns: 2 } },
+    source: 'builder-control/review-raw', cad: staleFx,
+  } }));
+
+  // Two facts, two elements, two treatments — not one grey sentence in which
+  // the runs that never reported their spend read as a footnote to the ones
+  // that did.
+  const nodes = allNodes(page.document.getElementById('cost'));
+  const recorded = nodes.find((node) => String(node.className) === 'cost-recorded');
+  const unrecorded = nodes.find((node) => String(node.className) === 'cost-unrecorded');
+  assert.ok(recorded, 'the spend panel does not shape recorded spend as its own element');
+  assert.ok(unrecorded, 'unrecorded runs share the recorded-spend treatment, so the unknown is invisible');
+  assert.match(recorded.textContent, /RECORDED: 3 run\(s\) reported cost/);
+  assert.match(unrecorded.textContent, /UNRECORDED: 2 run\(s\) reported none/);
+  assert.match(unrecorded.textContent, /never zero/,
+    'unrecorded spend is not stated as real-but-unknown');
+  assert.ok(/\.cost-unrecorded\{[^}]*border-left:2px solid var\(--warn\)/.test(code),
+    'unrecorded spend is separated from recorded spend by colour alone');
+
+  // Dated FX evidence is named in the figure and beside it, never rendered as
+  // a current rate.
+  const body = page.text('cost');
+  assert.match(body, /CAD AT LEAST 3\.47/, 'the CAD figure is not rendered from the dated evidence');
+  assert.match(body, /STALE/, 'the stale FX chip is gone');
+  assert.match(body,
+    /Dated CAD evidence: the rate above was observed 2026-08-01 and is 33 day\(s\) old/,
+    'stale FX evidence is not named with its own observation date and age');
+  assert.match(body, /dated, not current/);
+
+  // The strip and the Detail View rail read the same resolution, so no surface
+  // can present the dated figure as current or the unknown spend as zero.
+  const costPanel = evidencePanelsById(page).cost;
+  assert.match(evidencePanelValue(costPanel),
+    /CAD AT LEAST 3\.47 — dated CAD, converted at FX evidence observed 2026-08-01, not a current rate\./,
+    'the Detail View CAD figure does not name its dated rate');
+  assert.match(costPanel.textContent, /Recorded spend: 3 run\(s\) reported what they cost\./);
+  assert.match(costPanel.textContent, /UNRECORDED spend: 2 run\(s\) wrote no cost telemetry/);
+  assert.match(costPanel.textContent, /it is not zero and it is not in the figure above/);
+  assert.ok(!/CAD 0\b|\$0\b/.test(costPanel.textContent + body),
+    'unrecorded spend was rendered as a zero somewhere on the spend surface');
+});
+
+test('the safe-state and spend instruments cannot drag a desktop or a phone sideways', () => {
+  // Every instrument that carries a canonical identifier or a dense figure has
+  // to break the word rather than widen the page — on the half-width pilot
+  // cards as well as at the phone breakpoint.
+  for (const selector of ['.command-value', '.hud-summary-value', '.evidence-value',
+    '.cost-recorded,.cost-unrecorded']) {
+    assert.ok(new RegExp(selector.replace(/\./g, '\\.') + '\\{[^}]*overflow-wrap:anywhere').test(code),
+      `${selector} carries canonical values that cannot wrap, so a 40-character commit overflows`);
+  }
+  assert.ok(/\.cost-head\{[^}]*flex-wrap:wrap/.test(code),
+    'the spend headline row cannot wrap its figure, chip and two run counts');
+  const phoneWrapped = phoneSelectorsDeclaring(/overflow-wrap:anywhere/);
+  for (const selector of ['.command-value', '.hud-value']) {
+    assert.ok(phoneWrapped.has(selector),
+      `${selector} loses its phone wrapping, so the cockpit scrolls sideways`);
+  }
 });
 
 // ── WHY THIS MODEL / TOOL — the routing instrument may not infer a reason ───
