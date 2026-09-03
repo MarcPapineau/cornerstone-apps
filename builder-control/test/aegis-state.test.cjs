@@ -3708,5 +3708,71 @@ test('cost telemetry supports canonical JSONL and pretty-printed top-level event
     'a terminal event from stderr was accepted as stdout billing telemetry');
 });
 
+// ── a committed governed worktree still has a subject ──────────────────────
+// The projector only ever supplied --base from a reviewed checkpoint range or
+// a caller argument. A run whose builder COMMITTED inside its own worktree has
+// a clean HEAD, so with no base the canonical subject was read as `git diff
+// HEAD` — zero bytes — and a complete, reviewable change was published to the
+// founder as an unavailable gate. That is the comfortable lie this suite
+// exists to catch: not a wrong verdict, an erased one.
+//
+// This case stages the real condition (a real governed worktree, a real
+// commit) and names the exact refusal string that must no longer appear.
+test('a committed governed worktree derives its subject from the run base commit, not an empty HEAD diff', () => {
+  const runId = 'RUN-20260902-cd0b1a55';
+  const branch = `aegis/${runId}`;
+  const git = (argv, cwd = ROOT) => spawnSync('git', argv, { cwd, encoding: 'utf8' });
+
+  const baseRead = git(['rev-parse', 'HEAD']);
+  assert.strictEqual(baseRead.status, 0, 'the control checkout has no HEAD to cut a fixture worktree from');
+  const baseCommit = baseRead.stdout.trim();
+
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-committed-'));
+  const worktreePath = path.join(tmp, `aegis-wt-${runId}`);
+  const added = git(['worktree', 'add', '-b', branch, worktreePath, baseCommit]);
+  try {
+    assert.strictEqual(added.status, 0,
+      `could not stage a governed worktree fixture: ${(added.stderr || '').trim()}`);
+
+    const leaf = 'aegis-committed-subject-fixture.txt';
+    fs.writeFileSync(path.join(worktreePath, leaf), 'one committed line the subject must be able to see\n');
+    assert.strictEqual(git(['add', '--', leaf], worktreePath).status, 0, 'the fixture leaf could not be staged');
+    const commit = git(['-c', 'user.email=fixture@aegis.local', '-c', 'user.name=AEGIS Fixture',
+      'commit', '-m', 'fixture: a committed change inside the governed worktree'], worktreePath);
+    assert.strictEqual(commit.status, 0, `the fixture commit failed: ${(commit.stderr || '').trim()}`);
+
+    // Control: without this the red condition is not staged and a pass below
+    // would prove nothing.
+    const head = git(['rev-parse', 'HEAD'], worktreePath).stdout.trim();
+    assert.notStrictEqual(head, baseCommit, 'the fixture did not actually commit past its base');
+    assert.strictEqual(git(['status', '--porcelain'], worktreePath).stdout.trim(), '',
+      'the fixture worktree is dirty, so a baseless HEAD diff would have found bytes anyway');
+
+    const run = runRecord(runId, {
+      state: 'BUILT',
+      packet: 'builder-control/packets/B1.json',
+      baseCommit,
+      worktree: { path: worktreePath, branch, baseCommit, createdAt: '2026-09-02T10:00:00.000Z' },
+    });
+    const snap = M.snapshot({}, { runsDir: fixtureRunsDir([run]) });
+
+    assert.doesNotMatch(String(snap.engineering.reason || ''),
+      /the canonical subject could not be derived/,
+      'a committed governed worktree was still read as having no derivable subject');
+    assert.strictEqual(snap.engineering.state, 'OK',
+      `the engineering gate was unavailable for a committed run: ${snap.engineering.reason}`);
+    assert.ok(Array.isArray(snap.engineering.subjectPaths) && snap.engineering.subjectPaths.length > 0,
+      'the projected subject named no paths, so the gate verdict is about nothing');
+    assert.ok(snap.engineering.subjectPaths.includes(leaf),
+      `the committed change is missing from the subject: ${JSON.stringify(snap.engineering.subjectPaths)}`);
+    assert.ok(/^[0-9a-f]{64}$/.test(String(snap.engineering.subjectSha256 || '')),
+      'no canonical subject hash reached the projection, so nothing can bind a review to this run');
+  } finally {
+    git(['worktree', 'remove', '--force', worktreePath]);
+    git(['branch', '-D', branch]);
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
+});
+
 const failedCount = process.exitCode ? 'at least 1' : '0';
 console.log(`${passed} passed, ${failedCount} failed.`);

@@ -884,6 +884,24 @@ function canonicalReviewRefusal(gate, claim, subject, packet, receipt) {
   return claim;
 }
 
+// True only when the run worktree's HEAD has moved off its base commit — i.e.
+// the builder committed. Read from git through the same validated environment
+// the gate itself runs under; anything unreadable answers false, which leaves
+// the previous baseless behaviour exactly as it was.
+function committedPastBase(baseCommit, gateEnv) {
+  const head = spawnSync('git', ['rev-parse', '--verify', 'HEAD^{commit}'], {
+    cwd: ROOT, env: gateEnv, encoding: 'utf8',
+  });
+  if (head.status !== 0) return false;
+  const headOid = (head.stdout || '').trim();
+  if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(headOid) || headOid === baseCommit) return false;
+  // The base must be an ancestor of HEAD, or `base..HEAD` is not this run's
+  // change but an unrelated divergence.
+  return spawnSync('git', ['merge-base', '--is-ancestor', baseCommit, headOid], {
+    cwd: ROOT, env: gateEnv, encoding: 'utf8',
+  }).status === 0;
+}
+
 function projectEngineering(args, context = {}) {
   const currentRun = context.currentRun || null;
   const identity = currentRun && currentRun[RUN_CONTROL_IDENTITY];
@@ -920,7 +938,23 @@ function projectEngineering(args, context = {}) {
       'caller-supplied gate range conflicts with the validated reviewed checkpoint range; refusing to recompute a different subject',
       context);
   }
-  const gateBase = reviewedGateRange ? reviewedGateRange.base : args.base;
+  // A run whose builder COMMITTED inside its governed worktree has a clean
+  // HEAD, so the baseless `git diff HEAD` the subject falls back to reads zero
+  // bytes and the dashboard reports UNAVAILABLE for a run that in fact carries
+  // a complete, reviewable change. The run's own base commit is the range floor
+  // that change was cut from, and canonicalGitEnvironment above has already
+  // proven it: canonical OID, equal to the worktree's recorded base, and
+  // present in this repository. So it becomes the DEFAULT base — never an
+  // override. A reviewed checkpoint range still wins, an explicit caller base
+  // still wins, and every conflict refusal above still fires first.
+  //
+  // The HEAD comparison is not optional. Before the builder commits, HEAD IS
+  // the base commit and the real change lives only in the working tree, which
+  // `base..HEAD` cannot see at all. Defaulting unconditionally would therefore
+  // blank the subject of every in-flight run to fix the committed one.
+  const runBase = !reviewedGateRange && !args.base && identity.baseCommit &&
+    committedPastBase(identity.baseCommit, gateEnv) ? identity.baseCommit : null;
+  const gateBase = reviewedGateRange ? reviewedGateRange.base : (args.base || runBase);
   const gateHead = reviewedGateRange ? reviewedGateRange.head : args.head;
   const subjectArgs = [ENGOS, '--subject', '--packet', runPacket, '--json'];
   if (gateBase) subjectArgs.push('--base', gateBase);
