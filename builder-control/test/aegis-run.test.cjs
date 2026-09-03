@@ -3158,7 +3158,7 @@ hostContainmentTest('runChecks: executes every declared non-recursive check incl
   }
 });
 
-// ── fixed-policy dashboard check selector (not yet wired into runChecks) ───
+// ── fixed-policy dashboard check selector ──────────────────────────────────
 function selectorPacket() {
   const parsed = JSON.parse(fs.readFileSync(path.join(ROOT, REVIEW_PACKET), 'utf8'));
   const runnable = parsed.testsRequired.filter((command) => {
@@ -3210,6 +3210,38 @@ test('check selector: a packet missing either dashboard command falls back to it
   }
   assert.deepStrictEqual(
     R.dashboardSliceCheckCommands({ testsRequired: [] }, ['builder-control/dashboard/index.html']), []);
+});
+
+test('check selector is consulted only after a validated canonical subject and before execution', () => {
+  const source = fs.readFileSync(CLI, 'utf8');
+  const body = source.slice(source.indexOf('function runChecksClaimed(run) {'),
+    source.indexOf('function runChecks(runId) {'));
+  const selector = body.indexOf(
+    'const cmds = dashboardSliceCheckCommands(pkt, subjectBefore.changedPaths);');
+  const subjectRefusal = body.indexOf('!validSubjectCoordinate(subjectBefore)');
+  const subjectThrow = body.indexOf("'CHECKS-SUBJECT-INVALID'");
+  const noChecksRefusal = body.indexOf('if (!runnableCommands.length) {');
+  const execution = body.indexOf('for (const cmd of cmds) {');
+  assert.ok(selector > 0, 'runChecksClaimed must select its commands through the fixed-policy selector');
+  assert.ok(subjectRefusal > 0 && subjectThrow > 0 && noChecksRefusal > 0 && execution > 0,
+    'the subject refusal, no-checks refusal, and execution loop must all remain in runChecksClaimed');
+  // A narrowed list is a subject-derived claim: it may not be computed from an
+  // absent, malformed, or unvalidated subject, and it may not arrive too late
+  // to govern what actually runs.
+  assert.ok(selector > subjectThrow,
+    'the selector must be consulted only after the canonical subject refusal');
+  assert.ok(selector < execution,
+    'the selector must be consulted before any check command is executed');
+  // The refusal that decides whether evidence exists at all still weighs the
+  // packet's full runnable list, never the narrowed one.
+  assert.ok(noChecksRefusal < selector,
+    'the no-checks refusal must precede and ignore any narrowing');
+  assert.match(body, /const runnableCommands = runnableCheckCommands\(pkt\);/);
+  assert.strictEqual(
+    (body.match(/dashboardSliceCheckCommands\(/g) || []).length, 1,
+    'the selector must have exactly one call site inside runChecksClaimed');
+  assert.doesNotMatch(body.slice(0, selector), /\bcmds\b/,
+    'no check list may exist before the validated subject narrows it');
 });
 
 hostContainmentTest('runChecks: external packet is refused before checks with no run or ledger mutation', () => {

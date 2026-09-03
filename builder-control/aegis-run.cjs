@@ -4687,9 +4687,9 @@ function runChecksClaimed(run) {
   const packetBefore = packetCoordinate(packet);
   const packetReal = packetBefore.real;
   const pkt = packetBefore.parsed;
-  const cmds = runnableCheckCommands(pkt);
+  const runnableCommands = runnableCheckCommands(pkt);
   const hostCommands = runnableHostContainmentCommands(pkt);
-  if (!cmds.length) {
+  if (!runnableCommands.length) {
     transition(run, 'CHECKS_FAILED', 'the packet declares no runnable testsRequired');
     throw new RunError('NO-CHECKS', 'the packet declares no runnable checks. Zero checks passing is the absence of evidence, not evidence.');
   }
@@ -4702,6 +4702,11 @@ function runChecksClaimed(run) {
     throw new RunError('CHECKS-SUBJECT-INVALID',
       'deterministic checks require a non-empty canonical subject before execution');
   }
+  // Narrowing is a subject-derived decision, so the selector may only read a
+  // canonical subject this authority already validated. The no-checks refusal
+  // above still weighs the packet's full runnable list, and the selector's
+  // only inputs are that validated packet and its changed paths.
+  const cmds = dashboardSliceCheckCommands(pkt, subjectBefore.changedPaths);
   const statePreparation = prepareCanonicalDashboardState(run, pkt, packetReal);
   if (!statePreparation.ok) {
     const boundaryReason = boundedCheckFailureTail(
