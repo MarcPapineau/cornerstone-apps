@@ -91,6 +91,14 @@
   .s-PROGRESS_UNRECORDED,.s-NOT_RUNNING{color:var(--unknown)}
   .s-TIMED_OUT{color:var(--fail)}
   .s-RECORDED{color:var(--text-1)}
+  /* Failure-state storyboard vocabulary. A provider that could not do the work
+     is a hard failure; stalled work and repeated correction cycles are warnings
+     that need a decision. "No recorded failure" is deliberately NOT a pass
+     colour: it reports what the run record does not contain, which is never the
+     same fact as a healthy run. */
+  .s-PROVIDER_FAILURE{color:var(--fail)}
+  .s-STALLED,.s-REVIEW_CHURN{color:var(--warn)}
+  .s-NO_RECORDED_FAILURE{color:var(--text-1)}
 
   /* ── topology ───────────────────────────────────────────────────── */
   .stages{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
@@ -276,6 +284,13 @@
      this the commit is one unbreakable word and it drags the deck sideways at
      every desktop width, not only on a phone. */
   .command-value{font-size:14px;line-height:1.45;margin-top:calc(var(--sp)*2);overflow-wrap:anywhere}
+  /* The failure storyboard states its kind, the last evidence recorded for it
+     and the one next action inside a half-width card, so its canonical failure
+     codes, run states and timestamps wrap there exactly as the value above
+     does. Static shapes only: nothing in a failed or stalled card moves. */
+  .command-card>.chip{margin-top:calc(var(--sp)*2)}
+  .command-card .meta{color:var(--text-2);font-size:12px;line-height:1.45;
+    margin-top:calc(var(--sp)*2);overflow-wrap:anywhere}
   .deck-heading{display:flex;align-items:center;justify-content:space-between;gap:calc(var(--sp)*3);
     margin:calc(var(--sp)*5) 0 calc(var(--sp)*2)}
   .deck-heading h3{font:600 11px/1.3 var(--mono);letter-spacing:.11em;text-transform:uppercase;color:var(--text-1)}
@@ -1504,6 +1519,9 @@
     // watchdog whose limits are merely RECORDED is a waypoint, not a pass.
     PROGRESS_RECORDED:'◐', PROGRESS_UNRECORDED:'◌', TIMED_OUT:'✕',
     NOT_RUNNING:'○', RECORDED:'◇',
+    // Failure-state storyboard. None of these is given a working shape: a
+    // stalled or failed run must never carry the mark an active one carries.
+    PROVIDER_FAILURE:'✕', STALLED:'◌', REVIEW_CHURN:'⚑', NO_RECORDED_FAILURE:'○',
     SYNCED:'●', PENDING:'◌', CONFLICT:'⚑', REFUSED:'⊘', OK:'●'
   };
 
@@ -2556,6 +2574,125 @@
     }
   }
 
+  // ── V2 failure-state storyboard ───────────────────────────────────
+  // Three failures read identically on a status page and need completely
+  // different responses from the owner: work that stopped moving, a provider
+  // that could not do the work, and a change that keeps coming back from
+  // review. This names which of the three the canonical run record already
+  // proves, restates the last evidence recorded for it, and repeats the ONE
+  // next governed action the deck resolved above. It is presentation only: no
+  // threshold, no clock, no lifecycle, no routing, no review and no recovery
+  // authority — every sentence re-reads a field aegis-run and the host
+  // projection already wrote down.
+  //
+  // Repetition is never inferred. A recorded correction count of one is a
+  // single correction, so only a recorded count of two or more is repeated
+  // review or correction activity. An attempt recorded as running with no
+  // recorded progress is reported by the BUILDER PROGRESS instrument as exactly
+  // that and is not called a stall here, because "not recorded yet" is not
+  // evidence that work stopped. A recorded failure whose kind none of these
+  // fields name stays UNAVAILABLE rather than being filed under the most
+  // plausible story.
+  var FAILURE_RUN_STATES = ['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'];
+
+  function failureStoryboard(run, nextAction){
+    // The one next action is the deck's own resolution, restated. This card
+    // never reaches a second opinion about what the operator should do.
+    var next = typeof nextAction === 'string' && nextAction.trim()
+      ? nextAction
+      : 'UNAVAILABLE — no next governed action is recorded for this run.';
+    if (!run){
+      return { state: 'UNAVAILABLE', recorded: false, next: next,
+        headline: 'UNAVAILABLE — no run is bound, so no failure state can be read.',
+        evidence: 'UNAVAILABLE — no run is bound to this page.' };
+    }
+    var sentence = function(value, absent){
+      var text = typeof value === 'string' && value.trim() ? value.trim() : absent;
+      return /[.!?]$/.test(text) ? text : text + '.';
+    };
+    var build = run.build || null;
+    var s = (build && build.supervision) || null;
+    var activity = (build && build.activity) || null;
+    var corrections = Number.isInteger(run.corrections) ? run.corrections : null;
+    var budget = Number.isInteger(run.maxCorrections) ? ' of ' + run.maxCorrections + ' allowed' : '';
+    // Recorded correction activity is context for every failure kind, so it
+    // travels beside each of them instead of replacing the kind on screen.
+    var churn = ' Recorded correction cycles: ' +
+      (corrections === null ? 'UNAVAILABLE' : corrections + budget) + '.';
+    var lastProgress = ' Last recorded builder progress: ' +
+      (s && s.progressState === 'RECORDED' ? s.lastProgressAt : 'UNAVAILABLE') + '.';
+    var builderEvidence = 'Recorded builder activity: ' +
+      sentence(activity && activity.summary, 'UNAVAILABLE') +
+      ' Recorded activity code ' + ((activity && activity.code) || 'UNAVAILABLE') +
+      ', active ' + (activity && activity.active === true ? 'YES' : 'NO') +
+      ', exit ' + (build && Number.isInteger(build.exit) ? build.exit : 'UNAVAILABLE') + '.';
+    var story = function(state, headline, evidence){
+      return { state: state, recorded: true, headline: headline, evidence: evidence, next: next };
+    };
+    var runState = typeof run.state === 'string' && run.state ? run.state : 'UNAVAILABLE';
+
+    var failure = (build && build.failure) || null;
+    if (failure && failure.code){
+      var failover = (build && build.failover) || null;
+      return story('PROVIDER_FAILURE',
+        'PROVIDER FAILURE — the recorded builder provider could not do this work.',
+        sentence(failure.summary, 'No provider failure summary is recorded') +
+        ' Recorded failure code ' + failure.code +
+        ', provider ' + (failure.provider || 'UNAVAILABLE') + '.' +
+        ' Recorded failover: ' + sentence(failover && failover.reason, 'UNAVAILABLE') + churn);
+    }
+    var route = run.route || null;
+    if (route && route.state === 'REFUSED'){
+      return story('PROVIDER_FAILURE',
+        'PROVIDER FAILURE — no builder was selected for this run.',
+        'The recorded routing decision was refused with code ' + (route.code || 'UNAVAILABLE') +
+        ': ' + sentence(route.reason, 'no reason is recorded') + churn);
+    }
+    if (s && s.timeoutReason){
+      return story('STALLED',
+        'WORK STALLED — the governed watchdog stopped this attempt.',
+        sentence(s.timeoutSummary, 'No timeout summary is recorded') +
+        ' Recorded timeout reason ' + s.timeoutReason + '.' + lastProgress + churn);
+    }
+    if (build && build.timedOut === true){
+      return story('STALLED',
+        'WORK STALLED — this attempt is recorded as timed out.',
+        'The run record marks this attempt as timed out, and no canonical timeout reason ' +
+        'travelled with it.' + lastProgress + churn);
+    }
+    // A recorded terminal exit, or a recorded worker/lifecycle contradiction,
+    // underneath a run still recorded as building: the lifecycle says work is
+    // in progress and the builder evidence beside it says it is not.
+    var contradicted = !!(activity && (activity.code === 'TERMINAL_STATE_MISMATCH' ||
+      activity.code === 'STATE_MISMATCH'));
+    if (runState === 'BUILDING' && build && (contradicted || Number.isInteger(build.exit))){
+      return story('STALLED',
+        'WORK STALLED — this run is still recorded as building, but its builder evidence ' +
+        'records no work running.',
+        builderEvidence + lastProgress + churn);
+    }
+    if (corrections !== null && corrections >= 2){
+      return story('REVIEW_CHURN',
+        'REVIEW CHURN — this change has already been corrected more than once.',
+        'Recorded correction cycles: ' + corrections + budget +
+        '. Last recorded review outcome: ' +
+        sentence(run.reviewFailure && run.reviewFailure.summary, 'UNAVAILABLE') +
+        ' Recorded run state: ' + runState + '.');
+    }
+    if (FAILURE_RUN_STATES.indexOf(runState) !== -1){
+      return story('UNAVAILABLE',
+        'UNAVAILABLE — this run is recorded as failed, but no canonical evidence names it as ' +
+        'stalled work, a provider failure or review churn.',
+        'Recorded run state: ' + runState + '. ' + builderEvidence + churn);
+    }
+    return { state: 'NO_RECORDED_FAILURE', recorded: false, next: next,
+      headline: 'No stalled work, provider failure or review churn is recorded for this run.',
+      evidence: 'Recorded run state: ' + runState + '. The run record carries no provider ' +
+        'failure, no recorded timeout and no repeated correction cycle.' + churn +
+        (build ? '' : ' No builder attempt is recorded for this run, so this is an absence of ' +
+          'evidence rather than proof that nothing failed.') };
+  }
+
   // ── Detail View evidence inspector ────────────────────────────────
   // Seven receipts, in the order an operator reads them once they have stopped
   // asking "what is happening" and started asking "show me": the action being
@@ -2615,6 +2752,15 @@
       meta.push('Builder progress: ' + (supervision.headline ||
         'UNAVAILABLE — no supervision resolution produced this fact.'));
       if (supervision.timeout) meta.push(supervision.timeout);
+    }
+    // The failure storyboard, restated from the deck's own resolution: which
+    // recorded failure this is, the last evidence recorded for it, and the one
+    // next governed action — the same three facts the Command View card prints.
+    var failure = ctx.failure || null;
+    if (failure){
+      meta.push('Failure state: ' + failure.state + ' — ' + failure.headline);
+      meta.push('Last recorded failure evidence: ' + failure.evidence);
+      if (failure.recorded) meta.push('One next governed action: ' + failure.next);
     }
     return { id: 'action', title: 'Current action', chip: state, state: state, lead: true,
       value: typeof ctx.currentAction === 'string' && ctx.currentAction
@@ -3154,6 +3300,12 @@
       e.state === 'OK' && Array.isArray(e.problems) && e.problems.length === 0);
     var deckFinished = founderFinished(boundRun, cleanIdle);
     var deckVerification = founderVerification(boundRun, bindingSubjectState, versionConfirmed, cleanIdle);
+    // Which recorded failure this is — stalled work, a provider failure, or
+    // review churn — read from the canonical run record, and handed the one
+    // next governed action the deck has already resolved above. Resolved here,
+    // once, so the Command View card and the Detail View rail below cannot
+    // reach two different readings of the same failure.
+    var failure = failureStoryboard(boundRun, deckActions[0]);
     var shell = $('operator-shell');
     if (shell) shell.setAttribute('data-run-status', controlState.state.toLowerCase());
 
@@ -3245,6 +3397,23 @@
     var supervisionCard = commandCard('BUILDER PROGRESS', supervision.headline, 'is-progress');
     supervisionCard.setAttribute('data-supervision-state', supervision.state);
     commandGrid.appendChild(supervisionCard);
+    // The failure storyboard: which of the three failures the run record proves,
+    // the last evidence recorded for it, and one next action. A named failure
+    // takes the deck's existing blocked shape; "no recorded failure" takes no
+    // state shape at all, because an absence in the record is not a clear run.
+    var failureCard = commandCard('FAILURE STATE', failure.headline,
+      failure.recorded ? 'is-failure is-blocked' : 'is-failure');
+    failureCard.setAttribute('data-failure-state', failure.state);
+    failureCard.appendChild(chip(failure.state));
+    var failureEvidence = el('div','meta','Last recorded evidence: ' + failure.evidence);
+    failureEvidence.setAttribute('data-failure-evidence', failure.state);
+    failureCard.appendChild(failureEvidence);
+    if (failure.recorded){
+      var failureNext = el('div','meta','One next governed action: ' + failure.next);
+      failureNext.setAttribute('data-failure-next', failure.state);
+      failureCard.appendChild(failureNext);
+    }
+    commandGrid.appendChild(failureCard);
     commandGrid.appendChild(commandCard('NEXT STEP', deckActions.join(' '), 'is-next'));
     commandGrid.appendChild(commandCard('BLOCKER', operatorBlocker,
       blockerClear ? 'is-clear' : 'is-blocked'));
@@ -3658,6 +3827,9 @@
       // module prints — so Detail View restates them and derives none of them.
       control: controlState,
       supervision: supervision,
+      // The same failure reading the Command View card prints, handed over
+      // rather than re-derived, so Detail View restates it and decides nothing.
+      failure: failure,
       currentAction: currentAction,
       nextAction: deckActions[0],
       exactSubjectBound: exactSubjectBound,

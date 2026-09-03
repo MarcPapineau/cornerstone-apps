@@ -3822,6 +3822,307 @@ test('DOM: the Command and Detail switch moves the keyboard, not only the scroll
     'the first keyboard target still skips into a collapsed engineer disclosure rather than the command deck');
 });
 
+// ── V2 failure-state storyboard (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ──
+// Three failures read identically on a status page and need completely
+// different responses: work that stopped moving, a provider that could not do
+// the work, and a change that keeps coming back from review. The defect these
+// proofs guard is the deck answering all three with one grey "blocked", and the
+// defect the FIX could introduce is worse: a storyboard that decides which of
+// the three it is from atmosphere rather than from the run record — calling a
+// single correction a cycle, calling an attempt with no progress yet a stall,
+// or filing an unexplained failure under the most plausible story.
+//
+// So every proof below holds the same shape: the state is named only when a
+// canonical field proves it, the last recorded evidence is shown, exactly one
+// next governed action is shown, and that action is the deck's own — never a
+// second recovery opinion. Absence of evidence is UNAVAILABLE, and nothing
+// about a failed or stalled run may move.
+const STORYBOARD_START = code.indexOf('function failureStoryboard(');
+const STORYBOARD = STORYBOARD_START === -1 ? ''
+  : code.slice(STORYBOARD_START, code.indexOf('// ── Detail View evidence inspector', STORYBOARD_START));
+
+function failureFixture(run) {
+  return fixtureState({
+    generatedAt: '2026-09-03T12:00:00.000Z',
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      evidenceState: 'OK', reason: 'exact current run is bound',
+    } },
+  });
+}
+
+// The storyboard through the page's own DOM: its machine state, its written
+// state word and glyph, the evidence line, and however many next-action lines
+// it rendered — the count matters as much as the text, because "exactly one"
+// is the property that keeps this a decision instead of a menu.
+function failureParts(page) {
+  const card = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+    .find((node) => node.attrs['data-operator-field'] === 'failure-state');
+  assert.ok(card, 'Command View exposes no failure-state instrument');
+  const evidence = findByAttr(card, 'data-failure-evidence');
+  const next = findByAttr(card, 'data-failure-next');
+  const nextStep = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+    .find((node) => node.attrs['data-operator-field'] === 'next-step');
+  return {
+    card,
+    state: card.attrs['data-failure-state'],
+    chip: (card.children || []).find((child) => /^chip\b/.test(String(child.className))),
+    evidence: evidence.length ? evidence[0].textContent : null,
+    next: next.length ? next[0].textContent : null,
+    nextCount: next.length,
+    deckNextStep: nextStep ? nextStep.textContent : '',
+  };
+}
+
+// A named failure states its kind three ways — machine attribute, written word
+// and glyph — and repeats the deck's own single next action verbatim.
+function assertNamedFailure(parts, state) {
+  assert.strictEqual(parts.state, state, `the storyboard did not name ${state}`);
+  assert.ok(parts.chip, `${state} is signalled without a state chip`);
+  assert.strictEqual(parts.chip.children.length, 2,
+    `${state} is signalled by colour alone, without a glyph and a written state`);
+  assert.ok(parts.chip.children[0].textContent.trim().length > 0,
+    `${state} has an empty glyph, leaving colour as the only shape`);
+  assert.strictEqual(parts.chip.children[1].textContent, state,
+    `${state} is not written out beside its glyph`);
+  assert.match(parts.card.className, /\bis-blocked\b/,
+    `${state} did not take the deck's recorded-problem shape`);
+  assert.strictEqual(parts.nextCount, 1,
+    `${state} rendered ${parts.nextCount} next actions instead of exactly one`);
+  const action = parts.next.replace('One next governed action: ', '');
+  assert.ok(action.length > 0, `${state} rendered an empty next action`);
+  assert.ok(parts.deckNextStep.includes(action),
+    `${state} reached its own recovery opinion instead of the deck's next step: ${action}`);
+}
+
+test('the failure storyboard owns no clock, no threshold, no lifecycle and no second recovery route', () => {
+  assert.ok(STORYBOARD.length > 0, 'the failure-state storyboard resolver was not located');
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.', 'fetch(', 'innerHTML', 'addEventListener', 'callApi', 'matchMedia']) {
+    assert.ok(!STORYBOARD.includes(banned),
+      `the storyboard uses ${banned} — it may only re-read recorded fields`);
+  }
+  // A threshold is exactly what would turn this presentation mapping into a
+  // second watchdog: the fixed limits belong to aegis-worker and are printed by
+  // the supervision instrument, and nothing here may compare against them.
+  for (const owned of ['noProgressLimitSec', 'wallClockLimitSec', 'heartbeatAt', 'transitions']) {
+    assert.ok(!STORYBOARD.includes(owned),
+      `the storyboard reads ${owned}, which belongs to another instrument's authority`);
+  }
+  // Every fact it does read is a canonical field the projection already wrote.
+  for (const canonical of ['build.failure', 'build.failover', 'build.timedOut', 'build.exit',
+    's.timeoutReason', 'run.corrections', 'run.maxCorrections', 'run.reviewFailure', 'run.route']) {
+    assert.ok(STORYBOARD.includes(canonical),
+      `the storyboard no longer reads the canonical ${canonical}`);
+  }
+  assert.ok(/corrections >= 2/.test(STORYBOARD),
+    'repeated review or correction activity is no longer required before churn is claimed');
+});
+
+test('no failed or stalled state pulses, spins or borrows a working shape', () => {
+  assert.ok(/\.s-PROVIDER_FAILURE\{color:var\(--fail\)\}/.test(code) &&
+    /\.s-STALLED,\.s-REVIEW_CHURN\{color:var\(--warn\)\}/.test(code) &&
+    /\.s-NO_RECORDED_FAILURE\{color:var\(--text-1\)\}/.test(code),
+    'the three failure states are not given distinct, static state colours');
+  // The working marks — the half-filled ACTIVE/RUNNING disc and the PASS dot —
+  // are what make a dead run look live. No failure state may carry either.
+  const glyphs = /PROVIDER_FAILURE:'(.)', STALLED:'(.)', REVIEW_CHURN:'(.)', NO_RECORDED_FAILURE:'(.)'/
+    .exec(code);
+  assert.ok(glyphs, 'the failure states have no glyphs, so they would be legible by colour alone');
+  for (const glyph of glyphs.slice(1)) {
+    assert.ok(glyph !== '◐' && glyph !== '●',
+      `a failure state carries the working glyph ${glyph}`);
+  }
+  assert.ok(!/is-failure/.test(PHONE) && !/is-failure/.test(WIDE),
+    'the failure storyboard is demoted or re-laid-out instead of read where it is');
+  assert.ok(/\.command-card \.meta\{[^}]*overflow-wrap:anywhere/.test(code),
+    'canonical failure codes and timestamps can drag the deck sideways inside a pilot card');
+  assert.ok(!/\.command-card \.meta\{[^}]*line-clamp/.test(code),
+    'the recorded failure evidence is clamped instead of read in full');
+});
+
+test('DOM: a recorded provider failure is named as one, with its evidence and one next action', () => {
+  const page = bootPage(failureFixture({
+    runId: 'RUN-PROVIDER-FAILURE', state: 'BUILD_FAILED',
+    objective: 'Continue after a recorded provider failure',
+    updatedAt: '2026-09-03T12:00:00.000Z',
+    build: {
+      mode: 'async', status: 'FAILED', exit: 1, timedOut: false, retrySafe: false,
+      recoveryCode: 'MODEL_AUTH_FAILURE',
+      activity: { code: 'MODEL_AUTH_FAILURE', phase: 'BLOCKED', active: false,
+        summary: 'Claude authentication failed' },
+      failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
+        summary: 'Claude authentication failed.' },
+      failover: { state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: 'grok-4.6',
+        reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.' },
+    },
+  }));
+  const parts = failureParts(page);
+  assertNamedFailure(parts, 'PROVIDER_FAILURE');
+  assert.match(parts.card.textContent, /the recorded builder provider could not do this work/,
+    'a provider failure is not stated in founder language');
+  assert.match(parts.evidence, /Claude authentication failed\./);
+  assert.match(parts.evidence, /Recorded failure code MODEL_AUTH_FAILURE, provider claude-subscription\./);
+  assert.match(parts.evidence, /Grok is the next eligible builder, but automatic failover is not enabled/,
+    'the recorded failover evidence was dropped');
+  assert.match(parts.next, /Re-authenticate Claude before continuing/,
+    'the provider failure did not carry the deck governed action');
+  assert.ok(!/WORK STALLED|REVIEW CHURN/.test(parts.card.textContent),
+    'a provider failure was also described as stalled work or review churn');
+});
+
+test('DOM: a recorded watchdog timeout is stalled work, not a provider or review failure', () => {
+  const page = bootPage(failureFixture({
+    runId: 'RUN-STALLED-TIMEOUT', state: 'BUILD_FAILED',
+    objective: 'Explain work that stopped making progress',
+    updatedAt: '2026-09-03T12:05:00.000Z',
+    build: {
+      mode: 'async', status: 'FAILED', exit: 124, timedOut: true, retrySafe: null,
+      activity: { code: 'FAILED', phase: 'STOPPED', active: false,
+        summary: 'Builder stopped with exit 124' },
+      supervision: {
+        progressState: 'RECORDED', progressKind: 'STDOUT',
+        progressSummary: 'Builder is emitting model and tool stream activity',
+        lastProgressAt: '2026-09-03T11:50:00.000Z', progressReason: null,
+        noProgressLimitSec: 300, wallClockLimitSec: 900,
+        timeoutReason: 'NO_PROGRESS_TIMEOUT',
+        timeoutSummary: 'Stopped because no real builder progress was observed inside the fixed no-progress limit',
+      },
+    },
+  }));
+  const parts = failureParts(page);
+  assertNamedFailure(parts, 'STALLED');
+  assert.match(parts.card.textContent, /WORK STALLED — the governed watchdog stopped this attempt\./);
+  assert.match(parts.evidence,
+    /Stopped because no real builder progress was observed inside the fixed no-progress limit\./);
+  assert.match(parts.evidence, /Recorded timeout reason NO_PROGRESS_TIMEOUT\./);
+  assert.match(parts.evidence, /Last recorded builder progress: 2026-09-03T11:50:00\.000Z\./,
+    'stalled work does not show the last progress the run actually recorded');
+  assert.match(parts.next, /Continue this run from the AEGIS CLI/,
+    'the stalled run did not carry the deck governed continuation route');
+  assert.ok(!/PROVIDER FAILURE|REVIEW CHURN/.test(parts.card.textContent),
+    'stalled work was also described as a provider failure or review churn');
+});
+
+test('DOM: a run still recorded as building with terminal builder evidence reads as stalled', () => {
+  const page = bootPage(failureFixture({
+    runId: 'RUN-STALLED-CONTRADICTION', state: 'BUILDING',
+    objective: 'Explain a build whose worker already stopped',
+    updatedAt: '2026-09-03T12:10:00.000Z',
+    build: {
+      mode: 'async', status: 'RUNNING', workerPid: 4242, exit: 3, timedOut: false,
+      activity: { code: 'TERMINAL_STATE_MISMATCH', phase: 'BLOCKED', active: false,
+        summary: 'Terminal builder exit 3 conflicts with an active lifecycle claim' },
+    },
+  }));
+  const parts = failureParts(page);
+  assertNamedFailure(parts, 'STALLED');
+  assert.match(parts.evidence,
+    /Terminal builder exit 3 conflicts with an active lifecycle claim\./);
+  assert.match(parts.evidence, /Recorded activity code TERMINAL_STATE_MISMATCH, active NO, exit 3\./);
+  assert.match(parts.evidence, /Last recorded builder progress: UNAVAILABLE\./,
+    'an unrecorded progress fact was filled in rather than stated as unavailable');
+});
+
+test('DOM: repeated recorded correction cycles are review churn, and one correction is not', () => {
+  const churn = bootPage(failureFixture({
+    runId: 'RUN-REVIEW-CHURN', state: 'REVIEW_FAILED',
+    objective: 'Correct exact review findings',
+    updatedAt: '2026-09-03T12:15:00.000Z', corrections: 3, maxCorrections: 3,
+    reviewFailure: { status: 'UNVERIFIED', reasonCode: 'REVIEW_FAILURE_UNCORROBORATED',
+      summary: 'The run records a review-failure claim, but attested gate evidence is unavailable in this projection.' },
+  }));
+  const churnParts = failureParts(churn);
+  assertNamedFailure(churnParts, 'REVIEW_CHURN');
+  assert.match(churnParts.card.textContent,
+    /REVIEW CHURN — this change has already been corrected more than once\./);
+  assert.match(churnParts.evidence, /Recorded correction cycles: 3 of 3 allowed\./);
+  assert.match(churnParts.evidence,
+    /Last recorded review outcome: The run records a review-failure claim/,
+    'review churn dropped the last recorded review outcome');
+  assert.match(churnParts.next, /All 3 bounded correction cycle\(s\) are already used/,
+    'review churn did not carry the deck recorded refusal as its one next action');
+
+  // One correction is a correction. Calling it a cycle would be the storyboard
+  // inventing the very pattern it exists to report.
+  const single = bootPage(failureFixture({
+    runId: 'RUN-ONE-CORRECTION', state: 'REVIEW_FAILED',
+    objective: 'Correct exact review findings once',
+    updatedAt: '2026-09-03T12:16:00.000Z', corrections: 1, maxCorrections: 3,
+  }));
+  const singleParts = failureParts(single);
+  assert.strictEqual(singleParts.state, 'UNAVAILABLE',
+    'a single recorded correction was reported as repeated review activity');
+  assert.ok(!/REVIEW CHURN|WORK STALLED|PROVIDER FAILURE/.test(singleParts.card.textContent),
+    'a failure with no canonical kind was filed under one of the three stories');
+  assert.match(singleParts.card.textContent,
+    /no canonical evidence names it as stalled work, a provider failure or review churn/);
+  assert.match(singleParts.evidence, /Recorded correction cycles: 1 of 3 allowed\./,
+    'the recorded correction count was hidden by the unavailable kind');
+  assert.strictEqual(singleParts.nextCount, 1,
+    'a recorded failure of unavailable kind must still carry exactly one next action');
+});
+
+test('DOM: with no failure evidence and no bound run the storyboard claims nothing', () => {
+  const healthy = failureParts(bootPage(failureFixture({
+    runId: 'RUN-NO-FAILURE', state: 'BUILDING', objective: 'Build with nothing recorded as wrong',
+    updatedAt: '2026-09-03T12:20:00.000Z',
+    build: { mode: 'async', status: 'RUNNING', workerPid: 4242, exit: null, timedOut: false,
+      activity: { code: 'RUNNING', phase: 'RUNNING', active: true, summary: 'Builder is running' } },
+  })));
+  assert.strictEqual(healthy.state, 'NO_RECORDED_FAILURE');
+  assert.doesNotMatch(healthy.card.className, /\bis-blocked\b/,
+    'a run with no recorded failure was given the recorded-problem shape');
+  assert.strictEqual(healthy.nextCount, 0,
+    'a run with no recorded failure was still given a failure recovery action');
+  assert.match(healthy.evidence, /Recorded run state: BUILDING\./);
+  assert.match(healthy.evidence, /Recorded correction cycles: UNAVAILABLE\./,
+    'an absent correction counter was rendered as zero rather than unavailable');
+
+  const unbound = failureParts(bootPage(fixtureState()));
+  assert.strictEqual(unbound.state, 'UNAVAILABLE');
+  assert.strictEqual(unbound.nextCount, 0);
+  assert.match(unbound.card.textContent,
+    /UNAVAILABLE — no run is bound, so no failure state can be read\./);
+  assert.ok(!/REVIEW CHURN|WORK STALLED|PROVIDER FAILURE/.test(unbound.card.textContent),
+    'an unbound page invented a failure story');
+
+  // An absence in the record is never presented as a healthy run.
+  const noBuild = failureParts(bootPage(failureFixture({
+    runId: 'RUN-NO-BUILDER', state: 'INTAKE_RECORDED', objective: 'Recorded objective only',
+    updatedAt: '2026-09-03T12:21:00.000Z',
+  })));
+  assert.strictEqual(noBuild.state, 'NO_RECORDED_FAILURE');
+  assert.match(noBuild.evidence, /absence of evidence rather than proof that nothing failed/,
+    'a run with no builder attempt was reported as a proven-clean attempt');
+});
+
+test('DOM: Detail View restates the same failure reading, so the two surfaces cannot disagree', () => {
+  const page = bootPage(failureFixture({
+    runId: 'RUN-DETAIL-FAILURE', state: 'BUILD_FAILED',
+    objective: 'Read the same failure on both surfaces',
+    updatedAt: '2026-09-03T12:25:00.000Z',
+    build: {
+      mode: 'async', status: 'FAILED', exit: 1, timedOut: false, retrySafe: false,
+      activity: { code: 'MODEL_AUTH_FAILURE', phase: 'BLOCKED', active: false,
+        summary: 'Claude authentication failed' },
+      failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
+        summary: 'Claude authentication failed.' },
+      failover: { state: 'NOT_EXECUTABLE', provider: 'grok-subscription', model: 'grok-4.6',
+        reason: 'Grok is the next eligible builder, but automatic failover is not enabled for this beta.' },
+    },
+  }));
+  const parts = failureParts(page);
+  const lead = evidencePanelsById(page).action;
+  assert.ok(lead, 'the Detail View lead instrument is missing');
+  assert.match(lead.textContent, /Failure state: PROVIDER_FAILURE — /,
+    'Detail View does not restate the resolved failure state');
+  assert.ok(lead.textContent.includes(parts.evidence.replace('Last recorded evidence: ', '')),
+    'Detail View derived its own failure evidence instead of restating the resolved one');
+  assert.ok(lead.textContent.includes(parts.next.replace('One next governed action: ', '')),
+    'Detail View and Command View disagree about the one next governed action');
+});
+
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────
 // The panel used to render once from the generated snapshot and never again,
 // so a founder watching the page saw an old objective and an old verdict
