@@ -1312,6 +1312,11 @@ function log(req, status, started) {
  * status read. The immediate pass closes already-orphaned BUILDING records;
  * the bounded interval catches a worker that exits after hosting starts. Both
  * use aegis-run's canonical claim/transition authority.
+ *
+ * A run the scan reports as BUILT is also offered — by run id, nothing else —
+ * to aegis-run's automatic-checks authority, which refuses everything that is
+ * not a dashboard-created run whose canonical subject is the dashboard slice.
+ * Hosting selects no command and records no outcome.
  */
 function startRunReconciler(server, authority = AegisRun, intervalMs = RUN_RECONCILE_INTERVAL_MS) {
   if (!server || typeof server.once !== 'function' ||
@@ -1319,10 +1324,35 @@ function startRunReconciler(server, authority = AegisRun, intervalMs = RUN_RECON
     throw new TypeError('run reconciler requires a close-capable server and canonical run authority');
   }
   const boundedIntervalMs = Number.isInteger(intervalMs) && intervalMs > 0 ? intervalMs : RUN_RECONCILE_INTERVAL_MS;
+  // Which runs this process has already offered to the automatic-checks
+  // authority while they were BUILT. Process-local memory only: it is not
+  // evidence, it decides nothing about a run, and it exists so a run sitting
+  // at BUILT is offered once per arrival instead of once every interval. A
+  // later pass that observes the same run away from BUILT — a correction
+  // cycle returning through BUILDING — forgets it, so the next BUILT is a new
+  // arrival again.
+  const offeredWhileBuilt = new Set();
   const pass = () => {
-    try { authority.reconcileBuildingRuns(); }
+    let results;
+    try { results = authority.reconcileBuildingRuns(); }
     catch (error) {
       process.stderr.write(`[aegis-host] run reconciliation refused: ${String(error.code || error.message || error)}\n`);
+      return;
+    }
+    // Reconciliation is where hosting learns that a detached worker finished.
+    // Hosting decides nothing about the run it is handed: whether checks may
+    // start, and which ones, belongs entirely to aegis-run's authority, which
+    // refuses every run that is not a dashboard-created dashboard-slice BUILT.
+    if (!Array.isArray(results) || typeof authority.runAutomaticDashboardChecks !== 'function') return;
+    for (const result of results) {
+      if (!result || typeof result.runId !== 'string') continue;
+      if (result.state !== 'BUILT') { offeredWhileBuilt.delete(result.runId); continue; }
+      if (offeredWhileBuilt.has(result.runId)) continue;
+      offeredWhileBuilt.add(result.runId);
+      try { authority.runAutomaticDashboardChecks(result.runId); }
+      catch (error) {
+        process.stderr.write(`[aegis-host] automatic dashboard checks refused for ${result.runId}: ${String(error.code || error.message || error)}\n`);
+      }
     }
   };
   pass();

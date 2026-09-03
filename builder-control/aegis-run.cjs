@@ -1343,7 +1343,17 @@ function reconcileWorkerRun(runId, options = {}) {
 function reconcileBuildingRuns(options = {}) {
   const results = [];
   for (const run of listRuns()) {
-    if (run.state !== 'BUILDING' || !run.build || run.build.mode !== 'async') continue;
+    if (!run.build || run.build.mode !== 'async') continue;
+    // A detached worker records its own BUILT transition, so a run that
+    // already finished is never handed to reconcileWorkerRun. Report it as the
+    // observation it is: no claim is taken, nothing is patched, and no
+    // transition is attempted. Callers learn a worker slot finished here or
+    // not at all.
+    if (run.state === 'BUILT') {
+      results.push(Object.freeze({ runId: run.runId, action: 'NOOP', state: 'BUILT' }));
+      continue;
+    }
+    if (run.state !== 'BUILDING') continue;
     try { results.push(reconcileWorkerRun(run.runId, options)); }
     catch (error) {
       if (error instanceof AegisControlError && error.code === 'LAUNCH_IN_PROGRESS') {
@@ -5007,6 +5017,94 @@ function runChecks(runId) {
   } finally { releaseRunLaunchClaim(claim); }
 }
 
+// ── automatic focused dashboard checks ─────────────────────────────────────
+// One narrow automation and nothing wider: a dashboard-created run that
+// reaches BUILT with a canonical subject confined to the dashboard slice may
+// have its already-proven focused check pair executed without an operator
+// click. Every other run keeps the manual control-surface path exactly as it
+// is, and the full packet is never started automatically.
+//
+// This is an ELIGIBILITY authority, not a second check authority. It selects
+// no command, transitions no state, and writes no evidence. Execution goes
+// through runChecks() — the one canonical executor — which takes the same
+// per-run claim as the operator button and re-derives the narrowed list from
+// the canonical subject itself. Eligibility is a refusal-shaped decision: if
+// anything is missing, moved, unreadable, or wider than the dashboard slice,
+// the answer is "not eligible" and the run simply stays manual.
+function automaticDashboardChecksEligibility(runId) {
+  const ineligible = (reason, state = null) =>
+    Object.freeze({ eligible: false, runId, state, reason });
+  let run;
+  try { run = loadRun(runId); }
+  catch (error) {
+    return ineligible(`the canonical run record is unavailable: ${error.message}`);
+  }
+  // The eligibility marker is server-owned and recorded once at objective
+  // intake; no request body can set it. A CLI run, or any run created without
+  // it, is never touched here.
+  if (run.automaticChecks !== true) {
+    return ineligible('the run is not marked automatic-checks eligible', run.state);
+  }
+  if (run.state !== 'BUILT') {
+    return ineligible(`automatic checks require BUILT, run is ${run.state}`, run.state);
+  }
+  let packetBefore;
+  let gitEnv;
+  try {
+    const packet = resolvePacketOption(run.packet);
+    if (!packet) return ineligible('the run names no readable packet', run.state);
+    packetBefore = packetCoordinate(packet);
+    gitEnv = canonicalGitEnvironment(run);
+  } catch (error) {
+    return ineligible(`the packet or worktree could not be proven: ${error.message}`, run.state);
+  }
+  let subjectResult;
+  try {
+    subjectResult = runCanonicalEngineeringOs(
+      ['--subject', '--packet', packetBefore.path, '--json'], gitEnv);
+  } catch (error) {
+    return ineligible(`the canonical subject authority was unavailable: ${error.message}`, run.state);
+  }
+  const subject = subjectResult.parsed;
+  if (subjectResult.status !== 0 || !validSubjectCoordinate(subject)) {
+    return ineligible('the canonical subject was empty, malformed, or unavailable', run.state);
+  }
+  const changedPaths = subject.changedPaths;
+  if (!Array.isArray(changedPaths) || changedPaths.length === 0 ||
+      !changedPaths.every((p) => typeof p === 'string' && DASHBOARD_SLICE_PATHS.includes(p))) {
+    return ineligible('the canonical changed paths are not confined to the dashboard slice', run.state);
+  }
+  // The decisive guard against ever auto-running the packet: the fixed-policy
+  // selector must ALREADY reduce this subject to exactly the proven focused
+  // pair. A packet that would fall back to its full list is ineligible rather
+  // than narrowed here, because narrowing is not this function's authority.
+  const commands = dashboardSliceCheckCommands(packetBefore.parsed, changedPaths);
+  const selected = new Set(commands);
+  if (commands.length !== DASHBOARD_SLICE_CHECKS.length ||
+      selected.size !== DASHBOARD_SLICE_CHECKS.length ||
+      !DASHBOARD_SLICE_CHECKS.every((command) => selected.has(command))) {
+    return ineligible('the canonical selection is not the proven focused dashboard pair', run.state);
+  }
+  return Object.freeze({
+    eligible: true, runId, state: run.state, commands: Object.freeze([...commands]),
+  });
+}
+
+function runAutomaticDashboardChecks(runId) {
+  const eligibility = automaticDashboardChecksEligibility(runId);
+  if (!eligibility.eligible) {
+    return Object.freeze({
+      runId, action: 'automatic-checks', ran: false,
+      state: eligibility.state, reason: eligibility.reason,
+    });
+  }
+  const checks = runChecks(runId);
+  return Object.freeze({
+    runId, action: 'automatic-checks', ran: true, commands: eligibility.commands,
+    state: checks.state, checks: checks.checks, nextAction: checks.nextAction,
+  });
+}
+
 // ── step 7: exact-subject independent review binding ───────────────────────
 // The runtime deliberately does not interpret review records.  The canonical
 // Engineering OS computes the subject and applies the review gate; this layer
@@ -5918,4 +6016,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };

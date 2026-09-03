@@ -3298,6 +3298,142 @@ test('check selector is consulted only after a validated canonical subject and b
     'no check list may exist before the validated subject narrows it');
 });
 
+// ── automatic focused dashboard checks ─────────────────────────────────────
+const FOCUSED_DASHBOARD_PAIR = [
+  'node builder-control/test/dashboard-slice.test.cjs',
+  'git diff --check',
+];
+
+test('automatic checks delegate execution to runChecks and can never name a command', () => {
+  const source = fs.readFileSync(CLI, 'utf8');
+  const body = source.slice(
+    source.indexOf('function automaticDashboardChecksEligibility(runId) {'),
+    source.indexOf('// ── step 7: exact-subject independent review binding'));
+  assert.ok(body.length > 0, 'the automatic dashboard check authority is missing from aegis-run.cjs');
+  assert.strictEqual((body.match(/runChecks\(runId\)/g) || []).length, 1,
+    'automatic checks must have exactly one execution call site, and it must be the canonical runChecks');
+  assert.doesNotMatch(body, /spawnSync\(|executeCheckInSnapshot\(|transition\(|saveRun\(/,
+    'the automatic path must neither execute a check nor move or rewrite a run itself');
+  // Eligibility is the whole of the automation's authority, and each of these
+  // is a load-bearing refusal, not decoration.
+  assert.match(body, /run\.automaticChecks !== true/);
+  assert.match(body, /run\.state !== 'BUILT'/);
+  assert.match(body, /DASHBOARD_SLICE_PATHS\.includes\(p\)/);
+  assert.match(body, /DASHBOARD_SLICE_CHECKS\.every\(/);
+});
+
+hostContainmentTest('automatic checks accept a dashboard-created BUILT dashboard-slice run as exactly the focused pair', () => {
+  const subject = reviewSubject({
+    changedPaths: ['builder-control/dashboard/index.html'],
+    subjectPaths: ['builder-control/dashboard/index.html'],
+    diffBytes: 256,
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('BUILT',
+    { ...REVIEW_RUN, automaticChecks: true }, `
+      console.log(JSON.stringify(R.automaticDashboardChecksEligibility(runId)));
+    `, engineeringSubjectSequenceMock([subject], REVIEW_PACKET));
+  try {
+    assert.strictEqual(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.eligible, true, `eligibility was refused: ${out.reason}`);
+    assert.deepStrictEqual(out.commands, FOCUSED_DASHBOARD_PAIR,
+      'an eligible run must resolve to the proven focused pair and nothing wider');
+    // Deciding is not executing: eligibility alone moves and records nothing.
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILT');
+    assert.strictEqual(saved.checks, null);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(ledger, 'utf8')), []);
+  } finally { fs.rmSync(TMP, { recursive: true, force: true }); }
+});
+
+hostContainmentTest('RED: a run that is not dashboard-created is never automatically checked, and no subject is computed', () => {
+  for (const marker of [{ automaticChecks: false }, {}]) {
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('BUILT',
+      { ...REVIEW_RUN, ...marker }, `
+        console.log(JSON.stringify(R.runAutomaticDashboardChecks(runId)));
+      `, engineeringSubjectSequenceMock([], REVIEW_PACKET));
+    try {
+      assert.strictEqual(r.status, 0, r.stderr);
+      const out = JSON.parse(r.stdout.trim().split('\n').pop());
+      assert.strictEqual(out.ran, false, `${JSON.stringify(marker)} was automatically checked`);
+      assert.match(out.reason, /not marked automatic-checks eligible/);
+      const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+      assert.strictEqual(saved.state, 'BUILT');
+      assert.strictEqual(saved.checks, null);
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(ledger, 'utf8')), []);
+    } finally { fs.rmSync(TMP, { recursive: true, force: true }); }
+  }
+});
+
+hostContainmentTest('RED: automatic checks refuse any run that is not currently BUILT', () => {
+  for (const state of ['BUILDING', 'CHECKS_PASSED', 'BUILD_FAILED']) {
+    const { r, ledger, TMP } = withSeededRun(state,
+      { ...REVIEW_RUN, automaticChecks: true }, `
+        console.log(JSON.stringify(R.runAutomaticDashboardChecks(runId)));
+      `, engineeringSubjectSequenceMock([], REVIEW_PACKET));
+    try {
+      assert.strictEqual(r.status, 0, r.stderr);
+      const out = JSON.parse(r.stdout.trim().split('\n').pop());
+      assert.strictEqual(out.ran, false, `${state} was automatically checked`);
+      assert.match(out.reason, /automatic checks require BUILT/);
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(ledger, 'utf8')), []);
+    } finally { fs.rmSync(TMP, { recursive: true, force: true }); }
+  }
+});
+
+hostContainmentTest('RED: a canonical subject reaching past the dashboard slice keeps the manual check path', () => {
+  for (const changedPaths of [
+    ['builder-control/aegis-run.cjs', 'builder-control/dashboard/index.html'],
+    ['builder-control/dashboard/state.js'],
+    [],
+  ]) {
+    const subject = reviewSubject({
+      changedPaths,
+      subjectPaths: ['builder-control/dashboard/index.html'],
+      diffBytes: 256,
+    });
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('BUILT',
+      { ...REVIEW_RUN, automaticChecks: true }, `
+        console.log(JSON.stringify(R.runAutomaticDashboardChecks(runId)));
+      `, engineeringSubjectSequenceMock([subject], REVIEW_PACKET));
+    try {
+      assert.strictEqual(r.status, 0, r.stderr);
+      const out = JSON.parse(r.stdout.trim().split('\n').pop());
+      assert.strictEqual(out.ran, false,
+        `changed paths ${JSON.stringify(changedPaths)} started an automatic check run`);
+      assert.match(out.reason, /not confined to the dashboard slice/);
+      const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+      assert.strictEqual(saved.state, 'BUILT');
+      assert.strictEqual(saved.checks, null);
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(ledger, 'utf8')), []);
+    } finally { fs.rmSync(TMP, { recursive: true, force: true }); }
+  }
+});
+
+hostContainmentTest('reconciliation reports an already BUILT async run without claiming or moving it', () => {
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('BUILT', {
+    ...REVIEW_RUN,
+    automaticChecks: true,
+    build: {
+      mode: 'async', attempt: 1, attemptId: '66666666-6666-4666-8666-666666666666',
+      workerPid: null, workerState: 'EXITED', revision: 2, exit: 0,
+    },
+  }, `
+    console.log(JSON.stringify(R.reconcileBuildingRuns()));
+  `);
+  try {
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.deepStrictEqual(JSON.parse(r.stdout.trim().split('\n').pop()),
+      [{ runId, action: 'NOOP', state: 'BUILT' }],
+      'a finished async run must be reported to the reconciler caller exactly once per scan');
+    const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILT');
+    assert.strictEqual(saved.build.workerState, 'EXITED');
+    assert.strictEqual(saved.build.revision, 2, 'observation must not patch the worker attempt');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(ledger, 'utf8')), []);
+  } finally { fs.rmSync(TMP, { recursive: true, force: true }); }
+});
+
 hostContainmentTest('runChecks: external packet is refused before checks with no run or ledger mutation', () => {
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-check-external-'));
   const packet = path.join(tmp, 'packet.json');

@@ -1020,6 +1020,22 @@ test('RED: status reads never invoke worker reconciliation', () => {
     'status must not reopen mutable run files after the immutable AegisState snapshot');
 });
 
+test('RED: hosting never names a check command when it offers a BUILT run for automatic checks', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8');
+  const body = source.slice(source.indexOf('function startRunReconciler('), source.indexOf('function start(args)'));
+  assert.ok(body.length > 0, 'startRunReconciler source boundary was not found');
+  // A comment may describe the boundary — naming the slice this delegation is
+  // narrowed to is how the boundary is documented. Only executable source can
+  // actually select a command, so the prohibitions below read the code alone.
+  const executable = body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  assert.match(executable, /authority\.runAutomaticDashboardChecks\(result\.runId\)/,
+    'hosting must delegate automatic checks to the canonical authority by run id alone');
+  assert.ok(!/testsRequired|dashboard-slice|git diff --check|\.test\.cjs/.test(executable),
+    'hosting must not name, select, or narrow a check command');
+  assert.ok(!/transition|CHECKS_PASSED|CHECKS_FAILED/.test(executable),
+    'hosting must not decide or record a lifecycle outcome for an automatically checked run');
+});
+
 test('RED: failed bootstrap and unverified termination never project as running activity', () => {
   for (const [workerState, expected, exit, terminationVerified] of [
     ['BOOTSTRAP_FAILED', 'Builder failed during startup', null, null],
@@ -1104,6 +1120,73 @@ function get(port, path_, headers = {}) {
     const stoppedAt = passes;
     await new Promise((resolve) => setTimeout(resolve, 55));
     assert.strictEqual(passes, stoppedAt, 'the reconciliation timer leaked after server close');
+    reconciler.stop();
+  });
+
+  await atest('hosting offers only a returned BUILT run to the automatic-checks authority, by run id alone', async () => {
+    const server = new EventEmitter();
+    const runId = 'RUN-20260903-1a2b3c4d';
+    let results = [{ runId, action: 'ACTIVE', state: 'BUILDING' }];
+    const offered = [];
+    const authority = {
+      reconcileBuildingRuns() { return results; },
+      runAutomaticDashboardChecks(...args) { offered.push(args); return { runId, ran: false }; },
+    };
+    const reconciler = S.startRunReconciler(server, authority, 20);
+    assert.deepStrictEqual(offered, [], 'a BUILDING run must never be offered to automatic checks');
+    // Hosting hands over an identifier and nothing else: no command, no
+    // selection, no packet. Every decision stays with aegis-run.
+    results = [{ runId, action: 'NOOP', state: 'BUILT' }];
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.deepStrictEqual(offered, [[runId]],
+      'a BUILT run must be offered exactly once per arrival, with the run id as the only argument');
+    // A correction cycle returning through BUILDING is a new arrival.
+    results = [{ runId, action: 'ACTIVE', state: 'BUILDING' }];
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    results = [{ runId, action: 'NOOP', state: 'BUILT' }];
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.deepStrictEqual(offered, [[runId], [runId]],
+      'a run that reached BUILT again after a correction was never offered');
+    server.emit('close');
+    reconciler.stop();
+  });
+
+  await atest('an automatic-checks refusal never stops hosting reconciliation', async () => {
+    const server = new EventEmitter();
+    let passes = 0;
+    const authority = {
+      reconcileBuildingRuns() {
+        passes += 1;
+        return [{ runId: 'RUN-20260903-5e6f7a8b', action: 'NOOP', state: 'BUILT' }];
+      },
+      runAutomaticDashboardChecks() {
+        const error = new Error('automatic checks are refused for this fixture');
+        error.code = 'INVALID_CHECKS';
+        throw error;
+      },
+    };
+    const reconciler = S.startRunReconciler(server, authority, 20);
+    const afterFirstPass = passes;
+    assert.strictEqual(afterFirstPass, 1, 'the immediate pass did not survive an automatic-checks refusal');
+    await new Promise((resolve) => setTimeout(resolve, 55));
+    assert.ok(passes > afterFirstPass, 'reconciliation stopped after an automatic-checks refusal');
+    server.emit('close');
+    reconciler.stop();
+  });
+
+  await atest('hosting reconciliation tolerates an authority without the automatic-checks capability', async () => {
+    const server = new EventEmitter();
+    let passes = 0;
+    const authority = {
+      reconcileBuildingRuns() {
+        passes += 1;
+        return [{ runId: 'RUN-20260903-9c0d1e2f', action: 'NOOP', state: 'BUILT' }];
+      },
+    };
+    const reconciler = S.startRunReconciler(server, authority, 20);
+    await new Promise((resolve) => setTimeout(resolve, 55));
+    assert.ok(passes >= 2, 'a reconciler without an automatic-checks authority stopped reconciling');
+    server.emit('close');
     reconciler.stop();
   });
 
