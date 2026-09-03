@@ -860,6 +860,36 @@ test('the identity line restates existing resolutions and cannot name a run the 
     'live work is claimed from something other than the existing lifecycle resolution');
 });
 
+test('live activity has one translation seam and Detail View alone discloses the exact receipt', () => {
+  assert.strictEqual((code.match(/function activityUpdate\(/g) || []).length, 1,
+    'live activity has more than one founder-language translation authority');
+  assert.strictEqual((code.match(/function appendActivity\(/g) || []).length, 1,
+    'live activity has more than one renderer');
+  assert.ok(/\.activity-raw\{display:none;[^}]*overflow-wrap:anywhere|\.activity-raw\{display:none;/.test(code),
+    'Command View does not keep raw receipts out of its founder-readable feed');
+  assert.ok(/body\[data-detail="true"\] \.activity-raw\{display:block\}/.test(code),
+    'Detail View does not disclose the exact recorded receipt');
+  const renderer = code.slice(code.indexOf('function appendActivity'),
+    code.indexOf('// One activity renderer owns the live feed'));
+  assert.ok(/String\(text\)/.test(renderer), 'the renderer does not retain the exact supplied receipt text');
+  assert.ok(!/new Date|Date\.now|setTimeout|setInterval/.test(renderer),
+    'the activity renderer invents time or activity instead of using canonical evidence');
+});
+
+test('accepted, waiting, refused and stopping activity never claims recorded progress', () => {
+  const map = code.slice(code.indexOf('var ACTIVITY_UPDATES'), code.indexOf('function activityAnswer'));
+  for (const event of ['START_ACCEPTED', 'START_REFUSED', 'CHECKS_ACCEPTED', 'CHECKS_REFUSED',
+    'REVIEW_EVIDENCE_ACCEPTED', 'REVIEW_REFUSED_BY_REVIEWER', 'REVIEW_REFUSED_BY_AEGIS',
+    'CANCEL_ACCEPTED', 'CANCEL_REFUSED', 'RETRY_ACCEPTED', 'RETRY_REFUSED']) {
+    assert.ok(map.includes(event + ':'), `${event} has no founder-readable activity mapping`);
+  }
+  assert.ok(!/moved:\s*['"][^'"]*(?:Yes|progressed|completed|finished|advanced)/i.test(map),
+    'a control receipt is presented as completed or recorded progress');
+  assert.ok(/nothing counts as built until AEGIS records it/.test(map) &&
+    /a check result counts only once AEGIS writes it into the run history/.test(map),
+    'accepted work is not explicitly separated from canonical lifecycle progress');
+});
+
 // ── V2 mobile operator cockpit (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ───
 // The phone failure guarded here is a cockpit that reads like a spreadsheet:
 // the owner opens AEGIS on a phone and the first screens are routing rationale,
@@ -4121,6 +4151,34 @@ test('DOM: Detail View restates the same failure reading, so the two surfaces ca
     'Detail View derived its own failure evidence instead of restating the resolved one');
   assert.ok(lead.textContent.includes(parts.next.replace('One next governed action: ', '')),
     'Detail View and Command View disagree about the one next governed action');
+});
+
+test('DOM: founder activity preserves exact evidence and never promotes a control receipt to progress', () => {
+  const page = bootPage(fixtureState());
+  const raw = 'Retry failed for RUN-FOUNDER: exact refusal [AEGIS-BOUNDARY]';
+  page.sandbox.AEGIS_DASHBOARD.appendActivity(raw, {
+    code: 'RETRY_REFUSED', runId: 'RUN-FOUNDER', ts: '2026-09-03T15:04:05.000Z',
+  });
+  const host = page.document.getElementById('live-activity');
+  const items = findByAttr(host, 'data-activity');
+  assert.strictEqual(items.length, 1, 'one receipt produced more than one activity item');
+  assert.strictEqual(items[0].attrs['data-activity'], 'RETRY_REFUSED');
+  assert.match(items[0].textContent, /The correction cycle did not start/,
+    'Command View did not translate the refusal into founder-readable language');
+  assert.match(items[0].textContent, /No — nothing moved forward/,
+    'a refused retry was allowed to imply progress');
+  const evidence = findByAttr(host, 'data-activity-evidence');
+  assert.strictEqual(evidence.length, 1, 'the exact receipt does not share its founder activity item');
+  assert.ok(evidence[0].textContent.includes(raw), 'Detail evidence rewrote or dropped the exact receipt');
+  assert.match(evidence[0].textContent, /Canonical timestamp 2026-09-03T15:04:05\.000Z/,
+    'the canonical timestamp was not retained beside the exact receipt');
+
+  const unknown = page.sandbox.AEGIS_DASHBOARD.activityUpdate({ code: 'HEARTBEAT_ONLY' });
+  assert.strictEqual(unknown.code, 'UNAVAILABLE');
+  assert.match(unknown.moved, /^No —/,
+    'an unknown or heartbeat-only update was allowed to imply progress');
+  assert.match(unknown.stamp, /timestamp UNAVAILABLE/,
+    'an event without a canonical timestamp received an invented browser time');
 });
 
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────

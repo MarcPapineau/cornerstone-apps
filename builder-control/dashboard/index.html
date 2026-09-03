@@ -165,6 +165,28 @@
   .row .meta{color:var(--text-2);font-size:12px;margin-top:2px}
   .badges{display:flex;gap:calc(var(--sp)*1.5);flex-wrap:wrap;justify-content:flex-end}
 
+  /* ── live activity: one item, two reading levels ─────────────────
+     A live update is one list item, never two. Command View reads the
+     founder answers; the exact recorded text and its canonical timestamp are
+     written into the SAME item by the same renderer and disclosed by the
+     Detail control, so no receipt is dropped, rewritten or duplicated. There
+     is no width, no track minimum and no nowrap anywhere here: every value
+     wraps inside its column, so a run id or a refusal code cannot drag a
+     390px phone sideways. */
+  .activity-item{display:block;min-width:0}
+  .activity-what{font-weight:500;color:var(--text-0);font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+  .activity-answers{margin:calc(var(--sp)*2) 0 0;display:grid;grid-template-columns:minmax(0,1fr);
+    gap:calc(var(--sp)*1.5)}
+  .activity-answer{min-width:0}
+  .activity-answer>dt{font:650 10px/1.3 var(--mono);letter-spacing:.09em;text-transform:uppercase;
+    color:var(--text-2)}
+  .activity-answer>dd{margin:2px 0 0;font-size:12px;line-height:1.45;color:var(--text-1);
+    overflow-wrap:anywhere}
+  .activity-raw{display:none;margin-top:calc(var(--sp)*2);padding-top:calc(var(--sp)*2);
+    border-top:1px solid var(--line)}
+  .activity-raw-text{font:11px/1.5 var(--mono);color:var(--text-1);overflow-wrap:anywhere}
+  .activity-raw-stamp{margin-top:3px;font:11px/1.45 var(--mono);color:var(--text-2);overflow-wrap:anywhere}
+
   /* ── inspector ──────────────────────────────────────────────────── */
   .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:calc(var(--sp)*2) calc(var(--sp)*3);font-size:13px}
   .kv dt{color:var(--text-2)}
@@ -702,6 +724,10 @@
   body[data-detail="true"] #raw-state{display:block}
   body[data-detail="true"] #raw-state>.raw-body{display:grid}
   body[data-detail="true"] .strategic-core{opacity:.78}
+  /* The exact recorded event text and its canonical timestamp. Disclosure
+     only: the evidence is always written into the item, so Detail View reveals
+     what was already there rather than fetching or re-deriving anything. */
+  body[data-detail="true"] .activity-raw{display:block}
 
   /* Evidence inspector — Detail View only. display:none keeps it out of the
      Command View layout AND out of the accessibility tree, so the first screen
@@ -1665,6 +1691,177 @@
       : 'UNAVAILABLE — canonical run evidence does not record what finished.';
   }
 
+  // ── V2 founder-readable live activity ─────────────────────────────────────
+  // The live feed printed the control plane's own receipt text — "status:
+  // engineering=OK runs=3 current=RUN-…" — which answers none of the four
+  // questions an owner actually has about a line that just appeared: what
+  // happened, who or what did it, did the build move forward, and what now.
+  //
+  // This is a TRANSLATION layer and nothing else. A sentence is selected by the
+  // canonical event code its caller already held, and the only values
+  // interpolated are canonical fields the same caller already received — the
+  // run id and the recorded provider. It reads no state, decides no lifecycle,
+  // and owns no verdict, so it cannot disagree with the deck: a status update
+  // restates currentOperatorContext, which is the SAME resolution the mission
+  // line, the brief and the context assistant already read.
+  //
+  // Progress is never implied. An accepted request is a receipt, not a
+  // transition: aegis-run owns transitions and writes them to the run history,
+  // which is why acceptance, refusal, failure and a repeated status snapshot
+  // all report that this update did not move the build. The exact recorded text
+  // is never edited here — it is carried through untouched and disclosed in
+  // Detail View beside its canonical timestamp.
+  //
+  // The provider name is canonical evidence when the launch receipt carries
+  // one. When it does not, the worker is still named as governed and its
+  // identity is reported UNAVAILABLE rather than guessed.
+  function activityRun(facts){
+    return typeof facts.runId === 'string' && facts.runId ? 'run ' + facts.runId : 'the current run';
+  }
+  function activityWorker(facts){
+    return typeof facts.provider === 'string' && facts.provider
+      ? 'the governed ' + facts.provider + ' worker'
+      : 'the governed worker AEGIS selected (its provider is UNAVAILABLE on this receipt)';
+  }
+  function activityDeck(field, unavailable){
+    var ctx = currentOperatorContext;
+    return ctx && typeof ctx[field] === 'string' && ctx[field] ? ctx[field] : unavailable;
+  }
+
+  var ACTIVITY_UPDATES = {
+    STATUS_SNAPSHOT: {
+      what: function(){
+        return 'AEGIS re-sent the whole picture. ' +
+          activityDeck('finished', 'UNAVAILABLE — canonical run evidence does not record what finished.');
+      },
+      who: 'AEGIS sent this by itself. Nobody pressed anything and no build step ran for it.',
+      moved: 'Not from this update — it is the current picture read again, and it claims no step of its own.',
+      next: function(){
+        return activityDeck('next', 'UNAVAILABLE — no next action is resolved from canonical evidence.');
+      }
+    },
+    START_ACCEPTED: {
+      what: function(f){
+        return 'AEGIS accepted your request to start ' + activityRun(f) + ' and handed the work to ' +
+          activityWorker(f) + '.';
+      },
+      who: 'You asked for it on this page; AEGIS started the worker.',
+      moved: 'Not yet — the job has been handed over, and nothing counts as built until AEGIS records it.',
+      next: 'Wait for AEGIS to record the worker running or stopping. This page updates on its own.'
+    },
+    START_REFUSED: {
+      what: function(f){ return 'AEGIS refused to start ' + activityRun(f) + ', so no worker was started.'; },
+      who: 'AEGIS refused the request. No worker and no model was given any work.',
+      moved: 'No — nothing moved forward.',
+      next: 'Open Detail View to read the exact refusal, fix what it names, then ask to start the run again.'
+    },
+    CHECKS_ACCEPTED: {
+      what: function(f){
+        return 'AEGIS accepted your request to run the automated checks on ' + activityRun(f) + '.';
+      },
+      who: 'You asked for the checks on this page; AEGIS runs them.',
+      moved: 'Not yet — a check result counts only once AEGIS writes it into the run history.',
+      next: 'Wait for AEGIS to record the check result. This page updates on its own.'
+    },
+    CHECKS_REFUSED: {
+      what: function(f){ return 'The automated checks did not start for ' + activityRun(f) + '.'; },
+      who: 'AEGIS could not accept the request. No check was run.',
+      moved: 'No — nothing moved forward.',
+      next: 'Open Detail View to read the exact reason, then ask for the checks again.'
+    },
+    REVIEW_EVIDENCE_ACCEPTED: {
+      what: function(f){
+        return 'AEGIS accepted the outside review paperwork already on file for ' + activityRun(f) + '.';
+      },
+      who: 'AEGIS checked paperwork that already existed. This page did not order, pay for or carry out any review.',
+      moved: 'Not yet — the run moves only when AEGIS writes the change into the run history.',
+      next: 'Wait for AEGIS to record the review evidence as attached. This page updates on its own.'
+    },
+    REVIEW_REFUSED_BY_REVIEWER: {
+      what: function(f){
+        return 'The outside reviewer would not approve this exact checked version of ' + activityRun(f) + '.';
+      },
+      who: 'The outside reviewer decided this. AEGIS recorded the refusal; this page judged nothing.',
+      moved: 'No — this is a stop, not a step forward.',
+      next: 'Use Retry to spend one bounded correction cycle on this run.'
+    },
+    REVIEW_REFUSED_BY_AEGIS: {
+      what: function(f){
+        return 'AEGIS would not accept the outside review paperwork for ' + activityRun(f) + '.';
+      },
+      who: 'AEGIS refused the request. No review paperwork was attached to this run.',
+      moved: 'No — nothing moved forward.',
+      next: 'Open Detail View to read the exact refusal code and reason before asking again.'
+    },
+    CANCEL_ACCEPTED: {
+      what: function(f){ return 'AEGIS accepted your request to cancel ' + activityRun(f) + '.'; },
+      who: 'You asked for the cancellation on this page; AEGIS carries it out.',
+      moved: 'No — cancelling stops work, it never finishes it.',
+      next: 'Wait for AEGIS to record the run as stopped. This page updates on its own.'
+    },
+    CANCEL_REFUSED: {
+      what: function(f){
+        return 'The cancellation did not go through, so ' + activityRun(f) + ' was left as it was.';
+      },
+      who: 'AEGIS could not accept the cancellation.',
+      moved: 'No — nothing moved forward and nothing stopped.',
+      next: 'Open Detail View to read the exact reason, then ask for the cancellation again.'
+    },
+    RETRY_ACCEPTED: {
+      what: function(f){
+        return 'AEGIS accepted one bounded correction cycle for ' + activityRun(f) + '.';
+      },
+      who: 'You asked for the retry on this page; AEGIS decides whether a cycle is still allowed.',
+      moved: 'Not yet — a correction cycle is another attempt at the same work, not progress.',
+      next: 'Wait for AEGIS to record what the correction attempt does. This page updates on its own.'
+    },
+    RETRY_REFUSED: {
+      what: function(f){ return 'The correction cycle did not start for ' + activityRun(f) + '.'; },
+      who: 'AEGIS could not accept the retry. Nothing was re-run.',
+      moved: 'No — nothing moved forward.',
+      next: 'Open Detail View to read the exact reason. If every bounded correction cycle is already used, ' +
+        'escalate this run or abandon it.'
+    }
+  };
+
+  function activityAnswer(value, facts){
+    return typeof value === 'function' ? value(facts) : value;
+  }
+
+  // A canonical timestamp or an explicit absence — never a browser clock. A
+  // control receipt carries no timestamp of its own, and stamping one here
+  // would put a fabricated time next to unmodified canonical evidence.
+  function activityStamp(facts){
+    return typeof facts.ts === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z?$/.test(facts.ts)
+      ? 'Canonical timestamp ' + facts.ts
+      : 'Canonical timestamp UNAVAILABLE — this receipt carries none.';
+  }
+
+  // Own-property lookup only, and an unrecognised code is stated as
+  // unrecognised: an update AEGIS cannot name must never borrow the wording of
+  // one it can.
+  function activityUpdate(record){
+    var facts = record && typeof record === 'object' ? record : {};
+    var code = typeof facts.code === 'string' ? facts.code : '';
+    if (!Object.prototype.hasOwnProperty.call(ACTIVITY_UPDATES, code)) {
+      return { code: 'UNAVAILABLE',
+        what: 'UNAVAILABLE — this update carries no canonical event, so AEGIS will not describe it.',
+        who: 'UNAVAILABLE — no actor is recorded on this update.',
+        moved: 'No — an update AEGIS cannot name never counts as progress.',
+        next: 'Open Detail View and read the exact recorded text below.',
+        stamp: activityStamp(facts) };
+    }
+    var entry = ACTIVITY_UPDATES[code];
+    return {
+      code: code,
+      what: activityAnswer(entry.what, facts),
+      who: activityAnswer(entry.who, facts),
+      moved: activityAnswer(entry.moved, facts),
+      next: activityAnswer(entry.next, facts),
+      stamp: activityStamp(facts)
+    };
+  }
+
   // Why the integrated version still requires verification. Only a run that is
   // positively bound to the current code version with clear evidence may say it
   // is confirmed; every other case explains the gap instead of hiding it.
@@ -2555,9 +2752,12 @@
   async function requestRunRetry(run, button){
     if (!retryAvailability(run).allowed) return;
     if (button){ button.disabled = true; button.textContent = 'Retry requested…'; }
-    var publishActivity = function(text){
+    // The exact API receipt text is unchanged and still published; the second
+    // argument names which canonical event it is, so the feed can state it in
+    // founder language without rewriting the receipt.
+    var publishActivity = function(text, record){
       var dashboard = window.AEGIS_DASHBOARD;
-      if (dashboard && typeof dashboard.appendActivity === 'function') dashboard.appendActivity(text);
+      if (dashboard && typeof dashboard.appendActivity === 'function') dashboard.appendActivity(text, record);
     };
     try {
       var dashboard = window.AEGIS_DASHBOARD;
@@ -2567,10 +2767,12 @@
       var result = await dashboard.callApi('/api/retry', { runId: run.runId });
       publishActivity('Retry accepted for ' + run.runId + ': state ' +
         ((result && result.state) || 'UNAVAILABLE') +
-        ((result && result.action) ? '; action ' + result.action : '') + '.');
+        ((result && result.action) ? '; action ' + result.action : '') + '.',
+      { code: 'RETRY_ACCEPTED', runId: run.runId });
     } catch (e) {
       if (button){ button.disabled = false; button.textContent = 'Retry'; }
-      publishActivity('Retry failed for ' + run.runId + ': ' + e.message);
+      publishActivity('Retry failed for ' + run.runId + ': ' + e.message,
+        { code: 'RETRY_REFUSED', runId: run.runId });
     }
   }
 
@@ -4352,7 +4554,11 @@
     // One founder-language source. The run-card renderer lives in the second
     // script block and must read the same sentences the deck reads, so the
     // same fact is never phrased two different ways on one screen.
-    founder: FOUNDER
+    founder: FOUNDER,
+    // The live feed is rendered by the switchboard block below, so the ONE
+    // translation of a canonical event into founder language is exported here
+    // rather than copied there.
+    activityUpdate: activityUpdate
   };
 })();
 </script>
@@ -4435,9 +4641,12 @@
       report(true, 'Worker launch accepted: ' + (result.state || 'UNKNOWN') +
         '. Governed ' + ((result.builder && result.builder.provider) || 'builder') +
         ' process ' + (Number.isInteger(result.workerPid) ? ('PID ' + result.workerPid) : 'ownership UNAVAILABLE') +
-        ' has entered the asynchronous launch lifecycle. Live evidence will show when it reaches RUNNING or stops.');
+        ' has entered the asynchronous launch lifecycle. Live evidence will show when it reaches RUNNING or stops.',
+      { code: 'START_ACCEPTED', runId: result.runId || runId,
+        provider: (result.builder && result.builder.provider) || null });
     } catch (e) {
-      report(false, 'Start failed (' + e.code + '): ' + e.message);
+      report(false, 'Start failed (' + e.code + '): ' + e.message,
+        { code: 'START_REFUSED', runId: runId });
     } finally {
       startBtn.disabled = false;
     }
@@ -4557,7 +4766,7 @@
     if (run.state === 'INTAKE_RECORDED') {
       var startBtn = el('button', 'action primary', 'Start governed builder');
       startBtn.type = 'button';
-      bindRunActions(startBtn, run.runId, function(_ok, text){ appendActivity(text); });
+      bindRunActions(startBtn, run.runId, function(_ok, text, record){ appendActivity(text, record); });
       row.appendChild(startBtn);
     }
 
@@ -4580,11 +4789,13 @@
         try {
           var result = await callApi('/api/checks', { runId: run.runId });
           appendActivity('Checks completed for ' + run.runId + ': ' + result.state +
-            '; waiting for live lifecycle evidence.');
+            '; waiting for live lifecycle evidence.',
+          { code: 'CHECKS_ACCEPTED', runId: run.runId });
         } catch (e) {
           checksBtn.disabled = false;
           checksBtn.textContent = 'Run deterministic checks';
-          appendActivity('Checks failed to run for ' + run.runId + ': ' + e.message);
+          appendActivity('Checks failed to run for ' + run.runId + ': ' + e.message,
+            { code: 'CHECKS_REFUSED', runId: run.runId });
         }
       });
       row.appendChild(checksBtn);
@@ -4610,11 +4821,14 @@
             ? 'Independent review refused this exact checked version for ' + run.runId +
               '; Retry can start a bounded correction. No review was launched by this dashboard.'
             : 'Review evidence verified for ' + run.runId + ': ' + result.state +
-              '; waiting for live lifecycle evidence. No review was launched by this dashboard.');
+              '; waiting for live lifecycle evidence. No review was launched by this dashboard.',
+          { code: result.state === 'REVIEW_FAILED' ? 'REVIEW_REFUSED_BY_REVIEWER' : 'REVIEW_EVIDENCE_ACCEPTED',
+            runId: run.runId });
         } catch (e) {
           reviewBtn.disabled = false;
           reviewBtn.textContent = 'Verify independent review';
-          appendActivity('Review verification refused for ' + run.runId + ' (' + e.code + '): ' + e.message);
+          appendActivity('Review verification refused for ' + run.runId + ' (' + e.code + '): ' + e.message,
+            { code: 'REVIEW_REFUSED_BY_AEGIS', runId: run.runId });
         }
       });
       row.appendChild(reviewBtn);
@@ -4634,11 +4848,13 @@
         cancelBtn.textContent = 'Cancel requested…';
         try {
           await callApi('/api/cancel', { runId: run.runId });
-          appendActivity('Cancel accepted for ' + run.runId + '; waiting for lifecycle evidence.');
+          appendActivity('Cancel accepted for ' + run.runId + '; waiting for lifecycle evidence.',
+            { code: 'CANCEL_ACCEPTED', runId: run.runId });
         } catch (e) {
           cancelBtn.disabled = false;
           cancelBtn.textContent = 'Cancel';
-          appendActivity('Cancel failed for ' + run.runId + ': ' + e.message);
+          appendActivity('Cancel failed for ' + run.runId + ': ' + e.message,
+            { code: 'CANCEL_REFUSED', runId: run.runId });
         }
       });
       row.appendChild(cancelBtn);
@@ -4716,13 +4932,49 @@
     });
   }
 
-  function appendActivity(text){
+  // One item, two reading levels, one renderer.
+  //
+  // Command View reads the four founder answers — what happened, who or what
+  // acted, whether the build moved forward, and what happens next. Detail View
+  // discloses the SAME item's engineering evidence: the exact recorded text,
+  // byte for byte as the caller published it, beside its canonical timestamp.
+  // Both are written every time, so switching view discloses evidence that was
+  // already in the DOM rather than fetching, re-deriving or regenerating it.
+  //
+  // The founder answers come from the ONE exported translation seam in the
+  // renderer block. If that seam is unavailable the item says so and still
+  // prints its raw evidence — it never invents a summary of its own.
+  function appendActivity(text, record){
     var host = $('live-activity');
     if (!host) return;
     if (host.firstElementChild && host.firstElementChild.classList.contains('empty')) host.textContent = '';
-    var li = el('li', 'row');
-    li.appendChild(el('span', null, text));
-    li.appendChild(el('span', 'meta mono', new Date().toISOString()));
+    var dashboard = window.AEGIS_DASHBOARD;
+    var update = dashboard && typeof dashboard.activityUpdate === 'function'
+      ? dashboard.activityUpdate(record)
+      : { code: 'UNAVAILABLE',
+        what: 'UNAVAILABLE — the founder-language translation is not loaded for this update.',
+        who: 'UNAVAILABLE — no actor is recorded on this update.',
+        moved: 'No — an update AEGIS cannot describe never counts as progress.',
+        next: 'Open Detail View and read the exact recorded text below.',
+        stamp: 'Canonical timestamp UNAVAILABLE — this receipt carries none.' };
+    var li = el('li', 'row activity-item');
+    li.setAttribute('data-activity', update.code);
+    li.appendChild(el('div', 'activity-what', update.what));
+    var answers = el('dl', 'activity-answers');
+    [['Who acted', update.who],
+      ['Did this move the build forward?', update.moved],
+      ['What happens next', update.next]].forEach(function(pair){
+      var group = el('div', 'activity-answer');
+      group.appendChild(el('dt', null, pair[0]));
+      group.appendChild(el('dd', null, pair[1]));
+      answers.appendChild(group);
+    });
+    li.appendChild(answers);
+    var evidence = el('div', 'activity-raw');
+    evidence.setAttribute('data-activity-evidence', update.code);
+    evidence.appendChild(el('div', 'activity-raw-text', String(text)));
+    evidence.appendChild(el('div', 'activity-raw-stamp', update.stamp));
+    li.appendChild(evidence);
     host.insertBefore(li, host.firstChild);
     while (host.children.length > 30) host.removeChild(host.lastChild);
   }
@@ -4848,9 +5100,16 @@
       if (D.renderReviewers) D.renderReviewers(status.reviewers || null, status.engineering || null);
       if (D.renderEvents) D.renderEvents(status.events || null);
     }
+    // The engineering receipt line is unchanged and still recorded verbatim for
+    // Detail View. The canonical timestamp of a status event is the projection's
+    // own generatedAt — no browser clock is substituted when it is absent. The
+    // founder summary is composed AFTER renderFounderSummary above, so it
+    // restates the resolution the deck just painted rather than a second one.
     appendActivity('status: engineering=' + ((status.engineering && status.engineering.state) || 'UNKNOWN') +
       ' runs=' + ((status.runs && status.runs.length) || 0) +
-      ' current=' + ((status.runsBinding && status.runsBinding.runId) || 'UNAVAILABLE'));
+      ' current=' + ((status.runsBinding && status.runsBinding.runId) || 'UNAVAILABLE'),
+    { code: 'STATUS_SNAPSHOT', ts: (status && status.generatedAt) || null,
+      runId: (status && status.runsBinding && status.runsBinding.runId) || null });
   }
 
   // Keep live repaint on the same explicit renderer seam as the generated
