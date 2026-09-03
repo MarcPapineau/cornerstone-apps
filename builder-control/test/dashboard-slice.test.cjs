@@ -929,6 +929,87 @@ test('the phone cockpit hides no evidence, adds no motion, and leaves the deskto
     'the tablet and ordinary-laptop layouts were changed by the phone packet');
 });
 
+test('the phone command summary compacts the header and the strip instead of burying the answers', () => {
+  // The defect guarded here is a phone first screen spent entirely on chrome:
+  // a three-block header above five desktop-height status cards, with the
+  // mission, the current action, the owner decision, the next action and the
+  // last safe checkpoint all pushed past the fold. The fix is compaction, so
+  // every proof below pairs "smaller" with "still present and still whole".
+  const header = /\.command-header\{display:flex;position:static;([^}]*)\}/.exec(PHONE);
+  assert.ok(header, 'the phone header rule was rebuilt away');
+  assert.ok(/min-height:0/.test(header[1]) && /padding:8px 12px/.test(header[1]),
+    'the phone header still reserves the full desktop header band above the instruments');
+  assert.ok(/\.header-state\{display:contents\}/.test(PHONE),
+    'the header state block still takes a full-width row of its own on a phone');
+  assert.ok(/\.header-state \.hud-control\{order:1\}/.test(PHONE) &&
+    /\.header-state \.context-strip\{order:3;flex:1 0 100%/.test(PHONE),
+    'the header controls and the canonical context line are not laid out as one compact band');
+  // display:contents relocates a box; it removes nothing, and the proof above
+  // already forbids display:none anywhere in this block. Both controls and all
+  // three canonical context cells stay exactly where the markup has them.
+  const source = htmlSrc();
+  for (const id of ['ctx-entity', 'ctx-generated', 'ctx-verdict', 'toggle-motion']) {
+    assert.ok(source.includes('id="' + id + '"'), `${id} was deleted rather than compacted`);
+  }
+
+  // The operational status becomes one summary line per answer: written label
+  // and canonical state word on the first row, resolved sentence clamped under
+  // it. Five full-height cards are exactly what buried the operator answers.
+  assert.ok(/\.ops-cell\{display:flex;flex-wrap:wrap;[^}]*padding:5px 10px\}/.test(PHONE),
+    'the phone strip still stacks five desktop-height status cards');
+  assert.ok(/\.ops-cell>\.chip\{[^}]*margin-top:0/.test(PHONE),
+    'the canonical state word still takes a row of its own inside every phone cell');
+  assert.ok(/\.ops-value\{[^}]*-webkit-line-clamp:1\}/.test(PHONE),
+    'the strip sentence is not compacted to one summary line at phone width');
+  // Clamping is a stylesheet decision, never a truncated value: the renderer
+  // still writes the whole canonical sentence into the cell, the mission brief
+  // reads the run-state sentence unclamped, and every other sentence the strip
+  // abbreviates is rendered in full further down this same page.
+  assert.ok(/node\.appendChild\(el\('div','ops-value',cell\.value\)\)/.test(code),
+    'the strip truncates its canonical sentence in the renderer instead of in the stylesheet');
+  assert.ok(!/mission-meta\{[^}]*line-clamp/.test(PHONE),
+    'the mission status sentence is clamped in the strip and in the brief, so a phone cannot read it in full');
+  assert.ok(!/brief-value\{[^}]*line-clamp/.test(PHONE),
+    'a canonical operator answer is clamped instead of read in full');
+  for (const restated of ["commandCard('BUILDER PROGRESS'", "commandCard('LAST SAFE CHECKPOINT'",
+    'evidenceCostPanel(view && view.cost)']) {
+    assert.ok(code.includes(restated), `${restated} no longer restates in full a sentence the phone strip clamps`);
+  }
+
+  // The brief pays for the space it saves in padding and in one stacked chip
+  // row — never in the canonical answers themselves.
+  assert.ok(/#founder-summary \.mission-head\{flex-direction:row;flex-wrap:wrap/.test(PHONE),
+    'the mission state chip still takes a stacked row of its own above the operator answers');
+  assert.ok(/\.operator-brief\{display:flex;flex-direction:column;margin-top:9px;padding:9px 11px\}/.test(PHONE),
+    'the operator brief keeps its full desktop padding on a phone');
+  // Nothing compacted here drops below the size that keeps it readable: the
+  // operator answers stay at 13px or larger and governed inputs stay at 16px,
+  // which is the size that stops mobile Safari zooming the form on focus.
+  for (const rule of phoneRules()) {
+    const target = rule.selectors.join(',');
+    for (const declared of rule.body.matchAll(/font-size:(\d+(?:\.\d+)?)px/g)) {
+      const px = Number(declared[1]);
+      if (/\.field |input|textarea|select/.test(target)) {
+        assert.ok(px >= 16, `${target} drops a governed form control to ${px}px`);
+      } else if (/brief-value|command-value|mission-title/.test(target)) {
+        assert.ok(px >= 13, `${target} shrinks a canonical operator answer to ${px}px`);
+      } else {
+        assert.ok(px >= 10, `${target} shrinks page text to ${px}px`);
+      }
+    }
+  }
+
+  // Above 680px the header band, the header state row and the strip cell are
+  // exactly what they were: this packet changed a phone, not a desktop.
+  assert.ok(/\.command-header\{min-height:72px;padding:12px 20px/.test(code),
+    'the desktop header band was rebuilt by the phone packet');
+  assert.ok(/\.header-state\{display:flex;align-items:center/.test(code),
+    'the desktop header state row lost its own layout');
+  assert.ok(/\.ops-cell\{min-width:0;padding:9px 11px/.test(code) &&
+    /\.ops-value\{[^}]*-webkit-line-clamp:4/.test(code),
+    'the desktop strip cell or its four-line clamp was rebuilt by the phone packet');
+});
+
 
 // ── DOM harness: render the REAL page source, not a copy of it ─────────────
 // jsdom is not a dependency here and will not become one for a governance

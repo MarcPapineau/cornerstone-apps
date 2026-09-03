@@ -665,14 +665,25 @@
     .ops-strip-cells{grid-template-columns:repeat(2,minmax(0,1fr))}
   }
   @media (max-width:680px){
-    /* The wrapped header is three rows tall on a phone. Kept sticky it would
-       spend roughly a quarter of the viewport on chrome the operator has
-       already read, so here it scrolls away and the instruments get the screen.
-       The view switch stays reachable because it is the first thing above the
-       deck, not because it permanently occupies it. */
-    .command-header{display:flex;position:static}
-    .view-nav{order:3;width:100%}.view-nav .view-tab{flex:1}
-    .header-state{width:100%;flex-wrap:wrap;justify-content:flex-start}
+    /* The header is chrome the operator has already read. Kept sticky it would
+       spend roughly a quarter of the viewport on it, so here it scrolls away
+       and the instruments get the screen. It is also one compact band instead
+       of three stacked full-width blocks: display:contents removes the
+       header-state wrapper box only — both controls and every canonical
+       context cell stay in the DOM and in the accessibility tree — so the
+       controls sit beside the brand and the canonical context line reads under
+       the view switch rather than above the instruments. The view switch stays
+       reachable because it is the first thing above the deck, not because it
+       permanently occupies it. */
+    .command-header{display:flex;position:static;align-items:center;gap:8px;min-height:0;padding:8px 12px}
+    .brand-lockup{flex:1 1 auto;min-width:0;gap:8px;padding-left:8px}
+    .brand-name{font-size:15px}
+    .header-state{display:contents}
+    .header-state .hud-control{order:1}
+    .view-nav{order:2;width:100%;padding:3px}.view-nav .view-tab{flex:1}
+    .header-state .context-strip{order:3;flex:1 0 100%;justify-content:flex-start;flex-wrap:wrap;gap:6px}
+    .ctx{font-size:11px}
+    .context-cell{padding:5px 8px}
     .core-stage{display:flex;flex-direction:column;min-height:0}
     /* An explicit width in a stacked flex column is laid out flush left, so the
        core is centred here rather than hanging off the edge of the column. */
@@ -693,12 +704,38 @@
        still has nothing on this screen to suppress. Above 680px the desktop and
        tablet Strategic HUD is untouched. */
     .ops-strip{padding:0 12px 2px}
-    .ops-strip>.ops-strip-title{flex-wrap:wrap}
-    .ops-cell{padding:10px 12px}
-    /* One line tighter than the desktop clamp: five stacked cells must still
-       leave the mission on the same first screen. The complete canonical
-       sentence stays in the cell for assistive technology and Detail View. */
-    .ops-value{-webkit-line-clamp:3}
+    .ops-strip>.ops-strip-title{flex-wrap:wrap;gap:6px;min-height:0;padding:4px 2px;font-size:10px}
+    .ops-strip>.ops-strip-cells{gap:5px;padding:6px 0 0}
+    /* One concise summary line per operational answer instead of five tall
+       cards. The written label and the canonical state word share the first
+       row and the resolved sentence reads under it, clamped to its first line,
+       so all five answers still arrive before the mission, the current action,
+       the owner decision and the next action rather than burying them.
+       Clamping is presentation only: the renderer still writes the whole
+       canonical sentence into the cell, so it stays in the DOM for assistive
+       technology, and every one of these five sentences is rendered unabridged
+       further down this same page — run state in the mission brief, builder
+       progress, recorded cost and last safe checkpoint on the deck cards and
+       in the Detail View evidence rail. */
+    .ops-cell{display:flex;flex-wrap:wrap;align-items:center;column-gap:8px;padding:5px 10px}
+    .ops-label{flex:1 1 auto;min-width:0;font-size:10px}
+    .ops-cell>.chip{flex:0 0 auto;margin-top:0;padding:1px 7px}
+    .ops-value{flex:1 0 100%;margin-top:3px;-webkit-line-clamp:1}
+
+    /* The mission brief's own first screen, one size tighter and with the
+       mission state chip kept on the mission row instead of taking a stacked
+       row of its own below it. Nothing is clamped here: the mission status
+       sentence the strip abbreviates above is read in full at this point. */
+    .command-shell{padding:10px 12px 14px}
+    #founder-summary>h2{padding:8px 12px}
+    #founder-summary>.body{padding:10px 12px}
+    #founder-summary .mission-head{flex-direction:row;flex-wrap:wrap;gap:8px;padding-bottom:6px}
+    #founder-summary .mission-head>div{flex:1 1 200px;min-width:0}
+    #founder-summary .mission-kicker{font-size:10px}
+    #founder-summary .mission-title{font-size:18px;margin-top:4px}
+    #founder-summary .mission-meta{margin-top:5px}
+    .brief-row{margin-top:7px}
+    .brief-value{margin-top:2px;font-size:13px;line-height:1.4}
     /* Presentation order only, for the deck cards and for the operator brief
        below them. The DOM order the desktop deck and assistive technology read
        is unchanged and no card or row is dropped: the supporting cards — routing
@@ -708,7 +745,7 @@
        checkpoint across three phone screens. */
     #founder-summary .command-card.is-routing,#founder-summary .command-card.is-live-evidence,
     #founder-summary .command-card.is-progress,#founder-summary .command-card.is-elapsed{order:1}
-    .operator-brief{display:flex;flex-direction:column}
+    .operator-brief{display:flex;flex-direction:column;margin-top:9px;padding:9px 11px}
     .operator-brief-title{order:0}
     .brief-row[data-operator-brief="now"]{order:1}
     .brief-row[data-operator-brief="needs-marc"]{order:2}
