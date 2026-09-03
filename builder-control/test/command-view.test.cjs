@@ -162,6 +162,64 @@ test('workflow state uses colour, icon and plain-English text together', () => {
   requireDomProof('DOM: routed Command View renders canonical pilot cards and accessible plain-English workflow state');
 });
 
+// ── the Monday research report and the Marc decision queue ─────────────────
+// This is the one surface on the page where the founder takes an irreversible
+// action on evidence he did not gather himself, so the acceptance bar is not
+// "the panel renders". It is: nothing is shown from a report AEGIS cannot vouch
+// for, everything needed to decide is on screen before the controls are, and
+// the page can name only which recommendation is being decided.
+test('the Command View carries the Monday research report and the Marc decision queue', () => {
+  for (const [label, pattern] of [
+    ['Monday research report', /\bmonday research report\b/i],
+    ['Marc decision queue', /\bmarc decision queue\b/i],
+  ]) {
+    assert.ok(hasVisibleCommandRegion(pattern), `the Command View has no ${label} region`);
+  }
+  // Neither panel ships with content of its own. A seeded report, an example
+  // recommendation, or a decision control that exists before a projection
+  // offered one would all be approvable theater.
+  assert.ok(!/REC-[A-Za-z0-9]|RR-\d{8}-/.test(commandMarkup),
+    'a research report or recommendation identifier is baked into the shipped markup');
+  assert.ok(!/data-research-decision/.test(markup),
+    'a decision control ships in the static markup, before any projection has offered one');
+  assert.ok(/data-research-decision/.test(code),
+    'the decision controls are never built from the projection at all');
+});
+
+test('the research panels are honest when no valid report exists and never decide from one', () => {
+  requireDomProof('DOM: no valid research report shows an honest empty state and offers no decision');
+  requireDomProof('DOM: a stale report and an already-decided recommendation cannot be approved');
+});
+
+test('a valid report states what changed, why it matters, evidence, cost, risks and the decision requested', () => {
+  requireDomProof('DOM: a valid research report shows what changed, why it matters, evidence, cost, risks and the decision requested');
+  requireDomProof('DOM: an unchecked signal is never dressed as a checked recommendation');
+});
+
+test('a founder decision names only the recommendation and lets the route carry the decision word', () => {
+  requireDomProof('DOM: each founder decision posts only the recommendationId to its own dedicated route');
+  requireDomProof('DOM: a refused decision records nothing and says so');
+  // The three decision words exist ONLY as three named routes, declared once.
+  // A shared endpoint with a verdict field, or a second call site, would put
+  // the decision word back under browser control.
+  const table = code.slice(code.indexOf('var RESEARCH_DECISIONS = ['),
+    code.indexOf('function activityDecision'));
+  assert.ok(table.length > 0, 'the one research decision route table was not found');
+  for (const route of ['/api/research-approve', '/api/research-park', '/api/research-reject']) {
+    assert.ok(table.includes(route), `${route} is missing from the one decision route table`);
+  }
+  assert.strictEqual((code.match(/\/api\/research-/g) || []).length, 3,
+    'a research decision route is named outside the one declared route table');
+  assert.ok(/callApi\(choice\.route, \{ recommendationId: item\.recommendationId \}\)/.test(code),
+    'the decision request body is built from something other than the one recommendation id');
+});
+
+test('research machine identifiers stay in Detail View while the founder panels stay in plain English', () => {
+  requireDomProof('DOM: research identifiers and digests stay in Detail View, not in the founder panels');
+  assert.ok(!/reportSha256|recommendationSha256|notionPageId/.test(commandMarkup),
+    'a machine identifier is labelled in the Command View markup rather than in Detail View');
+});
+
 test('existing anti-theater guards remain the single owner for fake progress, decorative loops and transition proof', () => {
   const companion = fs.readFileSync(SLICE_TEST_PATH, 'utf8');
   const delegated = [

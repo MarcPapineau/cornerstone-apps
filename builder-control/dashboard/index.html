@@ -72,7 +72,7 @@
   .s-ACTIVE,.s-RUNNING,.s-CHECKING{color:var(--active)}
   .s-IDLE,.s-WAITING{color:var(--stale)}
   .s-WARNING,.s-DEGRADED,.s-STALE{color:var(--warn)}
-  .s-FAILED,.s-FAIL,.s-MISSING{color:var(--fail)}
+  .s-FAILED,.s-FAIL,.s-MISSING,.s-INVALID{color:var(--fail)}
   .s-BLOCKED{color:var(--blocked)}
   .s-UNVERIFIED,.s-UNKNOWN,.s-NOT_REQUIRED{color:var(--unknown)}
     /* FINDING #9: readiness states get their own muted treatment — they are
@@ -99,6 +99,16 @@
   .s-PROVIDER_FAILURE{color:var(--fail)}
   .s-STALLED,.s-REVIEW_CHURN{color:var(--warn)}
   .s-NO_RECORDED_FAILURE{color:var(--text-1)}
+  /* Research lifecycle vocabulary — the exact nine tokens the research
+     projection owns. None of the pre-decision states is given a pass colour: a
+     recommendation is a proposal, and colouring "somebody suggested this" like
+     a verified gate result is exactly the lie this palette exists to prevent.
+     A decision Marc recorded is closed rather than good or bad, and only a
+     build outcome the canonical ledger observed is coloured like progress. */
+  .s-SIGNAL,.s-VERIFIED,.s-RECOMMENDED{color:var(--unknown)}
+  .s-APPROVED_BY_MARC{color:var(--active)}
+  .s-PARKED,.s-REJECTED{color:var(--stale)}
+  .s-BUILT,.s-VERIFIED_IN_RUNTIME,.s-CANON_PROMOTED{color:var(--pass)}
 
   /* ── topology ───────────────────────────────────────────────────── */
   .stages{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
@@ -1152,6 +1162,27 @@
     .core-path-handoff{margin-top:6px}
   }
 
+  /* ── Monday research report and the Marc decision queue ───────────
+     Presentation only: spacing, reading order and wrapping for two panels whose
+     every sentence is a field the research contract already validated. Nothing
+     here is hidden, clamped or animated, because the queue is where an
+     irreversible decision is taken and a half-shown recommendation is exactly
+     how an unread risk gets approved. Long evidence URLs and recorded reasons
+     wrap rather than widen the page. */
+  .research-head{display:flex;flex-wrap:wrap;gap:calc(var(--sp)*2);align-items:center}
+  .research-title{font-size:15px;font-weight:600;overflow-wrap:anywhere}
+  .research-line{margin-top:calc(var(--sp)*1.5);color:var(--text-1);font-size:12px;overflow-wrap:anywhere}
+  .research-counts{margin-top:calc(var(--sp)*3);padding-top:calc(var(--sp)*2);
+    border-top:1px solid var(--line);color:var(--text-0);font-size:12px}
+  .research-item>h3{font-size:14px;overflow-wrap:anywhere}
+  .research-answers{margin:calc(var(--sp)*3) 0 0}
+  .research-answers dt{font:600 10px/1.4 var(--mono);letter-spacing:.09em;
+    text-transform:uppercase;color:var(--text-2)}
+  .research-answers dd{margin:2px 0 calc(var(--sp)*3);color:var(--text-0);overflow-wrap:anywhere}
+  .research-list{margin:0;padding-left:calc(var(--sp)*4)}
+  .research-list>li{overflow-wrap:anywhere}
+  .research-blocked{color:var(--text-1);font-size:12px;overflow-wrap:anywhere}
+
   /* ── Detail View: the tactical evidence surface ───────────────────
      Detail View is not a second dashboard and not a second authority. It is
      the same canonical resolutions the Command View deck, the Strategic
@@ -1418,6 +1449,24 @@
       <h2 id="live-h">Live activity <span id="live-conn-state" class="mono rail-note">connecting…</span></h2>
       <div class="body"><ul class="rows" id="live-activity"><li class="empty">Waiting for the first status push.</li></ul></div>
     </section>
+
+    <!-- The Monday research report is a READ-ONLY projection of the document the
+         research agent writes. It is not canon, it holds no engineering
+         authority, and it can neither darken nor brighten anything above it. If
+         no valid report exists these two panels say exactly that and show
+         nothing else — there is no seeded example item anywhere in this file. -->
+    <section id="research-report" aria-labelledby="research-report-h">
+      <h2 id="research-report-h">Monday research report <span class="rail-note">proposals only · never canon</span></h2>
+      <div class="body" id="research-report-body"><p class="empty">Loading the Monday research report…</p></div>
+    </section>
+
+    <section id="decision-queue" aria-labelledby="decision-queue-h">
+      <h2 id="decision-queue-h">Marc decision queue <span class="rail-note">your decision, recorded once</span></h2>
+      <div class="body">
+        <div id="decision-queue-summary"></div>
+        <ul class="rows" id="decision-queue-list"><li class="empty">Loading the decision queue…</li></ul>
+      </div>
+    </section>
   </div>
 
   <aside class="right-rail" aria-label="Inspector and integrations">
@@ -1491,6 +1540,11 @@
         <p class="mono" id="ctx-subject">subject —</p>
       </div>
     </section>
+    <section aria-labelledby="research-machine-h">
+      <h2 id="research-machine-h">Research report evidence <span style="text-transform:none;letter-spacing:0;color:var(--text-2)">— identifiers, digests and ledger receipts</span></h2>
+      <div class="body" id="research-machine"><p class="empty">Loading research report evidence…</p></div>
+    </section>
+
     <section id="topology" aria-labelledby="topology-h" tabindex="-1">
       <h2 id="topology-h">Exact eleven-stage evidence</h2>
       <div class="body">
@@ -1555,7 +1609,14 @@
     // Failure-state storyboard. None of these is given a working shape: a
     // stalled or failed run must never carry the mark an active one carries.
     PROVIDER_FAILURE:'✕', STALLED:'◌', REVIEW_CHURN:'⚑', NO_RECORDED_FAILURE:'○',
-    SYNCED:'●', PENDING:'◌', CONFLICT:'⚑', REFUSED:'⊘', OK:'●'
+    SYNCED:'●', PENDING:'◌', CONFLICT:'⚑', REFUSED:'⊘', OK:'●',
+    // Research lifecycle vocabulary. A proposal nobody has decided on is a
+    // waypoint shape, a recorded decision is a closed shape, and only an
+    // observed build outcome gets the filled dot the rest of this map reserves
+    // for something that actually happened.
+    INVALID:'✕', SIGNAL:'◌', VERIFIED:'◇', RECOMMENDED:'◇',
+    APPROVED_BY_MARC:'◆', PARKED:'◑', REJECTED:'■',
+    BUILT:'●', VERIFIED_IN_RUNTIME:'●', CANON_PROMOTED:'◆'
   };
 
   function el(tag, cls, text){
@@ -1587,6 +1648,9 @@
       engineering: { state: 'UNAVAILABLE', verdict: 'UNAVAILABLE', reason: reason, stages: [] },
       integration: { connectors: { state: 'UNAVAILABLE', reason: reason, connectors: [] } },
       knowledge: { state: 'UNAVAILABLE', reason: reason, records: [] },
+      research: { state: 'UNAVAILABLE', reason: reason, report: null, recommendations: [],
+        decisionsAvailable: false, decisionsUnavailableReason: reason,
+        counts: { total: 0, awaitingMarc: 0, approved: 0, parked: 0, rejected: 0 } },
       reviewers: { state: 'UNAVAILABLE', reason: reason, reviewers: [] },
       cost: { state: 'UNAVAILABLE', reason: reason },
       runs: { state: 'UNAVAILABLE', reason: reason, runs: [], current: {
@@ -1735,6 +1799,24 @@
     return ctx && typeof ctx[field] === 'string' && ctx[field] ? ctx[field] : unavailable;
   }
 
+  // The three founder decisions, and the ONE dedicated route each of them
+  // posts to. The decision word is never a request field: choosing which named
+  // endpoint to call is the only way this page can express which decision was
+  // made, and the server owns the word itself. Nothing here ranks, scores or
+  // recommends one of the three over another.
+  var RESEARCH_DECISIONS = [
+    { word: 'APPROVE', label: 'Approve', route: '/api/research-approve', style: 'action primary' },
+    { word: 'PARK', label: 'Park', route: '/api/research-park', style: 'action' },
+    { word: 'REJECT', label: 'Reject', route: '/api/research-reject', style: 'action warn' }
+  ];
+  function activityDecision(facts){
+    var word = facts && typeof facts.decision === 'string' ? facts.decision : '';
+    for (var i = 0; i < RESEARCH_DECISIONS.length; i++){
+      if (RESEARCH_DECISIONS[i].word === word) return RESEARCH_DECISIONS[i].label;
+    }
+    return 'a decision whose recorded word is UNAVAILABLE';
+  }
+
   var ACTIVITY_UPDATES = {
     STATUS_SNAPSHOT: {
       what: function(){
@@ -1828,6 +1910,25 @@
       moved: 'No — nothing moved forward.',
       next: 'Open Detail View to read the exact reason. If every bounded correction cycle is already used, ' +
         'escalate this run or abandon it.'
+    },
+    RESEARCH_DECISION_RECORDED: {
+      what: function(f){
+        return 'AEGIS wrote down your decision on one research recommendation: ' + activityDecision(f) + '.';
+      },
+      who: 'You decided it on this page. AEGIS only wrote it down; it judged nothing and it built nothing.',
+      moved: 'No — deciding about research is not a build step. Approving records a bounded proposal ' +
+        'and starts no worker.',
+      next: 'Read the decision queue for the recorded result. Scoping a packet and starting a governed ' +
+        'build stay separate decisions after this.'
+    },
+    RESEARCH_DECISION_REFUSED: {
+      what: function(f){
+        return 'AEGIS refused to write down a decision on one research recommendation (' +
+          activityDecision(f) + '), so nothing was decided.';
+      },
+      who: 'AEGIS refused the request. No decision was written down anywhere.',
+      moved: 'No — nothing moved forward and nothing was decided.',
+      next: 'Open Detail View to read the exact refusal, then decide again if it still applies.'
     }
   };
 
@@ -4485,6 +4586,366 @@
   }
   renderEvents(S.events);
 
+  // ── Monday research report and the Marc decision queue ──────────
+  // The FOURTH evidence plane, rendered exactly as the projector published it.
+  // Four rules make this surface safe to act on:
+  //
+  //   1. It never composes a recommendation. Every sentence is either a field
+  //      the research contract validated or a lifecycle sentence the projector
+  //      owns. There is no seed item, no example report and no placeholder.
+  //   2. It shows nothing from a report it cannot vouch for. UNAVAILABLE and
+  //      INVALID render the recorded reason and an empty queue — never a
+  //      partial report, because a partly valid report is exactly the shape in
+  //      which an unchecked item reaches a founder wearing the authority of the
+  //      checked ones beside it.
+  //   3. It never decides. Approve, Park and Reject are three separate named
+  //      routes and the only field this page may post is which recommendation
+  //      is being decided. The decision word belongs to the route and the
+  //      recorded decision belongs to the canonical ledger.
+  //   4. It never offers a decision the projector did not open. A stale report,
+  //      an already-decided item and an unreadable projection each render their
+  //      own recorded reason INSTEAD of the buttons, so an impossible approval
+  //      cannot be attempted and then explained away afterwards.
+  var RESEARCH_STATES = ['OK', 'STALE', 'INVALID', 'UNAVAILABLE'];
+  var RESEARCH_CLOSED = {
+    UNAVAILABLE: 'No Monday research report has been fetched, so there is nothing to read and nothing to approve.',
+    INVALID: 'The Monday research report did not pass its contract checks, so none of it is shown and nothing from it can be decided.'
+  };
+
+  // One resolution of the two shapes this plane arrives in — the generated
+  // snapshot's projection and the minimized /api/status projection — which
+  // carry the same field names by contract. A state this page does not know is
+  // resolved to UNAVAILABLE rather than travelling verbatim, and a readable
+  // state with no report is closed too: "OK with nothing in it" is not a report.
+  function researchView(source){
+    var r = source && typeof source === 'object' ? source : null;
+    var state = r && RESEARCH_STATES.indexOf(r.state) !== -1 ? r.state : 'UNAVAILABLE';
+    var report = r && r.report && typeof r.report === 'object' ? r.report : null;
+    var open = (state === 'OK' || state === 'STALE') && !!report;
+    return {
+      state: state,
+      open: open,
+      report: report,
+      closedReason: open ? null
+        : ((r && typeof r.reason === 'string' && r.reason) || RESEARCH_CLOSED[state] ||
+          'The Monday research report projection could not be read, so none of it is shown.'),
+      staleReason: state === 'STALE' && r && typeof r.reason === 'string' ? r.reason : null,
+      recommendations: open && Array.isArray(r.recommendations) ? r.recommendations : [],
+      decisionsAvailable: open && r.decisionsAvailable === true,
+      decisionsUnavailableReason: r && typeof r.decisionsUnavailableReason === 'string' &&
+        r.decisionsUnavailableReason ? r.decisionsUnavailableReason : null,
+      counts: (r && r.counts && typeof r.counts === 'object') ? r.counts : {}
+    };
+  }
+
+  function researchCount(value){
+    return Number.isInteger(value) ? value : 0;
+  }
+
+  function renderResearchReport(view){
+    var host = $('research-report-body');
+    if (!host) return;
+    host.textContent = '';
+    var head = el('div','research-head');
+    head.appendChild(chip(view.state));
+    head.appendChild(el('span','research-title', view.open
+      ? view.report.title
+      : 'No Monday research report is being shown'));
+    host.appendChild(head);
+    if (!view.open){
+      host.appendChild(el('p','empty', view.closedReason));
+      return;
+    }
+    host.appendChild(el('div','research-line', 'Week of ' + view.report.weekOf + '.'));
+    host.appendChild(el('div','research-line', 'Copied from the research document by ' +
+      view.report.fetchedBy + '. AEGIS wrote none of it and decided none of it.'));
+    host.appendChild(el('div','research-line', view.state === 'STALE'
+      ? (view.staleReason ||
+        'This report is older than one weekly cycle, so it is shown as history and no decision is offered from it.')
+      : 'This is the current report. Everything in it is a proposal until you decide on it.'));
+    if (typeof view.report.notionUrl === 'string' && view.report.notionUrl){
+      host.appendChild(el('div','research-line',
+        'The source research document is recorded in Detail View. This local control surface does not open external links.'));
+    }
+    var counts = view.counts;
+    host.appendChild(el('div','research-counts',
+      researchCount(counts.total) + ' recommendation(s) in this report · ' +
+      researchCount(counts.awaitingMarc) + ' waiting for your decision · ' +
+      researchCount(counts.approved) + ' approved · ' +
+      researchCount(counts.parked) + ' parked · ' +
+      researchCount(counts.rejected) + ' rejected.'));
+  }
+
+  function researchCostSentence(cost){
+    var c = cost && typeof cost === 'object' ? cost : null;
+    if (!c) return 'COST UNAVAILABLE — no cost travelled with this recommendation.';
+    var display = typeof c.display === 'string' && c.display ? c.display : 'COST UNAVAILABLE';
+    var basis = typeof c.basis === 'string' && c.basis ? c.basis
+      : (typeof c.reason === 'string' && c.reason ? c.reason
+        : 'no basis for this figure is recorded.');
+    return display + ' — ' + basis;
+  }
+
+  function researchListOr(values, absence){
+    var rows = Array.isArray(values) ? values : [];
+    var dd = el('dd');
+    if (!rows.length){
+      dd.appendChild(document.createTextNode(absence));
+      return dd;
+    }
+    var list = el('ul','research-list');
+    rows.forEach(function(value){ list.appendChild(el('li', null, String(value))); });
+    dd.appendChild(list);
+    return dd;
+  }
+
+  // Command View names the evidence clearly but never turns external addresses
+  // into navigation. Exact source references remain available in Detail View;
+  // this authenticated local control surface stays same-origin only.
+  function researchEvidence(links){
+    var rows = Array.isArray(links) ? links : [];
+    var dd = el('dd');
+    if (!rows.length){
+      dd.appendChild(document.createTextNode(
+        'No evidence link travelled with this recommendation, so nothing here has been offered to you as checkable.'));
+      return dd;
+    }
+    var list = el('ul','research-list');
+    rows.forEach(function(row){
+      var url = row && typeof row.url === 'string' ? row.url : '';
+      var label = row && typeof row.label === 'string' && row.label ? row.label : 'Unnamed evidence source';
+      var item = el('li');
+      item.appendChild(document.createTextNode(label + (url
+        ? ' — source reference recorded in Detail View.'
+        : ' — source reference UNAVAILABLE.')));
+      list.appendChild(item);
+    });
+    dd.appendChild(list);
+    return dd;
+  }
+
+  function researchVerification(verification){
+    var v = verification && typeof verification === 'object' ? verification : null;
+    if (!v){
+      return 'Not checked — nobody has verified this claim, so it is a signal rather than a recommendation.';
+    }
+    return 'Checked by ' + (v.verifiedBy || 'UNAVAILABLE') + ' on ' + (v.verifiedAt || 'UNAVAILABLE') +
+      ' — ' + (v.method || 'the method is UNAVAILABLE.');
+  }
+
+  // Why no decision is offered on this item. The projector's own recorded
+  // reason wins; this only names the case when the projection left it out.
+  function researchBlockedReason(view, item){
+    if (typeof item.notDecidableReason === 'string' && item.notDecidableReason) {
+      return item.notDecidableReason;
+    }
+    if (!view.decisionsAvailable){
+      return view.decisionsUnavailableReason ||
+        'No decision is offered from this report, so Approve, Park and Reject are not shown.';
+    }
+    return 'This recommendation is not open for a decision, so Approve, Park and Reject are not shown.';
+  }
+
+  function researchDecisionReceipt(choice, result){
+    var next = result && typeof result.nextAction === 'string' && result.nextAction
+      ? result.nextAction
+      : 'The receipt records no next action, so nothing further is claimed here.';
+    return 'AEGIS recorded ' + choice.label + ' for this recommendation. ' + next;
+  }
+
+  async function requestResearchDecision(item, choice, buttons, message){
+    var dashboard = window.AEGIS_DASHBOARD;
+    var publish = function(text, record){
+      if (dashboard && typeof dashboard.appendActivity === 'function') dashboard.appendActivity(text, record);
+    };
+    buttons.forEach(function(button){ button.disabled = true; });
+    try {
+      if (!dashboard || typeof dashboard.callApi !== 'function'){
+        throw new Error('the canonical dashboard control client is unavailable');
+      }
+      // The body names ONE recommendation and carries nothing else: no verdict,
+      // no report, no digest, no packet and no proposal. Which of the three
+      // named routes is called is what says which decision this is.
+      var result = await dashboard.callApi(choice.route, { recommendationId: item.recommendationId });
+      message.className = 'api-msg ok';
+      message.textContent = researchDecisionReceipt(choice, result);
+      publish('research decision: ' + choice.word + ' recorded for ' + item.recommendationId +
+        ' as ' + ((result && result.decisionId) || 'UNAVAILABLE') + '.',
+      { code: 'RESEARCH_DECISION_RECORDED', decision: choice.word,
+        ts: (result && result.decidedAt) || null });
+    } catch (e) {
+      buttons.forEach(function(button){ button.disabled = false; });
+      message.className = 'api-msg err';
+      message.textContent = 'AEGIS refused this decision (' + (e.code || 'UNAVAILABLE') + '): ' +
+        e.message + '. Nothing was recorded.';
+      publish('research decision refused: ' + choice.word + ' for ' + item.recommendationId +
+        ': ' + e.message, { code: 'RESEARCH_DECISION_REFUSED', decision: choice.word });
+    }
+  }
+
+  function researchDecisionRow(view, item){
+    var row = el('div','btn-row');
+    // Both gates must hold: the projection must be offering decisions at all,
+    // and this exact recommendation must still be open for one.
+    if (!(view.decisionsAvailable === true && item.decidable === true)){
+      row.appendChild(el('div','research-blocked', researchBlockedReason(view, item)));
+      return row;
+    }
+    var message = el('div','research-blocked',
+      'A decision is appended once and never overwritten.');
+    var buttons = [];
+    RESEARCH_DECISIONS.forEach(function(choice){
+      var button = el('button', choice.style, choice.label);
+      button.type = 'button';
+      button.setAttribute('data-research-decision', choice.word);
+      button.addEventListener('click', function(){
+        return requestResearchDecision(item, choice, buttons, message);
+      });
+      buttons.push(button);
+      row.appendChild(button);
+    });
+    row.appendChild(message);
+    return row;
+  }
+
+  function researchItem(view, item){
+    var li = el('li','row research-item');
+    var lifecycle = (item && item.lifecycle) || {};
+    li.setAttribute('data-recommendation-state',
+      typeof lifecycle.state === 'string' ? lifecycle.state : 'UNAVAILABLE');
+    li.appendChild(el('h3', null, item.title));
+    var head = el('div','research-head');
+    head.appendChild(chip(lifecycle.state || 'UNKNOWN'));
+    li.appendChild(head);
+    li.appendChild(el('div','research-line', lifecycle.plain ||
+      'UNAVAILABLE — the projection records no plain-English state for this recommendation.'));
+
+    var answers = el('dl','research-answers');
+    function answer(term, value){
+      answers.appendChild(el('dt', null, term));
+      answers.appendChild(el('dd', null, value));
+    }
+    answer('What changed', item.whatChanged ||
+      'UNAVAILABLE — the report records no change for this item.');
+    answer('Why it matters', item.whyItMatters ||
+      'UNAVAILABLE — the report records no reason for this item.');
+    answer('What you are being asked to decide', item.marcMustDecide ||
+      'UNAVAILABLE — the report states no decision for this item.');
+    answer('Cost', researchCostSentence(item.cost));
+    answers.appendChild(el('dt', null, 'Risks'));
+    answers.appendChild(researchListOr(item.risks,
+      'No risk is recorded against this recommendation.'));
+    answers.appendChild(el('dt', null, 'Evidence'));
+    answers.appendChild(researchEvidence(item.evidence));
+    answer('Checked', researchVerification(item.verification));
+    li.appendChild(answers);
+    li.appendChild(researchDecisionRow(view, item));
+    return li;
+  }
+
+  function renderResearchQueue(view){
+    var summary = $('decision-queue-summary');
+    var list = $('decision-queue-list');
+    if (!summary || !list) return;
+    summary.textContent = '';
+    list.textContent = '';
+    if (!view.open){
+      summary.appendChild(el('div','research-blocked', view.closedReason));
+      list.appendChild(el('li','empty',
+        'Nothing can be approved, parked or rejected while no valid report is available.'));
+      return;
+    }
+    if (!view.recommendations.length){
+      summary.appendChild(el('div','research-blocked',
+        'This report records no recommendations.'));
+      list.appendChild(el('li','empty','There is nothing in this report to decide.'));
+      return;
+    }
+    summary.appendChild(el('div','research-blocked', view.decisionsAvailable
+      ? 'Approving records a bounded packet proposal against a recommendation. It starts no worker, ' +
+        'writes no packet and promotes nothing into canon.'
+      : (view.decisionsUnavailableReason ||
+        'No decision is offered from this report, so this queue is read-only.')));
+    view.recommendations.forEach(function(item){
+      list.appendChild(researchItem(view, item));
+    });
+  }
+
+  // Detail View: the identifiers, digests and ledger receipts behind every
+  // sentence in the two Command View panels above. Same projection, same
+  // values, no second read.
+  function renderResearchEvidence(view){
+    var host = $('research-machine');
+    if (!host) return;
+    host.textContent = '';
+    var dl = el('dl','kv');
+    function kv(term, value){
+      dl.appendChild(el('dt', null, term));
+      dl.appendChild(el('dd','mono', value == null || value === '' ? 'UNAVAILABLE' : String(value)));
+    }
+    kv('projection state', view.state);
+    if (!view.open){
+      kv('reason', view.closedReason);
+      host.appendChild(dl);
+      return;
+    }
+    kv('reportId', view.report.reportId);
+    kv('weekOf', view.report.weekOf);
+    kv('notionPageId', view.report.notionPageId);
+    kv('notionUrl', view.report.notionUrl);
+    kv('fetchedAt', view.report.fetchedAt);
+    kv('fetchedBy', view.report.fetchedBy);
+    kv('fetchedAgeMinutes', Number.isInteger(view.report.fetchedAgeMinutes)
+      ? view.report.fetchedAgeMinutes : null);
+    kv('staleThresholdMinutes', Number.isInteger(view.report.thresholdMinutes)
+      ? view.report.thresholdMinutes : null);
+    kv('reportSha256', view.report.reportSha256);
+    kv('decisionsAvailable', view.decisionsAvailable === true ? 'true' : 'false');
+    host.appendChild(dl);
+    var rows = el('ul','rows');
+    view.recommendations.forEach(function(item){
+      var lifecycle = item.lifecycle || {};
+      var li = el('li','row');
+      li.appendChild(el('div','name mono', item.recommendationId));
+      li.appendChild(el('div','meta mono', 'lifecycle=' + (lifecycle.state || 'UNAVAILABLE') +
+        ' · decidable=' + (item.decidable === true ? 'true' : 'false') +
+        ' · source=' + (lifecycle.source || 'UNAVAILABLE')));
+      if (item.recommendationSha256){
+        li.appendChild(el('div','meta mono', 'recommendationSha256=' + item.recommendationSha256));
+      }
+      if (Array.isArray(item.evidence)){
+        item.evidence.forEach(function(source, index){
+          li.appendChild(el('div','meta mono', 'evidence[' + index + ']=' +
+            ((source && source.url) || 'UNAVAILABLE')));
+        });
+      }
+      if (item.decision){
+        li.appendChild(el('div','meta mono', 'decisionId=' + (item.decision.decisionId || 'UNAVAILABLE') +
+          ' · decidedAt=' + (item.decision.decidedAt || 'UNAVAILABLE') +
+          ' · decidedBy=' + (item.decision.decidedBy || 'UNAVAILABLE')));
+        if (item.decision.proposal){
+          li.appendChild(el('div','meta mono', 'proposalId=' + (item.decision.proposal.proposalId || 'UNAVAILABLE') +
+            ' · proposedPacketId=' + (item.decision.proposal.proposedPacketId || 'UNAVAILABLE') +
+            ' · builderStarted=' + (item.decision.proposal.builderStarted === true ? 'true' : 'false')));
+        }
+      }
+      if (item.outcome){
+        li.appendChild(el('div','meta mono', 'outcome=' + (item.outcome.state || 'UNAVAILABLE') +
+          ' · observedAt=' + (item.outcome.observedAt || 'UNAVAILABLE')));
+      }
+      rows.appendChild(li);
+    });
+    host.appendChild(rows);
+  }
+
+  function renderResearch(source){
+    var view = researchView(source);
+    renderResearchReport(view);
+    renderResearchQueue(view);
+    renderResearchEvidence(view);
+  }
+  renderResearch(S.research);
+
   // ── inspector ───────────────────────────────────────────────────
   var current = null;
   var currentOperatorSelection = null;
@@ -4588,6 +5049,8 @@
     renderStages: renderStages,
     renderReviewers: renderReviewers,
     renderEvents: renderEvents,
+    renderResearch: renderResearch,
+    researchView: researchView,
     usageMessage: usageMessage,
     viewFromState: viewFromState,
     operatorAnswer: operatorAnswer,
@@ -5212,6 +5675,10 @@
       if (D.renderStages) D.renderStages(status.engineering || null);
       if (D.renderReviewers) D.renderReviewers(status.reviewers || null, status.engineering || null);
       if (D.renderEvents) D.renderEvents(status.events || null);
+      // The research plane is repainted from the SAME push as everything else,
+      // so a decision recorded a moment ago is read back from the canonical
+      // projection rather than from what this page remembers doing.
+      if (D.renderResearch) D.renderResearch(status.research || null);
     }
     // The engineering receipt line is unchanged and still recorded verbatim for
     // Detail View. The canonical timestamp of a status event is the projection's

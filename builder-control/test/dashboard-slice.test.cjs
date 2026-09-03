@@ -6592,7 +6592,337 @@ async function asyncTests() {
     assert.ok(!/RUN-OLD-FAILED|RUN-DOES-NOT-EXIST/.test(line.host.textContent),
       `a ghost binding named a run no canonical record supports: ${line.host.textContent}`);
   });
+
+  // ── recording a founder decision ────────────────────────────────────────
+  // The browser may say WHICH recommendation is being decided and nothing else.
+  // The decision word is carried by the route it calls, so a page that could
+  // post a verdict — or post anything beyond the one recommendation id — fails
+  // here rather than after a decision is already in the canonical ledger.
+  function researchDecisionPage(calls, response) {
+    const status = researchStatus(researchProjectionFixture());
+    return bootPage(fixtureState(), {
+      fetch: async (path, init) => {
+        calls.push({ path, init: init || {} });
+        if (init && init.method === 'POST') return response;
+        return { ok: true, json: async () => status };
+      },
+    });
+  }
+
+  const RECORDED_DECISION = {
+    ok: true,
+    json: async () => ({
+      decision: 'APPROVED', lifecycleState: 'APPROVED_BY_MARC',
+      decisionId: 'DEC-20260903120000-0a1b2c3d', decidedAt: '2026-09-03T12:00:00.000Z',
+      decidedBy: 'MARC', recommendationId: 'REC-review-model-routing',
+      reportId: 'RR-20260831-weekly', builderStarted: false,
+      nextAction: 'A bounded packet proposal is recorded against this recommendation. No builder was ' +
+        'started; scoping the packet and starting a governed build remain separate decisions.',
+    }),
+  };
+
+  await atest('DOM: each founder decision posts only the recommendationId to its own dedicated route', async () => {
+    const expected = [['APPROVE', 'Approve', '/api/research-approve'],
+      ['PARK', 'Park', '/api/research-park'],
+      ['REJECT', 'Reject', '/api/research-reject']];
+    for (let index = 0; index < expected.length; index++) {
+      const [word, label, route] = expected[index];
+      const calls = [];
+      const page = researchDecisionPage(calls, RECORDED_DECISION);
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+
+      const buttons = decisionButtons(page);
+      assert.deepStrictEqual(buttons.map((b) => b.attrs['data-research-decision']),
+        ['APPROVE', 'PARK', 'REJECT'],
+        'a decidable recommendation does not offer exactly the three founder decisions');
+      assert.strictEqual(buttons[index].textContent, label,
+        `the ${word} control is unlabelled or renamed`);
+
+      buttons[index]._listeners.click[0]();
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+
+      const posted = calls.filter((call) => call.init.method === 'POST');
+      assert.strictEqual(posted.length, 1,
+        `pressing ${label} produced ${posted.length} requests instead of exactly one`);
+      assert.strictEqual(posted[0].path, route,
+        `${label} did not post to its own dedicated route`);
+      assert.strictEqual(posted[0].init.credentials, 'same-origin',
+        `${label} was posted without the authenticated session`);
+      assert.deepStrictEqual(Object.keys(JSON.parse(posted[0].init.body)), ['recommendationId'],
+        `the ${label} body carried a field other than the one recommendation id`);
+      assert.deepStrictEqual(JSON.parse(posted[0].init.body),
+        { recommendationId: 'REC-review-model-routing' },
+        `${label} named something other than the recommendation being decided`);
+      assert.ok(buttons.every((button) => button.disabled === true),
+        `the decision controls stayed pressable after ${label} was recorded`);
+      assert.match(page.text('decision-queue-list'),
+        new RegExp(`AEGIS recorded ${label} for this recommendation\\.`),
+        `${label} recorded no visible receipt`);
+      assert.match(page.text('decision-queue-list'),
+        /No builder was started/,
+        'the receipt did not restate that approving starts nothing');
+      assert.match(page.text('live-activity'),
+        new RegExp(`AEGIS wrote down your decision on one research recommendation: ${label}\\.`),
+        `${label} was not published to the one activity feed`);
+      assert.match(page.text('live-activity'), /deciding about research is not a build step/,
+        'a recorded research decision was allowed to read as build progress');
+    }
+  });
+
+  await atest('DOM: a refused decision records nothing and says so', async () => {
+    const calls = [];
+    const page = researchDecisionPage(calls, {
+      ok: false, status: 409,
+      json: async () => ({ error: { code: 'DECISION_ALREADY_RECORDED',
+        message: 'this recommendation is not open for a decision' } }),
+    });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    const buttons = decisionButtons(page);
+    buttons[0]._listeners.click[0]();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    assert.match(page.text('decision-queue-list'),
+      /AEGIS refused this decision \(DECISION_ALREADY_RECORDED\): this recommendation is not open for a decision\. Nothing was recorded\./,
+      'a refused decision did not state the exact refusal, or claimed something was recorded');
+    assert.ok(buttons.every((button) => button.disabled === false),
+      'a refused decision left the controls locked, so the refusal cannot be acted on');
+    assert.match(page.text('live-activity'), /so nothing was decided/,
+      'a refused decision was not published as having decided nothing');
+  });
 }
+
+// ── the Monday research report and the Marc decision queue ─────────────────
+// The failure these proofs exist to catch is the one this whole surface is
+// built to prevent: a founder approving something nobody checked, or approving
+// from a report AEGIS could not vouch for. Every proof below drives the REAL
+// hosting minimizer and the REAL page renderer, so a panel that shows a report
+// it should have refused, or offers a decision the projector closed, fails here
+// rather than on a Monday morning.
+function researchRecommendationFixture(over) {
+  return Object.assign({
+    recommendationId: 'REC-review-model-routing',
+    title: 'Route independent review to the cheaper checked model',
+    whatChanged: 'The provider published a cheaper review model with the same recorded review quality.',
+    whyItMatters: 'Every independent review is billed at the older price today, so this changes what a review costs.',
+    marcMustDecide: 'Whether AEGIS should route independent review to the cheaper model.',
+    evidence: [{ label: 'Published pricing page', url: 'https://example.com/pricing' }],
+    risks: ['The cheaper model has no recorded review result on this repository yet.'],
+    cost: { state: 'ESTIMATED', amountUsd: 12.5, display: 'US$12.50 estimated',
+      basis: 'the provider list price applied to the last recorded review volume' },
+    verification: { verifiedAt: '2026-09-01T08:30:00.000Z', verifiedBy: 'research-agent',
+      method: 'read the published pricing page and compared it with the recorded review volume' },
+    reportedStage: 'RECOMMENDED',
+    lifecycle: { state: 'RECOMMENDED', label: 'RECOMMENDED',
+      plain: AegisState.RESEARCH_LIFECYCLE_PLAIN.RECOMMENDED,
+      source: 'builder-control/research-report.json' },
+    decision: null, outcome: null,
+    decidable: true, notDecidableReason: null,
+    recommendationSha256: 'c'.repeat(64),
+    source: 'builder-control/research-report.json',
+  }, over || {});
+}
+
+function researchProjectionFixture(over) {
+  return Object.assign({
+    state: 'OK', reason: null,
+    source: 'builder-control/research-report.json',
+    ledgerSource: 'builder-control/ledger.json',
+    report: {
+      reportId: 'RR-20260831-weekly', title: 'Weekly research: one change worth deciding on',
+      weekOf: '2026-08-31', notionPageId: 'a'.repeat(32),
+      notionUrl: `https://www.notion.so/${'a'.repeat(32)}`,
+      fetchedAt: '2026-09-01T09:00:00.000Z', fetchedBy: 'aegis-research-fetcher',
+      fetchedAgeMinutes: 120, thresholdMinutes: 10080, reportSha256: 'b'.repeat(64),
+    },
+    decisionsAvailable: true, decisionsUnavailableReason: null,
+    recommendations: [researchRecommendationFixture()],
+    counts: { total: 1, awaitingMarc: 1, approved: 0, parked: 0, rejected: 0 },
+  }, over || {});
+}
+
+// The status shape the browser actually receives: the projector envelope put
+// through the REAL hosting minimizer, never a hand-written public payload.
+function researchStatus(projection) {
+  return {
+    generatedAt: '2026-09-03T12:00:00.000Z',
+    engineering: { state: 'UNAVAILABLE', reason: 'not under test here' },
+    integration: { connectors: [] }, reviewers: [], events: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [],
+    runsBinding: { state: 'UNAVAILABLE', runId: null, evidenceState: 'OK',
+      reason: 'no run records exist yet, so no run is current.' },
+    research: Hosting.minimizeResearch(projection),
+  };
+}
+
+function decisionButtons(page) {
+  return findByAttr(page.document.getElementById('decision-queue-list'), 'data-research-decision');
+}
+
+function researchCommandText(page) {
+  return `${page.text('research-report-body')} ${page.text('decision-queue-summary')} ${page.text('decision-queue-list')}`;
+}
+
+test('DOM: no valid research report shows an honest empty state and offers no decision', () => {
+  // The generated snapshot carries no research plane at all — the exact case a
+  // dashboard fills with a friendly placeholder.
+  const page = bootPage(fixtureState());
+  assert.match(page.text('research-report-body'), /No Monday research report is being shown/,
+    'a missing research projection did not say so');
+  assert.match(page.text('research-report-body'),
+    /No Monday research report has been fetched, so there is nothing to read and nothing to approve\./,
+    'the honest empty state did not state why nothing is shown');
+  assert.match(page.text('decision-queue-list'),
+    /Nothing can be approved, parked or rejected while no valid report is available\./,
+    'the decision queue invented a queue with no report behind it');
+  assert.deepStrictEqual(decisionButtons(page), [],
+    'a decision control was offered with no research report at all');
+
+  // An INVALID artifact is the more dangerous case: the file exists. Nothing
+  // from it may reach the screen, whole or in part.
+  renderMinimizedStatus(page, researchStatus({
+    state: 'INVALID',
+    reason: 'The Monday research report projection failed 3 contract check(s), so none of it is shown.',
+    report: null, recommendations: [], decisionsAvailable: false,
+    decisionsUnavailableReason: 'The Monday research report projection failed 3 contract check(s), so none of it is shown.',
+    counts: { total: 0, awaitingMarc: 0, approved: 0, parked: 0, rejected: 0 },
+  }));
+  assert.match(page.text('research-report-body'), /failed 3 contract check\(s\)/,
+    'an invalid report did not state the recorded refusal');
+  assert.doesNotMatch(researchCommandText(page), /REC-|RR-2026/,
+    'an invalid report leaked report or recommendation content onto the screen');
+  assert.deepStrictEqual(decisionButtons(page), [],
+    'an invalid report still offered a decision control');
+});
+
+test('DOM: a valid research report shows what changed, why it matters, evidence, cost, risks and the decision requested', () => {
+  const page = bootPage(fixtureState());
+  const projection = researchProjectionFixture();
+  renderMinimizedStatus(page, researchStatus(projection));
+  const item = projection.recommendations[0];
+
+  const report = page.text('research-report-body');
+  assert.ok(report.includes(projection.report.title), 'the report title is missing');
+  assert.match(report, /Week of 2026-08-31\./, 'the week the report covers is missing');
+  assert.match(report, /Copied from the research document by aegis-research-fetcher\./,
+    'the report does not say where it came from or who fetched it');
+  assert.match(report, /This is the current report\. Everything in it is a proposal until you decide on it\./,
+    'a current report is not stated as a set of proposals');
+  assert.match(report, /1 recommendation\(s\) in this report · 1 waiting for your decision/,
+    'the report does not count what is waiting for a decision');
+
+  const queue = page.text('decision-queue-list');
+  for (const [label, value] of [
+    ['What changed', item.whatChanged],
+    ['Why it matters', item.whyItMatters],
+    ['What you are being asked to decide', item.marcMustDecide],
+  ]) {
+    assert.ok(queue.includes(label), `the queue does not ask "${label}"`);
+    assert.ok(queue.includes(value), `the queue does not answer "${label}"`);
+  }
+  assert.ok(queue.includes(item.title), 'the recommendation has no title');
+  assert.ok(queue.includes(AegisState.RESEARCH_LIFECYCLE_PLAIN.RECOMMENDED),
+    'the projector-owned lifecycle sentence was replaced or dropped');
+  assert.match(queue, /US\$12\.50 estimated — the provider list price/,
+    'the recorded cost and its basis are missing');
+  assert.ok(queue.includes(item.risks[0]), 'the recorded risk is missing');
+  assert.ok(queue.includes(item.evidence[0].label), 'the evidence link is missing');
+  assert.ok(queue.includes(item.verification.method),
+    'the queue does not say how this claim was checked');
+
+  // The local control surface stays same-origin. The evidence label is visible
+  // in Command View and the exact source reference is preserved in Detail View.
+  const links = findByAttr(page.document.getElementById('decision-queue-list'), 'href');
+  assert.deepStrictEqual(links, [], 'Command View created an external navigation link');
+  assert.ok(page.document.getElementById('research-machine').textContent.includes(item.evidence[0].url),
+    'Detail View dropped the exact evidence source reference');
+});
+
+test('DOM: an unchecked signal is never dressed as a checked recommendation', () => {
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, researchStatus(researchProjectionFixture({
+    recommendations: [researchRecommendationFixture({
+      verification: null,
+      lifecycle: { state: 'SIGNAL', label: 'SIGNAL',
+        plain: AegisState.RESEARCH_LIFECYCLE_PLAIN.SIGNAL,
+        source: 'builder-control/research-report.json' },
+    })],
+  })));
+  const queue = page.text('decision-queue-list');
+  assert.ok(queue.includes(AegisState.RESEARCH_LIFECYCLE_PLAIN.SIGNAL),
+    'an unverified signal did not carry the projector sentence saying nobody checked it');
+  assert.match(queue, /Not checked — nobody has verified this claim/,
+    'a recommendation with no verification record did not say so');
+  const state = findByAttr(page.document.getElementById('decision-queue-list'), 'data-recommendation-state');
+  assert.deepStrictEqual(state.map((node) => node.attrs['data-recommendation-state']), ['SIGNAL'],
+    'the recommendation does not carry its canonical lifecycle state as a machine attribute');
+});
+
+test('DOM: a stale report and an already-decided recommendation cannot be approved', () => {
+  const staleReason = 'This projection was fetched 20000 minute(s) ago, older than the 10080-minute ' +
+    'Monday cycle. It is shown as history; approving from an out-of-date report is not offered.';
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, researchStatus(researchProjectionFixture({
+    state: 'STALE', reason: staleReason,
+    decisionsAvailable: false, decisionsUnavailableReason: staleReason,
+    recommendations: [researchRecommendationFixture({ decidable: false, notDecidableReason: staleReason })],
+  })));
+  assert.match(page.text('research-report-body'), /older than the 10080-minute/,
+    'a stale report did not explain that it is history');
+  assert.ok(page.text('decision-queue-list').includes(staleReason),
+    'the stale report did not state why no decision is offered on the item');
+  assert.deepStrictEqual(decisionButtons(page), [],
+    'a stale report still offered Approve, Park or Reject');
+
+  // Already decided: the ledger holds the decision, and a second one would be a
+  // reversal rather than a decision. The queue states the recorded decision and
+  // offers no control.
+  const decidedReason = 'You already recorded APPROVED BY MARC for this on 2026-09-02T10:00:00.000Z. ' +
+    'Decisions are appended, never overwritten.';
+  renderMinimizedStatus(page, researchStatus(researchProjectionFixture({
+    counts: { total: 1, awaitingMarc: 0, approved: 1, parked: 0, rejected: 0 },
+    recommendations: [researchRecommendationFixture({
+      decidable: false, notDecidableReason: decidedReason,
+      lifecycle: { state: 'APPROVED_BY_MARC', label: 'APPROVED BY MARC',
+        plain: AegisState.RESEARCH_LIFECYCLE_PLAIN.APPROVED_BY_MARC,
+        source: 'builder-control/ledger.json#LED-DECISION-0123456789abcdef0123456789abcdef' },
+      decision: { state: 'APPROVED_BY_MARC', decisionId: 'DEC-20260902100000-0a1b2c3d',
+        decidedAt: '2026-09-02T10:00:00.000Z', decidedBy: 'MARC',
+        entryId: 'LED-DECISION-0123456789abcdef0123456789abcdef',
+        proposal: { proposalId: 'PROP-20260902100000-4e5f6a7b', state: 'PROPOSED',
+          proposedPacketId: 'PKT-PROPOSED-20260902100000-REC-review-model-routing',
+          objective: 'Route independent review to the cheaper checked model',
+          sourceRecommendationId: 'REC-review-model-routing', builderStarted: false } },
+    })],
+  })));
+  assert.ok(page.text('decision-queue-list').includes(decidedReason),
+    'an already-decided recommendation did not restate the recorded decision');
+  assert.deepStrictEqual(decisionButtons(page), [],
+    'an already-decided recommendation was offered a second, overwriting decision');
+  assert.ok(page.text('decision-queue-list').includes(
+    AegisState.RESEARCH_LIFECYCLE_PLAIN.APPROVED_BY_MARC),
+  'the recorded approval did not state that no builder was started');
+});
+
+test('DOM: research identifiers and digests stay in Detail View, not in the founder panels', () => {
+  const page = bootPage(fixtureState());
+  const projection = researchProjectionFixture();
+  renderMinimizedStatus(page, researchStatus(projection));
+
+  const machine = page.text('research-machine');
+  for (const value of ['RR-20260831-weekly', 'b'.repeat(64), 'REC-review-model-routing',
+    'a'.repeat(32), '2026-09-01T09:00:00.000Z']) {
+    assert.ok(machine.includes(value), `Detail View dropped the machine value ${value}`);
+  }
+  assert.match(machine, /decidable=true/, 'Detail View does not disclose the decidability it acted on');
+
+  const command = researchCommandText(page);
+  for (const machineOnly of ['RR-20260831-weekly', 'b'.repeat(64), 'c'.repeat(64),
+    'REC-review-model-routing', 'reportSha256']) {
+    assert.ok(!command.includes(machineOnly),
+      `the founder panels print the machine field ${machineOnly}`);
+  }
+});
 
 async function atest(name, fn) {
   try { await fn(); passed++; console.log(`ok   ${name}`); }
