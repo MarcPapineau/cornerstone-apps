@@ -1010,6 +1010,130 @@ test('the phone command summary compacts the header and the strip instead of bur
     'the desktop strip cell or its four-line clamp was rebuilt by the phone packet');
 });
 
+// ── wide-screen Command View density (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// The failure guarded here is a working command centre that reads as a
+// four-screen document: on an ordinary 1292×994 desktop the first viewport is
+// spent on header chrome, two rows of full-height status cards and a fixed
+// 510px HUD reserve, so the AEGIS Core, its six evidence modules, the
+// nine-station handoff path and the build route are all scrolled away. The fix
+// is density, so every proof below pairs "smaller" with "still present, still
+// whole, and still never legible by colour alone". These are static proofs over
+// the shipped breakpoint, because the regression is silent: it renders
+// perfectly on a phone and on a 1920px wall display.
+const wideStart = code.lastIndexOf('@media (min-width:1100px)');
+const WIDE = wideStart === -1 ? '' : code.slice(wideStart, code.indexOf('\n  }', wideStart));
+
+function wideRules() {
+  const rules = [];
+  for (const rule of WIDE.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    rules.push({ selectors: rule[1].split(',').map((s) => s.trim()).filter(Boolean), body: rule[2] });
+  }
+  return rules;
+}
+
+function wideSelectorsDeclaring(pattern) {
+  const found = new Set();
+  for (const rule of wideRules()) {
+    if (!pattern.test(rule.body)) continue;
+    for (const selector of rule.selectors) found.add(selector);
+  }
+  return found;
+}
+
+test('the wide Command View compacts the first screen without hiding, repainting or animating anything', () => {
+  assert.ok(WIDE.length > 0, 'the wide-screen Command View density block was not located');
+  // It starts exactly at the tablet ceiling: 681–1099px keeps the styles it
+  // shipped with, and nothing here can reach a phone.
+  const added = (code.match(/@media \(min-width:(\d+)px\)/g) || [])
+    .map((query) => Number(/(\d+)/.exec(query)[1]));
+  assert.ok(added.includes(1100), 'the wide Command View density layer is not scoped to 1100px and above');
+  for (const width of added) {
+    assert.ok(width >= 1100,
+      `a min-width:${width}px rule reaches below the wide band, into preserved phone or tablet styles`);
+  }
+  // Compaction, never removal: a display:none here would delete an instrument
+  // from the very screen this block exists to complete.
+  for (const rule of wideRules()) {
+    assert.ok(!/display:none/.test(rule.body),
+      `the wide Command View removes ${rule.selectors.join(',')} instead of compacting it`);
+  }
+  // Density may not become a second status signal, and it may not outrank one:
+  // no colour, no border colour, no shadow, and no !important that could
+  // silently delete the .is-now / .is-blocked / .is-clear inset state bars.
+  for (const rule of wideRules()) {
+    const target = rule.selectors.join(',');
+    assert.ok(!/(?:^|;)\s*(?:color|background|border-color|box-shadow)\s*:/.test(rule.body),
+      `${target} repaints a state signal instead of compacting a box`);
+    assert.ok(!/!important/.test(rule.body), `${target} outranks a shipped state signal with !important`);
+  }
+  assert.ok(!/@keyframes/.test(WIDE) && !/\banimation\s*:/.test(WIDE) && !/(?:^|;)transition:(?!none)/.test(WIDE),
+    'the wide Command View introduced motion — it is an instrument panel, not decoration');
+  // No new authority: this layer is CSS, so it may not carry a script, a data
+  // source or a network dependency of any kind.
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'url(', 'AEGIS_STATE']) {
+    assert.ok(!WIDE.includes(banned), `the density layer uses ${banned} — it may only compact shipped boxes`);
+  }
+});
+
+test('the wide Command View fits the whole HUD, all nine stations and the build route, and clamps only supporting prose', () => {
+  // The two fixed reserves are what pushed the path and the route off-screen.
+  assert.ok(/\.strategic-core\{min-height:0\}/.test(WIDE) && /\.core-stage\{min-height:0;gap:10px\}/.test(WIDE),
+    'the HUD keeps the fixed 510px/430px reserve that spends the first screen on empty panel');
+  assert.ok(/\.aegis-core\{width:148px;height:148px/.test(WIDE),
+    'the AEGIS Core keeps a diameter that alone sets the middle HUD row taller than the fold');
+  assert.ok(/\.ops-cell\{display:flex;flex-wrap:wrap;[^}]*padding:6px 9px\}/.test(WIDE) &&
+    /\.ops-cell>\.chip\{[^}]*margin-top:0/.test(WIDE) &&
+    /\.ops-strip-cells\{grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/.test(WIDE),
+    'the operational status is still two rows of full-height cards on a wide screen');
+  assert.ok(/\.command-header\{min-height:0;/.test(WIDE) && /\.command-shell\{padding:10px 14px 14px;gap:12px\}/.test(WIDE),
+    'header and shell chrome still reserve their full band above the instruments');
+  // Complete means complete: the stage keeps three canonical columns, the track
+  // keeps nine, and neither is re-columned into a second screen here.
+  const retracked = wideSelectorsDeclaring(/grid-template-columns/);
+  for (const selector of ['.core-stage', '.core-path-track', '#topology-live-body .route-strip']) {
+    assert.ok(!retracked.has(selector), `${selector} is re-columned at wide width, which splits the cockpit`);
+  }
+  const source = htmlSrc();
+  for (const id of ['hud-mission', 'hud-crew', 'hud-review', 'hud-gate', 'hud-evidence', 'hud-checkpoint',
+    'aegis-core', 'core-path-track', 'core-path-note', 'ops-strip-cells', 'founder-body', 'topology-live-body']) {
+    assert.ok(source.includes('id="' + id + '"'), `${id} was deleted rather than compacted`);
+  }
+  assert.strictEqual(corePathStations().length, 9, 'the handoff path no longer declares nine canonical stations');
+
+  // Clamping is presentation over supporting prose only. Every operator answer
+  // — current action, next step, blocker, last safe checkpoint, and the brief's
+  // NOW / NEXT / NEEDS MARC rows — is read in full at this width.
+  const clamped = wideSelectorsDeclaring(/-webkit-line-clamp/);
+  for (const answer of ['.is-now', '.is-next', '.is-blocked', '.is-clear', '.is-checkpoint',
+    '"now"', '"next"', '"needs-marc"']) {
+    for (const selector of clamped) {
+      assert.ok(!selector.includes(answer), `the wide Command View clamps the operator answer ${answer}`);
+    }
+  }
+  // And every clamped value is still written whole by its renderer, so it stays
+  // in the DOM for assistive technology and unabridged in Detail View.
+  assert.ok(/card\.appendChild\(el\('div','command-value',value\)\)/.test(code) &&
+    /row\.appendChild\(el\('div','brief-value',value\)\)/.test(code) &&
+    /item\.appendChild\(el\('span','core-station-mark',/.test(code),
+    'a value the wide Command View clamps is truncated in the renderer instead of in the stylesheet');
+
+  // Below 1100px nothing moved: the phone cockpit and the tablet HUD are exactly
+  // the styles they shipped with.
+  assert.ok(/\.core-stage\{position:relative;min-height:430px;display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/.test(code) &&
+    /\.aegis-core\{position:relative;z-index:2;grid-column:2;grid-row:2;justify-self:center;width:188px;height:188px/.test(code),
+    'the shipped sub-1100px HUD geometry was rebuilt by the density packet');
+  assert.ok(/\.command-header\{min-height:72px;padding:12px 20px/.test(code) &&
+    /\.ops-cell\{min-width:0;padding:9px 11px/.test(code) &&
+    /\.ops-value\{[^}]*-webkit-line-clamp:4/.test(code),
+    'the shipped header band or status cell was rebuilt rather than overridden above 1100px');
+  assert.ok(/\.command-shell\{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"\}/.test(code) &&
+    /#topology-live-body \.route-strip\{grid-template-columns:repeat\(3,minmax\(100px,1fr\)\)\}/.test(code),
+    'the 681–1099px tablet stack was changed by the wide-screen density packet');
+  assert.ok(/\.ops-strip-cells\{grid-template-columns:1fr\}/.test(PHONE) &&
+    /\.core-path-track\{grid-template-columns:1fr\}/.test(PHONE),
+    'the phone cockpit was changed by the wide-screen density packet');
+});
+
 
 // ── DOM harness: render the REAL page source, not a copy of it ─────────────
 // jsdom is not a dependency here and will not become one for a governance

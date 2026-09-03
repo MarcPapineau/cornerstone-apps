@@ -787,6 +787,104 @@
     .badges{justify-content:flex-start}
     .context-cell,.context-cell.mono{max-width:100%}
   }
+
+  /* ── wide-screen Command View density ──
+     One cockpit, not a four-screen document. At 1100px and above the working
+     command centre has to answer on its first screen: the header, the five
+     operational answers, the mission brief, the complete Strategic Systems HUD
+     with the AEGIS Core and all six evidence modules around it, the complete
+     nine-station handoff path, and the start of the build route.
+
+     Every rule below is padding, gap, reserved height, type size or a line
+     clamp. Nothing is hidden and nothing is deleted: there is no display:none
+     in this block, every module, station, card and control keeps its box, and
+     the renderers still write the whole canonical sentence into every clamped
+     element, so it stays in the DOM for assistive technology and is read
+     unabridged in Detail View. Clamping is applied only to supporting prose —
+     crew, routing rationale, live evidence, builder-progress detail, elapsed,
+     the two explanatory brief rows and the station's own role line. The
+     operator answers (current action, next step, blocker, last safe checkpoint,
+     and the brief's NOW / NEXT / NEEDS MARC rows) are never clamped here.
+
+     No colour, chip, glyph or state signal is touched, so nothing here becomes
+     legible by colour alone, and there is no transition, animation, timer or
+     second reading of any value. Phone styles at 680px and below and tablet
+     styles from 681px to 1099px are left exactly as they shipped. */
+  @media (min-width:1100px){
+    /* Chrome pays first. Both controls and all three canonical context cells
+       stay exactly where the markup has them; only their padding shrinks. */
+    .command-header{min-height:0;gap:8px 14px;padding:8px 16px}
+    .brand-lockup{min-width:0;gap:10px}
+    .brand-name{font-size:16px}
+    .view-tab{padding:5px 13px}
+    .hud-control{padding:5px 8px}
+    .context-cell{padding:5px 9px}
+
+    /* The five operational answers stay five cells in one band at every wide
+       width. The written label and the canonical state word share the first row
+       and the resolved sentence reads under them, so the strip costs one band
+       instead of two rows of full-height cards. */
+    .ops-strip>.ops-strip-title{min-height:0;padding:5px 2px}
+    .ops-strip-cells{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;padding:7px 0 0}
+    .ops-cell{display:flex;flex-wrap:wrap;align-items:center;column-gap:8px;padding:6px 9px}
+    .ops-label{flex:1 1 auto;min-width:0}
+    .ops-cell>.chip{flex:0 0 auto;margin-top:0}
+    .ops-value{flex:1 0 100%;margin-top:3px;-webkit-line-clamp:2}
+
+    .command-shell{padding:10px 14px 14px;gap:12px}
+    .left-rail,.center-console,.right-rail{gap:12px}
+    .command-shell section>h2,.panel-summary{min-height:0;padding:8px 14px}
+
+    /* Mission brief: tighter rules and a clamp on the four supporting cards and
+       the two explanatory brief rows only. */
+    #founder-summary>.body{padding:11px 13px}
+    #founder-summary .mission-head{padding-bottom:7px}
+    #founder-summary .mission-title{font-size:18px;margin-top:3px}
+    #founder-summary .mission-meta{margin-top:4px}
+    #founder-summary .command-grid{gap:6px;margin-top:9px}
+    #founder-summary .command-card{padding:7px 10px}
+    #founder-summary .command-value{margin-top:3px;font-size:13px}
+    #founder-summary .command-card.is-crew .command-value,
+    #founder-summary .command-card.is-routing .command-value,
+    #founder-summary .command-card.is-live-evidence .command-value,
+    #founder-summary .command-card.is-progress .command-value,
+    #founder-summary .command-card.is-elapsed .command-value{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+    .operator-brief{margin-top:9px;padding:9px 11px}
+    .brief-row{margin-top:7px}
+    .brief-value{margin-top:2px;font-size:13px}
+    .brief-row[data-operator-brief="finished"] .brief-value,
+    .brief-row[data-operator-brief="verify"] .brief-value{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+    .founder-details{margin-top:9px}
+
+    /* Strategic Systems HUD: the whole instrument on one screen. The stage keeps
+       its three canonical columns and all six evidence modules around the core;
+       the fixed 510px/430px reserves, the ring, the core diameter and the node
+       padding are what shrink. */
+    .strategic-core{min-height:0}
+    .strategic-core>.body{padding:12px}
+    .core-stage{min-height:0;gap:10px}
+    .core-stage::before{width:232px;height:232px}
+    .core-stage::after{width:182px;height:182px}
+    .core-node{min-height:0;padding:9px 11px 10px}
+    .core-node h3{padding-bottom:5px}
+    .core-node .hud-value{margin-top:6px;font-size:12.5px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
+    .core-node .hud-state{margin-top:5px}
+    .aegis-core{width:148px;height:148px;padding:0 11px}
+    .core-mark{font-size:15px}
+    .core-sub{margin-top:5px}
+    .core-status{margin-top:7px}
+    .core-legend{margin-top:10px;padding-top:8px;gap:14px}
+
+    /* The complete nine-station handoff path stays nine stations on one row: no
+       track is re-columned here, so no station is pushed onto a second screen. */
+    .core-path{margin-top:10px;padding-top:9px}
+    .core-path-track{margin-top:8px;gap:7px}
+    .core-station{padding:6px 8px 6px 10px}
+    .core-station-mark{margin-top:4px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+    .core-station-holder{margin-top:3px;font-size:11px;line-height:135%}
+    .core-path-note{margin-top:8px;font-size:11px;line-height:1.4}
+    .core-path-handoff{margin-top:6px}
+  }
 </style>
 </head>
 <body>
