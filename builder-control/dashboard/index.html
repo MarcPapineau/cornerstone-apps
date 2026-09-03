@@ -175,6 +175,13 @@
      390px phone sideways. */
   .activity-item{display:block;min-width:0}
   .activity-what{font-weight:500;color:var(--text-0);font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+  /* A consecutive identical status snapshot folds into the item it repeats and
+     says how many canonical updates it stands for. It is a count of updates,
+     not a claim of work: it sits beside the founder answers, never in place of
+     the "did this move the build forward?" answer, and it is legible in
+     Command View because a hidden count is how a repeat passes for a change. */
+  .activity-repeat{margin:calc(var(--sp)*2) 0 0;font-size:12px;line-height:1.45;
+    color:var(--text-1);overflow-wrap:anywhere}
   .activity-answers{margin:calc(var(--sp)*2) 0 0;display:grid;grid-template-columns:minmax(0,1fr);
     gap:calc(var(--sp)*1.5)}
   .activity-answer{min-width:0}
@@ -1837,6 +1844,28 @@
       : 'Canonical timestamp UNAVAILABLE — this receipt carries none.';
   }
 
+  // ── consecutive identical status snapshots read as ONE item ───────────────
+  // Command View printed a fresh card for every /api/status push, so a quiet
+  // system produced a wall of byte-identical "AEGIS re-sent the whole picture"
+  // cards and the one line that had actually changed was scrolled away by the
+  // updates that said nothing. Repeats now fold into the item they repeat and
+  // carry a truthful count of the canonical updates that item stands for.
+  //
+  // This is the ONLY canonical event a repeat may be folded into. Every
+  // control action, refusal, failure, timeout, cancellation, retry, handoff
+  // and unrecognised code always gets its own item, because two of those are
+  // two separate things that happened even when their text matches.
+  var ACTIVITY_REPEATABLE_CODES = ['STATUS_SNAPSHOT'];
+
+  // A count of updates, never a claim of work. It says out loud that a repeat
+  // is not progress, and it points at the Detail View evidence rather than
+  // standing in for it — no receipt and no timestamp is summarised away.
+  function activityRepeat(count){
+    return 'This same update arrived ' + count + ' times in a row, worded identically each time. ' +
+      'Repeating it is not progress — no build step ran for any of the ' + count + '. ' +
+      'Detail View lists all ' + count + ' exact receipts with their canonical timestamps, in order.';
+  }
+
   // Own-property lookup only, and an unrecognised code is stated as
   // unrecognised: an update AEGIS cannot name must never borrow the wording of
   // one it can.
@@ -1849,7 +1878,8 @@
         who: 'UNAVAILABLE — no actor is recorded on this update.',
         moved: 'No — an update AEGIS cannot name never counts as progress.',
         next: 'Open Detail View and read the exact recorded text below.',
-        stamp: activityStamp(facts) };
+        stamp: activityStamp(facts),
+        repeatable: false };
     }
     var entry = ACTIVITY_UPDATES[code];
     return {
@@ -1858,7 +1888,10 @@
       who: activityAnswer(entry.who, facts),
       moved: activityAnswer(entry.moved, facts),
       next: activityAnswer(entry.next, facts),
-      stamp: activityStamp(facts)
+      stamp: activityStamp(facts),
+      // Presentation eligibility only. It grants no progress, no lifecycle
+      // meaning and no permission to drop evidence.
+      repeatable: ACTIVITY_REPEATABLE_CODES.indexOf(code) !== -1
     };
   }
 
@@ -4557,8 +4590,10 @@
     founder: FOUNDER,
     // The live feed is rendered by the switchboard block below, so the ONE
     // translation of a canonical event into founder language is exported here
-    // rather than copied there.
-    activityUpdate: activityUpdate
+    // rather than copied there. The repeat sentence crosses the same seam for
+    // the same reason: the renderer must not phrase a repeat in its own words.
+    activityUpdate: activityUpdate,
+    activityRepeat: activityRepeat
   };
 })();
 </script>
@@ -4944,6 +4979,27 @@
   // The founder answers come from the ONE exported translation seam in the
   // renderer block. If that seam is unavailable the item says so and still
   // prints its raw evidence — it never invents a summary of its own.
+  //
+  // A consecutive identical status snapshot does not get a second card. It is
+  // folded into the item it repeats, which then states how many canonical
+  // updates it stands for. The fold is deliberately narrow and requires ALL of:
+  //
+  //   * the translation seam marked the code repeatable — today only
+  //     STATUS_SNAPSHOT, and never a control action, refusal, failure,
+  //     timeout, cancellation, retry, handoff or unrecognised code;
+  //   * the exact recorded receipt text matches the previous one byte for byte;
+  //   * every founder answer matches, so a newer update is never presented
+  //     under an older reading of the deck;
+  //   * the item is still the NEWEST one in the feed, which is what makes the
+  //     fold consecutive and stops the memo below from resurrecting an item
+  //     that has since been trimmed off the end.
+  //
+  // Nothing is hidden and nothing is deleted: every exact receipt and every
+  // canonical timestamp stays in that same item's Detail View evidence in
+  // arrival order, and the count is a count of updates that explicitly denies
+  // being progress. The "did this move the build forward?" answer is left
+  // exactly as the translation seam wrote it.
+  var lastActivity = null;
   function appendActivity(text, record){
     var host = $('live-activity');
     if (!host) return;
@@ -4956,9 +5012,40 @@
         who: 'UNAVAILABLE — no actor is recorded on this update.',
         moved: 'No — an update AEGIS cannot describe never counts as progress.',
         next: 'Open Detail View and read the exact recorded text below.',
-        stamp: 'Canonical timestamp UNAVAILABLE — this receipt carries none.' };
+        stamp: 'Canonical timestamp UNAVAILABLE — this receipt carries none.',
+        repeatable: false };
+    var raw = String(text);
+    var repeatSentence = dashboard && typeof dashboard.activityRepeat === 'function'
+      ? dashboard.activityRepeat
+      : null;
+    // Presentation identity: the code, the exact receipt, and every sentence
+    // Command View would show. If any of them differs this is a different
+    // item, not a repeat of this one. Each part is length-prefixed, because a
+    // receipt is untrusted text and a plain separator is something it could
+    // imitate to make two different updates compare equal.
+    var identity = [update.code, raw, update.what, update.who, update.moved, update.next]
+      .map(function(part){ var value = String(part); return value.length + ':' + value; }).join('');
+    var UNUSED_MARKER_TO_REMOVE = [update.code, raw, update.what, update.who, update.moved, update.next].join('\n \n');
+
+    if (update.repeatable === true && repeatSentence && lastActivity &&
+        lastActivity.node === host.firstElementChild && lastActivity.identity === identity) {
+      lastActivity.count += 1;
+      lastActivity.node.setAttribute('data-activity-repeats', String(lastActivity.count));
+      if (!lastActivity.repeat) {
+        lastActivity.repeat = el('div', 'activity-repeat');
+        lastActivity.node.insertBefore(lastActivity.repeat, lastActivity.answers);
+      }
+      lastActivity.repeat.textContent = repeatSentence(lastActivity.count);
+      // The repeated update keeps its own receipt and its own canonical
+      // timestamp, appended after the ones already disclosed.
+      lastActivity.evidence.appendChild(el('div', 'activity-raw-text', raw));
+      lastActivity.evidence.appendChild(el('div', 'activity-raw-stamp', update.stamp));
+      return;
+    }
+
     var li = el('li', 'row activity-item');
     li.setAttribute('data-activity', update.code);
+    li.setAttribute('data-activity-repeats', '1');
     li.appendChild(el('div', 'activity-what', update.what));
     var answers = el('dl', 'activity-answers');
     [['Who acted', update.who],
@@ -4972,11 +5059,13 @@
     li.appendChild(answers);
     var evidence = el('div', 'activity-raw');
     evidence.setAttribute('data-activity-evidence', update.code);
-    evidence.appendChild(el('div', 'activity-raw-text', String(text)));
+    evidence.appendChild(el('div', 'activity-raw-text', raw));
     evidence.appendChild(el('div', 'activity-raw-stamp', update.stamp));
     li.appendChild(evidence);
     host.insertBefore(li, host.firstChild);
     while (host.children.length > 30) host.removeChild(host.lastChild);
+    lastActivity = { node: li, identity: identity, count: 1,
+      answers: answers, evidence: evidence, repeat: null };
   }
   // One activity renderer owns the live feed. The primary Command View may
   // request a write through this seam, but it never creates a second log.

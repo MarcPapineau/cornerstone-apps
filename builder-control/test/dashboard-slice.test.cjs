@@ -876,6 +876,63 @@ test('live activity has one translation seam and Detail View alone discloses the
     'the activity renderer invents time or activity instead of using canonical evidence');
 });
 
+// ── repeated status snapshots (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ────
+// The defect: a quiet system pushed /api/status on its own and Command View
+// answered with a wall of byte-identical "AEGIS re-sent the whole picture"
+// cards, so the one update that had actually changed was scrolled away by the
+// ones that said nothing. The fix must stay narrow — a fold that widened to
+// control actions, refusals, failures or unrecognised codes would merge two
+// separate things that happened, and a fold that summarised evidence away
+// would delete the receipt a reader needs.
+test('only consecutive identical status snapshots fold, and a fold deletes no evidence', () => {
+  assert.strictEqual((code.match(/ACTIVITY_REPEATABLE_CODES\s*=/g) || []).length, 1,
+    'the fold allow-list is declared more than once, or not at all');
+  const list = /var ACTIVITY_REPEATABLE_CODES\s*=\s*\[([^\]]*)\]/.exec(code);
+  assert.ok(list, 'no ACTIVITY_REPEATABLE_CODES allow-list was found');
+  assert.deepStrictEqual(list[1].split(',').map((item) => item.trim()).filter(Boolean),
+    ["'STATUS_SNAPSHOT'"], 'a canonical event other than STATUS_SNAPSHOT was made foldable');
+  assert.ok(/repeatable:\s*ACTIVITY_REPEATABLE_CODES\.indexOf\(code\) !== -1/.test(code),
+    'fold eligibility is decided somewhere other than the one allow-list');
+  assert.ok(/repeatable:\s*false/.test(code),
+    'an update carrying no canonical event is not explicitly refused the fold');
+
+  const renderer = code.slice(code.indexOf('function appendActivity'),
+    code.indexOf('// One activity renderer owns the live feed'));
+  assert.ok(/update\.repeatable === true/.test(renderer),
+    'the renderer folds without asking the translation seam whether the code may fold at all');
+  assert.ok(/lastActivity\.node === host\.firstElementChild/.test(renderer),
+    'the fold target is not required to be the newest item, so a non-consecutive repeat could fold');
+  assert.ok(/lastActivity\.identity === identity/.test(renderer),
+    'the renderer folds without requiring an identical presentation identity');
+  assert.ok(/\[update\.code, raw, update\.what, update\.who, update\.moved, update\.next\]/.test(renderer),
+    'the fold identity no longer covers the exact receipt and every founder answer');
+
+  const fold = renderer.slice(renderer.indexOf('if (update.repeatable === true'),
+    renderer.indexOf('var li = el('));
+  assert.ok(fold.length > 0, 'the fold branch was not located');
+  assert.ok(!/removeChild|textContent = ''|innerHTML/.test(fold),
+    'folding a repeat deletes or clears evidence that was already disclosed');
+  assert.ok(/activity-raw-text/.test(fold) && /activity-raw-stamp/.test(fold),
+    'a folded repeat does not add its own exact receipt and its own canonical timestamp');
+  assert.ok(/repeatSentence\(lastActivity\.count\)/.test(fold),
+    'the renderer phrases the repeat count itself instead of using the one translation seam');
+  assert.ok(!/moved/.test(fold),
+    'folding a repeat rewrites the did-this-move-the-build-forward answer');
+  assert.ok(!/new Date|Date\.now|setTimeout|setInterval/.test(fold),
+    'the fold invents time or motion instead of counting canonical updates');
+
+  const sentence = code.slice(code.indexOf('function activityRepeat('),
+    code.indexOf('function activityUpdate('));
+  assert.ok(sentence.length > 0, 'no activityRepeat() translation was found ahead of activityUpdate()');
+  assert.ok(/not progress/.test(sentence),
+    'the repeat count does not state out loud that a repeat is not progress');
+  assert.ok(!/progressed|advanced|completed|succeeded|finished/i.test(sentence),
+    'the repeat count implies the build moved because an update repeated');
+  assert.ok(/\.activity-repeat\{[^}]*font-size/.test(code) &&
+    !/\.activity-repeat\{[^}]*display:none/.test(code),
+    'the repeat count is not legible in Command View — a hidden count is how a repeat passes for a change');
+});
+
 test('accepted, waiting, refused and stopping activity never claims recorded progress', () => {
   const map = code.slice(code.indexOf('var ACTIVITY_UPDATES'), code.indexOf('function activityAnswer'));
   for (const event of ['START_ACCEPTED', 'START_REFUSED', 'CHECKS_ACCEPTED', 'CHECKS_REFUSED',
@@ -4179,6 +4236,94 @@ test('DOM: founder activity preserves exact evidence and never promotes a contro
     'an unknown or heartbeat-only update was allowed to imply progress');
   assert.match(unknown.stamp, /timestamp UNAVAILABLE/,
     'an event without a canonical timestamp received an invented browser time');
+  assert.strictEqual(unknown.repeatable, false,
+    'an update AEGIS cannot name was still marked foldable into another item');
+});
+
+test('DOM: repeated status snapshots read as one counted item that keeps every receipt', () => {
+  const page = bootPage(fixtureState());
+  const host = page.document.getElementById('live-activity');
+  const push = (text, record) => page.sandbox.AEGIS_DASHBOARD.appendActivity(text, record);
+  const kids = (node, cls) => node.children.filter((child) => child.className === cls);
+  const codes = () => findByAttr(host, 'data-activity');
+  const raw = 'status: engineering=OK runs=1 current=RUN-QUIET';
+
+  // Two pushes of the SAME picture. The system sent them by itself; nothing
+  // was pressed and no build step ran for either one.
+  push(raw, { code: 'STATUS_SNAPSHOT', ts: '2026-09-03T15:00:00.000Z', runId: 'RUN-QUIET' });
+  push(raw, { code: 'STATUS_SNAPSHOT', ts: '2026-09-03T15:00:30.000Z', runId: 'RUN-QUIET' });
+
+  let items = codes();
+  assert.strictEqual(items.length, 1,
+    'two byte-identical status snapshots produced duplicate Command View cards');
+  assert.strictEqual(items[0].attrs['data-activity'], 'STATUS_SNAPSHOT');
+  assert.strictEqual(items[0].attrs['data-activity-repeats'], '2',
+    'the one item does not carry a truthful count of the canonical updates it stands for');
+  const repeat = kids(items[0], 'activity-repeat');
+  assert.strictEqual(repeat.length, 1, 'the folded item has no single founder-readable repeat line');
+  assert.match(repeat[0].textContent, /arrived 2 times in a row/,
+    'Command View does not say how many identical updates this one item stands for');
+  assert.match(repeat[0].textContent, /not progress/,
+    'a repeated update was counted as build progress');
+  assert.match(items[0].textContent, /Not from this update/,
+    'the folded item stopped answering that the update claims no step of its own');
+
+  // Detail View still holds BOTH exact receipts and BOTH canonical timestamps,
+  // in arrival order, inside that same item.
+  let evidence = findByAttr(host, 'data-activity-evidence');
+  assert.strictEqual(evidence.length, 1, 'a folded repeat opened a second evidence block');
+  assert.deepStrictEqual(kids(evidence[0], 'activity-raw-text').map((n) => n.textContent), [raw, raw],
+    'Detail View dropped or rewrote one of the two exact receipts');
+  assert.deepStrictEqual(kids(evidence[0], 'activity-raw-stamp').map((n) => n.textContent), [
+    'Canonical timestamp 2026-09-03T15:00:00.000Z',
+    'Canonical timestamp 2026-09-03T15:00:30.000Z',
+  ], 'Detail View lost a canonical timestamp or disclosed the two receipts out of order');
+
+  // A CHANGED picture is a different thing to read and gets its own item.
+  push('status: engineering=OK runs=2 current=RUN-QUIET',
+    { code: 'STATUS_SNAPSHOT', ts: '2026-09-03T15:01:00.000Z', runId: 'RUN-QUIET' });
+  assert.strictEqual(codes().length, 2,
+    'a changed status snapshot was folded into the item it differs from');
+  assert.strictEqual(host.children[0].attrs['data-activity-repeats'], '1',
+    'a first sighting was counted as a repeat');
+  assert.strictEqual(host.children[1].attrs['data-activity-repeats'], '2',
+    'opening a new item rewrote the count of the item it did not fold into');
+  assert.strictEqual(kids(host.children[0], 'activity-repeat').length, 0,
+    'an item standing for one update still shows a repeat count');
+
+  // Only CONSECUTIVE repeats fold: the first text is back, but something else
+  // has been read since, so it is a new occurrence and not a repeat of that item.
+  push(raw, { code: 'STATUS_SNAPSHOT', ts: '2026-09-03T15:01:30.000Z', runId: 'RUN-QUIET' });
+  assert.strictEqual(codes().length, 3, 'a non-consecutive repeat was folded into an older item');
+
+  // Nothing else folds. Two identical refusals are two refusals, and an update
+  // AEGIS cannot name is never merged into another one.
+  push('Retry failed for RUN-QUIET: exact refusal',
+    { code: 'RETRY_REFUSED', runId: 'RUN-QUIET', ts: '2026-09-03T15:02:00.000Z' });
+  push('Retry failed for RUN-QUIET: exact refusal',
+    { code: 'RETRY_REFUSED', runId: 'RUN-QUIET', ts: '2026-09-03T15:02:10.000Z' });
+  push('heartbeat only', { code: 'HEARTBEAT_ONLY', ts: '2026-09-03T15:03:00.000Z' });
+  push('heartbeat only', { code: 'HEARTBEAT_ONLY', ts: '2026-09-03T15:03:10.000Z' });
+
+  items = codes();
+  const byCode = (want) => items.filter((n) => n.attrs['data-activity'] === want);
+  assert.strictEqual(byCode('RETRY_REFUSED').length, 2,
+    'two identical control refusals were coalesced — each refusal is a separate thing that happened');
+  assert.strictEqual(byCode('UNAVAILABLE').length, 2,
+    'an update AEGIS cannot name was folded into another one');
+  for (const item of byCode('RETRY_REFUSED').concat(byCode('UNAVAILABLE'))) {
+    assert.strictEqual(item.attrs['data-activity-repeats'], '1',
+      'a non-foldable event was given a repeat count');
+    assert.strictEqual(kids(item, 'activity-repeat').length, 0,
+      'a non-foldable event was given a repeat line');
+  }
+
+  // Eight canonical updates arrived; eight exact receipts are still on the page.
+  evidence = findByAttr(host, 'data-activity-evidence');
+  assert.strictEqual(items.length, 7, 'the feed holds the wrong number of activity items');
+  assert.strictEqual(
+    evidence.reduce((total, block) => total + kids(block, 'activity-raw-text').length, 0), 8,
+    'the feed holds fewer exact receipts than the number of canonical updates it received');
 });
 
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────
