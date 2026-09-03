@@ -4175,8 +4175,13 @@
       objectiveDetail.appendChild(el('p','mission-objective-full',deckObjective));
       missionText.appendChild(objectiveDetail);
     }
-    missionText.appendChild(el('div','mission-meta',controlState.plain +
-      (controlState.state !== opState.state ? ' Run lifecycle: ' + opState.plain : '')));
+    // The gate verdict's full sentence is already the labelled GATE READINESS
+    // cell above and the brief's own answer below, so the rail keeps only the
+    // state pair that tells the gate and the worker apart — plus the lifecycle
+    // sentence in the one case neither carries it: when the two disagree.
+    missionText.appendChild(el('div','mission-meta','Gate readiness: ' + controlState.state +
+      ' · Run lifecycle: ' + opState.state +
+      (controlState.state !== opState.state ? ' — ' + opState.plain : '')));
     mission.appendChild(missionText);
     mission.appendChild(chip(controlState.state));
     host.appendChild(mission);
@@ -4324,8 +4329,10 @@
     // above. It never estimates progress or turns authentication into usage.
     function hudText(id, value){ var node = $(id); if (node) node.textContent = value; }
     hudText('hud-mission', missionHeadlineText);
-    hudText('hud-mission-state', controlState.state + ' — ' + controlState.plain +
-      (controlState.state !== opState.state ? ' Run lifecycle: ' + opState.plain : ''));
+    // Both named states, no third copy of the paragraph the labelled gate cell
+    // and the brief already carry on the same screen.
+    hudText('hud-mission-state', 'GATE READINESS ' + controlState.state +
+      ' · RUN LIFECYCLE ' + opState.state);
     hudText('hud-core-status', controlState.state);
     hudText('hud-crew', crew);
     // currentAction is overwritten with the gate's reason whenever the control

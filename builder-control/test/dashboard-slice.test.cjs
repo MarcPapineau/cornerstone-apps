@@ -4126,6 +4126,105 @@ test('the disclosure is presentation only: no timer, no state of its own, no for
     code.indexOf('.command-grid{display:grid'))), 'the disclosure block introduced motion');
 });
 
+// ── first screen: one explanation, two named states ───────────────────────
+// The mission line and the HUD mission module used to print the same gate
+// paragraph the Operator brief already answers, so the same multi-line text
+// occupied the left rail, the HUD and the brief at once. They now carry the
+// labelled state pair only. The properties that make that safe: the gate and
+// the worker stay separately named, the brief keeps the complete sentence, and
+// the one explanation the brief does NOT carry — the run lifecycle sentence
+// when the two verdicts disagree — stays visible on the mission line.
+function missionMetaText(page) {
+  const node = allNodes(page.document.getElementById('founder-body'))
+    .find((n) => n.className === 'mission-meta');
+  assert.ok(node, 'the mission line lost its status summary');
+  return node.textContent;
+}
+
+function blockedBuildFixture() {
+  const run = {
+    runId: 'RUN-FIRST-SCREEN-FAILED', state: 'BUILD_FAILED',
+    objective: 'Prove a failed run keeps its recorded reason', updatedAt: '2026-09-03T13:00:00.000Z',
+    build: { failure: { code: 'BUILDER_TIMEOUT', summary: 'The builder exceeded its fixed time limit.' } },
+  };
+  return fixtureState({ runs: { state: 'OK', runs: [run], current: {
+    state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, reason: 'exact current run is bound' } } });
+}
+
+function gateUnavailableFixture() {
+  const run = {
+    runId: 'RUN-FIRST-SCREEN-GATE', state: 'CHECKS_PASSED',
+    objective: 'Prove passed checks with unreadable gate evidence', updatedAt: '2026-09-03T13:10:00.000Z',
+    checks: { passed: 3, total: 3, outcome: 'PASS' },
+  };
+  return fixtureState({
+    engineering: { state: 'UNAVAILABLE', reason: 'the gate projection could not be read', problems: [] },
+    runs: { state: 'OK', runs: [run], current: { state: 'BOUND', runId: run.runId,
+      updatedAt: run.updatedAt, subjectState: 'UNAVAILABLE', subjectSha256: null } },
+  });
+}
+
+test('DOM: the mission line and HUD name the gate and the run lifecycle without repeating the brief paragraph', () => {
+  const unknown = bootPage(fixtureState());
+  renderMinimizedStatus(unknown, briefUnreadableLedgerStatus());
+  const pages = [
+    ['a running build', bootPage(briefBuildingFixture())],
+    ['passed checks with unreadable gate evidence', bootPage(gateUnavailableFixture())],
+    ['a failed build', bootPage(blockedBuildFixture())],
+    ['an unreadable run ledger', unknown],
+  ];
+  for (const [name, page] of pages) {
+    const meta = missionMetaText(page);
+    const hud = page.text('hud-mission-state');
+    assert.match(meta, /^Gate readiness: [A-Z_]+ · Run lifecycle: [A-Z_]+/,
+      `${name}: the mission line no longer distinguishes the gate from the worker: ${meta}`);
+    assert.match(hud, /^GATE READINESS [A-Z_]+ · RUN LIFECYCLE [A-Z_]+$/,
+      `${name}: the HUD mission state is not the labelled state pair: ${hud}`);
+    assert.ok(hud.startsWith('GATE READINESS ' + page.text('hud-core-status')),
+      `${name}: the HUD mission module reports a different gate verdict than the core: ${hud}`);
+    // The complete gate sentence stays in the brief, and only there on the
+    // first screen — that duplication is what made this screen unreadable.
+    const now = briefField(page, 'now').value;
+    assert.ok(now.length > 0 && !meta.includes(now) && !hud.includes(now),
+      `${name}: the brief's own explanation is still repeated on the mission line or HUD: ${meta} / ${hud}`);
+    // Nothing that tells the owner what is wrong or what to do was dropped.
+    for (const field of ['next', 'needs-marc']) {
+      assert.ok(briefField(page, field).value.length > 0, `${name}: the ${field} answer was emptied`);
+    }
+    assert.ok(deckCardText(page, 'blocker').length > 0 && deckCardText(page, 'next-step').length > 0,
+      `${name}: the blocker or next-step instrument was emptied`);
+  }
+});
+
+test('DOM: every exact reason survives — the brief keeps the gate sentence, the mission line keeps the lifecycle one', () => {
+  // Gate and lifecycle agree: the whole recorded reason, including the missing
+  // handoff, is the brief's answer and the mission line stays two state words.
+  const failed = bootPage(blockedBuildFixture());
+  assert.strictEqual(missionMetaText(failed), 'Gate readiness: BLOCKED · Run lifecycle: BLOCKED',
+    'a run whose gate and lifecycle agree still carries a duplicated paragraph');
+  assert.strictEqual(briefField(failed, 'now').value,
+    'The builder exceeded its fixed time limit. No replacement builder handoff is recorded.',
+    'the recorded timeout and handoff evidence was lost with the duplicate text');
+
+  // Gate and lifecycle disagree: the gate refusal is the brief's answer, and
+  // the lifecycle sentence the brief does not carry stays on the mission line.
+  const gate = bootPage(gateUnavailableFixture());
+  assert.strictEqual(missionMetaText(gate),
+    'Gate readiness: UNAVAILABLE · Run lifecycle: WAITING — Deterministic checks passed with ' +
+    'final required evidence; the run is waiting for independent review evidence.',
+    'the run lifecycle explanation was dropped instead of de-duplicated');
+  assert.match(briefField(gate, 'needs-marc').value, /Not confirmed — AEGIS cannot yet show/,
+    'the fail-closed gate refusal was softened out of the brief');
+
+  const unknown = bootPage(fixtureState());
+  renderMinimizedStatus(unknown, briefUnreadableLedgerStatus());
+  assert.strictEqual(missionMetaText(unknown),
+    'Gate readiness: UNAVAILABLE · Run lifecycle: IDLE — Nothing is currently running.',
+    'an unreadable ledger reported something other than the two canonical states');
+  assert.match(briefField(unknown, 'needs-marc').value, /could not be read or validated/,
+    'the recorded reason the ledger is unusable was withheld from the brief');
+});
+
 // ── V2 FOUNDER LANGUAGE — one explanation, not the gate's own vocabulary ────
 // Command View used to repeat internal phrasing — "control-plane status is
 // unavailable", "the exact-subject gate" — across the mission line, the brief,
