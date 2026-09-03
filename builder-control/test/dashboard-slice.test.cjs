@@ -2302,6 +2302,127 @@ test('DOM: malformed run evidence is unavailable and never lights the clean-idle
     'malformed run evidence rendered the affirmative empty-history message');
 });
 
+// ── run history: objective first, recorded outcome second, evidence third ────
+// Every attempt used to lead with its run id, so the reader had to decode
+// RUN-2026… before learning what the attempt was for or what came of it. These
+// proofs pin the reading order AND its truthfulness: passed checks are stated
+// as passed checks and nothing more, and finished, failed, running,
+// self-contradicting and unrecognised evidence each keep a distinct sentence.
+const HISTORY_BINDING = { state: 'BOUND', runId: 'RUN-HISTORY-PASSED',
+  updatedAt: '2026-09-03T09:00:00.000Z', evidenceState: 'OK', reason: 'bound to current run' };
+
+function historyRuns() {
+  return [
+    { runId: 'RUN-HISTORY-PASSED', state: 'CHECKS_PASSED',
+      objective: 'Read the run ledger at a glance', updatedAt: '2026-09-03T09:00:00.000Z',
+      checks: { passed: 4, total: 4, outcome: 'PASS' } },
+    { runId: 'RUN-HISTORY-FAILED', state: 'CHECKS_FAILED',
+      objective: 'Stop this attempt on a failed check', updatedAt: '2026-09-03T09:01:00.000Z' },
+    { runId: 'RUN-HISTORY-RUNNING', state: 'BUILDING',
+      objective: 'Keep the governed builder working', updatedAt: '2026-09-03T09:02:00.000Z',
+      build: { status: 'RUNNING', activity: { code: 'AUTHORIZED_WRITE', phase: 'BUILD',
+        active: true, summary: 'The builder is editing an allowed file.' } } },
+    { runId: 'RUN-HISTORY-CONTRADICTED', state: 'BUILDING',
+      objective: 'Say so when the record contradicts itself', updatedAt: '2026-09-03T09:03:00.000Z',
+      build: { status: 'RUNNING', exit: 124, activity: { code: 'AUTHORIZED_WRITE', phase: 'BUILD',
+        active: true, summary: 'The builder is editing an allowed file.' } } },
+    { runId: 'RUN-HISTORY-UNNAMED', state: 'CORRECTING',
+      objective: 'Carry a state the outcome sentences do not name',
+      updatedAt: '2026-09-03T09:04:00.000Z' },
+  ];
+}
+
+function historyCards(runs, binding) {
+  const page = bootPage(fixtureState());
+  page.sandbox.AEGIS_DASHBOARD.renderRuns(runs, binding === undefined ? HISTORY_BINDING : binding, 'OK');
+  return { page, cards: page.document.getElementById('runs-list').children };
+}
+
+test('DOM: every run card leads with its objective and a plain-English recorded outcome', () => {
+  const { cards } = historyCards(historyRuns());
+  assert.strictEqual(cards.length, 5, 'run history dropped or duplicated a canonical attempt');
+  assert.deepStrictEqual(cards.map((card) => card.children[0].tagName),
+    ['H3', 'H3', 'H3', 'H3', 'H3'], 'something other than the objective leads the card');
+  assert.deepStrictEqual(cards.map((card) => card.children[0].textContent),
+    historyRuns().map((run) => run.objective),
+    'the run id, not the objective, still leads the card');
+  const outcomes = cards.map((card) => card.children[1].textContent);
+  assert.deepStrictEqual(outcomes, [
+    'The build finished and its automated checks passed.',
+    'Nothing finished — this run stopped on a failed check.',
+    'Nothing has finished yet — the assigned worker is still building this change.',
+    'Nothing has finished yet — the assigned worker is still building this change.',
+    'UNAVAILABLE — canonical run evidence does not record what finished.',
+  ], 'the recorded outcomes are not distinct plain-English readings of each canonical state');
+  // Passed checks are build-and-check evidence. They are not delivery,
+  // integration, or a safe checkpoint, and this card may never say they are.
+  assert.doesNotMatch(outcomes[0], /shipp|integrat|deploy|merge|checkpoint|safe/i,
+    `CHECKS_PASSED was described as more than passing checks: ${outcomes[0]}`);
+  assert.deepStrictEqual(cards.map((card) => card.children[1].attrs['data-run-outcome']),
+    ['CHECKS_PASSED', 'CHECKS_FAILED', 'BUILDING', 'BUILDING', 'CORRECTING'],
+    'the outcome line is no longer marked with the canonical state it reads');
+  // A run still recorded as BUILDING whose worker already exited is the one
+  // case the outcome sentence cannot describe, so the existing lifecycle
+  // reading is stated beside it — and the genuinely running run is not padded
+  // with a second sentence that repeats what the first already said.
+  assert.strictEqual(cards[3].children[2].textContent,
+    'The run still says building, but the builder has already recorded terminal exit 124.',
+    'a run contradicting its own worker evidence was left claiming it is still building');
+  assert.strictEqual(cards[2].children[2].attrs['data-run-evidence'], 'RUN-HISTORY-RUNNING',
+    'the running run gained a redundant lifecycle line ahead of its evidence');
+});
+
+test('DOM: the exact run id, glyph, canonical state and recorded time stay readable on every card', () => {
+  const { cards } = historyCards(historyRuns());
+  assert.deepStrictEqual(cards.map((card) => findByAttr(card, 'data-run-evidence')[0].textContent), [
+    'RUN-HISTORY-PASSED  ● CHECKS_PASSED · updated 2026-09-03T09:00:00.000Z',
+    'RUN-HISTORY-FAILED  ✕ CHECKS_FAILED · updated 2026-09-03T09:01:00.000Z',
+    'RUN-HISTORY-RUNNING  ◐ BUILDING · updated 2026-09-03T09:02:00.000Z',
+    'RUN-HISTORY-CONTRADICTED  ◐ BUILDING · updated 2026-09-03T09:03:00.000Z',
+    'RUN-HISTORY-UNNAMED  ▲ CORRECTING · updated 2026-09-03T09:04:00.000Z',
+  ], 'an exact run identifier, state glyph or recorded time is no longer readable on the card');
+  // The bound current run keeps the control the binding authorizes.
+  assert.ok(allNodes(cards[0]).some((node) => node.tagName === 'BUTTON' &&
+    node.textContent === 'Verify independent review'),
+  'the bound CHECKS_PASSED run lost its permission-checked review control');
+  assert.ok(!allNodes(cards[1]).some((node) => node.tagName === 'BUTTON' &&
+    node.textContent === 'Verify independent review'),
+  'an unbound run gained a control its binding does not authorize');
+});
+
+test('DOM: missing and unrecognised run evidence stays UNAVAILABLE, with controls and warnings intact', () => {
+  const { cards } = historyCards([
+    { runId: 'RUN-HISTORY-BARE', state: 'REVIEW_FAILED', updatedAt: null,
+      checks: { passed: 2, total: 3, outcome: 'FAIL' },
+      reviewFailure: { summary: 'codex refused this exact code version.' } },
+    { runId: 'RUN-HISTORY-UNMAPPED', state: 'constructor', objective: 'Probe the glyph map' },
+  ], { state: 'UNAVAILABLE', runId: null, reason: 'no run is bound' });
+  assert.strictEqual(cards[0].children[0].textContent,
+    'UNAVAILABLE — no objective is recorded for this run.',
+    'a missing objective was filled in rather than reported absent');
+  assert.strictEqual(cards[0].children[1].textContent,
+    'Nothing finished — this run stopped on independent review.',
+    'the review-failed outcome is not stated in plain English');
+  assert.strictEqual(findByAttr(cards[0], 'data-run-evidence')[0].textContent,
+    'RUN-HISTORY-BARE  ✕ REVIEW_FAILED · updated UNAVAILABLE',
+    'an unrecorded time was invented rather than reported absent');
+  assert.strictEqual(cards[1].children[1].textContent,
+    'UNAVAILABLE — canonical run evidence does not record what finished.',
+    'an unrecognised state resolved to an inherited sentence about finished work');
+  assert.strictEqual(findByAttr(cards[1], 'data-run-evidence')[0].textContent,
+    'RUN-HISTORY-UNMAPPED  ? constructor · updated UNAVAILABLE',
+    'an unrecognised state resolved to an inherited member of the glyph map');
+  // Nothing the card carried before the reordering was dropped.
+  assert.match(cards[0].textContent, /checks: 2\/3 · FAIL/,
+    'the exact check counters left the card');
+  assert.match(cards[0].textContent, /codex refused this exact code version\./,
+    'the review-failure warning left the card');
+  const buttons = allNodes(cards[0]).filter((node) => node.tagName === 'BUTTON');
+  assert.deepStrictEqual(buttons.map((node) => node.textContent), ['Pause', 'Cancel', 'Retry'],
+    'the existing run controls were lost, reordered or duplicated by the reordering');
+  assert.strictEqual(buttons[0].disabled, true, 'Pause stopped being disabled');
+});
+
 test('DOM: a running build shows its mission, current action, elapsed evidence, next step and blocker without inventing a model', () => {
   const run = {
     runId: 'RUN-PILOT', state: 'BUILDING', objective: 'Improve the AEGIS operator dashboard',

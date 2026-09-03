@@ -5599,6 +5599,11 @@
     // script block and must read the same sentences the deck reads, so the
     // same fact is never phrased two different ways on one screen.
     founder: FOUNDER,
+    // Run history reads the SAME two resolutions the deck reads — what the
+    // ledger records as finished, and the lifecycle reading — so a run card
+    // cannot become a second opinion about either.
+    founderFinished: founderFinished,
+    operationalState: operationalState,
     // The live feed is rendered by the switchboard block below, so the ONE
     // translation of a canonical event into founder language is exported here
     // rather than copied there. The repeat sentence crosses the same seam for
@@ -5956,8 +5961,32 @@
     }
     runs.forEach(function(run){
       var card = el('div', 'run-card');
-      card.appendChild(el('h3', null, run.runId + '  ' + (STATE_GLYPH[run.state] || '?') + ' ' + run.state));
-      card.appendChild(el('div', 'meta', run.objective || '(no objective)'));
+      // Objective, then the recorded outcome, then the exact identity that
+      // proves both. Nothing is dropped by the reordering: the id, glyph,
+      // canonical state and recorded time stay on the card as evidence.
+      var runState = run.state || 'UNAVAILABLE';
+      card.appendChild(el('h3', null, run.objective ||
+        'UNAVAILABLE — no objective is recorded for this run.'));
+      // The recorded outcome, in the deck's own words. An unrecognised state
+      // reports UNAVAILABLE there rather than implying finished work here.
+      var outcome = el('div', 'meta', D && D.founderFinished
+        ? D.founderFinished(run, false)
+        : 'UNAVAILABLE — the founder-language reading of this run is not loaded.');
+      outcome.setAttribute('data-run-outcome', runState);
+      card.appendChild(outcome);
+      // BUILDING contradicted by its own worker evidence is the one case the
+      // sentence above cannot describe, so the lifecycle reading is stated too.
+      if (runState === 'BUILDING' && D && D.operationalState) {
+        var lifecycle = D.operationalState(run);
+        if (lifecycle.state !== 'RUNNING') card.appendChild(el('div', 'meta', lifecycle.plain));
+      }
+      // Own-property lookup only: an unexpected state must resolve to the
+      // unknown glyph, never to an inherited member of the glyph map.
+      var identity = el('div', 'meta', (run.runId || 'UNAVAILABLE') + '  ' +
+        (Object.prototype.hasOwnProperty.call(STATE_GLYPH, runState) ? STATE_GLYPH[runState] : '?') +
+        ' ' + runState + ' · updated ' + (run.updatedAt || 'UNAVAILABLE'));
+      identity.setAttribute('data-run-evidence', run.runId || 'UNAVAILABLE');
+      card.appendChild(identity);
       if (run.build) card.appendChild(buildEvidence(run.build));
       if (run.checks) {
         card.appendChild(el('div', 'meta', 'checks: ' + run.checks.passed + '/' + run.checks.total +
