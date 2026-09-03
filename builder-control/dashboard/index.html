@@ -364,6 +364,9 @@
   .context-cell{padding:7px 10px;border:1px solid rgba(57,198,255,.14);border-radius:4px;
     background:rgba(57,198,255,.035);min-width:0}
   .context-cell.mono{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* The header chip carries controlPlaneState — gate readiness for the current
+     subject, not what the worker is doing — so it is labelled as the gate. */
+  .ctx-gate-label{font:650 10px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:#8faac0}
 
   /* ── operational status strip ──
      Five cells directly beneath the header, so the first screen answers the
@@ -407,6 +410,7 @@
   .ops-run-canonical{min-width:0;font:650 10px/1.45 var(--mono);letter-spacing:.08em;
     color:var(--text-2);overflow-wrap:anywhere;word-break:break-word}
   .ops-run-line>.chip{margin:0;white-space:normal}
+  .ops-run-gate{margin-top:6px}
   .ops-run-why{min-width:0;margin:6px 0 0;font-size:12px;line-height:1.45;color:var(--text-2);
     overflow-wrap:anywhere}
 
@@ -2285,6 +2289,10 @@
     var currentRun = runFromView(currentView);
     var currentBinding = currentView.runsBinding ||
       (currentView.runs && !Array.isArray(currentView.runs) ? currentView.runs.current : null);
+    // Same chip, same resolution, now named. This has always been the control
+    // plane's reading of the CURRENT GATE SUBJECT; unlabelled, a BLOCKED gate
+    // beside a finished worker read as a failed worker.
+    verdict.appendChild(el('span','ctx-gate-label','Gate'));
     verdict.appendChild(chip(controlPlaneState(currentEng, currentBinding, currentRun,
       availableEmptyRuns(currentView)).state));
   }
@@ -3570,7 +3578,13 @@
   }
   function opsStripCells(control, supervision, costPanel, checkpointPanel){
     return [
-      { id: 'run-state', label: 'RUN STATE',
+      // This cell is handed controlPlaneState, which answers whether the CURRENT
+      // GATE SUBJECT is clear — not what the worker did. Labelled "RUN STATE" it
+      // reported a finished worker as stalled whenever review evidence was still
+      // outstanding. The resolution, the token and the sentence are unchanged;
+      // only the label now says which question it answers. What the worker did
+      // is stated separately, and first, in the bound-run identity line above.
+      { id: 'run-state', label: 'GATE READINESS',
         state: opsCellState(control.state), chip: opsCellState(control.state),
         value: opsCellText(control.plain) },
       { id: 'progress', label: 'REAL PROGRESS VS HEARTBEAT',
@@ -3629,7 +3643,8 @@
     if (!binding || binding.state !== 'BOUND' || !binding.runId ||
         !run || run.runId !== binding.runId){
       return {
-        state: 'UNAVAILABLE', runId: 'UNAVAILABLE', canonical: 'UNAVAILABLE',
+        state: 'UNAVAILABLE', build: 'UNAVAILABLE', runId: 'UNAVAILABLE',
+        canonical: 'UNAVAILABLE',
         text: 'UNAVAILABLE — canonical binding evidence does not name a current run, so ' +
           'nothing on this page can be attributed to one.'
       };
@@ -3644,19 +3659,39 @@
           'screen because canonical binding evidence still names it the current run.'
         : 'Whether this run is working right now is UNAVAILABLE — canonical evidence does ' +
           'not record active worker activity for it.');
+    // Build activity and gate readiness are two different questions about the
+    // same run, and merging them is what made a finished worker read as a
+    // stalled one: control.state answers the gate, so it stays on its own
+    // labelled chip and keeps its own reason in the cell beneath. The build
+    // reading is the lifecycle resolution this page already made — nothing
+    // here re-decides either.
+    //
+    // One exception is a refusal, not a new reading: when lifecycle is
+    // UNVERIFIED the run record claims a stage its receipts have not verified,
+    // so the lifecycle's own unverified sentence is stated instead of the
+    // finished sentence. Unverified counters may never read as checks passed.
+    var buildState = typeof lifecycle.state === 'string' && lifecycle.state
+      ? lifecycle.state : 'UNAVAILABLE';
+    var unavailableBuild = 'UNAVAILABLE — canonical run evidence does not record what finished.';
+    var buildText = buildState === 'UNVERIFIED'
+      ? (typeof lifecycle.plain === 'string' && lifecycle.plain ? lifecycle.plain : unavailableBuild)
+      : (typeof finished === 'string' && finished.trim() ? finished : unavailableBuild);
     return {
       state: control.state,
+      build: buildState,
       runId: binding.runId,
       canonical: typeof run.state === 'string' && run.state ? run.state : 'UNAVAILABLE',
-      text: (typeof finished === 'string' && finished.trim()
-        ? finished
-        : 'UNAVAILABLE — canonical run evidence does not record what finished.') + ' ' + liveness
+      text: buildText + ' ' + liveness
     };
   }
 
-  // Text, shape and state word again: the run id, its canonical lifecycle
-  // token, the same control-plane chip the RUN STATE cell carries, and the
-  // founder sentence underneath. Nothing here is legible by colour alone.
+  // Text, shape and state word again, now under two separate written headings:
+  // BUILD ACTIVITY carries the run id, its canonical lifecycle token, the
+  // lifecycle chip and the founder sentence for what the worker did; GATE
+  // READINESS carries the control-plane chip, whose reason is the cell of the
+  // same name directly beneath. Neither heading is legible by colour alone, and
+  // a blocked gate never turns the build chip green or the build sentence into
+  // a failure.
   function renderOpsRun(identity){
     var host = $('ops-strip-run'); if (!host) return;
     host.textContent = '';
@@ -3667,14 +3702,23 @@
     var idNode = el('span','ops-run-id mono',identity.runId);
     idNode.setAttribute('data-ops-run-field','id');
     line.appendChild(idNode);
+    line.appendChild(el('span','ops-run-label','BUILD ACTIVITY'));
     var canonicalNode = el('span','ops-run-canonical',identity.canonical);
     canonicalNode.setAttribute('data-ops-run-field','canonical');
     line.appendChild(canonicalNode);
-    line.appendChild(chip(identity.state));
+    var buildChip = chip(identity.build);
+    buildChip.setAttribute('data-ops-run-chip','build');
+    line.appendChild(buildChip);
     host.appendChild(line);
     var why = el('p','ops-run-why',identity.text);
     why.setAttribute('data-ops-run-field','why');
     host.appendChild(why);
+    var gate = el('div','ops-run-line ops-run-gate');
+    gate.appendChild(el('span','ops-run-label','GATE READINESS'));
+    var gateChip = chip(identity.state);
+    gateChip.setAttribute('data-ops-run-chip','gate');
+    gate.appendChild(gateChip);
+    host.appendChild(gate);
   }
 
   function renderFounderSummary(view){

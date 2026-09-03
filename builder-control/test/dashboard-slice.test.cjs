@@ -858,6 +858,20 @@ test('the identity line restates existing resolutions and cannot name a run the 
     'the identity line accepts something weaker than an exact canonical binding');
   assert.ok(/lifecycle\.state === 'RUNNING'/.test(fn),
     'live work is claimed from something other than the existing lifecycle resolution');
+  // Build activity and gate readiness stay two readings of two existing
+  // resolutions: the lifecycle answers the worker, the control plane answers
+  // the gate, and neither is recomputed here.
+  assert.ok(/build: buildState/.test(fn) && /buildState = typeof lifecycle\.state/.test(fn),
+    'the build reading is not taken from the existing lifecycle resolution');
+  assert.ok(/state: control\.state/.test(fn),
+    'the gate reading is no longer the existing control-plane resolution');
+  assert.ok(/buildState === 'UNVERIFIED'/.test(fn),
+    'an unverified lifecycle can still be restated as a finished, checked build');
+  const renderer = code.slice(code.indexOf('function renderOpsRun'), code.indexOf('function renderFounderSummary'));
+  assert.ok(/'BUILD ACTIVITY'/.test(renderer) && /'GATE READINESS'/.test(renderer),
+    'the identity line does not label which state belongs to the worker and which to the gate');
+  assert.ok(/chip\(identity\.build\)/.test(renderer) && /chip\(identity\.state\)/.test(renderer),
+    'the identity line no longer paints both the build and the gate reading');
 });
 
 test('live activity has one translation seam and Detail View alone discloses the exact receipt', () => {
@@ -7118,7 +7132,12 @@ async function asyncTests() {
       ['checkpoint', 'cost', 'progress', 'run-state', 'watchdog'],
       'the strip does not expose exactly the five operational answers');
     assertCellStates(cells['run-state'], { state: 'IDLE', plain: 'Nothing running' }, 'run state');
-    assert.match(cells['run-state'].textContent, /RUN STATE/);
+    // This cell has always carried controlPlaneState, which answers whether the
+    // current gate subject is clear rather than what the worker is doing, and it
+    // is now labelled as the gate. The canonical cell id is unchanged.
+    assert.match(cells['run-state'].textContent, /GATE READINESS/);
+    assert.ok(!/RUN STATE/.test(cells['run-state'].textContent),
+      'the gate cell still claims to be the run state, which reads a blocked gate as a stalled worker');
     assert.match(cells['run-state'].textContent, /Nothing is currently running\./);
     assertCellStates(cells.progress, { state: 'NOT_RUNNING', plain: 'Nothing running' }, 'progress');
     assert.match(cells.progress.textContent, /No run is active, so there is no builder to supervise\./);
@@ -7317,29 +7336,45 @@ async function asyncTests() {
   // line through the page's own DOM, so a line that names an unbound run, or
   // that lets an older failed run read as live work, fails here rather than in
   // front of the owner.
+  // Two separately labelled chips now: what the worker did, and whether the
+  // gate is clear. They are selected by their own machine attribute, so a
+  // renderer that merged them back into one word fails here.
   function opsRunLine(page) {
     const host = page.document.getElementById('ops-strip-run');
     const fields = {};
     findByAttr(host, 'data-ops-run-field').forEach((node) => {
       fields[node.attrs['data-ops-run-field']] = node;
     });
-    const row = host.children[0] || { children: [] };
-    const chipNode = (row.children || []).find((c) => String(c.className).includes('chip'));
-    return { host, fields, chipNode };
+    const chips = {};
+    findByAttr(host, 'data-ops-run-chip').forEach((node) => {
+      chips[node.attrs['data-ops-run-chip']] = node;
+    });
+    return { host, fields, chips, chipNode: chips.gate };
   }
 
-  // The identity chip states its condition three ways, exactly like a strip
-  // cell: the machine attribute, a written state word, and a glyph.
+  function assertChipShape(chipNode, state, label) {
+    assert.ok(chipNode, `the identity line has no ${label} chip`);
+    assert.strictEqual(chipNode.children.length, 2,
+      `the ${label} chip must carry a glyph and a written state, not colour alone`);
+    assert.ok(chipNode.children[0].textContent.trim().length > 0,
+      `the ${label} chip glyph is empty, leaving colour as the only shape`);
+    assert.strictEqual(chipNode.children[1].textContent, state,
+      `the ${label} chip does not write out its canonical state`);
+  }
+
+  // The gate chip states its condition three ways, exactly like a strip cell:
+  // the machine attribute, a written state word, and a glyph. It carries the
+  // control-plane reading, which is what data-ops-run has always recorded.
   function assertIdentityChip(line, state) {
     assert.strictEqual(line.host.attrs['data-ops-run'], state,
       `the identity line does not carry the canonical state ${state}`);
-    assert.ok(line.chipNode, 'the identity line has no state chip');
-    assert.strictEqual(line.chipNode.children.length, 2,
-      'the identity chip must carry a glyph and a written state, not colour alone');
-    assert.ok(line.chipNode.children[0].textContent.trim().length > 0,
-      'the identity chip glyph is empty, leaving colour as the only shape');
-    assert.strictEqual(line.chipNode.children[1].textContent, state,
-      'the identity chip does not write out its canonical state');
+    assertChipShape(line.chipNode, state, 'gate readiness');
+  }
+
+  // The build chip is the lifecycle reading and nothing else: a blocked gate
+  // may never rewrite it, and it may never turn a blocked gate green.
+  function assertBuildChip(line, state) {
+    assertChipShape(line.chips.build, state, 'build activity');
   }
 
   const HISTORICAL_FAILED_STATUS = {
@@ -7360,8 +7395,13 @@ async function asyncTests() {
     for (let i = 0; i < 10; i++) await Promise.resolve();
     const line = opsRunLine(page);
     assertIdentityChip(line, 'RUNNING');
+    assertBuildChip(line, 'RUNNING');
     assert.match(line.host.textContent, /CURRENT RUN/,
       `the identity line is not labelled: ${line.host.textContent}`);
+    for (const label of ['BUILD ACTIVITY', 'GATE READINESS']) {
+      assert.match(line.host.textContent, new RegExp(label),
+        `the identity line does not say which state is the ${label}: ${line.host.textContent}`);
+    }
     assert.strictEqual(line.host.attrs['data-ops-run-id'], 'RUN-SUPERVISION');
     assert.strictEqual(line.fields.id.textContent, 'RUN-SUPERVISION',
       'the identity line does not name the canonically bound run');
@@ -7381,6 +7421,9 @@ async function asyncTests() {
     for (let i = 0; i < 10; i++) await Promise.resolve();
     const line = opsRunLine(page);
     assertIdentityChip(line, 'BLOCKED');
+    // A run that actually stopped on review keeps a blocked BUILD reading too:
+    // separating the two questions may not soften a real failure.
+    assertBuildChip(line, 'BLOCKED');
     assert.strictEqual(line.fields.id.textContent, 'RUN-OLD-FAILED');
     assert.strictEqual(line.fields.canonical.textContent, 'REVIEW_FAILED',
       'the recorded canonical state of the displayed run is missing');
@@ -7402,6 +7445,7 @@ async function asyncTests() {
     for (let i = 0; i < 10; i++) await Promise.resolve();
     let line = opsRunLine(page);
     assertIdentityChip(line, 'UNAVAILABLE');
+    assertBuildChip(line, 'UNAVAILABLE');
     assert.strictEqual(line.host.attrs['data-ops-run-id'], 'UNAVAILABLE');
     assert.strictEqual(line.fields.id.textContent, 'UNAVAILABLE');
     assert.strictEqual(line.fields.canonical.textContent, 'UNAVAILABLE');
@@ -7420,6 +7464,73 @@ async function asyncTests() {
     assert.strictEqual(line.fields.id.textContent, 'UNAVAILABLE');
     assert.ok(!/RUN-OLD-FAILED|RUN-DOES-NOT-EXIST/.test(line.host.textContent),
       `a ghost binding named a run no canonical record supports: ${line.host.textContent}`);
+  });
+
+  // ── build activity vs gate readiness ──────────────────────────────────────
+  // The reported defect: a worker that had finished, with its focused checks
+  // passed and only required-reviewer evidence outstanding, was the only state
+  // word on the first screen — the gate's BLOCKED — so a finished build read as
+  // frozen or failed. The two questions must be answered separately and both
+  // must stay true: the gate keeps its block and its recorded reason, and the
+  // build keeps its finished sentence.
+  const REVIEW_PENDING_STATUS = {
+    generatedAt: '2026-09-03T09:00:00.000Z', runsState: 'OK',
+    engineering: { state: 'OK', verdict: 'BLOCKED', stages: [],
+      problems: [{ rule: 'ENGOS-REVIEW-MISSING',
+        detail: 'grok is required and has no review bound to this subject.' }] },
+    runsBinding: { state: 'BOUND', runId: 'RUN-REVIEW-PENDING', updatedAt: '2026-09-03T08:59:00.000Z',
+      evidenceState: 'OK', reason: 'the run ledger names this the current run' },
+    integration: { connectors: [] },
+    cost: { state: 'UNAVAILABLE', reason: 'no transcripts are recorded' },
+    runs: [{ runId: 'RUN-REVIEW-PENDING', state: 'CHECKS_PASSED', transitions: 5,
+      objective: 'A finished worker whose independent review evidence is outstanding',
+      updatedAt: '2026-09-03T08:59:00.000Z', checks: { outcome: 'PASS' } }],
+  };
+
+  await atest('DOM: a finished worker with review outstanding is not presented as a stalled or failed build', async () => {
+    const page = bootPage(fixtureState(), { status: REVIEW_PENDING_STATUS });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const line = opsRunLine(page);
+    // The gate is untouched: still blocked, still the page's control state.
+    assertIdentityChip(line, 'BLOCKED');
+    // The worker is stated separately, and truthfully.
+    assertBuildChip(line, 'WAITING');
+    assert.strictEqual(line.fields.canonical.textContent, 'CHECKS_PASSED',
+      'the recorded canonical lifecycle state of the finished worker is missing');
+    assert.match(line.fields.why.textContent, /The build finished and its automated checks passed\./,
+      `a finished worker was not stated as finished: ${line.fields.why.textContent}`);
+    assert.ok(!/Nothing finished|Nothing has finished yet|stopped on/.test(line.fields.why.textContent),
+      `a finished worker was described as a failure: ${line.fields.why.textContent}`);
+    assert.ok(!/is the run AEGIS is working on right now/.test(line.fields.why.textContent),
+      'a finished worker was presented as work still running');
+
+    const cells = opsCells(page);
+    assertCellStates(cells['run-state'], { state: 'BLOCKED', plain: 'Needs attention' }, 'gate readiness');
+    assert.match(cells['run-state'].textContent, /GATE READINESS/);
+    assert.match(cells['run-state'].textContent,
+      /Blocked — the required checks on this exact code version still have unmet requirements\./,
+      `the gate lost its recorded reason: ${cells['run-state'].textContent}`);
+    // The gate is never repainted as clear, and the reason stays reachable.
+    assert.ok(!/^(PASS|COMPLETE)$/.test(cells['run-state'].attrs['data-ops-state']),
+      'a blocked gate was rendered as a cleared one');
+    const evidence = page.text('founder-body') + ' ' + page.text('evidence-rail-body');
+    assert.match(evidence, /unresolved gate requirement/,
+      `the unresolved gate requirement is no longer reachable from the current evidence view: ${evidence}`);
+  });
+
+  await atest('DOM: recorded check counters without a verified receipt never read as checks that passed', async () => {
+    const unverified = JSON.parse(JSON.stringify(REVIEW_PENDING_STATUS));
+    unverified.runs[0].checks = { total: 12, passed: 12 };
+    const page = bootPage(fixtureState(), { status: unverified });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const line = opsRunLine(page);
+    assertBuildChip(line, 'UNVERIFIED');
+    assertIdentityChip(line, 'BLOCKED');
+    assert.match(line.fields.why.textContent,
+      /Check totals are recorded, but canonical receipt and lifecycle evidence have not verified a passing outcome\./,
+      `unverified counters were not stated as unverified: ${line.fields.why.textContent}`);
+    assert.ok(!/automated checks passed/.test(line.fields.why.textContent),
+      `unverified counters were restated as checks that passed: ${line.fields.why.textContent}`);
   });
 
   // ── recording a founder decision ────────────────────────────────────────
