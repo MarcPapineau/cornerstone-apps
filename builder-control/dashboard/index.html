@@ -415,7 +415,10 @@
   @media (max-width:959px){
     .command-header{align-items:flex-start}.context-strip{justify-content:flex-start;flex-wrap:wrap}
     .command-shell{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"}
-    .right-rail,.evidence-deck{display:flex;flex-direction:column}
+    /* The right rail flattens to a single column here, but the evidence deck
+       keeps its grid: flattening it too silently discarded the tablet deck's
+       own two-column track list and stacked every panel full width. */
+    .right-rail{display:flex;flex-direction:column}
     #topology-live-body .route-strip{grid-template-columns:repeat(3,minmax(100px,1fr))}
     .route-node:nth-child(6n)::after{display:block}.route-node:nth-child(3n)::after{display:none}
     #raw-state>.raw-body{grid-template-columns:1fr}
@@ -531,7 +534,12 @@
   .hud-summary .body{min-height:108px}
   .hud-summary-value{font-size:14px;line-height:1.4;color:var(--text-0)}
   .hud-summary-meta{margin-top:8px;color:var(--text-2);font:10px/1.45 var(--mono)}
-  .event-panel{grid-column:span 2}details[aria-labelledby="cost-h"]{grid-column:span 1}
+  /* Five instruments, five columns. The deck holds event history, spend, system
+     health, decisions and last safe checkpoint; giving any one of them two
+     columns pushes a sixth cell onto a row of its own, which reads as a missing
+     panel rather than as the end of the band. Below 1600 the grid narrows and
+     the event log reclaims its second column there. */
+  .event-panel,details[aria-labelledby="cost-h"]{grid-column:span 1}
   #raw-state{grid-column:1/-1}
   body[data-detail="true"] #raw-state{display:block}
   body[data-detail="true"] #raw-state>.raw-body{display:grid}
@@ -566,7 +574,7 @@
     #founder-summary .command-grid{gap:5px;margin-top:8px}
     #founder-summary .command-card{padding:8px 10px}
     #founder-summary .command-value{line-height:1.3}
-    .evidence-deck{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .evidence-deck{grid-template-columns:repeat(3,minmax(0,1fr))}.event-panel{grid-column:span 2}
   }
   @media (max-width:1050px){
     .command-shell{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"}
@@ -575,8 +583,20 @@
     .evidence-deck{grid-template-columns:repeat(2,minmax(0,1fr))}.event-panel{grid-column:span 2}
   }
   @media (max-width:680px){
-    .command-header{display:flex}.view-nav{order:3;width:100%}.header-state{width:100%;flex-wrap:wrap;justify-content:flex-start}
-    .core-stage{display:flex;flex-direction:column;min-height:0}.aegis-core{order:-1;flex:0 0 145px}
+    /* The wrapped header is three rows tall on a phone. Kept sticky it would
+       spend roughly a quarter of the viewport on chrome the operator has
+       already read, so here it scrolls away and the instruments get the screen.
+       The view switch stays reachable because it is the first thing above the
+       deck, not because it permanently occupies it. */
+    .command-header{display:flex;position:static}
+    .view-nav{order:3;width:100%}.view-nav .view-tab{flex:1}
+    .header-state{width:100%;flex-wrap:wrap;justify-content:flex-start}
+    /* Finger-sized hit areas for the only controls a phone operator uses. */
+    .view-tab,.hud-control,.ask-actions .action{min-height:44px}
+    .core-stage{display:flex;flex-direction:column;min-height:0}
+    /* An explicit width in a stacked flex column is laid out flush left, so the
+       core is centred here rather than hanging off the edge of the column. */
+    .aegis-core{order:-1;flex:0 0 145px;align-self:center}
     .core-node{width:100%}.core-stage::before,.core-stage::after{display:none}
     .core-path-track{grid-template-columns:1fr}.core-station::after{display:none}
     .evidence-deck{grid-template-columns:1fr}.event-panel{grid-column:auto}
