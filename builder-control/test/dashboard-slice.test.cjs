@@ -1908,6 +1908,166 @@ test('DOM: missing or invalid lifecycle evidence is reported as UNAVAILABLE, nev
     'an idle dashboard claims live evidence it does not have');
 });
 
+// ── V2 OPERATOR COCKPIT — the operator brief (NOW / NEXT / NEEDS MARC) ────
+// The brief is the first thing the owner reads, so the only thing it may do is
+// repeat canonical fields the deck has already resolved. These proofs hold the
+// three properties that would make it a liability if they regressed: the three
+// questions are actually named, each answer is the canonical field itself
+// rather than a second derivation of it, and an absent field produces an
+// honest UNAVAILABLE instead of a reassuring sentence. It must also stay inert
+// — no timer, no elapsed arithmetic, no invented activity.
+function briefRows(page) {
+  return findByAttr(page.document.getElementById('founder-body'), 'data-operator-brief')
+    .filter((node) => node.attrs['data-operator-brief'] !== 'summary');
+}
+
+function briefField(page, field) {
+  const row = briefRows(page).find((node) => node.attrs['data-operator-brief'] === field);
+  assert.ok(row, `the operator brief has no ${field} row`);
+  return { label: row.firstChild.textContent, value: row.lastChild.textContent };
+}
+
+function deckCardText(page, field) {
+  const card = operatorFields(page).find((node) => node.attrs['data-operator-field'] === field);
+  assert.ok(card, `the pilot deck has no ${field} card`);
+  return card.lastChild.textContent;
+}
+
+function briefBuildingFixture() {
+  const run = {
+    runId: 'RUN-BRIEF', state: 'BUILDING', objective: 'Prove the operator brief repeats canonical fields',
+    updatedAt: '2026-09-02T14:10:00.000Z',
+    build: {
+      mode: 'async', status: 'RUNNING', workerPid: 4242,
+      startedAt: '2026-09-02T14:00:00.000Z', endedAt: null,
+      activity: { active: true, summary: 'Editing the command deck.' },
+    },
+  };
+  return fixtureState({
+    generatedAt: '2026-09-02T14:10:00.000Z',
+    runs: { state: 'OK', runs: [run], current: { state: 'BOUND', runId: run.runId,
+      updatedAt: run.updatedAt, reason: 'exact current run is bound' } },
+  });
+}
+
+// The malformed-evidence projection is the honest-absence case that a real
+// operator hits: the ledger could not be read, so no answer about the owner is
+// available and none may be invented.
+function briefUnreadableLedgerStatus() {
+  return {
+    generatedAt: '2026-09-02T14:20:00.000Z',
+    engineering: fixtureState().engineering,
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [],
+    runsBinding: { state: 'UNAVAILABLE', runId: null, updatedAt: null, evidenceState: 'UNAVAILABLE',
+      reason: '1 run record(s) could not be read or validated, so current run status is unavailable.' },
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  };
+}
+
+test('DOM: the operator brief names NOW, NEXT and NEEDS MARC at the top of Command View', () => {
+  const page = bootPage(fixtureState());
+  const rows = briefRows(page);
+  assert.deepStrictEqual(rows.map((node) => node.attrs['data-operator-brief']), ['now', 'next', 'needs-marc'],
+    'the brief must answer exactly the three operator questions, in that order');
+  assert.deepStrictEqual(rows.map((node) => node.firstChild.textContent), ['NOW', 'NEXT', 'NEEDS MARC'],
+    'the three brief labels are not rendered as founder-readable text');
+  const founder = page.document.getElementById('founder-body');
+  const classes = founder.children.map((node) => node.className);
+  const brief = classes.indexOf('operator-brief');
+  assert.ok(brief !== -1, 'no operator brief is rendered in Command View');
+  assert.ok(brief <= 1, `the brief is not near the top of Command View: ${classes.join(', ')}`);
+  assert.ok(brief < classes.indexOf('command-grid'),
+    'the brief must read before the dense pilot card grid, not after it');
+  assert.strictEqual(classes.filter((cls) => cls === 'operator-brief').length, 1,
+    'exactly one operator brief may exist — a second copy would drift from the first');
+});
+
+test('DOM: every brief answer is the canonical field the deck already resolved, not a second derivation', () => {
+  const page = bootPage(briefBuildingFixture());
+  assert.strictEqual(briefField(page, 'now').value, deckCardText(page, 'current-action'),
+    'NOW is not the canonical current-action field');
+  assert.strictEqual(briefField(page, 'next').value, deckCardText(page, 'next-step'),
+    'NEXT is not the canonical next-action field');
+  const needs = briefField(page, 'needs-marc').value;
+  const blocker = deckCardText(page, 'blocker');
+  assert.ok(needs.endsWith(blocker),
+    `NEEDS MARC is not built from the canonical blocker/decision field: ${needs}`);
+  assert.match(briefField(page, 'now').value, /Editing the command deck\./,
+    'NOW dropped the recorded worker activity the deck reads');
+  // A running builder is a stage fact, not an owner decision.
+  assert.match(needs, /No owner decision is canonically required right now\./,
+    `a running build was presented as waiting on the owner: ${needs}`);
+  for (const invented of [/\d+\s*%/, /elapsed/i, /remaining/i, /estimat/i, /progress/i]) {
+    assert.doesNotMatch(briefRows(page).map((node) => node.textContent).join(' '), invented,
+      `the brief invented a ${invented} claim the canonical fields do not carry`);
+  }
+});
+
+test('DOM: NEEDS MARC says plainly when no owner decision is required, and never softens a real one', () => {
+  const idle = bootPage(fixtureState());
+  const idleNeeds = briefField(idle, 'needs-marc').value;
+  assert.match(idleNeeds, /No owner decision is canonically required right now\./,
+    `an idle deck did not state plainly that nothing needs the owner: ${idleNeeds}`);
+  assert.ok(idleNeeds.includes(deckCardText(idle, 'blocker')),
+    'the plain "nothing needed" answer dropped the canonical blocker line it rests on');
+
+  const blockedState = fixtureState({
+    engineering: Object.assign({}, fixtureState().engineering, { state: 'OK', problems: [] }),
+    runs: { state: 'OK', runs: [], current: { state: 'MISMATCHED', runId: 'RUN-WRONG',
+      reason: 'binding subject does not match the current subject' } },
+  });
+  const blocked = bootPage(blockedState);
+  const blockedNeeds = briefField(blocked, 'needs-marc').value;
+  assert.strictEqual(blockedNeeds, deckCardText(blocked, 'blocker'),
+    'a real blocker was not carried into NEEDS MARC verbatim');
+  assert.doesNotMatch(blockedNeeds, /No owner decision is canonically required/,
+    `a recorded blocker was reported as needing nothing from the owner: ${blockedNeeds}`);
+});
+
+test('DOM: unreadable run evidence makes the brief say so instead of answering for the owner', () => {
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, briefUnreadableLedgerStatus());
+  const now = briefField(page, 'now').value;
+  const needs = briefField(page, 'needs-marc').value;
+  assert.strictEqual(now, deckCardText(page, 'current-action'),
+    'NOW stopped tracking the canonical current-action field under unavailable evidence');
+  assert.strictEqual(needs, deckCardText(page, 'blocker'),
+    'NEEDS MARC stopped tracking the canonical blocker field under unavailable evidence');
+  assert.match(needs, /could not be read or validated/,
+    `the recorded reason the ledger is unusable was withheld from the brief: ${needs}`);
+  assert.doesNotMatch(needs, /No owner decision is canonically required/,
+    'unreadable evidence was rendered as a positive "nothing is needed" answer');
+  assert.doesNotMatch(briefRows(page).map((node) => node.textContent).join(' '), /No blocker — no run has started\./,
+    'unreadable evidence was rendered as clean idle in the brief');
+});
+
+test('the brief is inert: it computes no time, no activity and no status of its own', () => {
+  const start = code.indexOf("var brief = el('div','operator-brief')");
+  const end = code.indexOf('renderHandoff(host, boundRun, currentAction)', start);
+  assert.ok(start !== -1 && end > start, 'the operator brief renderer boundary was not found');
+  const brief = code.slice(start, end);
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.random', 'fetch(', 'innerHTML', 'addEventListener']) {
+    assert.ok(!brief.includes(banned),
+      `the brief uses ${banned} — it may only re-read fields the deck already resolved`);
+  }
+  // Only the four canonical inputs the packet allows.
+  for (const canonical of ['currentAction', 'deckActions.join', 'operatorBlocker', 'blockerClear']) {
+    assert.ok(brief.includes(canonical), `the brief no longer reads the canonical ${canonical} field`);
+  }
+  for (const raw of ['boundRun', 'view.', 'S.runs', 'build.activity', 'elapsed']) {
+    assert.ok(!brief.includes(raw), `the brief reaches past the resolved deck fields into ${raw}`);
+  }
+  assert.ok(/UNAVAILABLE — no current action is recorded in canonical run evidence\./.test(brief) &&
+    /UNAVAILABLE — no next action is recorded in canonical run evidence\./.test(brief) &&
+    /UNAVAILABLE — no canonical blocker or decision evidence is recorded/.test(brief),
+    'an absent canonical field would render as blank or reassuring text instead of an honest UNAVAILABLE');
+  assert.ok(!/@keyframes|animation\s*:/.test(code.slice(code.indexOf('.operator-brief{'),
+    code.indexOf('.handoff{display:flex'))), 'the brief block introduced motion');
+});
+
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────
 // The panel used to render once from the generated snapshot and never again,
 // so a founder watching the page saw an old objective and an old verdict

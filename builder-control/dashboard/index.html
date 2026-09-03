@@ -297,6 +297,21 @@
   .command-card.is-now,.command-card.is-next,.command-card.is-blocked,.command-card.is-clear{grid-column:span 2}
   .command-value{font-size:14px;line-height:1.4}.command-label{font-size:11px;color:#829bb2}
 
+  /* ── operator brief ──
+     The first block the owner reads: NOW, NEXT and NEEDS MARC, in that order.
+     It is a re-reading of canonical fields the deck below already renders, so
+     it carries no motion, no timer and no state of its own. Rows stack their
+     own label above their value, which keeps it legible at every width without
+     a breakpoint of its own. */
+  .operator-brief{margin:12px 0 0;padding:11px 13px;border:1px solid #2b465b;
+    border-left:3px solid var(--cyan);border-radius:3px;background:#0d1922}
+  .operator-brief-title{font:650 10px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--cyan)}
+  .brief-row{margin-top:9px}
+  .brief-label{font:650 11px/1.3 var(--mono);letter-spacing:.12em;color:#9ab2c8}
+  .brief-value{margin-top:3px;font-size:14px;line-height:1.45;color:var(--text-0);overflow-wrap:anywhere}
+  .brief-row.is-blocked .brief-label{color:var(--fail)}
+  .brief-row.is-clear .brief-label{color:var(--pass)}
+
   /* ── handoff indicator ──
      One compact line, rendered only when canonical run state reports that the
      bound run moved from one workflow stage to another. It carries no motion
@@ -1664,6 +1679,45 @@
     mission.appendChild(missionText);
     mission.appendChild(chip(controlState.state));
     host.appendChild(mission);
+
+    // Operator brief: the three questions the owner arrives with — what is
+    // happening NOW, what happens NEXT, and does this NEED MARC. Every value
+    // is a canonical field this deck has already resolved above: the current
+    // action, the recorded next action, and the blocker/decision verdict. It
+    // derives nothing of its own — no elapsed time, no progress, no inferred
+    // status, no activity — so if a canonical field carries no usable text the
+    // brief says UNAVAILABLE instead of filling the gap.
+    function briefText(value){
+      return typeof value === 'string' && value.trim() ? value : null;
+    }
+    var brief = el('div','operator-brief');
+    brief.setAttribute('data-operator-brief','summary');
+    brief.appendChild(el('div','operator-brief-title','Operator brief'));
+    function briefRow(label, field, value, cls){
+      var row = el('div','brief-row' + (cls ? ' ' + cls : ''));
+      row.setAttribute('data-operator-brief', field);
+      row.appendChild(el('div','brief-label',label));
+      row.appendChild(el('div','brief-value',value));
+      brief.appendChild(row);
+    }
+    var briefBlocker = briefText(operatorBlocker);
+    // "Needs Marc" is not a new signal. It is the deck's own blocker/decision
+    // verdict, read out loud: when that verdict is clear the honest answer is
+    // that nothing is waiting on the owner, stated plainly and still showing
+    // the recorded blocker line it rests on.
+    var briefDecision = !briefBlocker
+      ? 'UNAVAILABLE — no canonical blocker or decision evidence is recorded, so whether an owner decision is required cannot be stated.'
+      : (blockerClear
+        ? 'No owner decision is canonically required right now. Recorded blocker status: ' + briefBlocker
+        : briefBlocker);
+    briefRow('NOW', 'now', briefText(currentAction) ||
+      'UNAVAILABLE — no current action is recorded in canonical run evidence.');
+    briefRow('NEXT', 'next', briefText(deckActions.join(' ')) ||
+      'UNAVAILABLE — no next action is recorded in canonical run evidence.');
+    briefRow('NEEDS MARC', 'needs-marc', briefDecision,
+      briefBlocker && blockerClear ? 'is-clear' : (briefBlocker ? 'is-blocked' : ''));
+    host.appendChild(brief);
+
     renderHandoff(host, boundRun, currentAction);
 
     function commandCard(label, value, cls){
