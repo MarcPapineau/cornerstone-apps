@@ -820,6 +820,26 @@ function runnableCheckCommands(packet) {
   });
 }
 
+// Fixed-policy narrowing. Both lists are module constants: no caller, packet, or
+// changed-path input can supply, name, or invent a command, and every returned
+// entry is an element the packet already declared in testsRequired.
+const DASHBOARD_SLICE_PATHS = Object.freeze([
+  'builder-control/dashboard/index.html',
+  'builder-control/test/dashboard-slice.test.cjs',
+]);
+const DASHBOARD_SLICE_CHECKS = Object.freeze([
+  'node builder-control/test/dashboard-slice.test.cjs',
+  'git diff --check',
+]);
+
+function dashboardSliceCheckCommands(packet, changedPaths) {
+  const commands = runnableCheckCommands(packet || {});
+  if (!Array.isArray(changedPaths) || changedPaths.length === 0) return commands;
+  if (!changedPaths.every((p) => typeof p === 'string' && DASHBOARD_SLICE_PATHS.includes(p))) return commands;
+  if (!DASHBOARD_SLICE_CHECKS.every((command) => commands.includes(command))) return commands;
+  return commands.filter((command) => DASHBOARD_SLICE_CHECKS.includes(command));
+}
+
 function runnableHostContainmentCommands(packet) {
   const declared = packet && packet.hostContainmentRequired;
   const required = Boolean(packet && HOST_CONTAINMENT_REQUIRED_PACKET_IDS.has(packet.packetId));
@@ -5884,4 +5904,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };

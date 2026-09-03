@@ -3158,6 +3158,60 @@ hostContainmentTest('runChecks: executes every declared non-recursive check incl
   }
 });
 
+// ── fixed-policy dashboard check selector (not yet wired into runChecks) ───
+function selectorPacket() {
+  const parsed = JSON.parse(fs.readFileSync(path.join(ROOT, REVIEW_PACKET), 'utf8'));
+  const runnable = parsed.testsRequired.filter((command) => {
+    const tokens = String(command).trim().split(/\s+/);
+    return !(tokens[0] === 'node' && (tokens[1] || '').replace(/^\.\//, '') ===
+      'builder-control/engineering-os.cjs' && tokens.includes('--gate-done'));
+  });
+  return { parsed, runnable };
+}
+
+test('check selector: dashboard-only changed paths narrow to the two declared dashboard checks', () => {
+  const { parsed } = selectorPacket();
+  assert.deepStrictEqual(
+    R.dashboardSliceCheckCommands(parsed, ['builder-control/dashboard/index.html']),
+    ['node builder-control/test/dashboard-slice.test.cjs', 'git diff --check']);
+  assert.deepStrictEqual(
+    R.dashboardSliceCheckCommands(parsed,
+      ['builder-control/test/dashboard-slice.test.cjs', 'builder-control/dashboard/index.html']),
+    ['node builder-control/test/dashboard-slice.test.cjs', 'git diff --check']);
+  for (const command of R.dashboardSliceCheckCommands(parsed, ['builder-control/dashboard/index.html'])) {
+    assert.ok(parsed.testsRequired.includes(command),
+      `selector returned ${command}, which the packet never declared`);
+  }
+});
+
+test('check selector: any non-dashboard changed path falls back to the packet checks unchanged', () => {
+  const { parsed, runnable } = selectorPacket();
+  for (const changed of [
+    ['builder-control/dashboard/index.html', 'builder-control/aegis-run.cjs'],
+    ['builder-control/dashboard/index.html.bak'],
+    ['./builder-control/dashboard/index.html'],
+    ['builder-control/test/dashboard-slice.test.cjs', null],
+    [],
+    undefined,
+  ]) {
+    assert.deepStrictEqual(R.dashboardSliceCheckCommands(parsed, changed), runnable,
+      `changed paths ${JSON.stringify(changed)} must not narrow the declared checks`);
+  }
+});
+
+test('check selector: a packet missing either dashboard command falls back to its own checks', () => {
+  const { parsed, runnable } = selectorPacket();
+  for (const absent of ['node builder-control/test/dashboard-slice.test.cjs', 'git diff --check']) {
+    const packet = { ...parsed, testsRequired: runnable.filter((c) => c !== absent) };
+    assert.deepStrictEqual(
+      R.dashboardSliceCheckCommands(packet, ['builder-control/dashboard/index.html']),
+      packet.testsRequired,
+      `a packet without ${absent} must not have that command invented for it`);
+  }
+  assert.deepStrictEqual(
+    R.dashboardSliceCheckCommands({ testsRequired: [] }, ['builder-control/dashboard/index.html']), []);
+});
+
 hostContainmentTest('runChecks: external packet is refused before checks with no run or ledger mutation', () => {
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-check-external-'));
   const packet = path.join(tmp, 'packet.json');
