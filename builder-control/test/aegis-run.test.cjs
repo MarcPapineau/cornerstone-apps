@@ -992,6 +992,60 @@ test('createRunFromObjective: persists the exact canonically validated packet pa
   });
 });
 
+// ── automatic-check eligibility marker ─────────────────────────────────────
+// The marker records only that a run was created by the dashboard authority.
+// It is server-owned (an option, never intake input) and executes nothing.
+test('createRunFromObjective: only options.automaticChecks === true marks a run eligible', () => {
+  const { r, runsDir } = withIsolatedRuntime(`
+    const dashboard = R.createRunFromObjective({ objective: 'dashboard intake' }, { automaticChecks: true });
+    const fallback = R.createRunFromObjective({ objective: 'default intake' });
+    const truthy = R.createRunFromObjective({ objective: 'truthy intake' }, { automaticChecks: 'true' });
+    console.log(JSON.stringify({ dashboard: dashboard.runId, fallback: fallback.runId, truthy: truthy.runId }));
+  `);
+  assert.strictEqual(r.status, 0, `driver failed: ${r.stderr}`);
+  const ids = JSON.parse(r.stdout.trim().split('\n').pop());
+  const read = (runId) => JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  const dashboard = read(ids.dashboard);
+  assert.strictEqual(dashboard.automaticChecks, true,
+    'the dashboard intake authority must record the eligibility marker');
+  assert.strictEqual(read(ids.fallback).automaticChecks, false,
+    'intake with no automaticChecks option must not mark a run eligible');
+  assert.strictEqual(read(ids.truthy).automaticChecks, false,
+    'only the exact value true may mark a run eligible');
+  // Eligibility is a marker, not an action: intake still stops where it did.
+  assert.strictEqual(dashboard.state, 'INTAKE_RECORDED');
+  assert.strictEqual(dashboard.checks, null, 'the marker must not execute checks');
+  assert.strictEqual(dashboard.worktree, null);
+  assert.strictEqual(dashboard.build, null);
+});
+
+test('createRunFromObjective: a posted automaticChecks field is refused, never honoured', () => {
+  const { r, runsDir } = withIsolatedRuntime(`
+    for (const value of [true, false]) {
+      try { R.createRunFromObjective({ objective: 'browser marker attempt', automaticChecks: value }); console.log('NO-THROW'); }
+      catch (e) { console.log(e.code + ': ' + e.message); }
+    }
+  `);
+  assert.strictEqual(r.status, 0, `driver failed: ${r.stderr}`);
+  const lines = r.stdout.trim().split('\n');
+  assert.strictEqual(lines.length, 2, `expected two refusals, got: ${r.stdout}`);
+  for (const line of lines) {
+    assert.ok(/^INVALID_OBJECTIVE: /.test(line), `browser JSON set the marker instead of being refused: ${line}`);
+    assert.ok(/automaticChecks/.test(line), `the refusal must name the unknown field: ${line}`);
+  }
+  const files = fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((f) => f.endsWith('.json')) : [];
+  assert.strictEqual(files.length, 0, 'a browser marker attempt must not leave a run file behind');
+});
+
+test('createRunFromObjective: the CLI --new path records no automatic-check eligibility', () => {
+  const { runsDir } = withIsolatedRuntime(`process.exit(0);`);
+  const env = { ...process.env, AEGIS_RUNS_DIR: runsDir, AEGIS_CHECKPOINTS_DIR: path.join(runsDir, '..', 'checkpoints'), AEGIS_LEDGER_FILE: path.join(runsDir, '..', 'ledger.json') };
+  const out = spawnSync('node', [CLI, '--new', '--objective', 'cli eligibility', '--json'], { cwd: ROOT, encoding: 'utf8', env });
+  assert.strictEqual(out.status, 0, `--new failed: ${out.stderr}`);
+  assert.strictEqual(JSON.parse(out.stdout).automaticChecks, false,
+    'the CLI is not the dashboard intake authority and must not mark runs eligible');
+});
+
 hostContainmentTest('dashboard Start refuses changed packet bytes before routing, worktree creation or BUILDING', () => {
   const source = path.join(ROOT, 'builder-control', 'packets',
     'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json');

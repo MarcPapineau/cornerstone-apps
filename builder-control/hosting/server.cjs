@@ -1274,7 +1274,11 @@ async function handleApi(req, res, config, pathname, ctx, started, controlAuthor
     const body = await readJsonBody(req, MAX_API_BODY_BYTES);
 
     if (pathname === '/api/objective') {
-      const result = AegisRun.createRunFromObjective(body, { packet: SWITCHBOARD_PACKET });
+      // Both options are server-owned constants beside the request body, never
+      // read from it: the fixed beta packet, and the eligibility marker that
+      // records this run as dashboard-created. Nothing is executed here.
+      const result = AegisRun.createRunFromObjective(body,
+        { packet: SWITCHBOARD_PACKET, automaticChecks: true });
       sendJson(res, 200, result, headers);
       log(req, 200, started);
       return;

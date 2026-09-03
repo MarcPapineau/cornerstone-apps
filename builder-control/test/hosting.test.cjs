@@ -1603,6 +1603,33 @@ async function runApiSuite() {
       assert.ok(fs.existsSync(ledger), 'the intake transition must have been recorded to the isolated temp ledger');
     });
 
+    await atest('dashboard intake records the server-owned automatic-check marker the browser cannot set', async () => {
+      const r = await post(PORT, '/api/objective', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ objective: 'dashboard automatic check eligibility proof' }),
+      });
+      assert.strictEqual(r.status, 200, `expected 200, got ${r.status}: ${r.body}`);
+      const parsed = JSON.parse(r.body);
+      assert.ok(!('automaticChecks' in parsed), 'the intake response must not publish the marker');
+      const recorded = JSON.parse(fs.readFileSync(path.join(runsDir, `${parsed.runId}.json`), 'utf8'));
+      assert.strictEqual(recorded.automaticChecks, true,
+        'the authenticated objective authority must mark dashboard-created runs eligible');
+      assert.strictEqual(recorded.state, 'INTAKE_RECORDED',
+        'the marker must not advance the run past intake');
+      assert.strictEqual(recorded.checks, null, 'the marker must not execute checks');
+
+      // The marker is not an objective field: a browser body carrying it is
+      // refused as an unknown field, in both directions.
+      for (const value of [true, false]) {
+        const injected = await post(PORT, '/api/objective', {
+          headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+          body: JSON.stringify({ objective: 'browser marker attempt', automaticChecks: value }),
+        });
+        assert.strictEqual(injected.status, 400,
+          `a browser-supplied automaticChecks=${value} reached intake: ${injected.body}`);
+      }
+    });
+
     await atest('authenticated Start uses canonical prepare/routing and rejects browser launch authority', async () => {
       for (const [key, value] of [
         ['command', 'rm -rf /'], ['provider', 'grok'], ['model', 'caller-model'],

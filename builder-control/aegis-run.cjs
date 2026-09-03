@@ -1671,8 +1671,16 @@ function transition(run, to, notes, authority) {
 // the CREATED -> INTAKE_RECORDED transition. It never accepts a packet from
 // `input` — normalizeObjective already refuses unknown keys — only from
 // `options.packet`, which must resolve inside builder-control/packets.
+//
+// options.automaticChecks is the same kind of server-owned option: it records
+// an eligibility marker only, and nothing here executes a check. The POSTed
+// body can never set it, because `automaticChecks` is not an
+// OBJECTIVE_ALLOWED_KEYS field and normalizeObjective refuses unknown keys
+// before this point. Only the exact value `true` marks a run eligible; every
+// other caller, including the CLI, records false.
 function createRunFromObjective(input, options = {}) {
   const normalized = normalizeObjective(input);
+  const automaticChecks = options.automaticChecks === true;
   const packet = resolvePacketOption(options.packet);
   let immutablePacketCoordinate = null;
   if (packet) {
@@ -1704,6 +1712,7 @@ function createRunFromObjective(input, options = {}) {
     dataClass: normalized.dataClass,
     packet,
     packetCoordinate: immutablePacketCoordinate,
+    automaticChecks,
     baseCommit: git(['rev-parse', 'HEAD']).stdout.trim() || null,
     worktree: null,
     build: null,
