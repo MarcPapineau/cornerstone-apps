@@ -153,12 +153,18 @@
     box-shadow:0 0 0 3px color-mix(in srgb,var(--active) 24%,transparent)}
   /* The device's own setting, applied with exactly the declarations the on-page
      control applies, so the two can never leave the page in different states.
-     Nothing anywhere in this file turns a transition back ON, so this block can
-     only be added to and never subtracted from: while the device asks for
-     reduce, the control reports it as held on rather than offering an "off" the
-     stylesheet would go on contradicting. */
+     Nothing anywhere in this file turns a transition or an animation back ON, so
+     this block can only be added to and never subtracted from: while the device
+     asks for reduce, the control reports it as held on rather than offering an
+     "off" the stylesheet would go on contradicting. animation:none is suppression
+     and never motion — it covers the AEGIS Core evidence cue from the very first
+     paint, and cancels one already on screen the moment the setting turns on. */
   @media (prefers-reduced-motion: reduce){
-    *{transition:none!important;scroll-behavior:auto!important}
+    *{transition:none!important;animation:none!important;scroll-behavior:auto!important}
+    /* A pseudo-element runs its own animation, so the wildcard above does not
+       reach it. The AEGIS Core evidence cue is drawn on ::after and is named
+       here for that reason. */
+    *::before,*::after{transition:none!important;animation:none!important}
     /* The handoff strip is the only element that changes appearance when a
        stage moves, so its one transition is named here as well as covered by
        the wildcard: under reduced motion the border simply is the new colour,
@@ -679,7 +685,9 @@
     box-shadow:0 0 0 9px rgba(51,185,239,.04),0 0 46px rgba(51,185,239,.18),inset 0 0 32px rgba(51,185,239,.07)}
   /* One static hairline inside the rim. It is geometry, not a second indicator:
      the core's state is the word inside it, and this ring never changes with
-     that word, so nothing here can read as a status the state never reported. */
+     that word, so nothing here can read as a status the state never reported.
+     The evidence cue below is drawn on ::after instead, so it can never leave a
+     standing mark on this one. */
   .aegis-core::before{content:"";position:absolute;left:9px;right:9px;top:9px;bottom:9px;
     border:1px solid rgba(51,185,239,.2);border-radius:50%;pointer-events:none}
   .core-mark{max-width:100%;font:750 18px/1.15 var(--mono);letter-spacing:.09em;color:#d7f4ff}
@@ -695,6 +703,41 @@
     box-shadow:0 0 0 9px rgba(180,92,240,.05),0 0 38px rgba(180,92,240,.18),inset 0 0 32px rgba(180,92,240,.09)}
   #operator-shell[data-run-status="failed"] .aegis-core{border-color:var(--fail);
     box-shadow:0 0 0 9px rgba(229,72,77,.05),0 0 38px rgba(229,72,77,.18),inset 0 0 32px rgba(229,72,77,.09)}
+
+  /* ── the one evidence cue: new recorded builder activity ─────────────
+     This is the only animation in the page, and it is bound to evidence rather
+     than to time. The renderer sets data-core-cue exactly once for each
+     canonical activity identity it has not displayed before — the bound run id,
+     the activity category the projection recorded, and the time that evidence
+     was recorded — while that run's own worker is recorded as RUNNING. It means
+     NEW WORKER EVIDENCE ARRIVED and nothing else: never a passing check, never
+     a bound review, never a green gate. With no new evidence the attribute is
+     simply absent, so an idle, waiting, stopped or unavailable core is
+     completely still and there is no loop for a fake "working" state to hide in.
+
+     Two names, alternated by the renderer, because a CSS animation restarts only
+     when the computed animation-name changes. That is what makes a second
+     genuine update visible without a timer, a reflow read or a
+     requestAnimationFrame. Each runs a single iteration and neither leaves a
+     mark: the accent starts and ends fully transparent with no fill mode, so
+     once it has run the core looks exactly as it did before and no residue can
+     be read as a status. It is drawn on the core's own ::after, one small ring
+     on one element — the deck around it never flashes. */
+  @keyframes aegis-core-cue-a{
+    0%{opacity:0;transform:scale(.9)}
+    30%{opacity:.8;transform:scale(1)}
+    100%{opacity:0;transform:scale(1.05)}
+  }
+  @keyframes aegis-core-cue-b{
+    0%{opacity:0;transform:scale(.9)}
+    30%{opacity:.8;transform:scale(1)}
+    100%{opacity:0;transform:scale(1.05)}
+  }
+  #aegis-core::after{content:"";position:absolute;left:-5px;right:-5px;top:-5px;bottom:-5px;
+    border:1px solid var(--cyan);border-radius:50%;opacity:0;pointer-events:none}
+  #aegis-core[data-core-cue="a"]::after{animation:aegis-core-cue-a 620ms ease-out 1}
+  #aegis-core[data-core-cue="b"]::after{animation:aegis-core-cue-b 620ms ease-out 1}
+
   .core-legend{display:flex;justify-content:center;gap:18px;flex-wrap:wrap;margin-top:14px;padding-top:12px;
     border-top:1px solid #1e3446;color:var(--text-2);font:10px/1.4 var(--mono);letter-spacing:.06em}
   .core-legend span::before{content:"";display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:currentColor}
@@ -797,7 +840,8 @@
      the page and there is nothing to clear, so no band is reserved. */
   @media (min-width:681px){ html{scroll-padding-top:124px} }
 
-  body[data-reduced-motion="true"] *{transition:none!important;scroll-behavior:auto!important}
+  body[data-reduced-motion="true"] *{transition:none!important;animation:none!important;scroll-behavior:auto!important}
+  body[data-reduced-motion="true"] *::before,body[data-reduced-motion="true"] *::after{transition:none!important;animation:none!important}
 
   @media (max-width:1599px){
     .command-header{grid-template-columns:auto 1fr}.view-nav{justify-self:end}.header-state{grid-column:1/-1}
@@ -1346,9 +1390,13 @@
          the static text claims nothing it has not resolved yet. -->
     <span class="motion-state" id="motion-state" role="status">Reading this device's motion preference…</span>
     <!-- The standing fact this control sits on, stated once and never repainted:
-         there is nothing to slow down here, only transitions to suppress. -->
-    <span class="sr" id="motion-note">This page has no animation. Reduced motion additionally suppresses every
-      state transition, and this device's own setting cannot be switched off from here.</span>
+         exactly what there is to suppress, named honestly, so the control cannot
+         promise to stop motion the page does not have or hide motion it does. -->
+    <span class="sr" id="motion-note">This page has one animation: a short highlight around the AEGIS Core
+      that runs once when new recorded builder activity arrives for the running worker. It never loops, never runs
+      on a timer, and reports no verdict — what the builder is doing is always written out in words as well.
+      Reduced motion suppresses that highlight and every state transition, and this device's own setting cannot
+      be switched off from here.</span>
     <!-- Inert, and it says so where a tooltip cannot be reached: the title stays
          for the pointer, and the same reason is in the control's own text for
          assistive technology and for touch. -->
@@ -2992,6 +3040,80 @@
       ', run record written ' + (moved.at || 'UNAVAILABLE') + '.';
   }
 
+  // ── the one evidence cue on the AEGIS Core ────────────────────────
+  // One restrained highlight, once, for each canonical builder activity this
+  // page has not displayed before. It carries a single meaning — NEW WORKER
+  // EVIDENCE ARRIVED — and it judges nothing: gate readiness, independent-review
+  // coverage and the core's own status word are written elsewhere, by their own
+  // authorities, and are untouched here. Everything the cue rests on is resolved by
+  // operationalState() and supervisionFacts(), so this reaches no second reading
+  // of the run, keeps no activity log, counts nothing, and owns no timer, poll
+  // or frame loop. The only thing it remembers between paints is the last
+  // identity it displayed, purely so the same evidence cannot fire twice.
+  var CORE_CUE_STEPS = ['a', 'b'];
+  var coreCueStep = 1;
+  var coreCueIdentity = null;
+  var coreCueObserved = false;
+
+  // The bound run id, the activity category the projection recorded, and the
+  // time that evidence was recorded. Every path that is not an actively running
+  // worker under an authoritative current-run binding with complete activity
+  // evidence resolves to null, which is the no-cue answer: a failed, stopped,
+  // waiting or unverified worker, a terminal exit, an unavailable binding, a
+  // binding that names a different run, and any missing or unknown field all
+  // fail closed here rather than animating.
+  function coreActivityIdentity(run, binding){
+    if (!run || !binding || binding.state !== 'BOUND' || binding.runId !== run.runId) return null;
+    if (operationalState(run).state !== 'RUNNING') return null;
+    var build = run.build || null;
+    var facts = supervisionFacts(build);
+    if (facts.presence !== 'RUNNING' || !facts.activity) return null;
+    var s = build.supervision || {};
+    if (typeof s.activityCode !== 'string' || !s.activityCode) return null;
+    if (typeof s.activityAt !== 'string' || !s.activityAt) return null;
+    return run.runId + '|' + s.activityCode + '|' + s.activityAt;
+  }
+
+  // Reduced motion is resolved once, on the document body, by the control in the
+  // switchboard below, and the stylesheet suppresses the animation from that
+  // same state. This re-reads that one resolution instead of keeping a second
+  // copy of it, so a page asked to hold still is never even given the attribute.
+  function motionSuppressed(){
+    return !!(document.body && document.body.getAttribute('data-reduced-motion') === 'true');
+  }
+
+  // Removing the attribute removes the animation, so this both prevents a cue
+  // and cancels one already on screen. It deliberately does not forget the last
+  // displayed identity: re-arriving evidence is still the same evidence.
+  function clearCoreActivityCue(){
+    var core = $('aegis-core');
+    if (core) core.removeAttribute('data-core-cue');
+  }
+
+  function renderCoreActivityCue(run, binding){
+    var core = $('aegis-core');
+    if (!core) return;
+    var identity = coreActivityIdentity(run, binding);
+    // Terminal exit, a stopped or waiting worker, or evidence this page cannot
+    // read: no cue survives any of them.
+    if (!identity){ clearCoreActivityCue(); return; }
+    // The first activity this page ever resolves is a historical snapshot of
+    // work that was already under way before it opened — not news arriving while
+    // the operator watches — so it is adopted silently. A repeat of the identity
+    // already on screen, which is what a duplicate or heartbeat-only push
+    // produces, changes nothing at all: the attribute is left exactly as it is,
+    // so a genuine cue is neither restarted nor cut short by one.
+    if (identity === coreCueIdentity) return;
+    var isNew = coreCueObserved;
+    coreCueObserved = true;
+    coreCueIdentity = identity;
+    if (!isNew || motionSuppressed()){ clearCoreActivityCue(); return; }
+    // Alternating the attribute value alternates the animation-name, which is
+    // what restarts a CSS one-shot. No timer and no frame is involved.
+    coreCueStep = coreCueStep === 0 ? 1 : 0;
+    core.setAttribute('data-core-cue', CORE_CUE_STEPS[coreCueStep]);
+  }
+
   function reviewerEvidenceReady(engineering, binding, run){
     var e = engineering || {};
     var completeness = e.reviewerCompleteness;
@@ -4117,6 +4239,10 @@
     // run's state, and the transition the handoff indicator above already
     // proved. It never re-observes the run, so it cannot reach a second verdict.
     renderCorePath(boundRun, provenHandoff);
+    // The one motion cue, from the same two canonical facts the deck has already
+    // resolved: the run the binding names, and the activity evidence recorded
+    // against it. It fires only for evidence this page has not displayed before.
+    renderCoreActivityCue(boundRun, bind);
 
     var routeHead = el('div','deck-heading');
     routeHead.appendChild(el('h3',null,'Build sequence'));
@@ -5314,6 +5440,11 @@
     retryAvailability: retryAvailability,
     availableEmptyRuns: availableEmptyRuns,
     renderStateSource: renderStateSource,
+    // The switchboard owns two facts this renderer cannot see — the operator's
+    // own reduced-motion press, and the moment the live stream drops — and both
+    // must take the core cue off the screen. It is given the one clearing seam,
+    // never a way to start a cue of its own.
+    clearCoreActivityCue: clearCoreActivityCue,
     // One founder-language source. The run-card renderer lives in the second
     // script block and must read the same sentences the deck reads, so the
     // same fact is never phrased two different ways on one screen.
@@ -5876,9 +6007,11 @@
   });
 
   // ── reduced motion: report the resolved state, never invent motion ──
-  // This page ships with no animation and only a handful of transitions, so the
-  // control can only ever ADD suppression. Two facts have to be told apart and
-  // both have to be visible in words:
+  // This page owns exactly one animation — the AEGIS Core evidence cue, which
+  // runs once per genuinely new recorded builder activity and never loops — plus
+  // a handful of transitions. Nothing here turns either back on, so the control
+  // can only ever ADD suppression. Two facts have to be told apart and both have
+  // to be visible in words:
   //
   //   1. This device already asks for reduced motion. That is applied by a
   //      @media (prefers-reduced-motion: reduce) block, and nothing in this page
@@ -5900,6 +6033,12 @@
   function applyMotion(){
     var reduced = motionHeldBySystem || motionSetHere;
     document.body.setAttribute('data-reduced-motion', reduced ? 'true' : 'false');
+    // Switching suppression on cancels a cue that is already on screen, rather
+    // than letting it finish. The stylesheet stops it too; this also takes the
+    // attribute off, so the resolved state and the DOM agree.
+    if (reduced && window.AEGIS_DASHBOARD && window.AEGIS_DASHBOARD.clearCoreActivityCue) {
+      window.AEGIS_DASHBOARD.clearCoreActivityCue();
+    }
     if (motionToggle){
       motionToggle.setAttribute('aria-pressed', reduced ? 'true' : 'false');
       motionToggle.setAttribute('aria-disabled', motionHeldBySystem ? 'true' : 'false');
@@ -6012,6 +6151,11 @@
     });
     es.onerror = function(){
       if (connState) connState.textContent = 'disconnected — the browser will retry automatically';
+      // A dropped stream means this page has stopped receiving worker evidence.
+      // Anything still glowing from the last push would be claiming otherwise.
+      if (window.AEGIS_DASHBOARD && window.AEGIS_DASHBOARD.clearCoreActivityCue) {
+        window.AEGIS_DASHBOARD.clearCoreActivityCue();
+      }
     };
     es.onopen = function(){ if (connState) connState.textContent = 'connected'; };
   })();

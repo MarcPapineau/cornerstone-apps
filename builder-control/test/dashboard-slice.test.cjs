@@ -78,10 +78,60 @@ test('no timers anywhere: a pulse that can run without a real event is fake acti
   }
 });
 
+// The shell — every chrome and decorative surface on this page — still owns no
+// animation at all, and nothing anywhere owns a loop. Exactly one animation
+// exists, it is neither chrome nor a loop, and it is enumerated here by name:
+// the AEGIS Core evidence cue, two one-shot keyframes the renderer alternates so
+// that one genuinely new recorded builder activity produces one short highlight.
+// Alternation is what restarts a CSS one-shot without a timer or a frame loop;
+// the two blocks are otherwise identical. A third keyframes block, a second
+// animated selector, an iteration count above one, or any looping longhand fails
+// this proof rather than shipping quietly.
+const CORE_CUE_KEYFRAMES = ['aegis-core-cue-a', 'aegis-core-cue-b'];
+const CORE_CUE_SELECTORS = ['#aegis-core[data-core-cue="a"]::after',
+  '#aegis-core[data-core-cue="b"]::after'];
+
 test('the JARVIS shell has no CSS animation or decorative motion loop', () => {
-  const keyframes = code.match(/@keyframes\s+([\w-]+)/g) || [];
-  assert.strictEqual(keyframes.length, 0, `expected no keyframes block, found ${keyframes.length}`);
-  assert.ok(!/\banimation\s*:/.test(code), 'CSS animation found — state must be legible without motion');
+  const keyframes = (code.match(/@keyframes\s+([\w-]+)/g) || [])
+    .map((match) => match.replace(/@keyframes\s+/, ''));
+  assert.deepStrictEqual(keyframes, CORE_CUE_KEYFRAMES,
+    `only the two AEGIS Core evidence-cue keyframes may exist, found: ${keyframes.join(', ') || 'none'}`);
+  // No longhand may loop, reverse, pause or resume motion: the shorthand below
+  // is the whole declaration, so there is nowhere else for a loop to be set.
+  for (const longhand of ['animation-iteration-count', 'animation-direction',
+    'animation-play-state', 'animation-name']) {
+    assert.ok(!new RegExp('\\b' + longhand + '\\s*:').test(code),
+      `${longhand} is declared — a one-shot cue must own no restart or loop control`);
+  }
+  // Every animation declaration in the page is either the suppression reduced
+  // motion applies, or one of the two bounded cues on the core's accent ring.
+  const animated = [];
+  for (const rule of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const declared = /(?:^|;)\s*animation\s*:\s*([^;]+)/.exec(rule[2]);
+    if (!declared) continue;
+    const selector = rule[1].trim();
+    const value = declared[1].trim();
+    if (value === 'none!important') continue;
+    assert.ok(CORE_CUE_SELECTORS.includes(selector),
+      `${selector} animates, and only the AEGIS Core evidence accent may`);
+    assert.match(value, /^aegis-core-cue-[ab] 620ms ease-out 1$/,
+      `${selector} does not run exactly one bounded iteration: ${value}`);
+    animated.push(selector);
+  }
+  assert.deepStrictEqual(animated.sort(), [...CORE_CUE_SELECTORS].sort(),
+    'the evidence cue lost one of its two alternating one-shots, so a second genuine update would show nothing');
+  // The cue leaves nothing behind: no fill mode, and an accent that starts and
+  // ends fully transparent, so a finished cue cannot be read as a status.
+  assert.ok(/#aegis-core::after\{[^}]*opacity:0[^}]*\}/.test(code),
+    'the core accent ring is not transparent at rest, so it is a standing mark rather than a cue');
+  for (const name of CORE_CUE_KEYFRAMES) {
+    const block = code.slice(code.indexOf('@keyframes ' + name));
+    assert.ok(/0%\{opacity:0[^}]*\}/.test(block.slice(0, 200)) &&
+      /100%\{opacity:0[^}]*\}/.test(block.slice(0, 200)),
+      `${name} does not start and end at opacity 0, so it leaves a residue on the core`);
+    assert.ok(!/\bforwards\b|\bbackwards\b|\bboth\b/.test(block.slice(0, 200)),
+      `${name} uses a fill mode, which holds a frame on screen after the evidence is old`);
+  }
   assert.ok(/\.stage\.is-active\s+\.dot\s*\{[^}]*box-shadow/.test(code),
     'ACTIVE still needs a static, non-colour-only visual emphasis');
 });
@@ -4078,10 +4128,15 @@ test('DOM: auth, retry, named-reviewer and running-builder guidance still outran
 test('the reduced-motion state is resolved from the first byte, never an absent third state', () => {
   assert.ok(/<body[^>]*\sdata-reduced-motion="false"/.test(htmlSrc()),
     'the page ships with no reduced-motion state at all, so the control describes nothing until it is pressed');
-  assert.ok(/body\[data-reduced-motion="true"\] \*\{transition:none!important;scroll-behavior:auto!important\}/.test(code),
-    'the operator control no longer suppresses transitions and smooth scrolling');
-  // "off" is the shipped no-animation default and owns no rules of its own.
-  // Giving it any would mean the page had something to switch back on.
+  assert.ok(/body\[data-reduced-motion="true"\] \*\{transition:none!important;animation:none!important;scroll-behavior:auto!important\}/.test(code),
+    'the operator control no longer suppresses animations, transitions and smooth scrolling');
+  // A pseudo-element runs its own animation, so the wildcard above cannot reach
+  // the core evidence cue, which is drawn on ::after. Without this the control
+  // would report a suppression it does not actually apply.
+  assert.ok(/body\[data-reduced-motion="true"\] \*::before,body\[data-reduced-motion="true"\] \*::after\{transition:none!important;animation:none!important\}/.test(code),
+    'the operator control does not reach pseudo-element motion, so the AEGIS Core cue would keep running under reduced motion');
+  // "off" owns no rules of its own. Giving it any would mean the page had
+  // something to switch back on beyond the one evidence-bound cue.
   assert.ok(!/body\[data-reduced-motion="false"\]/.test(code),
     'the unreduced state was given rules of its own, which is a page inventing motion in order to remove it');
 });
@@ -4090,11 +4145,18 @@ test('the device setting and the on-page control apply exactly the same suppress
   const media = code.slice(code.indexOf('@media (prefers-reduced-motion: reduce)'));
   const block = media.slice(0, media.indexOf('\n  }'));
   assert.ok(block.length > 0, 'the reduced-motion media block was not located');
-  for (const declaration of ['transition:none!important', 'scroll-behavior:auto!important']) {
+  for (const declaration of ['transition:none!important', 'animation:none!important',
+    'scroll-behavior:auto!important']) {
     assert.ok(block.includes(declaration),
       `the device setting does not apply ${declaration}, so it and the control leave the page in two different states`);
   }
-  assert.ok(!/@keyframes|animation\s*:/.test(block),
+  // Pseudo-element coverage on both sides, or the device setting and the control
+  // would suppress two different amounts of the same page.
+  assert.ok(/\*::before,\*::after\{transition:none!important;animation:none!important\}/.test(block),
+    'the device setting does not reach pseudo-element motion, so the AEGIS Core cue would survive it');
+  // animation:none is suppression; a keyframes block or any animation value
+  // other than none would be this block inventing the motion it exists to remove.
+  assert.ok(!/@keyframes/.test(block) && !/animation\s*:\s*(?!none)/.test(block),
     'the reduced-motion block introduced motion, which is the one thing it may never do');
 });
 
@@ -4921,7 +4983,9 @@ function liveActivityRun(supervision) {
   };
 }
 
-function liveActivityPage(supervision) {
+// opts reaches bootPage unchanged, so a proof can boot this same running
+// builder as a device that asks for reduced motion.
+function liveActivityPage(supervision, opts) {
   const run = liveActivityRun(supervision);
   return bootPage(fixtureState({
     generatedAt: '2026-09-03T14:10:00.000Z',
@@ -4929,7 +4993,7 @@ function liveActivityPage(supervision) {
       state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
       reason: 'exact current run is bound',
     } },
-  }));
+  }), opts);
 }
 
 function builderProgressCard(page) {
@@ -4991,6 +5055,218 @@ test('DOM: Command View and Detail View print one builder-activity resolution, n
     'Detail View no longer reads the shared supervision resolution');
   assert.strictEqual((code.match(/function supervisionFacts\(/g) || []).length, 1,
     'a second supervision resolution would drift from the first');
+});
+
+// ── the AEGIS Core evidence cue ─────────────────────────────────────────────
+// The page now has one animation, and the whole question is whether it can ever
+// mean anything except "new recorded builder activity arrived". These proofs
+// hold both halves of that: it fires for genuinely new evidence, and it fires
+// for nothing else — not a repaint, not a duplicate, not a heartbeat, not the
+// historical snapshot the page opens with, not a stopped or unreadable worker,
+// and never while motion is suppressed.
+// The bounded categories the projection publishes, with the sentence it
+// publishes beside each. A fixture that changed the category without the
+// sentence would be evidence no projection could produce.
+const ACTIVITY_SUMMARY = Object.freeze({
+  READING: 'Reading files in the worktree',
+  EDITING: 'Editing files in the worktree',
+});
+function activityEvidence(at, activityCode) {
+  const named = activityCode || 'READING';
+  return Object.assign({}, RECORDED_ACTIVITY_SUPERVISION, {
+    activityAt: at, activityCode: named, activitySummary: ACTIVITY_SUMMARY[named],
+  });
+}
+
+// The minimized flat /api/status shape, pushed through the real switchboard
+// seam. `over` mutates exactly the canonical evidence a proof is about.
+function activityStatus(supervision, over) {
+  const edit = over || {};
+  const run = liveActivityRun(supervision);
+  if (edit.supervision) {
+    run.build.supervision = Object.assign({}, run.build.supervision, edit.supervision);
+  }
+  if (edit.build) Object.assign(run.build, edit.build);
+  if (edit.run) Object.assign(run, edit.run);
+  return {
+    generatedAt: '2026-09-03T14:10:10.000Z',
+    engineering: fixtureState().engineering,
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [run],
+    runsBinding: Object.assign({
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      evidenceState: 'OK', reason: 'exact current run is bound',
+    }, edit.binding || {}),
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  };
+}
+
+const coreCue = (page) => page.document.getElementById('aegis-core').getAttribute('data-core-cue');
+
+test('DOM: new recorded builder activity cues the core once, and the opening snapshot never does', () => {
+  const page = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION);
+  // The page opens onto a builder that was already running with already-recorded
+  // activity. That is history, not news arriving while the operator watches.
+  assert.strictEqual(coreCue(page), null,
+    'the first activity the page resolved was historical evidence, and it animated the core anyway');
+  renderMinimizedStatus(page, activityStatus(activityEvidence('2026-09-03T14:10:04.000Z', 'EDITING')));
+  const first = coreCue(page);
+  assert.ok(first === 'a' || first === 'b',
+    `a genuinely new recorded activity produced no core cue: ${first}`);
+  // A second genuine update must be visible as a second cue, which means the
+  // animation name has to change — otherwise the one-shot never restarts.
+  renderMinimizedStatus(page, activityStatus(activityEvidence('2026-09-03T14:10:06.000Z', 'EDITING')));
+  const second = coreCue(page);
+  assert.notStrictEqual(second, first,
+    'a second genuine update reused the same animation name, so nothing would restart on screen');
+  // The recorded category is part of the identity, not only its timestamp: a
+  // different thing observed at the same evidence time is still a new thing.
+  renderMinimizedStatus(page, activityStatus(activityEvidence('2026-09-03T14:10:06.000Z', 'READING')));
+  assert.notStrictEqual(coreCue(page), second,
+    'a different recorded activity category at the same evidence time was folded into a duplicate');
+  // The cue is worker evidence, not a gate outcome: the core still prints the
+  // canonical lifecycle word, and the gate is still recorded as BLOCKED.
+  assert.strictEqual(page.text('hud-core-status'), 'RUNNING',
+    'the core cue moved the canonical core status word');
+  assert.strictEqual(page.text('hud-gate-state'), 'BLOCKED',
+    'a cue for new worker evidence turned a blocking gate into a passing one');
+  assert.match(page.text('founder-body'), /activity evidence recorded 2026-09-03T14:10:06\.000Z/,
+    'the readable activity sentence was replaced by the visual cue');
+});
+
+test('DOM: a duplicate push and a heartbeat-only push never cue the core', () => {
+  const page = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION);
+  renderMinimizedStatus(page, activityStatus(activityEvidence('2026-09-03T14:10:04.000Z')));
+  const cued = coreCue(page);
+  assert.ok(cued, 'the setup update produced no cue to test against');
+  // Identical evidence again. The identity is unchanged, so the page does
+  // nothing at all: a repaint neither invents a second cue nor cuts short the
+  // one already running.
+  renderMinimizedStatus(page, activityStatus(activityEvidence('2026-09-03T14:10:04.000Z')));
+  assert.strictEqual(coreCue(page), cued,
+    'a duplicate push restarted or cancelled the core cue instead of leaving it alone');
+  // A push carrying supervisor liveness and no recorded activity is not
+  // evidence that anything happened.
+  renderMinimizedStatus(page, activityStatus(HEARTBEAT_ONLY_SUPERVISION));
+  assert.strictEqual(coreCue(page), null,
+    'a heartbeat with no recorded activity left the core claiming new worker evidence');
+  // And the same old evidence coming back is still the same old evidence.
+  renderMinimizedStatus(page, activityStatus(activityEvidence('2026-09-03T14:10:04.000Z')));
+  assert.strictEqual(coreCue(page), null,
+    'evidence the page had already displayed was replayed as if it were new');
+});
+
+test('DOM: no cue survives a stopped, waiting, failed, unbound or unreadable worker', () => {
+  const stops = [
+    ['a terminal builder exit', { build: { exit: 0 } }],
+    ['a stopped worker status', { build: { status: 'EXITED' } }],
+    ['a recorded builder timeout', { build: { timedOut: true } }],
+    ['a failed run', { run: { state: 'BUILD_FAILED' } }],
+    ['a worker claimed but not yet working', { build: { status: 'QUEUED' } }],
+    ['an unavailable current-run binding', { binding: { state: 'UNAVAILABLE', runId: null } }],
+    ['a binding that names another run', { binding: { runId: 'RUN-SOMETHING-ELSE' } }],
+    ['an activity category the projection could not name',
+      { supervision: { activityState: 'UNRECORDED', activityCode: null } }],
+    ['activity evidence with no recorded time', { supervision: { activityAt: null } }],
+  ];
+  for (const [label, over] of stops) {
+    const page = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION);
+    renderMinimizedStatus(page, activityStatus(activityEvidence('2026-09-03T14:10:04.000Z')));
+    assert.ok(coreCue(page), `${label}: the setup update produced no cue to clear`);
+    // The activity time moves as well, so a missing guard would show itself as a
+    // cue rather than as evidence that merely happens to repeat.
+    renderMinimizedStatus(page, activityStatus(activityEvidence('2026-09-03T14:10:07.000Z'), over));
+    assert.strictEqual(coreCue(page), null,
+      `${label} left the AEGIS Core cued, which claims live worker evidence that is not recorded`);
+  }
+});
+
+test('DOM: reduced motion from either source suppresses the cue and the words survive it', () => {
+  const asksForReduce = (query) => ({ matches: /prefers-reduced-motion/.test(query) });
+  const device = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION, { matchMedia: asksForReduce });
+  assert.strictEqual(device.document.body.getAttribute('data-reduced-motion'), 'true',
+    'the device fixture did not boot the page in the reduced state');
+  renderMinimizedStatus(device, activityStatus(activityEvidence('2026-09-03T14:10:04.000Z')));
+  assert.strictEqual(coreCue(device), null,
+    'a device that asks for reduced motion was still given a core cue');
+  assert.match(device.text('founder-body'), /Reading files in the worktree/,
+    'suppressing the motion also removed the readable activity it was standing in for');
+
+  // Set here instead, mid-cue: pressing the control cancels what is on screen
+  // rather than letting it finish.
+  const local = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION);
+  renderMinimizedStatus(local, activityStatus(activityEvidence('2026-09-03T14:10:04.000Z')));
+  assert.ok(coreCue(local), 'the setup update produced no cue to cancel');
+  local.document.getElementById('toggle-motion')._listeners.click[0]();
+  assert.strictEqual(local.document.body.getAttribute('data-reduced-motion'), 'true',
+    'the on-page control did not reach the reduced state');
+  assert.strictEqual(coreCue(local), null,
+    'switching reduced motion on left an active core cue running');
+  renderMinimizedStatus(local, activityStatus(activityEvidence('2026-09-03T14:10:09.000Z')));
+  assert.strictEqual(coreCue(local), null,
+    'new evidence animated the core while the operator had reduced motion switched on');
+  assert.match(local.text('founder-body'), /activity evidence recorded 2026-09-03T14:10:09\.000Z/,
+    'with motion off the operator lost the activity evidence entirely');
+});
+
+test('the core cue is bound to an evidence identity and owns no timer, log or verdict', () => {
+  const fn = code.slice(code.indexOf('var CORE_CUE_STEPS'),
+    code.indexOf('function reviewerEvidenceReady'));
+  assert.ok(fn.length > 0, 'the core cue resolver was not located');
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.', 'fetch(', 'innerHTML']) {
+    assert.ok(!fn.includes(banned),
+      `the cue uses ${banned} — motion must be bound to recorded evidence, never to time`);
+  }
+  // It re-reads the resolutions the deck already owns, and derives no run
+  // reading of its own.
+  for (const canonical of ["binding.state !== 'BOUND'", 'binding.runId !== run.runId',
+    "operationalState(run).state !== 'RUNNING'", 'supervisionFacts(build)',
+    's.activityCode', 's.activityAt']) {
+    assert.ok(fn.includes(canonical), `the cue no longer reads the canonical ${canonical}`);
+  }
+  // Deduplication only: one identity, not a second activity log or counter.
+  assert.ok(/var coreCueIdentity = null;/.test(fn) && !/\.push\(/.test(fn) && !/\.concat\(/.test(fn),
+    'the cue accumulates activity instead of holding the single identity it needs to deduplicate');
+  // And it says nothing about gates, review or checkpoints.
+  for (const owned of ['hud-core-status', 'verdict', 'engineering', 'problems', 'checkpoint',
+    'subjectSha256']) {
+    assert.ok(!fn.includes(owned),
+      `the cue reads ${owned} — it reports new worker evidence, never a gate or review outcome`);
+  }
+  // One driver, one place that can start a cue, and a clearing seam the
+  // switchboard uses for the two facts the renderer cannot see.
+  assert.ok(/renderCoreActivityCue\(boundRun, bind\);/.test(code),
+    'the cue is not driven by the bound run and binding the deck already resolved');
+  assert.strictEqual((code.match(/core\.setAttribute\('data-core-cue'/g) || []).length, 1,
+    'a second place in the page can start a core cue');
+  const disconnect = code.slice(code.indexOf('es.onerror = function()'));
+  assert.ok(/clearCoreActivityCue\(\)/.test(disconnect.slice(0, 700)),
+    'a dropped live stream leaves the core cued, which claims evidence that has stopped arriving');
+  const motion = code.slice(code.indexOf('function applyMotion()'));
+  assert.ok(/reduced && window\.AEGIS_DASHBOARD && window\.AEGIS_DASHBOARD\.clearCoreActivityCue/
+    .test(motion.slice(0, 600)),
+    'switching reduced motion on does not take an active cue off the screen');
+});
+
+test('the reduced-motion note describes the cue that exists instead of denying animation', () => {
+  const note = /<span class="sr" id="motion-note">([\s\S]*?)<\/span>/.exec(htmlSrc());
+  assert.ok(note, 'the reduced-motion screen-reader note was removed');
+  const text = note[1].replace(/\s+/g, ' ').trim();
+  assert.ok(!/no animation/i.test(text),
+    'the note still tells a screen-reader operator this page has no animation, which is no longer true');
+  assert.match(text, /AEGIS Core/, 'the note does not say where the one animation actually is');
+  assert.match(text, /runs once when new recorded builder activity arrives/,
+    'the note does not say what the cue means or when it fires');
+  assert.match(text, /never loops, never runs on a timer/,
+    'the note does not rule out the decorative loop this page refuses to ship');
+  assert.match(text, /reports no verdict/,
+    'the note lets the cue be read as a review or gate outcome');
+  assert.match(text, /written out in words as well/,
+    'the note does not say the same evidence is readable without the motion');
+  assert.match(text, /Reduced motion suppresses that highlight/,
+    'the note no longer states that the control suppresses the cue it just described');
 });
 
 test('DOM: no raw builder output reaches the page through the activity surface', () => {
