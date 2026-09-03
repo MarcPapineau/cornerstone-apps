@@ -788,6 +788,147 @@ test('the strip restates existing resolutions and owns no clock, threshold or se
     'the Detail View evidence rail lost its own CAD cost and checkpoint panels');
 });
 
+// ── V2 mobile operator cockpit (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ───
+// The phone failure guarded here is a cockpit that reads like a spreadsheet:
+// the owner opens AEGIS on a phone and the first screens are routing rationale,
+// live-evidence prose, builder-progress detail, elapsed time and a gate
+// transcript, while the operational strip, the mission, the current action, the
+// blocker, the next valid action and the last safe checkpoint are scrolled away
+// — with the governed controls too small to hit and a mono subject line dragging
+// the page sideways. These are static proofs over the shipped phone breakpoint,
+// because the regression is silent: it renders perfectly at 1440px.
+const phoneStart = code.lastIndexOf('@media (max-width:680px)');
+const PHONE = phoneStart === -1 ? '' : code.slice(phoneStart, code.indexOf('\n  }', phoneStart));
+
+function phoneRules() {
+  const rules = [];
+  for (const rule of PHONE.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    rules.push({ selectors: rule[1].split(',').map((s) => s.trim()).filter(Boolean), body: rule[2] });
+  }
+  return rules;
+}
+
+function phoneSelectorsDeclaring(pattern) {
+  const found = new Set();
+  for (const rule of phoneRules()) {
+    if (!pattern.test(rule.body)) continue;
+    for (const selector of rule.selectors) found.add(selector);
+  }
+  return found;
+}
+
+test('the phone cockpit reads strip, mission and decision instruments before supporting evidence', () => {
+  assert.ok(PHONE.length > 0, 'the phone breakpoint block was not located');
+  const source = htmlSrc();
+  assert.ok(source.indexOf('id="ops-strip"') < source.indexOf('id="operator-shell"') &&
+    source.indexOf('id="founder-summary"') < source.indexOf('class="evidence-deck"'),
+    'the phone reading order rests on source order that no longer puts the strip and mission first');
+  assert.ok(/\.ops-strip-cells\{grid-template-columns:1fr\}/.test(PHONE),
+    'the five operational answers still share a phone row, where none of them stays legible');
+  // Supporting cards are demoted, and only supporting cards. Demoting any of
+  // the six operator answers would restore exactly the defect this fixes.
+  const demotion = /#founder-summary \.command-card\.is-routing,#founder-summary \.command-card\.is-live-evidence,\s*#founder-summary \.command-card\.is-progress,#founder-summary \.command-card\.is-elapsed\{order:1\}/
+    .exec(PHONE);
+  assert.ok(demotion, 'routing rationale, live evidence, builder-progress detail and elapsed are not demoted on a phone');
+  const demoted = phoneSelectorsDeclaring(/(?:^|;)order:[1-9]/);
+  for (const essential of ['.is-now', '.is-next', '.is-blocked', '.is-clear', '.is-checkpoint', '.is-crew']) {
+    for (const selector of demoted) {
+      assert.ok(!selector.includes('.command-card' + essential),
+        `the phone deck demoted the operator card ${essential} below supporting evidence`);
+    }
+  }
+  const brief = {};
+  for (const row of PHONE.matchAll(/\.brief-row\[data-operator-brief="([\w-]+)"\]\{order:(\d+)\}/g)) {
+    brief[row[1]] = Number(row[2]);
+  }
+  assert.deepStrictEqual(Object.keys(brief).sort(), ['finished', 'needs-marc', 'next', 'now', 'verify'],
+    'the phone brief does not order all five canonical operator answers');
+  assert.ok(brief.now < brief['needs-marc'] && brief['needs-marc'] < brief.next &&
+    brief.next < brief.finished && brief.finished < brief.verify,
+    `the phone brief reads explanation before action: ${JSON.stringify(brief)}`);
+  assert.ok(/\.event-panel\{order:1\}/.test(PHONE),
+    'the long gate-decision log still reads ahead of the health, decision and checkpoint instruments');
+});
+
+test('the phone cockpit keeps Start, Cancel, Retry, the view switch and reduced motion finger-sized', () => {
+  const finger = phoneSelectorsDeclaring(/min-height:44px/);
+  for (const selector of ['.view-tab', '.hud-control', '.ask-actions .action', 'button.action',
+    '.panel-summary', '.field input', '.field textarea', '.field select']) {
+    assert.ok(finger.has(selector), `${selector} is not a finger-sized target at phone width`);
+  }
+  // The composer's optional fields carry an explicit 34px override at desktop
+  // width; without the same selector the phone rule loses the cascade to it.
+  for (const selector of ['.objective-composer .field:not(:first-child) input',
+    '.objective-composer .field:not(:first-child) textarea',
+    '.objective-composer .field:not(:first-child) select']) {
+    assert.ok(finger.has(selector), `${selector} keeps its 34px desktop height on a phone`);
+  }
+  assert.ok(/\.field input[^{]*\{[^}]*font-size:16px/.test(PHONE),
+    'a sub-16px field still lets mobile Safari zoom the governed form off-screen on focus');
+  // The three governed run controls are ordinary .action buttons, which is what
+  // the rule above sizes. If any of them stops being one, this proof fails
+  // rather than silently sizing nothing.
+  const source = htmlSrc();
+  assert.ok(/<button type="submit" class="action primary" id="btn-submit-objective"/.test(source),
+    'the governed Start control is no longer an .action button the phone rule sizes');
+  assert.ok(/el\('button', 'action warn', 'Cancel'\)/.test(code),
+    'the safe Cancel control is no longer an .action button the phone rule sizes');
+  assert.ok(/el\('button', 'action', 'Retry'\)/.test(code) && /el\('button','action primary','Retry'\)/.test(code),
+    'a valid Retry control is no longer an .action button the phone rule sizes');
+  assert.ok(/<button type="button" class="hud-control" id="toggle-motion"/.test(source),
+    'the reduced-motion control is no longer a .hud-control the phone rule sizes');
+  assert.ok(/\.btn-row>button\.action\{[^}]*flex:1 1 auto/.test(PHONE) && /\.btn-row>\.meta\{flex:1 0 100%\}/.test(PHONE),
+    'governed controls and their refusal reasons still compete for one phone row');
+});
+
+test('the phone cockpit wraps dense canonical values instead of scrolling the page sideways', () => {
+  const wrapped = phoneSelectorsDeclaring(/overflow-wrap:anywhere/);
+  for (const selector of ['.mission-meta', '.command-value', '.brief-value', '.row .name', '.row .meta',
+    '.run-card .meta', '.kv dt', '.hud-value']) {
+    assert.ok(wrapped.has(selector), `${selector} can still push the phone viewport sideways`);
+  }
+  assert.ok(/\.kv\{grid-template-columns:minmax\(0,1fr\)/.test(PHONE),
+    'the two-column key/value grid keeps an auto label column that a long canonical key widens');
+  assert.ok(/\.chip\{white-space:normal\}/.test(PHONE), 'a long canonical state word cannot wrap inside its chip');
+  assert.ok(/\.row\{flex-wrap:wrap\}/.test(PHONE) && /\.badges\{justify-content:flex-start\}/.test(PHONE),
+    'list rows still force their name and badges onto one phone line');
+  assert.ok(/\.context-cell,\.context-cell\.mono\{max-width:100%\}/.test(PHONE),
+    'the header context cells keep a fixed width wider than a phone');
+  // Wrapping is the fix. Clipping the document would hide the overflow instead
+  // of preventing it, and would hide the evidence that overflowed with it.
+  assert.ok(!/html,body\{[^}]*overflow/.test(code) && !/(?:^|;)overflow-x:/.test(PHONE),
+    'horizontal overflow is being masked by clipping the page rather than by wrapping the value');
+});
+
+test('the phone cockpit hides no evidence, adds no motion, and leaves the desktop and tablet HUD intact', () => {
+  for (const rule of phoneRules()) {
+    if (!/display:none/.test(rule.body)) continue;
+    for (const selector of rule.selectors) {
+      assert.ok(/::(?:before|after)$/.test(selector),
+        `the phone cockpit removes ${selector} instead of demoting or collapsing it`);
+    }
+  }
+  assert.ok(!/\banimation\s*:/.test(PHONE) && !/(?:^|;)transition:(?!none)/.test(PHONE),
+    'the phone cockpit introduced motion — it is an instrument panel, not decoration');
+  for (const card of ["commandCard('WHY THIS MODEL / TOOL'", "commandCard('LIVE EVIDENCE'",
+    "commandCard('ELAPSED'", "commandCard('CREW / MODEL'", "commandCard('LAST SAFE CHECKPOINT'"]) {
+    assert.ok(code.includes(card), `${card} was deleted rather than demoted on the phone deck`);
+  }
+  assert.ok(!/<details[^>]*id="raw-state"[^>]*\bopen\b/.test(htmlSrc()),
+    'deep technical evidence was forced open on the phone first screen');
+  // Above the phone breakpoint nothing moved: the wide Strategic HUD, its
+  // five-column strip and its five-instrument evidence band are untouched.
+  assert.ok(/\.ops-strip-cells\{display:grid;grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/.test(code),
+    'the desktop status strip lost its five-column band');
+  assert.ok(/\.core-stage\{position:relative;min-height:430px;display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/.test(code),
+    'the desktop Strategic HUD core stage was rebuilt for the phone');
+  assert.ok(/\.evidence-deck\{grid-template-columns:repeat\(5,minmax\(0,1fr\)\)\}/.test(code),
+    'the desktop evidence deck lost its five instrument columns');
+  assert.ok(/\.command-shell\{grid-template-columns:300px minmax\(600px,1fr\)/.test(code) &&
+    /#topology-live-body \.route-strip\{grid-template-columns:repeat\(6,minmax\(78px,1fr\)\)\}/.test(code),
+    'the tablet and ordinary-laptop layouts were changed by the phone packet');
+});
+
 
 // ── DOM harness: render the REAL page source, not a copy of it ─────────────
 // jsdom is not a dependency here and will not become one for a governance

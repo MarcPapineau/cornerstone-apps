@@ -673,8 +673,6 @@
     .command-header{display:flex;position:static}
     .view-nav{order:3;width:100%}.view-nav .view-tab{flex:1}
     .header-state{width:100%;flex-wrap:wrap;justify-content:flex-start}
-    /* Finger-sized hit areas for the only controls a phone operator uses. */
-    .view-tab,.hud-control,.ask-actions .action{min-height:44px}
     .core-stage{display:flex;flex-direction:column;min-height:0}
     /* An explicit width in a stacked flex column is laid out flush left, so the
        core is centred here rather than hanging off the edge of the column. */
@@ -683,6 +681,74 @@
     .core-path-track{grid-template-columns:1fr}.core-station::after{display:none}
     .evidence-deck{grid-template-columns:1fr}.event-panel{grid-column:auto}
     .ops-strip-cells{grid-template-columns:1fr}
+
+    /* ── V2 mobile operator cockpit ──
+       A phone gets the same instruments in a different reading order, never a
+       second dashboard and never a second authority: the operational strip, the
+       mission, the crew and its current action, the owner decision, the next
+       valid action and the last safe checkpoint are all readable before any
+       supporting evidence. Every rule below is order, wrapping, clamping or hit
+       size. Nothing is removed — clamped prose stays in the DOM and unabridged
+       in Detail View — and nothing here moves, so the reduced-motion control
+       still has nothing on this screen to suppress. Above 680px the desktop and
+       tablet Strategic HUD is untouched. */
+    .ops-strip{padding:0 12px 2px}
+    .ops-strip>.ops-strip-title{flex-wrap:wrap}
+    .ops-cell{padding:10px 12px}
+    /* One line tighter than the desktop clamp: five stacked cells must still
+       leave the mission on the same first screen. The complete canonical
+       sentence stays in the cell for assistive technology and Detail View. */
+    .ops-value{-webkit-line-clamp:3}
+    /* Presentation order only, for the deck cards and for the operator brief
+       below them. The DOM order the desktop deck and assistive technology read
+       is unchanged and no card or row is dropped: the supporting cards — routing
+       rationale, live evidence, builder-progress detail and elapsed — and the
+       two explanatory brief rows simply render after the decision answers
+       instead of splitting mission, current action, blocker, next step and
+       checkpoint across three phone screens. */
+    #founder-summary .command-card.is-routing,#founder-summary .command-card.is-live-evidence,
+    #founder-summary .command-card.is-progress,#founder-summary .command-card.is-elapsed{order:1}
+    .operator-brief{display:flex;flex-direction:column}
+    .operator-brief-title{order:0}
+    .brief-row[data-operator-brief="now"]{order:1}
+    .brief-row[data-operator-brief="needs-marc"]{order:2}
+    .brief-row[data-operator-brief="next"]{order:3}
+    .brief-row[data-operator-brief="finished"]{order:4}
+    .brief-row[data-operator-brief="verify"]{order:5}
+    /* The recent-decision log is the longest technical block on the deck, so at
+       phone width it reads after the health, decision and checkpoint
+       instruments rather than ahead of them. Demoted, never removed. */
+    .event-panel{order:1}#evidence-rail{order:2}#raw-state{order:3}
+    /* Finger-sized hit areas for every control a phone operator actually uses:
+       the governed Start, the Cancel and bounded Retry inside run history and
+       the recovery row, the Command/Detail view switch, reduced motion, and
+       each disclosure that holds demoted evidence. */
+    .view-tab,.hud-control,.ask-actions .action,button.action,.panel-summary,
+    .control-boundary>summary,.composer-options>summary,.founder-details>summary,
+    .mission-objective-detail>summary,.output-evidence summary,#raw-state>summary{min-height:44px}
+    .control-boundary>summary,.composer-options>summary,.founder-details>summary,
+    .mission-objective-detail>summary,.output-evidence summary{display:flex;align-items:center}
+    .btn-row{gap:10px}
+    .btn-row>button.action{flex:1 1 auto;padding:11px 14px}
+    /* A refusal reason belongs under its control, not squeezed beside it. */
+    .btn-row>.meta{flex:1 0 100%}
+    /* Below 16px mobile Safari zooms the page when a field takes focus, and it
+       is that zoom, not the layout, that pushes a governed form sideways. */
+    .field input,.field textarea,.field select,
+    .objective-composer .field:not(:first-child) input,
+    .objective-composer .field:not(:first-child) textarea,
+    .objective-composer .field:not(:first-child) select{min-height:44px;font-size:16px}
+    /* No sideways scroll: dense canonical values — subject lines, run
+       identifiers, commit hashes, state words — wrap inside their own panel
+       instead of widening the page. */
+    .mission-meta,.command-value,.brief-value,.row .name,.row .meta,.run-card h3,.run-card .meta,
+    .kv dt,.api-msg,.truth-card .meta,.hud-value,.hud-state{overflow-wrap:anywhere}
+    .kv{grid-template-columns:minmax(0,1fr);gap:2px}
+    .kv dt{margin-top:7px}
+    .chip{white-space:normal}
+    .row{flex-wrap:wrap}
+    .badges{justify-content:flex-start}
+    .context-cell,.context-cell.mono{max-width:100%}
   }
 </style>
 </head>
