@@ -1572,6 +1572,181 @@ test('RED: a confirmed use is never called "this run" when no run is bound', () 
     'with no binding the page must say so rather than imply the use belongs to the current run');
 });
 
+// ── V2 INTEGRATIONS — four questions, four separate answers, one authority ─
+// The Command View names a worker; the founder's next question is what that
+// worker can actually reach. Four different facts answer it, and collapsing any
+// two of them is the original connector defect returning by a different door:
+// how a call would reach the service (execution path), whether our credential
+// was valid at a dated check (authentication), whether the service itself last
+// answered a probe (verification), and whether the CURRENT bound run actually
+// consumed it (usage). These proofs hold three properties: the four are
+// rendered separately, an absent field is an explicit UNAVAILABLE rather than
+// the more flattering neighbouring fact, and the deck resolves them through the
+// same connector resolution the Detail View inspector already owns, so the two
+// surfaces can never answer the same question differently.
+function commandConnectorCards(page) {
+  return findByAttr(page.document.getElementById('integration-overview'), 'role');
+}
+
+function commandConnectorFacts(page) {
+  const cards = commandConnectorCards(page);
+  assert.strictEqual(cards.length, 1, `expected exactly one Command View connector card, found ${cards.length}`);
+  const facts = {};
+  for (const node of findByAttr(cards[0], 'data-connector-fact')) {
+    // Each fact line is an inline label plus its value; the rendered claim under
+    // test is the value, so a label can never satisfy a proof about evidence.
+    facts[node.attrs['data-connector-fact']] = {
+      state: node.attrs['data-connector-fact-state'],
+      text: node.children.length ? node.lastChild.textContent : node.textContent,
+      line: node.textContent,
+    };
+  }
+  return facts;
+}
+
+function integrationFixture(connector, boundRunId) {
+  const run = { runId: boundRunId, state: 'BUILT', objective: 'Explain the integrations from canonical state',
+    updatedAt: '2026-09-02T12:00:00.000Z' };
+  return fixtureState({
+    generatedAt: '2026-09-02T12:10:00.000Z',
+    integration: { connectors: { state: 'OK', connectors: [connector] } },
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, reason: 'exact current run is bound',
+    } },
+  });
+}
+
+test('the connection-side connector facts are resolved once and read by both Command View and the inspector', () => {
+  assert.ok(/function connectorFacts\(connector\)/.test(code), 'no connectorFacts() boundary found');
+  const fn = code.slice(code.indexOf('function connectorFacts'), code.indexOf('function renderConnectors'))
+    .replace(/\/\/[^\n]*/g, '');
+  assert.ok(fn.length > 0, 'the connectorFacts() body was not located');
+  assert.ok(/connector\.executionPath/.test(fn) && /connector\.authentication/.test(fn) &&
+    /connector\.lastVerified/.test(fn),
+    'the three connection facts are not each read from their own canonical projection field');
+  for (const derived of ['lastUsedByRun', 'usageMessage', 'health', 'staleness']) {
+    assert.ok(!new RegExp('\\b' + derived + '\\b').test(fn),
+      `connectorFacts() reads ${derived} — usage, health and freshness may never speak for a credential or a probe`);
+  }
+  const deck = code.slice(code.indexOf("var truth = el('div','truth-grid')"), code.indexOf('visibleHost = host'));
+  assert.ok(/connectorFacts\(resolvedConnector\(c\)\)/.test(deck),
+    'Command View resolves connector evidence outside the connector resolution the inspector already owns');
+  assert.ok(/usageMessage\(c\.lastUsedByRun/.test(deck),
+    'Command View usage no longer comes from the single usage authority');
+  const inspector = code.slice(code.indexOf("} else if (kind === 'connector'){"), code.indexOf("kv('Supports'"));
+  assert.ok(/connectorFacts\(connector\)/.test(inspector),
+    'the Detail View inspector derives the same facts a second time instead of reading the resolved ones');
+});
+
+test('DOM: the Command View connector card states execution path, authentication, verification and current-run usage separately', () => {
+  const connector = connectorFixture({ state: 'UNAVAILABLE' });
+  connector.authentication = { state: 'AUTHENTICATED',
+    plain: 'Our credential for this service was valid when checked 3 minute(s) ago.' };
+  connector.lastVerified = { state: 'FRESH', plain: 'Checked 3 minute(s) ago and it responded.' };
+  const facts = commandConnectorFacts(bootPage(integrationFixture(connector, 'RUN-INTEGRATION')));
+  assert.deepStrictEqual(Object.keys(facts).sort(),
+    ['authentication', 'execution-path', 'last-verified', 'used-by-current-run'],
+    'the four connector questions are not rendered as four separate answers');
+  assert.strictEqual(facts['execution-path'].state, 'RECORDED');
+  assert.match(facts['execution-path'].text, /^mcp$/, 'the recorded execution path was not rendered exactly');
+  assert.strictEqual(facts.authentication.state, 'AUTHENTICATED');
+  assert.match(facts.authentication.text, /valid when checked 3 minute\(s\) ago/,
+    'the card did not render the projector\'s own dated credential sentence');
+  assert.strictEqual(facts['last-verified'].state, 'FRESH');
+  assert.match(facts['last-verified'].text, /Checked 3 minute\(s\) ago and it responded/,
+    'the card did not render the projector\'s own verification sentence');
+  assert.strictEqual(facts['used-by-current-run'].state, 'UNAVAILABLE');
+  assert.match(facts['used-by-current-run'].text, /no record exists/,
+    'absent usage evidence was not reported as missing evidence');
+  assert.doesNotMatch(facts['used-by-current-run'].text, /\bUsed by this run\b/,
+    'an authenticated, freshly verified connector was rendered as one the current run used');
+  for (const field of ['authentication', 'last-verified']) {
+    assert.doesNotMatch(facts[field].text, /\bused\b|\bconsulted\b/i,
+      `the ${field} answer claims consumption, which only a usage receipt may state`);
+  }
+});
+
+test('DOM: only an exact current-run usage receipt lets a connector card say the bound run used it', () => {
+  const connector = connectorFixture({ state: 'USED', runId: 'RUN-USE',
+    observedAt: '2026-09-02T11:00:00.000Z', ledgerConfirmed: true });
+  connector.authentication = { state: 'AUTHENTICATED', plain: 'Credential valid when checked 2 minute(s) ago.' };
+  connector.lastVerified = { state: 'FRESH', plain: 'Checked 2 minute(s) ago and it responded.' };
+  const used = commandConnectorFacts(bootPage(integrationFixture(connector, 'RUN-USE')));
+  assert.strictEqual(used['used-by-current-run'].state, 'USED_CURRENT');
+  assert.match(used['used-by-current-run'].text, /Used by this run \(RUN-USE\)/,
+    'a ledger-confirmed use by the bound run was not attributed to it');
+  assert.strictEqual(used.authentication.state, 'AUTHENTICATED',
+    'a proven use rewrote the separate credential answer');
+
+  const other = commandConnectorFacts(bootPage(integrationFixture(connector, 'RUN-OTHER')));
+  assert.strictEqual(other['used-by-current-run'].state, 'USED_HISTORICAL');
+  assert.match(other['used-by-current-run'].text, /not the current run \(RUN-OTHER\)/,
+    'a use recorded for a different run was not distinguished from the bound run');
+  assert.doesNotMatch(other['used-by-current-run'].text, /\bUsed by this run\b/);
+});
+
+test('DOM: missing credential, verification or execution evidence renders explicit UNAVAILABLE, never a neighbouring fact', () => {
+  const connector = connectorFixture({ state: 'USED', runId: 'RUN-BARE',
+    observedAt: '2026-09-02T11:30:00.000Z', ledgerConfirmed: true });
+  delete connector.authStatus;
+  connector.executionPath = 'UNKNOWN';
+  connector.health = 'HEALTHY';
+  connector.staleness = { state: 'FRESH', ageMinutes: 1 };
+  const facts = commandConnectorFacts(bootPage(integrationFixture(connector, 'RUN-BARE')));
+  for (const field of ['execution-path', 'authentication', 'last-verified']) {
+    assert.strictEqual(facts[field].state, 'UNAVAILABLE',
+      `${field} was reported as a fact the projection does not carry`);
+    assert.match(facts[field].text, /^UNAVAILABLE — /,
+      `${field} absence is not stated as an explicit honest absence: ${facts[field].text}`);
+    assert.doesNotMatch(facts[field].text, /HEALTHY|FRESH|RUN-BARE/,
+      `${field} borrowed health, freshness or usage evidence to fill its own gap`);
+  }
+  // The one fact that IS recorded stays fully reported: an absence elsewhere
+  // must not suppress evidence the ledger actually confirmed.
+  assert.strictEqual(facts['used-by-current-run'].state, 'USED_CURRENT');
+  assert.match(facts['used-by-current-run'].text, /Used by this run \(RUN-BARE\)/);
+});
+
+test('DOM: a minimized live connector card answers through the existing inspector resolution, not a second one', () => {
+  const rich = connectorFixture({ state: 'UNAVAILABLE' });
+  rich.authentication = { state: 'AUTHENTICATED', plain: 'Credential checked from dated evidence.' };
+  rich.lastVerified = { state: 'FRESH', plain: 'Probe succeeded from dated evidence.' };
+  const page = bootPage(fixtureState({
+    integration: { connectors: { state: 'OK', connectors: [rich] } },
+  }));
+  // The real minimized payload carries no authentication or verification
+  // object; only the display allowlist hosting is permitted to publish.
+  renderMinimizedStatus(page, {
+    generatedAt: '2026-09-02T13:00:00.000Z',
+    engineering: fixtureState().engineering,
+    integration: { connectors: { state: 'OK', connectors: [{
+      label: rich.label, provider: rich.provider, executionPath: rich.executionPath,
+      health: rich.health, staleness: rich.staleness, authStatus: rich.authStatus,
+      lastUsedByRun: rich.lastUsedByRun, legacy: false,
+    }] } },
+    reviewers: [], cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [],
+    runsBinding: { state: 'UNAVAILABLE', runId: null, updatedAt: null,
+      evidenceState: 'OK', reason: 'no run records exist yet, so no run is current.' },
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  });
+  const facts = commandConnectorFacts(page);
+  assert.strictEqual(facts.authentication.state, 'AUTHENTICATED');
+  assert.match(facts.authentication.text, /Credential checked from dated evidence/,
+    'the live card did not resolve credential evidence through the existing connector resolution');
+  assert.match(facts['last-verified'].text, /Probe succeeded from dated evidence/,
+    'the live card did not resolve verification evidence through the existing connector resolution');
+
+  const cards = commandConnectorCards(page);
+  cards[0]._listeners.click[0]();
+  const inspector = page.text('inspector');
+  for (const field of ['execution-path', 'authentication', 'last-verified']) {
+    assert.ok(inspector.includes(facts[field].text),
+      `Command View and the Detail View inspector disagree about ${field}: ` +
+      `card said "${facts[field].text}"`);
+  }
+});
+
 // ── FINDING #7 RED PROOFS: binding, not array position ────────────────────
 test('RED: the current run is selected by timestamp, not by array position', () => {
   // Deliberately out of order: the NEWEST run is FIRST in the array, and the

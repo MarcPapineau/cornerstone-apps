@@ -354,6 +354,10 @@
   #integration-overview .truth-card .meta{font-size:12px;line-height:1.45;overflow-wrap:anywhere}
   #integration-overview .truth-card .usage-summary{display:-webkit-box;-webkit-box-orient:vertical;
     -webkit-line-clamp:3;overflow:hidden}
+  #integration-overview .truth-card .connector-fact{display:-webkit-box;-webkit-box-orient:vertical;
+    -webkit-line-clamp:2;overflow:hidden}
+  #integration-overview .truth-card .connector-fact-label{color:var(--text-1);font:600 10px/1.3 var(--mono);
+    letter-spacing:.12em}
   #integration-overview .truth-card:hover{border-color:var(--cyan)}
   #integration-overview .truth-card:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
   #inspector{min-height:104px}.right-rail .body{padding:14px}
@@ -2262,9 +2266,29 @@
         card.setAttribute('role','button');
         card.setAttribute('aria-label', c.label + ' connector evidence');
         card.appendChild(el('div','name',c.label));
-        card.appendChild(el('div','meta','Auth ' + (c.authStatus || 'UNAVAILABLE') + ' · health ' + (c.health || 'UNKNOWN')));
+        // Resolved through the inspector's own resolution, so Command View and
+        // the Detail View can never give two answers to the same question.
+        var facts = connectorFacts(resolvedConnector(c));
+        function factLine(field, label, fact){
+          var line = el('div','meta connector-fact');
+          line.setAttribute('data-connector-fact', field);
+          line.setAttribute('data-connector-fact-state', fact.state);
+          line.appendChild(el('span','connector-fact-label', label + ' '));
+          line.appendChild(document.createTextNode(fact.text));
+          card.appendChild(line);
+        }
+        factLine('execution-path','EXECUTION PATH', facts.executionPath);
+        // Authentication and verification are stated before usage and never as
+        // part of it: a valid credential and a service that answered a probe are
+        // two facts about reachability, not evidence that anything called it.
+        factLine('authentication','AUTHENTICATION', facts.authentication);
+        factLine('last-verified','LAST VERIFIED', facts.lastVerified);
+        card.appendChild(el('div','meta','Health ' + (c.health || 'UNKNOWN')));
         var usage = usageMessage(c.lastUsedByRun, bind && bind.state === 'BOUND' ? bind.runId : null);
-        card.appendChild(el('div','meta usage-summary',usage.text));
+        var usageLine = el('div','meta usage-summary',usage.text);
+        usageLine.setAttribute('data-connector-fact','used-by-current-run');
+        usageLine.setAttribute('data-connector-fact-state', usage.state);
+        card.appendChild(usageLine);
         card.appendChild(chip(usage.state === 'USED_CURRENT' ? 'ACTIVE' :
           (usage.state === 'USED_HISTORICAL' ? 'STALE' : usage.state)));
         card.addEventListener('click', function(){ select(card, 'connector', c); });
@@ -2710,6 +2734,51 @@
       'Usage state "' + used.state + '" is not one this page knows how to read, so it is reported as-is rather than guessed at.' };
   }
 
+  // ── the connection-side connector facts, resolved once ────────────────────
+  // Command View and the Detail View inspector ask a connector the same three
+  // questions, so they are answered here once and read twice. There is no
+  // second authority and no inference between them: the execution path is how a
+  // call would reach the service, authentication is whether our credential was
+  // valid at a dated check, and verification is whether the service itself last
+  // answered a probe. Each is taken verbatim from the field the projector wrote
+  // for it, and a field the projection does not carry is an explicit
+  // UNAVAILABLE — never a blank, and never the more flattering neighbouring
+  // fact. The fourth question — whether a run actually consumed this connector
+  // — is deliberately NOT answered here: usageMessage() is its single authority,
+  // and keeping it separate is what stops a working credential from being read
+  // as evidence of use.
+  function connectorFact(state, text){ return { state: state, text: text }; }
+  function connectorFacts(connector){
+    connector = connector || {};
+    var path = typeof connector.executionPath === 'string' && connector.executionPath &&
+      connector.executionPath !== 'UNKNOWN'
+      ? connectorFact('RECORDED', connector.executionPath)
+      : connectorFact('UNAVAILABLE',
+        'UNAVAILABLE — this projection records no execution path, so how a call would reach this service is unknown.');
+    var auth;
+    if (connector.authentication && typeof connector.authentication === 'object' &&
+        typeof connector.authentication.state === 'string' && connector.authentication.state){
+      auth = connectorFact(connector.authentication.state, connector.authentication.state +
+        (connector.authentication.plain ? ' — ' + connector.authentication.plain : ''));
+    } else if (typeof connector.authStatus === 'string' && connector.authStatus){
+      auth = connectorFact(connector.authStatus, connector.authStatus +
+        ' — this projection carries the dated credential verdict only; no explanation travelled with it.');
+    } else {
+      auth = connectorFact('UNAVAILABLE',
+        'UNAVAILABLE — no dated credential evidence is recorded for this connector.');
+    }
+    var verified;
+    if (connector.lastVerified && typeof connector.lastVerified === 'object' &&
+        typeof connector.lastVerified.state === 'string' && connector.lastVerified.state){
+      verified = connectorFact(connector.lastVerified.state, connector.lastVerified.state +
+        (connector.lastVerified.plain ? ' — ' + connector.lastVerified.plain : ''));
+    } else {
+      verified = connectorFact('UNAVAILABLE',
+        'UNAVAILABLE — this projection records no verification evidence, so when this service last answered is unknown.');
+    }
+    return { executionPath: path, authentication: auth, lastVerified: verified };
+  }
+
   // ── connectors ──────────────────────────────────────────────────
   // The generated snapshot and every live /api/status payload use this same
   // renderer. The source shape is intentionally accepted in both forms:
@@ -2861,14 +2930,15 @@
       kv('Auth', known(connector.authStatus));
       // THREE INDEPENDENT FACTS, never inferred from each other: a connector can
       // be authenticated and freshly verified and still be UNAVAILABLE for
-      // usage, because being reachable is not being consulted.
-      if (connector.authentication) kv('Authenticated', known(connector.authentication.state) + ' — ' + known(connector.authentication.plain));
-      else kv('Authenticated', known(connector.authStatus));
-      if (connector.lastVerified) kv('Last verified', known(connector.lastVerified.state) + ' — ' + known(connector.lastVerified.plain));
-      else kv('Last verified', known(null));
+      // usage, because being reachable is not being consulted. The first two are
+      // resolved by the same connectorFacts() Command View reads, so the deck
+      // and this drill-down cannot disagree about the same evidence.
+      var connectorEvidence = connectorFacts(connector);
+      kv('Authenticated', connectorEvidence.authentication.text);
+      kv('Last verified', connectorEvidence.lastVerified.text);
       if (connector.lastUsedByRun) kv('Last used by a run', connector.lastUsedByRun.plain || usageMessage(connector.lastUsedByRun, null).text);
       else kv('Last used by a run', usageMessage(null, null).text);
-      kv('Execution path', known(connector.executionPath));
+      kv('Execution path', connectorEvidence.executionPath.text);
       kv('Supports', (connector.capabilities||[]).join(', ') || 'UNAVAILABLE — no capability list in the current or generated projection');
       kv('Declared NOT supported', (connector.declaredNotSupported||[]).join(', ') || 'UNAVAILABLE — no exclusion list in the current or generated projection');
       kv('Failures', known(connector.failureCount));
