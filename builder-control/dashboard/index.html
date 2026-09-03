@@ -788,6 +788,157 @@
     .context-cell,.context-cell.mono{max-width:100%}
   }
 
+  /* ── wide-screen Strategic Systems HUD treatment ──────────────────
+     Depth, rails, hierarchy and one static surface texture for the wide command
+     centre. It is paint over boxes that already exist: apart from its own
+     decorative ::before / ::after hairlines, every rule below sets only a
+     colour, a background, a shadow or a border colour, so it moves nothing and
+     resizes nothing. It is declared BEFORE the density layer that follows, so
+     density wins every tie and the compact wide-screen fit is still set there
+     and nowhere else.
+
+     Nothing is hidden. There is no display:none, no visibility:hidden, no
+     opacity:0 and no line clamp here, so every module, station, card, chip and
+     canonical sentence still renders exactly where it did.
+
+     No accent invents a reading. Status rails appear only on the state hooks the
+     page already paints — #operator-shell[data-run-status],
+     .ops-cell[data-ops-state], .core-station.is-current / .is-from,
+     .command-card.is-now / .is-blocked / .is-clear and .route-node.is-PASS /
+     .is-ACTIVE — and every one of them sits beside the canonical state word, its
+     glyph and its chip, so the page stays completely readable with colour
+     removed. The corner tick on the six evidence modules is deliberately still a
+     tick and not a full-width bar: the shipped category colours put green on the
+     Evidence and Checkpoint modules, and a green edge running the width of a
+     module would read as PASS on a module that has reported nothing.
+
+     There is no texture behind the HUD stage, because there is no texture
+     anywhere in this layer. Depth here is flat colour, a border and an inset
+     shadow only: no gradient, no image, no url(), nothing that tiles, blends or
+     repeats. A backdrop with no artwork in it has nothing that can shimmer,
+     travel or resolve differently as a panel resizes, and it is identical
+     whether a run is active, blocked or idle, so it is surface and cannot be
+     read as activity. The one halo this layer does
+     change it removes: the panel corner bracket and the ACTIVE route node give
+     up their soft glow for a crisp rail, because a glow reads as a light source
+     that is on. There is no animation, no transition, no timer and no travelling
+     highlight anywhere in this block, so reduced motion still has nothing here
+     to suppress. Below 1100px this block does not apply at all. */
+  @media (min-width:1100px){
+    /* Chrome: one crisp rule under the header instead of a soft edge. */
+    .command-header{border-bottom-color:#26586f;
+      box-shadow:0 12px 30px rgba(0,0,0,.42),inset 0 -1px 0 rgba(57,198,255,.24)}
+
+    /* Panel depth. A seated plate: top-lit inner hairline, shaded inner base and
+       one soft drop shadow. Panels that carry a shipped signal — .live-panel,
+       .event-panel, #founder-summary, .strategic-core, the idle
+       .objective-composer — keep their own colour, because those rules are
+       id-scoped or !important and this one is deliberately neither. */
+    .command-shell section,.command-shell details.panel{border-color:#26455b;background:#0f1720;
+      box-shadow:0 16px 32px rgba(0,0,0,.34),inset 0 1px 0 rgba(154,196,226,.08),inset 0 -1px 0 rgba(0,0,0,.4)}
+    .command-shell section>h2,.panel-summary{color:#a8c2d7;background:#0b131b;border-bottom-color:#26455b;
+      box-shadow:inset 0 -1px 0 rgba(0,0,0,.45)}
+    .command-shell section::before,.command-shell details.panel::before{width:46px;height:2px;box-shadow:none}
+    .command-shell section::after,.command-shell details.panel::after{width:2px;height:18px;opacity:.9}
+
+    /* ── Strategic Systems HUD ──
+       The stage is one flat plate: a single colour a step above the panel behind
+       it and a step below the instrument modules on top of it, seated by a
+       top-lit inner hairline, a shaded inner base and a ruled inner edge. Then
+       two crisp concentric rings instead of one hazy one. */
+    .core-stage{background:#08131d;
+      box-shadow:inset 0 0 0 1px rgba(34,81,108,.45),inset 0 1px 0 rgba(154,196,226,.05),
+      inset 0 -1px 0 rgba(0,0,0,.42)}
+    .core-stage::before{border-color:#2c6a8b;box-shadow:none}
+    .core-stage::after{border-color:#1f4a63;opacity:.9}
+
+    /* The six evidence modules, as seated instrument plates with a ruled header.
+       The corner tick is module identity, not status: its colour is fixed by
+       which module it is and never changes with the value inside it, and the
+       module is named in words directly under it. */
+    .core-node{border-color:#2d4e66;background:#0a1622;
+      box-shadow:0 12px 24px rgba(0,0,0,.36),inset 0 1px 0 rgba(154,196,226,.09)}
+    .core-node::before{width:40px;height:2px}
+    .core-node h3{color:#a8c2d7;border-bottom-color:#26425a}
+
+    /* AEGIS Core: a heavier rim and a seated well, so the control plane reads as
+       the centre of the instrument. What the rim says is still set only by the
+       shipped #operator-shell[data-run-status] rules, which are id-scoped and
+       still win here — this changes the well and the rim thickness, never the
+       reading, and the state word stays written inside the core. The rim is the
+       only border width this layer touches, and the core is a fixed-diameter
+       border-box circle, so even that reflows nothing. */
+    .aegis-core{border-width:2px;background:#0d2232;
+      box-shadow:0 0 0 9px rgba(51,185,239,.04),0 0 46px rgba(51,185,239,.18),
+      inset 0 1px 0 rgba(154,196,226,.1),inset 0 -20px 34px rgba(0,0,0,.5)}
+    .aegis-core::before{border-color:rgba(51,185,239,.34)}
+    .core-mark{color:#e2f7ff}
+    .core-legend{border-top-color:#22516c}
+
+    /* ── handoff path ──
+       Nine seated station plates on one ruled track. Exactly two plates can be
+       marked and both marks are the shipped ones: .is-current, which the plate
+       also states in words, and .is-from. Every unmarked station keeps the same
+       plate as every other, so "not reached" is never a colour. */
+    .core-path{border-top-color:#22516c}
+    .core-path-head h3{color:#a8c2d7}
+    .core-station{border-color:#2d4e66;background:#0a1622;
+      box-shadow:inset 0 1px 0 rgba(154,196,226,.07)}
+    .core-station::after{background:#3d6786}
+    .core-station.is-current{box-shadow:inset 3px 0 0 var(--cyan),inset 0 1px 0 rgba(154,196,226,.1)}
+    .core-station.is-from{border-color:#4a7d9e;box-shadow:inset 3px 0 0 #4a7d9e,inset 0 1px 0 rgba(154,196,226,.07)}
+    .core-station-name{color:var(--text-0)}
+
+    /* ── mission brief ──
+       The owner's first block, given the strongest frame on the rail. The three
+       decision cards keep the shipped inset state bar as their signal; it is one
+       pixel wider here and nothing else about it changes. */
+    #founder-summary{border-color:#2b6280;background:#0f1d2b;
+      box-shadow:0 16px 32px rgba(0,0,0,.36),inset 0 1px 0 rgba(154,196,226,.09)}
+    #founder-summary>h2{background:#0d2331;border-bottom-color:#2b6280;box-shadow:inset 0 -1px 0 rgba(0,0,0,.4)}
+    #founder-summary .mission-head{border-bottom-color:#2b6280}
+    #founder-summary .command-card{border-color:#2d4e66;background:#09131d}
+    #founder-summary .command-card.is-now{border-color:rgba(74,163,255,.62);box-shadow:inset 4px 0 0 var(--active)}
+    #founder-summary .command-card.is-blocked{border-color:rgba(229,72,77,.5);box-shadow:inset 4px 0 0 var(--fail)}
+    #founder-summary .command-card.is-clear{border-color:rgba(63,185,138,.5);box-shadow:inset 4px 0 0 var(--pass)}
+    .operator-brief{border-color:#31586f;background:#0e1e2a;box-shadow:inset 0 1px 0 rgba(154,196,226,.07)}
+    .handoff{border-color:#31586f;background:#0e1c27}
+
+    /* ── operational instruments ──
+       Five seated cells, each with one status rail. Every rail keys off the
+       canonical state word the cell already prints as its chip label and repeats
+       as data-ops-state, and every word keyed here is one the shipped .s-STATE
+       chip rules already name in the same colour, so a rail can only repeat a
+       reading the cell has already written out in text with its glyph. */
+    .ops-strip>.ops-strip-title{color:#a8c2d7;border-bottom-color:#26455b}
+    .ops-cell{border-color:#2d4e66;background:#0c1a25;
+      box-shadow:0 10px 20px rgba(0,0,0,.3),inset 0 1px 0 rgba(154,196,226,.08)}
+    .ops-cell[data-ops-state="PASS"],.ops-cell[data-ops-state="COMPLETE"],
+    .ops-cell[data-ops-state="HEALTHY"],.ops-cell[data-ops-state="FRESH"],
+    .ops-cell[data-ops-state="AVAILABLE"]{border-left-color:var(--pass)}
+    .ops-cell[data-ops-state="WARNING"],.ops-cell[data-ops-state="DEGRADED"],
+    .ops-cell[data-ops-state="STALE"]{border-left-color:var(--warn)}
+    .ops-cell[data-ops-state="FAILED"],.ops-cell[data-ops-state="FAIL"],
+    .ops-cell[data-ops-state="MISSING"]{border-left-color:var(--fail)}
+    .ops-cell[data-ops-state="IDLE"],.ops-cell[data-ops-state="WAITING"],
+    .ops-cell[data-ops-state="UNAVAILABLE"],.ops-cell[data-ops-state="DISCONNECTED"]{border-left-color:var(--stale)}
+    .ops-cell[data-ops-state="UNVERIFIED"],.ops-cell[data-ops-state="UNKNOWN"],
+    .ops-cell[data-ops-state="NOT_REQUIRED"],.ops-cell[data-ops-state="PROGRESS_UNRECORDED"],
+    .ops-cell[data-ops-state="NOT_RUNNING"]{border-left-color:var(--unknown)}
+
+    /* ── build route and evidence instruments ──
+       The ACTIVE stage trades its outer halo for a crisp inset rail. It keeps the
+       shipped cyan border and the stage still prints its own state word and
+       glyph, so nothing is lost except the impression of emitted light. */
+    .route-node{border-color:#2d4e66;background:#0d1a26;box-shadow:inset 0 1px 0 rgba(154,196,226,.08)}
+    .route-node::after{background:#3d6786}
+    .route-node.is-PASS{box-shadow:inset 3px 0 0 var(--pass),inset 0 1px 0 rgba(154,196,226,.08)}
+    .route-node.is-ACTIVE{box-shadow:inset 3px 0 0 var(--cyan),inset 0 1px 0 rgba(154,196,226,.1)}
+    .deck-heading h3{color:#a8c2d7}
+    .evidence-panel{border-color:#2d4e66;background:#0a1622;box-shadow:inset 0 1px 0 rgba(154,196,226,.07)}
+    .evidence-panel>h3{color:#a8c2d7}
+  }
+
   /* ── wide-screen Command View density ──
      One cockpit, not a four-screen document. At 1100px and above the working
      command centre has to answer on its first screen: the header, the five

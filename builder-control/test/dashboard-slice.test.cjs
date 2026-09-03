@@ -1134,6 +1134,241 @@ test('the wide Command View fits the whole HUD, all nine stations and the build 
     'the phone cockpit was changed by the wide-screen density packet');
 });
 
+// ── wide-screen Strategic Systems HUD treatment (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// The failure guarded here is a command centre that looks like one by inventing
+// signal: a halo that implies a run is emitting light, a rail that colours a
+// state nothing reported, a texture pulled from an asset or bound to a run
+// status, or "depth" that quietly resizes a panel and pushes an instrument off
+// the screen the density layer above just finished fitting.
+//
+// The treatment layer is declared BEFORE the density layer, so density wins
+// every tie and the compact wide fit is still decided by exactly the block the
+// tests above hold. That ordering is itself asserted, because reversing it would
+// silently move authority over the fit into an untested block.
+const hudStart = code.indexOf('@media (min-width:1100px)');
+const HUD = hudStart === -1 ? '' : code.slice(hudStart, code.indexOf('\n  }', hudStart));
+
+// Paint, and nothing else. Every property here changes how a shipped box looks;
+// none of them changes where it is, how large it is, or whether it renders.
+const HUD_PAINT_ONLY = new Set(['color', 'background', 'background-color', 'background-image',
+  'background-size', 'background-position', 'background-repeat', 'border-color', 'border-top-color',
+  'border-right-color', 'border-bottom-color', 'border-left-color', 'border-width', 'box-shadow',
+  'opacity']);
+// Geometry is tolerated only on the layer's own decorative pseudo-elements,
+// which are hairlines that occupy no layout space of their own.
+const HUD_PSEUDO_GEOMETRY = new Set(['width', 'height']);
+
+function hudRules() {
+  const rules = [];
+  for (const rule of HUD.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    rules.push({ selectors: rule[1].split(',').map((s) => s.trim()).filter(Boolean), body: rule[2] });
+  }
+  return rules;
+}
+
+// Multi-layer shadows and rgba() carry commas but never semicolons, so a
+// semicolon split is an exact declaration split for this stylesheet.
+function hudDeclarations(body) {
+  return body.split(';').map((part) => part.trim()).filter(Boolean).map((part) => {
+    const colon = part.indexOf(':');
+    return { prop: part.slice(0, colon).trim().toLowerCase(), value: part.slice(colon + 1).trim() };
+  });
+}
+
+test('the wide Strategic Systems HUD treatment cannot hide, move, animate or fabricate anything', () => {
+  assert.ok(HUD.length > 0, 'the wide Strategic Systems HUD treatment block was not located');
+  assert.ok(hudRules().length > 0, 'the treatment layer declares no rules');
+  assert.ok(hudStart < wideStart && HUD !== WIDE,
+    'the treatment layer no longer precedes the density layer, so density no longer wins a tie and the compact wide fit is decided somewhere its own proofs do not reach');
+
+  // Nothing disappears. The cheapest way to make a dense panel look calm is to
+  // stop drawing part of it, and this page exists to not do that.
+  for (const rule of hudRules()) {
+    const target = rule.selectors.join(',');
+    for (const { prop, value } of hudDeclarations(rule.body)) {
+      assert.ok(prop !== 'display' || value !== 'none', `${target} hides an instrument`);
+      assert.ok(prop !== 'visibility' && prop !== 'content-visibility' && prop !== 'overflow',
+        `${target} hides or clips an instrument with ${prop}`);
+      if (prop === 'opacity') {
+        assert.ok(Number(value) > 0, `${target} renders an instrument at opacity ${value}`);
+      }
+    }
+  }
+  assert.ok(!/-webkit-line-clamp/.test(HUD),
+    'the treatment layer clamps prose — clamping belongs to the density layer, which holds its own proofs about what may be clamped');
+
+  // No motion of any kind, so reduced motion still has nothing here to suppress,
+  // and no glow, sweep or gradient that could read as travel.
+  assert.ok(!/@keyframes/.test(HUD) && !/\banimation\b/.test(HUD) && !/\btransition\b/.test(HUD) &&
+    !/\bwill-change\b/.test(HUD) && !/\btransform\b/.test(HUD),
+    'the treatment layer introduced motion — an instrument panel may not animate');
+  // No second authority and no dependency: this layer is stylesheet text, so it
+  // may not carry a script, a data source, an asset or a network fetch.
+  for (const banned of ['url(', 'setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now',
+    'fetch(', 'AEGIS_STATE', 'conic-gradient', '!important']) {
+    assert.ok(!HUD.includes(banned), `the treatment layer uses ${banned} — it may only repaint shipped boxes`);
+  }
+  // It writes no words and no glyphs of its own, so it cannot state anything
+  // canonical state has not stated.
+  for (const declared of HUD.matchAll(/content\s*:\s*([^;}]+)/g)) {
+    assert.strictEqual(declared[1].trim(), '""',
+      'the treatment layer writes its own label or glyph into the page');
+  }
+});
+
+test('the wide HUD treatment repaints only, so the compact wide fit and every narrower layout survive it', () => {
+  const borderWidthOn = new Set();
+  for (const rule of hudRules()) {
+    const target = rule.selectors.join(',');
+    const pseudoOnly = rule.selectors.every((selector) => /::(before|after)$/.test(selector));
+    for (const { prop } of hudDeclarations(rule.body)) {
+      if (HUD_PAINT_ONLY.has(prop)) {
+        if (prop === 'border-width') for (const selector of rule.selectors) borderWidthOn.add(selector);
+        continue;
+      }
+      assert.ok(pseudoOnly && HUD_PSEUDO_GEOMETRY.has(prop),
+        `${target} declares ${prop}, which resizes or moves a shipped box instead of repainting it`);
+    }
+  }
+  // One border width changes, and it reflows nothing: .aegis-core is a fixed
+  // width/height box-sizing:border-box circle, so a heavier rim is paid for out
+  // of the core's own padding and no neighbour moves.
+  assert.deepStrictEqual([...borderWidthOn].sort(), ['.aegis-core'],
+    'the treatment layer changes a border width on a box whose size is not already fixed, which reflows the compact wide fit');
+  assert.ok(/\.aegis-core\{position:relative;z-index:2;grid-column:2;grid-row:2;justify-self:center;width:188px;height:188px/.test(code) &&
+    /\.aegis-core\{width:148px;height:148px/.test(WIDE),
+    'the AEGIS Core no longer has a fixed diameter, so its rim weight now reflows the HUD stage');
+
+  // The fit itself is still the density layer's, untouched.
+  assert.ok(/\.strategic-core\{min-height:0\}/.test(WIDE) && /\.core-stage\{min-height:0;gap:10px\}/.test(WIDE) &&
+    /\.command-shell\{padding:10px 14px 14px;gap:12px\}/.test(WIDE),
+    'the treatment packet rebuilt the compact wide-screen fit instead of painting over it');
+
+  // Below 1100px nothing moved at all: the shipped HUD geometry, the tablet
+  // stack and the phone cockpit are exactly the styles they shipped with.
+  assert.ok(/\.core-stage\{position:relative;min-height:430px;display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/.test(code) &&
+    /\.core-node\{position:relative;z-index:1;min-height:92px;padding:12px 13px 13px/.test(code) &&
+    /\.core-station\{position:relative;min-width:0;padding:8px 9px 8px 11px/.test(code),
+    'the shipped sub-1100px HUD geometry was rebuilt by the treatment packet');
+  assert.ok(/#topology-live-body \.route-strip\{grid-template-columns:repeat\(3,minmax\(100px,1fr\)\)\}/.test(code) &&
+    /\.command-shell\{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"\}/.test(code),
+    'the 681–1099px tablet stack was changed by the wide-screen treatment packet');
+  assert.ok(/\.core-stage\{display:flex;flex-direction:column;min-height:0\}/.test(PHONE) &&
+    /\.core-path-track\{grid-template-columns:1fr\}/.test(PHONE) &&
+    /\.ops-strip-cells\{grid-template-columns:1fr\}/.test(PHONE),
+    'the phone cockpit was changed by the wide-screen treatment packet');
+});
+
+test('every wide HUD accent restates a canonical state word the page already prints in text', () => {
+  // Canonical state tokens are reserved for boxes that carry a canonical state
+  // hook. Chrome hairlines in this layer — the header rule, the panel bracket,
+  // the stage graticule — use explicit low-alpha rgba precisely so that the
+  // tokens keep meaning "this repeats a reported state" and nothing else.
+  const stateToken = /var\(--(pass|fail|warn|blocked|active|stale|unknown|cyan)\)/;
+  const stateHooks = [/\[data-run-status=/, /\[data-ops-state=/, /\.is-current\b/, /\.is-from\b/,
+    /\.is-now\b/, /\.is-blocked\b/, /\.is-clear\b/, /\.is-PASS\b/, /\.is-ACTIVE\b/, /\.s-[A-Z_]+/];
+  let railed = 0;
+  for (const rule of hudRules()) {
+    if (!stateToken.test(rule.body)) continue;
+    for (const selector of rule.selectors) {
+      assert.ok(stateHooks.some((hook) => hook.test(selector)),
+        `${selector} paints a canonical state colour on a box that carries no canonical state hook`);
+      railed++;
+    }
+  }
+  assert.ok(railed > 0, 'the treatment layer claims status-bound accent rails but binds none to a state hook');
+
+  // A rail may only key off a state word the shipped chip vocabulary already
+  // names, so the rail and the chip printed beside it can never disagree.
+  const chipStates = new Set([...code.matchAll(/\.s-([A-Z_]+)\b/g)].map((match) => match[1]));
+  const railStates = [...code.matchAll(/\[data-ops-state="([A-Z_]+)"\]/g)].map((match) => match[1]);
+  assert.ok(railStates.length > 0, 'no operational rail keys off a canonical state word');
+  for (const state of railStates) {
+    assert.ok(chipStates.has(state),
+      `a status rail keys off ${state}, which the shipped .s-STATE chip vocabulary never names`);
+  }
+
+  // Colour is emphasis, never the signal. Every box this layer rails still
+  // carries its own written state, and the renderers that write it are
+  // untouched — so the page reads identically with colour removed.
+  const source = htmlSrc();
+  for (const id of ['hud-mission-state', 'hud-crew-state', 'hud-review-state', 'hud-gate-state',
+    'hud-evidence-state', 'hud-checkpoint-state', 'hud-core-status']) {
+    assert.ok(source.includes('id="' + id + '"'),
+      `${id} lost the written state that its module's accent only repeats`);
+  }
+  assert.ok(/node\.setAttribute\('data-ops-state', cell\.state\)/.test(code) &&
+    /node\.appendChild\(chip\(cell\.chip\)\)/.test(code),
+    'an operational cell carries a status rail without the chip and state word the rail repeats');
+  assert.ok(/item\.appendChild\(el\('span','core-station-mark',/.test(code),
+    'a handoff station carries a rail without the written mark the rail repeats');
+  // The six evidence modules are marked by identity, not by status: no rule in
+  // this layer ties a module's corner tick to a run state or an ops state.
+  for (const rule of hudRules()) {
+    if (!rule.selectors.some((selector) => /^\.core-node/.test(selector))) continue;
+    for (const selector of rule.selectors) {
+      assert.ok(!/\[data-run-status=|\[data-ops-state=/.test(selector),
+        `${selector} makes an evidence module's category tick change with a run state it never reported`);
+    }
+  }
+});
+
+test('the wide HUD surface is flat, static, asset-free, gradient-free and identical in every run state', () => {
+  // This layer paints no artwork of any kind. The page already holds a global
+  // invariant that no decorative gradient or CSS-art mark may enter the
+  // stylesheet, and the wide treatment does not get an exemption from it: the
+  // only surface it is allowed is flat colour, a border and an inset shadow.
+  // Everything banned here is a way of drawing a surface that can tile, blend,
+  // resolve differently as a panel resizes, or move under the page as it
+  // scrolls — and a backdrop that moves reads as activity nothing reported.
+  for (const banned of ['gradient(', 'url(', 'image-set(', 'element(', 'paint(', 'background-image',
+    'background-size', 'background-position', 'background-repeat', 'background-attachment',
+    'background-blend-mode', 'mix-blend-mode', 'filter', 'backdrop-filter', 'mask']) {
+    assert.ok(!HUD.includes(banned),
+      `the treatment layer builds surface with ${banned} — the HUD backdrop is flat colour, border and inset shadow only`);
+  }
+
+  // The stage still reads as a seated plate, and it gets that the only way this
+  // layer may: one flat colour, and depth that is entirely inset. An OUTER
+  // shadow on the stage would be a glow around the instrument field, which is a
+  // light source, which is a claim that something is on.
+  const stage = hudRules().filter((rule) => rule.selectors.includes('.core-stage'));
+  assert.strictEqual(stage.length, 1,
+    'the HUD stage backdrop is not one rule — technical surface is a backdrop, not a decoration budget');
+  assert.deepStrictEqual(stage[0].selectors, ['.core-stage'],
+    'the HUD stage backdrop moved onto a box that carries evidence');
+  const stageDeclarations = hudDeclarations(stage[0].body);
+  const stageBackground = stageDeclarations.find((declaration) => declaration.prop === 'background');
+  assert.ok(stageBackground && /^#[0-9a-f]{6}$/i.test(stageBackground.value),
+    'the HUD stage backdrop is not a single flat colour');
+  const stageShadow = stageDeclarations.find((declaration) => declaration.prop === 'box-shadow');
+  assert.ok(stageShadow, 'the HUD stage lost the inset seat that gives it depth without artwork');
+  assert.ok(stageShadow.value.replace(/rgba?\([^)]*\)/g, 'C').split(',')
+    .every((layer) => layer.trim().startsWith('inset')),
+    'the HUD stage casts an outer shadow — its depth must be an inset seat, not a glow around the instrument field');
+
+  // The surface is the same surface in every state. No box in this layer that
+  // paints a background is selected by a run state or an operational state, so
+  // a backdrop can never be read as a reading.
+  for (const rule of hudRules()) {
+    if (!/(?:^|;)\s*background(?:-color)?\s*:/.test(rule.body)) continue;
+    for (const selector of rule.selectors) {
+      assert.ok(!/\[data-run-status=|\[data-ops-state=|\.is-[A-Za-z]/.test(selector),
+        `${selector} makes a surface change with a state, which turns a backdrop into an activity claim`);
+    }
+  }
+
+  // The two halos this layer touches, it removes. Both removals keep the signal:
+  // a panel corner never carried a reading at all, and the ACTIVE route stage
+  // keeps its shipped cyan border plus its own written state word and glyph.
+  assert.ok(/\.command-shell section::before,\.command-shell details\.panel::before\{[^}]*box-shadow:none/.test(HUD),
+    'the panel corner bracket keeps a halo that reads as an emitting light source');
+  assert.ok(/\.route-node\.is-ACTIVE\{box-shadow:inset 3px 0 0 var\(--cyan\)/.test(HUD),
+    'the ACTIVE route stage keeps an outer glow instead of a crisp status rail');
+  assert.ok(/\.route-node\.is-ACTIVE\{border-color:var\(--cyan\)/.test(code),
+    'the ACTIVE route stage lost the shipped border that states its status alongside its word');
+});
+
 
 // ── DOM harness: render the REAL page source, not a copy of it ─────────────
 // jsdom is not a dependency here and will not become one for a governance
