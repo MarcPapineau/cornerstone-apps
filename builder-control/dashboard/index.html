@@ -783,6 +783,15 @@
   .evidence-jump>.rail-note{flex:1 1 150px;min-width:0;overflow-wrap:anywhere}
   #founder-summary>.evidence-jump{padding:0 16px 16px}
   #evidence-rail>.evidence-jump{padding:14px 14px 0}
+  /* Where the jump lands. The rail is scrolled to block:"start", and the command
+     header is sticky from 681px up, so with no reserved band the rail's heading
+     and the way back out of it both arrive underneath the header that is painted
+     over them: the operator lands on chrome instead of on the receipts. The band
+     is reserved on the scroll container itself, so it costs one declaration and
+     no timer, no measured height, no second scroll and no change to what is
+     disclosed or to where the keyboard stops. Below 681px the header scrolls with
+     the page and there is nothing to clear, so no band is reserved. */
+  @media (min-width:681px){ html{scroll-padding-top:124px} }
 
   body[data-reduced-motion="true"] *{transition:none!important;scroll-behavior:auto!important}
 
@@ -1127,6 +1136,9 @@
     /* Chrome pays first. Both controls and all three canonical context cells
        stay exactly where the markup has them; only their padding shrinks. */
     .command-header{min-height:0;gap:8px 14px;padding:8px 16px}
+    /* The header is shorter here, but below 1600px it still wraps its state row,
+       so the reserved landing band shrinks with it rather than being dropped. */
+    html{scroll-padding-top:104px}
     .brand-lockup{min-width:0;gap:10px}
     .brand-name{font-size:16px}
     .view-tab{padding:5px 13px}

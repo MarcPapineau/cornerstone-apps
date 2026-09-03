@@ -1203,7 +1203,9 @@ test('the wide Command View compacts the first screen without hiding, repainting
   assert.ok(WIDE.length > 0, 'the wide-screen Command View density block was not located');
   // It starts exactly at the tablet ceiling: 681–1099px keeps the styles it
   // shipped with, and nothing here can reach a phone.
-  const added = (code.match(/@media \(min-width:(\d+)px\)/g) || [])
+  // Scanned inside WIDE, not the whole stylesheet: unrelated breakpoints
+  // elsewhere are not this block's invariant.
+  const added = (WIDE.match(/@media \(min-width:(\d+)px\)/g) || [])
     .map((query) => Number(/(\d+)/.exec(query)[1]));
   assert.ok(added.includes(1100), 'the wide Command View density layer is not scoped to 1100px and above');
   for (const width of added) {
@@ -4295,6 +4297,15 @@ test('the evidence rail heads every receipt in plain English and the navigation 
     'the evidence navigation writes or re-derives evidence of its own');
   assert.ok(/setDetailView\(true, 'evidence-rail-h'\)/.test(jumpCode),
     'the jump does not reuse the one disclosure switch to land on the rail heading');
+  // The landing, not only the jump. The command header is sticky from 681px up,
+  // so a rail scrolled to block:"start" puts its heading and the way back out
+  // underneath the header unless the header's own band is reserved on the scroll
+  // container. Every reserved band has to clear the header at its wrapped desktop
+  // height — 72px min-height plus 12px of padding top and bottom — or the
+  // operator arrives on chrome instead of on the receipts.
+  const landingBands = [...code.matchAll(/scroll-padding-top:(\d+)px/g)].map(m => Number(m[1]));
+  assert.ok(landingBands.length > 0 && landingBands.every(px => px >= 96),
+    'the evidence landing does not clear the sticky header: ' + JSON.stringify(landingBands));
 });
 
 test('the evidence navigation stays usable on a 390px phone, by keyboard, with reduced motion', () => {
