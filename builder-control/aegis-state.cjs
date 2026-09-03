@@ -2227,6 +2227,35 @@ function projectWorker(build, runState, runtime) {
   const boundedText = (value, max = 128) =>
     typeof value === 'string' && value.length <= max ? value : null;
   const boundedTimestamp = (value) => boundedText(value, 64);
+  // ── the builder's own live-activity evidence ─────────────────────────────
+  // PROVEN GAP: aegis-worker records lastProgressAt/progressKind and the bounded
+  // progressActivity/progressActivityAt pair on the run, but this allowlist
+  // dropped them, so hosting's minimizeSupervision read undefined and published
+  // UNRECORDED for a run that had authenticated READING/EDITING stream evidence.
+  // The gap was a missing carrier, not a missing observation, so the repair is
+  // to carry the recorded fields — and nothing else — through this projection.
+  //
+  // Hosting's PUBLIC_PROGRESS_KINDS / PUBLIC_PROGRESS_ACTIVITIES /
+  // PUBLIC_TIMEOUT_REASONS remain the ONE authority over which codes may be
+  // published. This projector therefore validates SHAPE only: a bounded
+  // uppercase code token and a real ISO instant. An unknown code fails closed at
+  // that existing authority rather than acquiring a second vocabulary here, and
+  // no tool input, path, prose or stdout fragment can take this shape.
+  const progressCode = (value) =>
+    typeof value === 'string' && /^[A-Z][A-Z_]{1,31}$/.test(value) ? value : null;
+  const progressInstant = (value) =>
+    typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value) &&
+    Number.isFinite(Date.parse(value)) ? value : null;
+  // A phase without a time, or a time without a phase, proves nothing about when
+  // the builder last did work, so the pair travels or neither does. The named
+  // activity rides on recorded progress and never on its own: a supervisor
+  // heartbeat alone must not keep a category on screen as if it were observed.
+  const progressKind = progressCode(build.progressKind);
+  const lastProgressAt = progressInstant(build.lastProgressAt);
+  const progressed = progressKind !== null && lastProgressAt !== null;
+  const progressActivity = progressed ? progressCode(build.progressActivity) : null;
+  const progressActivityAt = progressed ? progressInstant(build.progressActivityAt) : null;
+  const activityRecorded = progressActivity !== null && progressActivityAt !== null;
   const recovery = build.recovery && typeof build.recovery === 'object' && !Array.isArray(build.recovery)
     ? { reason: boundedText(build.recovery.reason), retrySafe: build.recovery.retrySafe === true,
         ...(build.recovery.terminationVerified === false ? { terminationVerified: false } : {}) }
@@ -2262,6 +2291,14 @@ function projectWorker(build, runState, runtime) {
     endedAt: boundedTimestamp(build.endedAt),
     exit,
     timedOut: build.timedOut === true,
+    // Live supervision evidence, carried beside the lifecycle facts and never
+    // instead of them. A timeout reason travels only on a run that actually
+    // timed out, so this adds no second verdict about timedOut, exit or failure.
+    lastProgressAt: progressed ? lastProgressAt : null,
+    progressKind: progressed ? progressKind : null,
+    progressActivity: activityRecorded ? progressActivity : null,
+    progressActivityAt: activityRecorded ? progressActivityAt : null,
+    timeoutReason: build.timedOut === true ? progressCode(build.timeoutReason) : null,
     recovery,
     failure,
     failover,

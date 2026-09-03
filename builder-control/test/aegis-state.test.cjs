@@ -3238,6 +3238,10 @@ test('dashboard projection preserves bounded worker lifecycle and canonical rout
     mode: 'async', workerState: 'RUNNING', workerPid: 4321,
     startedAt: '2026-08-27T20:00:00.000Z', heartbeatAt: '2026-08-27T20:00:01.000Z',
     endedAt: null, exit: null, timedOut: false,
+    // A heartbeat-only record records no builder progress, so every live
+    // supervision field stays null rather than borrowing the heartbeat.
+    lastProgressAt: null, progressKind: null,
+    progressActivity: null, progressActivityAt: null, timeoutReason: null,
     recovery: { reason: 'TERMINATION_UNVERIFIED', retrySafe: false },
     failure: null,
     failover: null,
@@ -3246,6 +3250,233 @@ test('dashboard projection preserves bounded worker lifecycle and canonical rout
   assert.deepStrictEqual(projected.route,
     { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' });
   assert.ok(!JSON.stringify(projected).includes(hostile), 'raw worker output crossed the projector boundary');
+});
+
+// ── live builder activity: recorded work must survive the projection ────────
+// PROVEN DEFECT: aegis-worker records lastProgressAt, progressKind and the
+// bounded progressActivity/progressActivityAt pair on the run, but the worker
+// allowlist above dropped all four. Hosting's minimizeSupervision therefore read
+// undefined and published "No real builder progress is recorded for this
+// attempt" for a run whose own record carried authenticated READING and EDITING
+// stream evidence — a dashboard telling the founder nothing was happening while
+// the builder was demonstrably reading and editing files.
+//
+// These cases run the REAL path the browser is served by:
+//   raw run record -> M.snapshot (one immutable read) -> minimizeApiStatus
+// so the projector and the public surface can never pass separately while the
+// founder-visible answer stays UNRECORDED.
+const HOSTING = require('../hosting/server.cjs');
+const ACTIVITY_HOSTILE = 'PRIVATE_STREAM_TEXT_MUST_NEVER_REACH_THE_DASHBOARD';
+// Every raw fixture below carries these alongside the progress evidence: the
+// public surface must publish the activity and none of this.
+const ACTIVITY_PRIVATE = {
+  stdoutTail: ACTIVITY_HOSTILE, stderrTail: ACTIVITY_HOSTILE, modelOutput: ACTIVITY_HOSTILE,
+  control: { dir: '/private/control', secret: ACTIVITY_HOSTILE, secretSha256: 'digest' },
+  // Present so the cancellation capability is really computed from the raw
+  // control identity here, and really left behind: publishing live activity may
+  // not cost the operator the ability to stop the builder.
+  childProcessIdentity: { pid: 4321, processGroupId: 4321, startMarker: 'fixture',
+    executable: '/fixture/claude', source: 'fixture' },
+};
+function activityBuild(extra) {
+  return Object.assign({
+    mode: 'async', workerState: 'RUNNING', workerPid: 4321,
+    startedAt: '2026-09-03T10:00:00.000Z', heartbeatAt: '2026-09-03T10:04:00.000Z',
+    endedAt: null, exit: null, timedOut: false,
+  }, ACTIVITY_PRIVATE, extra || {});
+}
+const ACTIVITY_UNKNOWN_KIND = 'EXFILTRATING';
+const ACTIVITY_UNKNOWN_CODE = 'CURLING_A_SECRET';
+const ACTIVITY_PROSE = 'Reading /private/secrets/id_rsa on behalf of the operator';
+// runId -> the raw build recorded on that run.
+const ACTIVITY_CASES = {
+  // Recorded, authenticated stream activity. These two are the regression.
+  'RUN-20260903-a0000001': activityBuild({
+    lastProgressAt: '2026-09-03T10:03:59.000Z', progressKind: 'STDOUT',
+    progressActivity: 'READING', progressActivityAt: '2026-09-03T10:03:59.000Z',
+  }),
+  'RUN-20260903-a0000002': activityBuild({
+    lastProgressAt: '2026-09-03T10:03:30.000Z', progressKind: 'AUTHORIZED_WRITE',
+    progressActivity: 'EDITING', progressActivityAt: '2026-09-03T10:03:30.000Z',
+  }),
+  // A supervisor heartbeat is not builder work.
+  'RUN-20260903-a0000003': activityBuild({}),
+  // Half a pair proves nothing about when the builder last worked.
+  'RUN-20260903-a0000004': activityBuild({ progressKind: 'STDOUT' }),
+  // An unrecognised progress code fails closed instead of travelling.
+  'RUN-20260903-a0000005': activityBuild({
+    lastProgressAt: '2026-09-03T10:03:59.000Z', progressKind: ACTIVITY_UNKNOWN_KIND,
+    progressActivity: 'READING', progressActivityAt: '2026-09-03T10:03:59.000Z',
+  }),
+  // An unrecognised activity code publishes no activity, but real progress stands.
+  'RUN-20260903-a0000006': activityBuild({
+    lastProgressAt: '2026-09-03T10:03:59.000Z', progressKind: 'STDOUT',
+    progressActivity: ACTIVITY_UNKNOWN_CODE, progressActivityAt: '2026-09-03T10:03:59.000Z',
+  }),
+  // An unparseable observation time is not an observation.
+  'RUN-20260903-a0000007': activityBuild({
+    lastProgressAt: '2026-09-03T10:03:59.000Z', progressKind: 'STDOUT',
+    progressActivity: 'READING', progressActivityAt: '2026-09-03 10:03:59',
+  }),
+  // An invalid progress time takes the activity down with it: the activity
+  // rides on recorded progress and never on its own.
+  'RUN-20260903-a0000008': activityBuild({
+    lastProgressAt: 'yesterday afternoon', progressKind: 'STDOUT',
+    progressActivity: 'READING', progressActivityAt: '2026-09-03T10:03:59.000Z',
+  }),
+  // Model prose describing the work is not a closed-vocabulary activity code.
+  'RUN-20260903-a0000009': activityBuild({
+    lastProgressAt: '2026-09-03T10:03:59.000Z', progressKind: 'STDOUT',
+    progressActivity: ACTIVITY_PROSE, progressActivityAt: '2026-09-03T10:03:59.000Z',
+  }),
+  // Timeout evidence, which travels only on a run that actually timed out.
+  'RUN-20260903-a000000a': activityBuild({
+    workerState: 'FAILED', exit: 124, timedOut: true, timeoutReason: 'NO_PROGRESS_TIMEOUT',
+    lastProgressAt: '2026-09-03T10:03:59.000Z', progressKind: 'STDOUT',
+  }),
+  'RUN-20260903-a000000b': activityBuild({ timeoutReason: 'NO_PROGRESS_TIMEOUT' }),
+  'RUN-20260903-a000000c': activityBuild({
+    workerState: 'FAILED', exit: 124, timedOut: true, timeoutReason: 'SECRET_LEAK_TIMEOUT',
+  }),
+};
+const ACTIVITY_TIMED_OUT = new Set(['RUN-20260903-a000000a', 'RUN-20260903-a000000c']);
+
+// ONE immutable run-directory read for every case, minimized exactly once, so
+// these proofs read the same object the browser would be served.
+let activityStatus = null;
+function activityApiStatus() {
+  if (activityStatus === null) {
+    const dir = fixtureRunsDir(Object.keys(ACTIVITY_CASES).map((runId) => runRecord(runId, {
+      state: ACTIVITY_TIMED_OUT.has(runId) ? 'BUILD_FAILED' : 'BUILDING',
+      build: ACTIVITY_CASES[runId],
+    })));
+    activityStatus = HOSTING.minimizeApiStatus(
+      M.snapshot({}, { runsDir: dir, ledgerFile: FROZEN_LEDGER }));
+  }
+  return activityStatus;
+}
+function activitySupervision(runId) {
+  const run = (activityApiStatus().runs || []).find((item) => item.runId === runId);
+  assert.ok(run && run.build && run.build.supervision,
+    `${runId} carried no public supervision through the snapshot to /api/status path`);
+  return run.build.supervision;
+}
+
+test('authenticated builder activity recorded on the run reaches the public supervision surface', () => {
+  const reading = activitySupervision('RUN-20260903-a0000001');
+  assert.strictEqual(reading.progressState, 'RECORDED',
+    'the run recorded real builder progress and the public surface still says UNRECORDED');
+  assert.strictEqual(reading.progressKind, 'STDOUT');
+  assert.strictEqual(reading.progressSummary, HOSTING.PUBLIC_PROGRESS_KINDS.STDOUT);
+  assert.strictEqual(reading.lastProgressAt, '2026-09-03T10:03:59.000Z');
+  assert.strictEqual(reading.progressReason, null,
+    'recorded progress must not also carry the "no progress is recorded" sentence');
+  assert.strictEqual(reading.activityState, 'RECORDED',
+    'the run recorded a READING activity and the public surface still says UNRECORDED');
+  assert.strictEqual(reading.activityCode, 'READING');
+  assert.strictEqual(reading.activitySummary, HOSTING.PUBLIC_PROGRESS_ACTIVITIES.READING);
+  assert.strictEqual(reading.activityAt, '2026-09-03T10:03:59.000Z');
+  assert.strictEqual(reading.activityReason, null);
+
+  // Live activity is published BESIDE the lifecycle facts, not instead of them.
+  const readingRun = activityApiStatus().runs.find((item) => item.runId === 'RUN-20260903-a0000001');
+  assert.strictEqual(readingRun.build.cancelAvailable, true,
+    'publishing live activity cost the operator the ability to stop the builder');
+  assert.strictEqual(readingRun.build.heartbeatAt, '2026-09-03T10:04:00.000Z');
+  assert.strictEqual(readingRun.build.timedOut, false);
+
+  const editing = activitySupervision('RUN-20260903-a0000002');
+  assert.strictEqual(editing.progressState, 'RECORDED');
+  assert.strictEqual(editing.progressKind, 'AUTHORIZED_WRITE');
+  assert.strictEqual(editing.activityState, 'RECORDED');
+  assert.strictEqual(editing.activityCode, 'EDITING');
+  assert.strictEqual(editing.activitySummary, HOSTING.PUBLIC_PROGRESS_ACTIVITIES.EDITING);
+  assert.strictEqual(editing.activityAt, '2026-09-03T10:03:30.000Z');
+});
+
+test('a heartbeat, an unknown code and an invalid timestamp never become builder progress', () => {
+  for (const [runId, why] of [
+    ['RUN-20260903-a0000003', 'a supervisor heartbeat alone was published as builder progress'],
+    ['RUN-20260903-a0000004', 'a progress phase with no observation time was published as progress'],
+    ['RUN-20260903-a0000005', 'an unrecognised progress code was published as progress'],
+    ['RUN-20260903-a0000008', 'an unparseable progress time was published as progress'],
+  ]) {
+    const supervision = activitySupervision(runId);
+    assert.strictEqual(supervision.progressState, 'UNRECORDED', why);
+    assert.strictEqual(supervision.progressKind, null, why);
+    assert.strictEqual(supervision.lastProgressAt, null, why);
+    assert.strictEqual(supervision.activityState, 'UNRECORDED',
+      `${why} — and it carried a named activity with it`);
+    assert.strictEqual(supervision.activityCode, null);
+    assert.strictEqual(supervision.activityAt, null);
+    assert.ok(/No real builder progress is recorded/.test(supervision.progressReason),
+      'an unrecorded surface must say so rather than fall silent');
+  }
+
+  // Real progress stands on its own; only the activity claim is refused.
+  for (const [runId, why] of [
+    ['RUN-20260903-a0000006', 'an unrecognised activity code reached the public surface'],
+    ['RUN-20260903-a0000007', 'an unparseable activity time was published as an observation'],
+    ['RUN-20260903-a0000009', 'model prose was published as a builder activity'],
+  ]) {
+    const supervision = activitySupervision(runId);
+    assert.strictEqual(supervision.progressState, 'RECORDED',
+      'a refused activity must not erase separately recorded progress');
+    assert.strictEqual(supervision.activityState, 'UNRECORDED', why);
+    assert.strictEqual(supervision.activityCode, null, why);
+    assert.strictEqual(supervision.activitySummary, null, why);
+    assert.strictEqual(supervision.activityAt, null, why);
+    assert.ok(/No bounded builder activity is recorded/.test(supervision.activityReason));
+  }
+});
+
+test('a timeout reason travels only on a run that timed out, and only from the closed vocabulary', () => {
+  const timedOut = activitySupervision('RUN-20260903-a000000a');
+  assert.strictEqual(timedOut.timeoutReason, 'NO_PROGRESS_TIMEOUT');
+  assert.strictEqual(timedOut.timeoutSummary, HOSTING.PUBLIC_TIMEOUT_REASONS.NO_PROGRESS_TIMEOUT);
+
+  const notTimedOut = activitySupervision('RUN-20260903-a000000b');
+  assert.strictEqual(notTimedOut.timeoutReason, null,
+    'a timeout reason was published for a run that never timed out');
+  assert.strictEqual(notTimedOut.timeoutSummary, null);
+
+  const unknownReason = activitySupervision('RUN-20260903-a000000c');
+  assert.strictEqual(unknownReason.timeoutReason, null,
+    'an unrecognised timeout code travelled verbatim');
+  assert.match(unknownReason.timeoutSummary, /no canonical timeout reason is recorded/);
+});
+
+test('carrying live activity carries nothing else: the worker allowlist stays closed', () => {
+  const status = JSON.stringify(activityApiStatus());
+  for (const [what, sentinel] of [
+    ['raw worker stream output or its control secret', ACTIVITY_HOSTILE],
+    ['an unrecognised progress code', ACTIVITY_UNKNOWN_KIND],
+    ['an unrecognised activity code', ACTIVITY_UNKNOWN_CODE],
+    ['model prose describing the work', 'id_rsa'],
+    ['an unrecognised timeout code', 'SECRET_LEAK_TIMEOUT'],
+  ]) {
+    assert.ok(!status.includes(sentinel), `${what} reached the public status surface`);
+  }
+
+  // The projector's own output is pinned to the exact allowlist: the repair adds
+  // the recorded supervision fields and nothing else from the raw run record.
+  const projected = M.projectRuns({
+    runsDir: fixtureRunsDir([runRecord('RUN-20260903-a000000d', {
+      state: 'BUILDING', build: ACTIVITY_CASES['RUN-20260903-a0000001'],
+    })]),
+  });
+  assert.deepStrictEqual(projected.runs[0].build, {
+    mode: 'async', workerState: 'RUNNING', workerPid: 4321,
+    startedAt: '2026-09-03T10:00:00.000Z', heartbeatAt: '2026-09-03T10:04:00.000Z',
+    endedAt: null, exit: null, timedOut: false,
+    lastProgressAt: '2026-09-03T10:03:59.000Z', progressKind: 'STDOUT',
+    progressActivity: 'READING', progressActivityAt: '2026-09-03T10:03:59.000Z',
+    timeoutReason: null,
+    recovery: null, failure: null, failover: null,
+    cancelAvailable: true,
+  });
+  assert.ok(!JSON.stringify(projected.runs[0]).includes(ACTIVITY_HOSTILE),
+    'raw worker output crossed the projector boundary alongside the activity');
 });
 
 test('dashboard projection rejects unvalidated route identity', () => {
