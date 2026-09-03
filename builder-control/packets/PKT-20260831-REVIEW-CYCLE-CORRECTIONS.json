@@ -1,0 +1,56 @@
+{
+  "packetId": "PKT-20260831-REVIEW-CYCLE-CORRECTIONS",
+  "agentId": "claude-code",
+  "objective": "Close the complete third-round review findings from PKT-20260831-REVIEW-CYCLE-LIMIT in one bounded batch: keep an incomplete third subject open only for its missing required reviewer, enforce D-19/D-20/D-14 at the direct review-adapter launch boundary, and exclude superseded findings from independent re-verification eligibility.",
+  "constraints": [
+    "This is a fresh correction packet because the parent packet exhausted its three allowed review rounds; no fourth review is launched under the parent packet.",
+    "Apply the three Codex/Grok findings as one batch. Do not reopen earlier corrected findings or add unrelated dashboard features.",
+    "A third subject is not complete until every required reviewer has produced a canonical substantive record for that subject.",
+    "The direct reviewer launcher must enforce the same cycle verdict as engineering-os --start and must refuse duplicate, fourth-round, and halted launches.",
+    "Only live non-superseded findings may be offered for independent re-verification."
+  ],
+  "sourceOfTruth": [
+    "builder-control/CONTROL-CONTRACT.md",
+    "builder-control/AI-ENGINEERING-OS.md",
+    "builder-control/schemas/engineering-review.schema.json"
+  ],
+  "filesAllowed": [
+    "builder-control/review-cycle.cjs",
+    "builder-control/test/review-cycle.test.cjs",
+    "builder-control/engineering-os.cjs",
+    "builder-control/test/engineering-os.test.cjs",
+    "builder-control/review-adapters.cjs",
+    "builder-control/test/review-adapters.test.cjs",
+    "builder-control/test/review-cycle-adapter.test.cjs",
+    "builder-control/test/host-containment.test.cjs",
+    "builder-control/packets/PKT-20260831-REVIEW-CYCLE-LIMIT.json",
+    "builder-control/packets/PKT-20260831-REVIEW-CYCLE-CORRECTIONS.json"
+  ],
+  "testsRequired": [
+    "node --check builder-control/review-cycle.cjs",
+    "node --check builder-control/review-adapters.cjs",
+    "node --check builder-control/engineering-os.cjs",
+    "node builder-control/test/review-cycle.test.cjs",
+    "node builder-control/test/engineering-os.test.cjs",
+    "node builder-control/test/review-cycle-adapter.test.cjs",
+    "node builder-control/test/functional-beta-snapshot.test.cjs",
+    "node builder-control/test/dashboard-slice.test.cjs",
+    "node builder-control/test/gate.test.cjs"
+  ],
+  "hostContainmentRequired": [
+    "node builder-control/test/host-containment.test.cjs"
+  ],
+  "stopConditions": [
+    "Any of the three named third-round findings remains reproducible",
+    "Any existing focused suite regresses",
+    "The parent packet receives a fourth review round"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — standing non-destructive AEGIS-dashboard completion authorization, 2026-08-31",
+    "allowsProtectedPaths": [
+      "builder-control/test/host-containment.test.cjs"
+    ],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

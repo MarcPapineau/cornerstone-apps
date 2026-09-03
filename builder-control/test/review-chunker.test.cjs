@@ -371,6 +371,38 @@ test('RED: the chunker INVENTS no optional authorization or telemetry ceiling wh
   }
 });
 
+test('ordinary review groups receive the proven 600-second completion window by default', () => {
+  const argv = C.buildGroupArgv(GROUP, SUBJ, { reviewer: 'grok', packet: 'P.json' });
+  assert.strictEqual(C.DEFAULT_REVIEW_TIMEOUT_SEC, 600);
+  assert.strictEqual(argv[argv.indexOf('--timeout') + 1], '600');
+
+  const explicitlyBounded = C.buildGroupArgv(GROUP, SUBJ, {
+    reviewer: 'grok', packet: 'P.json', timeout: 25,
+  });
+  assert.strictEqual(explicitlyBounded[explicitlyBounded.indexOf('--timeout') + 1], '25');
+});
+
+test('run-all reuses exactly one signed completed lane but reruns unavailable or ambiguous lanes', () => {
+  const lane = { groupId: 'G1', reviewer: 'grok', subjectSha: SUBJ.subjectSha256 };
+  const completed = {
+    reviewId: 'REV-complete', reviewer: 'grok', disposition: 'APPROVE',
+    reviewOf: { diffSha256: SUBJ.subjectSha256 },
+    group: { groupId: 'G1' },
+  };
+  const verify = () => ({ ok: true, gateable: true });
+  assert.strictEqual(C.reusableCompletedGroupRecord([completed], lane, verify), completed);
+  assert.strictEqual(C.reusableCompletedGroupRecord([
+    { ...completed, disposition: 'UNAVAILABLE' },
+  ], lane, verify), null);
+  assert.strictEqual(C.reusableCompletedGroupRecord([completed, {
+    ...completed, reviewId: 'REV-duplicate', disposition: 'REJECT',
+  }], lane, verify), null);
+  assert.strictEqual(C.reusableCompletedGroupRecord([completed], lane,
+    () => ({ ok: false, gateable: false })), null);
+  assert.strictEqual(C.reusableCompletedGroupRecord([{ ...completed,
+    reviewOf: { diffSha256: 'a'.repeat(64) } }], lane, verify), null);
+});
+
 test('RED: group binding survives the added flags', () => {
   const argv = C.buildGroupArgv(GROUP, SUBJ, {
     reviewer: 'grok', packet: 'P.json', allowMetered: true, approvedBy: 'M', capUsd: '2',
@@ -552,6 +584,88 @@ test('a single file that exceeds only the total payload ceiling receives the sam
     assert.strictEqual(error.totalBytes, C.MAX_GROUP_PAYLOAD_BYTES + 1);
     return true;
   });
+});
+
+// ── changed-byte planning ceiling: the exact boundary ──────────────────────
+// The ceiling moved 60000 → 70000 for a bounded subject whose largest
+// indivisible file is 63,232 bytes. A constant that is only asserted against
+// itself proves nothing, so these three pin the LITERAL value and both sides
+// of the boundary. If someone moves the ceiling again, these fail loudly.
+
+test('the changed-byte planning ceiling is exactly 70000', () => {
+  assert.strictEqual(C.MAX_GROUP_BYTES, 70000,
+    'the planning ceiling moved; the boundary proofs below and the reason comment in review-chunker.cjs must move with it');
+  assert.strictEqual(C.MAX_GROUP_PAYLOAD_BYTES, 1310720,
+    'the total payload cap is the safety authority and must not move with the planning proxy');
+});
+
+test('BOUNDARY: an indivisible 70000-byte file plans when total payload permits', () => {
+  // Exactly at the ceiling is INSIDE it. A single file cannot be split, so an
+  // off-by-one here is not a tighter budget — it is a subject that can never
+  // be reviewed at all.
+  const sizes = { 'solo/at-ceiling.cjs': 70000 };
+  const fixedOverheadBytes = 1000;                      // total 71,000 — far under the payload cap
+  const plan = C.planGroups(['solo/at-ceiling.cjs'], 1, sizes, { fixedOverheadBytes });
+  assert.strictEqual(plan.length, 1);
+  assert.deepStrictEqual(plan[0].paths, ['solo/at-ceiling.cjs']);
+  assert.strictEqual(plan[0].changedBytes, 70000);
+  assert.strictEqual(plan[0].estimatedReviewBytes, 70000 + fixedOverheadBytes);
+  assert.ok(plan[0].estimatedReviewBytes < C.MAX_GROUP_PAYLOAD_BYTES,
+    'this proof is only meaningful while the total payload cap is NOT the binding constraint');
+});
+
+test('BOUNDARY: an indivisible 70001-byte file is still refused by name', () => {
+  // One byte over, with the payload cap nowhere near binding: the changed-byte
+  // ceiling must refuse on its own, or raising it silently disabled it.
+  const sizes = { 'solo/over-ceiling.cjs': 70001 };
+  const fixedOverheadBytes = 1000;
+  assert.throws(() => C.planGroups(['solo/over-ceiling.cjs'], 1, sizes, { fixedOverheadBytes }), (error) => {
+    assert.strictEqual(error.code, 'REVIEW_GROUP_UNSPLITTABLE_OVERSIZE');
+    assert.strictEqual(error.path, 'solo/over-ceiling.cjs');
+    assert.strictEqual(error.changedBytes, 70001);
+    assert.strictEqual(error.maxChangedBytes, 70000);
+    assert.ok(error.totalBytes < C.MAX_GROUP_PAYLOAD_BYTES,
+      'the refusal must be attributable to the changed-byte ceiling, not to the payload cap');
+    return true;
+  });
+});
+
+test('BOUNDARY: the total payload cap still refuses a file the raised ceiling accepts', () => {
+  // The changed-byte ceiling is a planning proxy; the payload cap is the
+  // safety authority. A file comfortably under 70000 changed bytes must STILL
+  // be refused once its pinned specs and check proof push the real bundle over
+  // MAX_GROUP_PAYLOAD_BYTES. Raising the proxy must not have weakened this.
+  const changedBytes = 65000;                           // under 70000 — the proxy would allow it
+  const fixedOverheadBytes = C.MAX_GROUP_PAYLOAD_BYTES - changedBytes + 1;
+  assert.throws(() => C.planGroups(['solo/heavy-payload.cjs'], 1,
+    { 'solo/heavy-payload.cjs': changedBytes }, { fixedOverheadBytes }), (error) => {
+    assert.strictEqual(error.code, 'REVIEW_GROUP_UNSPLITTABLE_OVERSIZE');
+    assert.strictEqual(error.changedBytes, changedBytes);
+    assert.ok(error.changedBytes < C.MAX_GROUP_BYTES,
+      'this proof only holds while the changed-byte ceiling would have ACCEPTED this file');
+    assert.strictEqual(error.totalBytes, C.MAX_GROUP_PAYLOAD_BYTES + 1);
+    return true;
+  });
+});
+
+test('BOUNDARY: the real 63232-byte dashboard file is what the raise was for', () => {
+  // The concrete subject that motivated the change: one indivisible 63,232-byte
+  // file inside a 715,666-byte group payload. It failed at 60000 and must plan
+  // at 70000, with the total payload never approaching its cap.
+  const observedLargestFileBytes = 63232;
+  const observedGroupPayloadBytes = 715666;
+  assert.ok(observedLargestFileBytes > 60000,
+    'the fixture no longer reproduces the defect that motivated the raise');
+  assert.ok(observedLargestFileBytes <= C.MAX_GROUP_BYTES);
+  assert.ok(observedGroupPayloadBytes < C.MAX_GROUP_PAYLOAD_BYTES,
+    'the total payload was never the binding constraint for this subject');
+  const fixedOverheadBytes = observedGroupPayloadBytes - observedLargestFileBytes;
+  const plan = C.planGroups(['builder-control/test/dashboard-slice.test.cjs'], 1,
+    { 'builder-control/test/dashboard-slice.test.cjs': observedLargestFileBytes },
+    { fixedOverheadBytes });
+  assert.strictEqual(plan.length, 1);
+  assert.strictEqual(plan[0].changedBytes, observedLargestFileBytes);
+  assert.strictEqual(plan[0].estimatedReviewBytes, observedGroupPayloadBytes);
 });
 
 // ── GROK G11 FINDINGS #2 and #3 ──────────────────────────────────────────

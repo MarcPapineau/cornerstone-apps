@@ -26,6 +26,9 @@ const {
   validateReviewPayload,
   validateCodexInspectionProofs,
   codexCoveredPaths,
+  eligiblePriorFindings,
+  loadCurrentStateProofMap,
+  isCurrentOpenReverificationTarget,
   runTool,
   runContainedWithWatchdog,
   reapUndrainedReviewerGroup,
@@ -321,6 +324,51 @@ test('a real reviewer approval binds to the exact subject', () => {
   assert.deepStrictEqual(record.reviewOf.changedPaths, subject.subjectPaths);
 });
 
+test('GREEN: a normal adapter record can carry independent prior-finding re-verification', () => {
+  // A re-verifiable prior finding is one the current-state proof map bound to
+  // THIS subject and THIS check receipt and classified OPEN. Anything less is
+  // history, and buildRecord refuses a PASS against history.
+  const checkReceipt = { receiptSha256: 'f'.repeat(64) };
+  const priorFindings = [{
+    sourceReviewId: 'REV-prior-grok-001',
+    findingIndex: 0,
+    reviewer: 'grok',
+    severity: 'HIGH',
+    file: 'src/app.ts',
+    problem: 'the stale branch can bypass the guard',
+    verificationMethod: 'Run the guarded-branch regression test.',
+    classification: 'OPEN',
+    currentStateBinding: {
+      subjectSha256: subject.subjectSha256,
+      checkReceiptSha256: checkReceipt.receiptSha256,
+    },
+  }];
+  const parsed = {
+    disposition: 'APPROVE',
+    findings: [],
+    unverified: [],
+    reverifiedFindings: [{
+      sourceReviewId: 'REV-prior-grok-001',
+      findingIndex: 0,
+      verificationMethod: 'Run the guarded-branch regression test.',
+      evidence: 'The independent guarded-branch regression test exited 0 on the corrected subject.',
+      outcome: 'PASS',
+    }],
+  };
+  const record = buildRecord({ ...base, checkReceipt, ...codexEvidence(parsed), priorFindings });
+  assert.strictEqual(record.disposition, 'APPROVE');
+  assert.deepStrictEqual(record.reverifiedFindings, parsed.reverifiedFindings);
+
+  const sameReviewer = buildRecord({
+    ...base,
+    checkReceipt,
+    ...codexEvidence(parsed),
+    priorFindings: [{ ...priorFindings[0], reviewer: 'codex' }],
+  });
+  assert.strictEqual(sameReviewer.disposition, 'UNAVAILABLE');
+  assert.match(sameReviewer.unavailableReason, /different reviewer/);
+});
+
 test('RED: Codex cannot claim changed paths from complete input delivery without verified inspection proofs', () => {
   const parsed = { disposition: 'APPROVE', findings: [], unverified: [] };
   const uncovered = buildRecord({ ...base, parsed });
@@ -552,6 +600,16 @@ test('RED: the doctor never claims a review ran, and never spends anything', () 
     assert.ok(!detectionPath.includes(forbidden),
       `the doctor launches a subprocess (${forbidden}) — a probe that runs something can spend credits and can be wrong in a direction nobody checks`);
   }
+});
+
+test('RED: internal validator subprocesses use the running Node executable, not PATH lookup', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  assert.ok(!src.includes("spawnSync('node'"),
+    'contained execution removes Homebrew from PATH, so internal Node scripts must use process.execPath');
+  assert.ok(src.includes('spawnSync(process.execPath, a,'),
+    'subject resolution is not pinned to the running Node executable');
+  assert.ok(src.includes("spawnSync(process.execPath, [ENGOS, '--validate-review'"),
+    'review-record validation is not pinned to the running Node executable');
 });
 
 test('RED: Copilot is ADVISORY — refused as a gate reviewer even though the canon says AVAILABLE', () => {
@@ -884,7 +942,7 @@ test('RED: independent framing rejects empty-path tricks, duplicate frames, swap
 });
 
 test('RED: current beta planning is exact or names an unsplittable file without launching reviewers', () => {
-  const packetPath = path.join(__dirname, '..', 'packets', 'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json');
+  const packetPath = path.join(__dirname, '..', 'packets', 'PKT-20260831-REVIEW-CYCLE-LIMIT.json');
   const packet = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
   const subjectResult = spawnSync(process.execPath,
     [path.join(__dirname, '..', 'engineering-os.cjs'), '--subject', '--json'],
@@ -918,8 +976,8 @@ test('RED: current beta planning is exact or names an unsplittable file without 
   // either outcome is valid. Every derived group must remain an exact bounded
   // adapter input that fits without invoking a reviewer.
   const allBoundedPaths = resolveBoundedReviewPaths(subject, packet);
-  assert.ok(groups.length >= 16,
-    'the explicit group count is a minimum route width; byte-safe splitting may add lanes');
+  assert.ok(groups.length >= Math.min(16, subject.subjectPaths.length),
+    'the explicit group count is a minimum route width up to the number of indivisible subject paths; byte-safe splitting may add lanes');
   for (const group of groups) {
     const bytes = group.paths.reduce((sum, reviewPath) => {
       const absolute = path.join(__dirname, '..', '..', reviewPath);
@@ -2202,6 +2260,61 @@ test('RED: the reviewer watchdog hard-kills a TERM-resistant process group', asy
     'TERM-resistant descendant survived the watchdog');
 });
 
+test('reviewer output activity extends the idle deadline without removing the hard cap', async () => {
+  if (process.platform === 'win32') return skip('POSIX process groups are unavailable on win32');
+  const fixture = `
+    let count = 0;
+    const timer = setInterval(() => {
+      process.stdout.write('progress-' + (++count) + '\\n');
+      if (count === 6) { clearInterval(timer); process.exit(0); }
+    }, 100);
+  `;
+  const started = Date.now();
+  const result = await runContainedWithWatchdog({
+    bin: process.execPath,
+    argv: ['-e', fixture],
+  }, {
+    timeoutMs: 250,
+    activityExtendsTimeout: true,
+    hardTimeoutMs: 1_200,
+    killGraceMs: 75,
+    maxOutputBytes: 64 * 1024,
+    cwd: os.tmpdir(),
+    env: { PATH: process.env.PATH },
+  });
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.strictEqual(result.timedOut, false);
+  assert.strictEqual(result.timeoutReason, null);
+  assert.match(result.stdout, /progress-6/);
+  assert.ok(Date.now() - started >= 500, 'fixture did not actually outlive the idle deadline');
+});
+
+test('continuous reviewer chatter cannot evade the absolute hard cap', async () => {
+  if (process.platform === 'win32') return skip('POSIX process groups are unavailable on win32');
+  const fixture = `
+    process.on('SIGTERM', () => {});
+    setInterval(() => process.stdout.write('still-working\\n'), 50);
+  `;
+  const started = Date.now();
+  const result = await runContainedWithWatchdog({
+    bin: process.execPath,
+    argv: ['-e', fixture],
+  }, {
+    timeoutMs: 150,
+    activityExtendsTimeout: true,
+    hardTimeoutMs: 500,
+    killGraceMs: 75,
+    maxOutputBytes: 64 * 1024,
+    cwd: os.tmpdir(),
+    env: { PATH: process.env.PATH },
+  });
+  const elapsed = Date.now() - started;
+  assert.strictEqual(result.timedOut, true);
+  assert.strictEqual(result.timeoutReason, 'hard-cap');
+  assert.ok(elapsed >= 450 && elapsed < 1_500, `hard cap was not bounded: ${elapsed}ms`);
+  assert.strictEqual(result.groupDrained, true);
+});
+
 test('RED: an injected initial TERM failure is retained and cannot escape asynchronously', async () => {
   if (process.platform === 'win32') return skip('POSIX process groups are unavailable on win32');
   const fixture = 'process.on("SIGTERM",()=>{});process.stdout.write("ready\\n");setInterval(()=>{},1000)';
@@ -2240,7 +2353,9 @@ test('RED: injected grace KILL failures resolve fail-closed with undrained evide
       bin: process.execPath,
       argv: ['-e', fixture],
     }, {
-      timeoutMs: 75,
+      // Let the child install its SIGTERM handler before fault injection. A
+      // startup-race result proves only host load, not KILL-failure handling.
+      timeoutMs: 500,
       killGraceMs: 50,
       maxOutputBytes: 64 * 1024,
       cwd: os.tmpdir(),
@@ -4003,4 +4118,240 @@ test('RED: a signed record rejected in quarantine leaves only non-gated diagnost
 Promise.all(pendingTests).then(() => {
   const failedCount = process.exitCode ? 'at least 1' : '0';
   console.log(`${passed} passed, ${skipped} skipped, ${failedCount} failed.`);
+});
+
+// RUN-20260831-18c775b7 regression. Codex returned a complete, correct review
+// twice and AEGIS scored it UNAVAILABLE with "inspection proof failed for
+// builder-control/schemas/engineering-review.schema.json". The reviewer had in
+// fact read the file exactly: every character after the indent was byte-perfect.
+// It had parsed the .json subject and pretty-printed it at four-space indent,
+// so the challenged line at nesting depth five came back with 20 leading spaces
+// instead of the file's 10. The exact-hash test correctly rejected it, but the
+// failure reason could not distinguish that from a reviewer that never opened
+// the file, which is what turned one formatting artefact into a review loop.
+test('RED: a re-indented exact line is rejected AND named as a re-render, not as absent inspection', () => {
+  const schemaPath = 'builder-control/schemas/engineering-review.schema.json';
+  const sandbox = prepareReviewSandbox([schemaPath]);
+  try {
+    const built = buildCodexInput('EXACT INDENT REGRESSION', sandbox, [schemaPath]);
+    const challenge = built.inputDelivery.inspectionChallenges
+      .find((entry) => entry.path === schemaPath);
+    assert.ok(challenge, 'no challenge was issued for the schema');
+
+    // The challenge must publish the shape metrics a reviewer needs to notice
+    // it is about to answer from a re-rendering rather than from raw bytes.
+    const raw = fs.readFileSync(path.join(sandbox.cwd, schemaPath), 'utf8')
+      .split(/\r\n|\n|\r/)[challenge.lineNumber - 1];
+    assert.strictEqual(challenge.lineBytes, Buffer.byteLength(raw, 'utf8'));
+    assert.strictEqual(challenge.leadingWhitespace, raw.length - raw.replace(/^\s+/, '').length);
+    assert.ok(built.input.includes(`"lineBytes":${challenge.lineBytes}`),
+      'shape metrics never reached the reviewer-visible challenge block');
+    assert.match(built.input, /Do not parse, reformat,/);
+
+    const payload = (lineText) => ({
+      disposition: 'APPROVE', findings: [], unverified: [],
+      inspectionProofs: [{ path: schemaPath, lineNumber: challenge.lineNumber, lineText }],
+    });
+
+    // The honest raw line still proves inspection. The accept path is unchanged.
+    assert.strictEqual(validateCodexInspectionProofs(payload(raw), built.inputDelivery).complete, true,
+      'the exact raw line stopped proving inspection');
+
+    // Reproduce the actual defect: the same line as this file re-serialises it.
+    const reserialised = JSON.stringify(
+      JSON.parse(fs.readFileSync(path.join(sandbox.cwd, schemaPath), 'utf8')), null, 4)
+      .split('\n').find((candidate) => candidate.trim() === raw.trim());
+    assert.ok(reserialised && reserialised !== raw,
+      'the re-serialised variant did not differ, so this no longer reproduces the defect');
+
+    const verdict = validateCodexInspectionProofs(payload(reserialised), built.inputDelivery);
+    assert.strictEqual(verdict.complete, false, 'inspection proof was weakened into accepting re-rendered text');
+    assert.match(verdict.reason, /leading whitespace \d+ vs challenged \d+/);
+    assert.match(verdict.reason, /content matches exactly after indent correction/);
+    assert.match(verdict.reason, /reviewer formatting fault, not missing inspection/);
+  } finally { cleanupReviewSandbox(sandbox); }
+});
+
+// Pins the observed bytes from the RUN-20260831-18c775b7 receipts themselves,
+// so the case survives any later change to challenge line selection.
+test('RED: the exact bytes Codex returned on 2026-08-31 are diagnosed, and a genuine miss still reads as one', () => {
+  const real = '          "description": "SHA-256 of the SUBJECT diff that was reviewed, from '
+    + '`engineering-os.cjs --subject`. The subject excludes review evidence, so adding this record '
+    + 'does not change the hash it names."';
+  const returned = `          ${real}`; // the receipted answer: 20 leading spaces, not 10
+  assert.strictEqual(real.length - real.replace(/^\s+/, '').length, 10);
+  assert.strictEqual(returned.length - returned.replace(/^\s+/, '').length, 20);
+  assert.strictEqual(crypto.createHash('sha256').update(returned).digest('hex'),
+    '2986802240abeefcdfe6cf884f4f9adadb83d80c13bfd6b306dc39fc8d9b0469',
+    'this no longer reproduces the bytes Codex actually returned');
+
+  const schemaPath = 'builder-control/schemas/engineering-review.schema.json';
+  const inputDelivery = {
+    complete: true,
+    coveredPaths: [schemaPath],
+    inspectionChallenges: [{
+      path: schemaPath,
+      lineNumber: 62,
+      linePrefix: real.slice(0, 32),
+      lineBytes: Buffer.byteLength(real, 'utf8'),
+      leadingWhitespace: 10,
+      lineSha256: crypto.createHash('sha256').update(real).digest('hex'),
+    }],
+    inspectionChallengeSha256: 'd'.repeat(64),
+  };
+  const payload = (lineText) => ({
+    disposition: 'APPROVE', findings: [], unverified: [],
+    inspectionProofs: [{ path: schemaPath, lineNumber: 62, lineText }],
+  });
+
+  assert.strictEqual(validateCodexInspectionProofs(payload(real), inputDelivery).complete, true);
+
+  const reRendered = validateCodexInspectionProofs(payload(returned), inputDelivery);
+  assert.strictEqual(reRendered.complete, false);
+  assert.match(reRendered.reason, /leading whitespace 20 vs challenged 10/);
+  assert.match(reRendered.reason, /content matches exactly after indent correction/);
+
+  // A reviewer that guessed the line must NOT be described as a formatting
+  // artefact. The two failures have to stay distinguishable in both directions.
+  const invented = validateCodexInspectionProofs(
+    payload('          "description": "a plausible sentence that was never in the file at all."'),
+    inputDelivery);
+  assert.strictEqual(invented.complete, false);
+  assert.doesNotMatch(invented.reason, /after indent correction/);
+  assert.doesNotMatch(invented.reason, /formatting fault/);
+});
+
+// RUN-20260902-5226737c regression, subject 3870834fd6bddd99fa49c9dbc1d2be6e856b2205efdcc2bc8dedeb7bd622ff53.
+// Codex G3 twice read builder-control/test/hosting.test.cjs line 1028 and
+// returned it without its final comma. The validator was right to reject the
+// short line against the exact one, but the published challenge gave the
+// reviewer nothing to check its own tail against: linePrefix pins the head,
+// leadingWhitespace the indent, and lineBytes is a count no reviewer recomputes
+// reliably enough to notice one absent byte. lineSuffix makes trailing
+// punctuation self-checkable. Acceptance stays byte-exact.
+test('RED: a dropped trailing comma is still rejected, and is named as a truncated tail', () => {
+  const real = "    ['ORPHANED', 'Worker supervisor exited unexpectedly; builder termination "
+    + "is unverified and retry is blocked', 127, false],";
+  const truncated = real.slice(0, -1); // the receipted answer: the final comma dropped
+  assert.strictEqual(Buffer.byteLength(real, 'utf8'), 126);
+  assert.strictEqual(Buffer.byteLength(truncated, 'utf8'), 125);
+
+  const hostingPath = 'builder-control/test/hosting.test.cjs';
+  const linePrefix = real.slice(0, 32);
+  const inputDelivery = {
+    complete: true,
+    coveredPaths: [hostingPath],
+    inspectionChallenges: [{
+      path: hostingPath,
+      lineNumber: 1028,
+      linePrefix,
+      lineBytes: Buffer.byteLength(real, 'utf8'),
+      leadingWhitespace: 4,
+      // The published rule, recomputed here independently of the adapter.
+      lineSuffix: real.slice(real.length - 16),
+      lineSha256: crypto.createHash('sha256').update(real).digest('hex'),
+    }],
+    inspectionChallengeSha256: 'e'.repeat(64),
+  };
+  const payload = (lineText) => ({
+    disposition: 'APPROVE', findings: [], unverified: [],
+    inspectionProofs: [{ path: hostingPath, lineNumber: 1028, lineText }],
+  });
+
+  // Byte-exact acceptance is unchanged.
+  assert.strictEqual(validateCodexInspectionProofs(payload(real), inputDelivery).complete, true,
+    'the exact raw line stopped proving inspection');
+
+  // One missing comma is still a rejection. Nothing here normalises punctuation.
+  const dropped = validateCodexInspectionProofs(payload(truncated), inputDelivery);
+  assert.strictEqual(dropped.complete, false,
+    'a line missing its trailing comma was accepted as an exact inspection proof');
+  assert.match(dropped.reason, /returned 125 UTF-8 bytes/);
+  assert.match(dropped.reason, /challenged line is 126 bytes/);
+  assert.match(dropped.reason, /does not end with the challenged lineSuffix/);
+  assert.doesNotMatch(dropped.reason, /after indent correction/,
+    'a truncated tail was misreported as a re-indentation artefact');
+
+  // A truncation must stay distinguishable from an invented line in both
+  // directions: the invented one shares neither head nor tail.
+  const invented = validateCodexInspectionProofs(
+    payload("    ['ORPHANED', 'a plausible row that was never in the file at all', 1, true]"),
+    inputDelivery);
+  assert.strictEqual(invented.complete, false);
+  assert.match(invented.reason, /does not begin with the challenged linePrefix/);
+});
+
+test('the inspection challenge and the reviewer prompt both carry a bounded deterministic lineSuffix', () => {
+  // The documented rule, reimplemented here so the adapter cannot silently
+  // redefine it: at most 16 trailing UTF-16 code units, never starting inside a
+  // surrogate pair, never leaving fewer than 8 unpublished units between the
+  // published prefix and the published suffix.
+  const expectedSuffix = (lineText, linePrefix) => {
+    const budget = Math.min(16, lineText.length - linePrefix.length - 8);
+    if (budget <= 0) return '';
+    let start = lineText.length - budget;
+    const unit = lineText.charCodeAt(start);
+    if (unit >= 0xDC00 && unit <= 0xDFFF) start += 1;
+    return lineText.slice(start);
+  };
+
+  const reviewPaths = [
+    'builder-control/test/hosting.test.cjs',
+    'builder-control/schemas/engineering-review.schema.json',
+  ];
+  const sandbox = prepareReviewSandbox(reviewPaths);
+  try {
+    const built = buildCodexInput('EXACT SUFFIX TRANSPORT', sandbox, reviewPaths);
+    assert.strictEqual(built.inputDelivery.inspectionChallenges.length, reviewPaths.length);
+
+    for (const challenge of built.inputDelivery.inspectionChallenges) {
+      const raw = fs.readFileSync(path.join(sandbox.cwd, challenge.path), 'utf8')
+        .split(/\r\n|\n|\r/)[challenge.lineNumber - 1];
+      assert.strictEqual(typeof challenge.lineSuffix, 'string',
+        `${challenge.path} published no lineSuffix`);
+      assert.ok(challenge.lineSuffix.length > 0,
+        `${challenge.path} published an empty lineSuffix for a full-length candidate line`);
+      assert.ok(challenge.lineSuffix.length <= 16, 'lineSuffix exceeded its published bound');
+      assert.strictEqual(challenge.lineSuffix, expectedSuffix(raw, challenge.linePrefix),
+        `${challenge.path} lineSuffix does not follow the published rule`);
+      assert.ok(raw.endsWith(challenge.lineSuffix), 'lineSuffix is not the tail of the challenged line');
+
+      // Prefix + suffix must never span the whole line, or a reviewer could
+      // reconstruct it from the challenge instead of locating it in the bundle.
+      assert.ok(raw.length - challenge.linePrefix.length - challenge.lineSuffix.length >= 8,
+        `${challenge.path} published enough of the line to reconstruct it without reading the file`);
+
+      // It reached the reviewer, not just the private challenge record.
+      assert.ok(built.input.includes(`"lineSuffix":${JSON.stringify(challenge.lineSuffix)}`),
+        `${challenge.path} lineSuffix never reached the reviewer-visible challenge block`);
+      assert.ok(!built.input.includes(challenge.lineSha256),
+        'the private line hash leaked into the reviewer-visible challenge block');
+
+      // Acceptance is still exact, and the tail is still load-bearing.
+      const payload = (lineText) => ({
+        disposition: 'APPROVE',
+        findings: [],
+        unverified: [],
+        inspectionProofs: built.inputDelivery.inspectionChallenges.map((entry) => ({
+          path: entry.path,
+          lineNumber: entry.lineNumber,
+          lineText: entry.path === challenge.path ? lineText
+            : fs.readFileSync(path.join(sandbox.cwd, entry.path), 'utf8')
+              .split(/\r\n|\n|\r/)[entry.lineNumber - 1],
+        })),
+      });
+      assert.strictEqual(validateCodexInspectionProofs(payload(raw), built.inputDelivery).complete, true,
+        `${challenge.path} exact line stopped proving inspection`);
+      const shortened = validateCodexInspectionProofs(payload(raw.slice(0, -1)), built.inputDelivery);
+      assert.strictEqual(shortened.complete, false,
+        `${challenge.path} accepted a line missing its final character`);
+      assert.match(shortened.reason, /does not end with the challenged lineSuffix/);
+    }
+
+    // The prompt has to demand the tail, not merely publish it.
+    assert.match(built.input, /must ALSO end with exactly those characters/);
+    assert.match(built.input, /including any trailing comma/);
+    assert.match(built.input, /must be exactly lineBytes UTF-8 bytes/);
+    assert.match(built.input, /exactly leadingWhitespace whitespace characters/);
+  } finally { cleanupReviewSandbox(sandbox); }
 });

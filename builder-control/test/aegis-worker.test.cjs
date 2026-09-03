@@ -100,6 +100,18 @@ if (process.env.FAKE_CLAUDE_MODE === 'auth-fail') {
   console.error('Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.');
   process.exit(1);
 }
+if (process.env.FAKE_CLAUDE_MODE === 'progress') {
+  const delay = Number(process.env.FAKE_SLEEP_MS || 800);
+  const timer = setInterval(() => console.log('progress'), 75);
+  setTimeout(() => { clearInterval(timer); process.exit(0); }, delay);
+  return;
+}
+if (process.env.FAKE_CLAUDE_MODE === 'write-progress') {
+  const delay = Number(process.env.FAKE_SLEEP_MS || 2300);
+  const timer = setInterval(() => fs.appendFileSync('allowed.txt', 'progress\\n'), 250);
+  setTimeout(() => { clearInterval(timer); process.exit(0); }, delay);
+  return;
+}
 if (process.env.FAKE_CLAUDE_MODE === 'tree') {
   process.on('SIGTERM', () => {});
   const descendant = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: 'ignore' });
@@ -1402,6 +1414,60 @@ test('timeout is integer-bounded before worker launch', () => {
   assert.strictEqual(WORKER.normalizeTimeoutSec(undefined), 900);
   assert.strictEqual(WORKER.normalizeTimeoutSec(1), 1);
   assert.strictEqual(WORKER.normalizeTimeoutSec(3600), 3600);
+});
+
+test('builder no-progress watchdog is fixed at five minutes and cannot be operator shortened', () => {
+  assert.strictEqual(WORKER.DEFAULT_NO_PROGRESS_TIMEOUT_SEC, 300);
+  assert.strictEqual(WORKER.builderNoProgressTimeoutMs(900_000, {}), 300_000);
+  assert.strictEqual(WORKER.builderNoProgressTimeoutMs(300_000, {}), null);
+  assert.strictEqual(WORKER.builderNoProgressTimeoutMs(900_000, {
+    FAKE_NO_PROGRESS_TIMEOUT_MS: '25',
+  }), 300_000);
+  assert.strictEqual(WORKER.builderNoProgressTimeoutMs(5_000, {
+    NODE_ENV: 'test', FAKE_NO_PROGRESS_TIMEOUT_MS: '250',
+  }), 250);
+});
+
+test('no-output builder is stopped as stalled before its hard timeout', () => {
+  const f = fixture('stop the genuinely idle builder', {
+    FAKE_SLEEP_MS: '4000', FAKE_NO_PROGRESS_TIMEOUT_MS: '250',
+  }, 5);
+  const done = waitFor(f.read, (r) => r.state === 'BUILD_FAILED', 8000);
+  assert.strictEqual(done.build.exit, 124);
+  assert.strictEqual(done.build.timedOut, true);
+  assert.strictEqual(done.build.timeoutReason, 'NO_PROGRESS_TIMEOUT');
+  assert.strictEqual(done.build.timeoutTerminationEvidence.timeoutReason, 'NO_PROGRESS_TIMEOUT');
+  assert.strictEqual(done.build.timeoutTerminationEvidence.childCloseObserved, true);
+  assert.strictEqual(done.build.workerState, 'FAILED');
+  assert.strictEqual(done.build.progressKind, 'STARTED');
+  fs.rmSync(f.tmp, { recursive: true, force: true });
+});
+
+test('real stdout progress keeps a builder alive until successful exit', () => {
+  const f = fixture('allow a builder that is reporting real progress', {
+    FAKE_CLAUDE_MODE: 'progress', FAKE_SLEEP_MS: '1200',
+    FAKE_NO_PROGRESS_TIMEOUT_MS: '750',
+  }, 5);
+  const done = waitFor(f.read, (r) => r.state === 'BUILT', 8000);
+  assert.strictEqual(done.build.exit, 0);
+  assert.strictEqual(done.build.timedOut, false);
+  assert.strictEqual(done.build.timeoutReason, null);
+  assert.strictEqual(done.build.progressKind, 'STDOUT');
+  fs.rmSync(f.tmp, { recursive: true, force: true });
+});
+
+test('authorized file changes count as progress even when model output is buffered', () => {
+  const f = fixture('allow a quiet builder that is changing its authorized file', {
+    FAKE_CLAUDE_MODE: 'write-progress', FAKE_SLEEP_MS: '2300',
+    FAKE_NO_PROGRESS_TIMEOUT_MS: '1500',
+  }, 5);
+  const done = waitFor(f.read, (r) => r.state === 'BUILT', 8000);
+  assert.strictEqual(done.build.exit, 0);
+  assert.strictEqual(done.build.timedOut, false);
+  assert.strictEqual(done.build.timeoutReason, null);
+  assert.strictEqual(done.build.progressKind, 'AUTHORIZED_WRITE');
+  assert.strictEqual(done.build.authorizedMutationObserved, true);
+  fs.rmSync(f.tmp, { recursive: true, force: true });
 });
 
 test('timeout fails closed when the owned process group does not produce exact child close', () => {

@@ -24,6 +24,7 @@ const CONTROL_POLL_MS = 35;
 const CANCEL_CLOSE_GRACE_MS = 1000;
 const MAX_PROMPT_BYTES = 64 * 1024;
 const MAX_TIMEOUT_SEC = 3600;
+const DEFAULT_NO_PROGRESS_TIMEOUT_SEC = 300;
 const CLAUDE_MODELS = new Set(['opus', 'sonnet', 'haiku']);
 const GROK_MODELS = new Set(['grok-4.6', 'grok-4.5']);
 const CLAUDE_VERSION = '2.1.245';
@@ -40,6 +41,10 @@ const GROK_FILE_TOOLS = Object.freeze(['read_file', 'search_replace', 'grep', 'l
 const GROK_DISALLOWED_TOOLS = Object.freeze(['run_terminal_cmd', 'web_search', 'web_fetch', 'task']);
 const GROK_MAX_TURNS = 32;
 const GROK_HOME_PREFIX = '/private/tmp/aegis-grok-';
+const HOST_OUTER_CONTAINMENT_BOUNDARY = 'AEGIS_TOP_LEVEL_HOST_CONTAINMENT_V1';
+const CHECK_SNAPSHOT_POLICY = 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1';
+const TRUSTED_PROCESS_INSPECTOR_ENV = 'AEGIS_TRUSTED_PROCESS_INSPECTOR';
+const TRUSTED_PROCESS_INSPECTOR_SHA_ENV = 'AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256';
 const FIXED_PATH = [
   '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin',
   path.join(os.homedir(), '.local', 'bin'),
@@ -140,6 +145,9 @@ function boundedTail(value) {
   return String(value || '')
     .replace(/(authorization:\s*bearer\s+)[^\s]+/ig, '$1[REDACTED]')
     .replace(/((?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s]+/ig, '$1[REDACTED]')
+    // A credential is not always introduced by a label. A bare JWT carries its
+    // own shape, so it is redacted on the same boundary as the labelled forms.
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?\b/g, '[REDACTED JWT]')
     .split('\n').slice(-TAIL_LINES).join('\n').slice(-12000);
 }
 
@@ -155,9 +163,51 @@ function processGroupAlive(processGroupId) {
   catch (e) { return e && e.code === 'EPERM'; }
 }
 
+function trustedProcessInspector(source = process.env) {
+  if (source.AEGIS_HOST_OUTER_CONTAINMENT !== HOST_OUTER_CONTAINMENT_BOUNDARY &&
+      source.AEGIS_CHECK_SNAPSHOT_POLICY !== CHECK_SNAPSHOT_POLICY) return null;
+  const candidate = source[TRUSTED_PROCESS_INSPECTOR_ENV];
+  const expectedSha256 = source[TRUSTED_PROCESS_INSPECTOR_SHA_ENV];
+  const home = source.HOME;
+  const scratch = source.TMPDIR;
+  if (typeof candidate !== 'string' || !path.isAbsolute(candidate) ||
+      !/^[0-9a-f]{64}$/.test(expectedSha256 || '') ||
+      typeof home !== 'string' || typeof scratch !== 'string') return null;
+  const root = path.dirname(home);
+  const normalizedScratch = scratch.endsWith(path.sep) ? scratch.slice(0, -1) : scratch;
+  const bin = path.join(root, 'bin');
+  if (home !== path.join(root, 'home') || normalizedScratch !== path.join(root, 'tmp') ||
+      candidate !== path.join(bin, 'ps')) return null;
+  try {
+    for (const target of [root, bin]) {
+      const stat = fs.lstatSync(target);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() ||
+          (stat.mode & 0o022) !== 0 || fs.realpathSync(target) !== target) return null;
+    }
+    const stat = fs.lstatSync(candidate);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid() ||
+        (stat.mode & 0o077) !== 0 || (stat.mode & 0o100) === 0 ||
+        fs.realpathSync(candidate) !== candidate) return null;
+    const observedSha256 = crypto.createHash('sha256').update(fs.readFileSync(candidate)).digest('hex');
+    if (observedSha256 !== expectedSha256) return null;
+  } catch { return null; }
+  // The coordinate is accepted only from the deny-default outer boundary.
+  // A caller that merely copies its marker can still write this root and is
+  // therefore refused instead of gaining an executable-selection primitive.
+  const probe = path.join(root, `.aegis-inspector-boundary-probe-${process.pid}`);
+  try { fs.writeFileSync(probe, '', { flag: 'wx', mode: 0o600 }); }
+  catch (error) { return ['EPERM', 'EACCES'].includes(error.code) ? candidate : null; }
+  try { fs.unlinkSync(probe); } catch { /* fail closed below */ }
+  return null;
+}
+
+function processInspectorExecutable(source = process.env) {
+  return trustedProcessInspector(source) || (fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps');
+}
+
 function processGroupMembers(processGroupId, timeoutMs = 250) {
   if (!Number.isInteger(processGroupId) || processGroupId <= 1) return null;
-  const observed = spawnSync('ps', ['-axo', 'pid=,pgid='], {
+  const observed = spawnSync(processInspectorExecutable(), ['-axo', 'pid=,pgid='], {
     encoding: 'utf8', timeout: timeoutMs, detached: true,
   });
   if (observed.status !== 0) return null;
@@ -219,6 +269,21 @@ function normalizeTimeoutSec(value) {
     throw invalidLaunch(`timeoutSec must be an integer from 1 to ${MAX_TIMEOUT_SEC}`);
   }
   return timeoutSec;
+}
+
+function builderNoProgressTimeoutMs(timeoutMs, source = process.env) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw invalidLaunch('builder timeout must be a positive finite duration');
+  }
+  if (source.NODE_ENV === 'test' && source.FAKE_NO_PROGRESS_TIMEOUT_MS !== undefined) {
+    const configured = Number(source.FAKE_NO_PROGRESS_TIMEOUT_MS);
+    if (!Number.isInteger(configured) || configured < 25 || configured >= timeoutMs) {
+      throw invalidLaunch('test no-progress timeout must be an integer from 25ms below the hard timeout');
+    }
+    return configured;
+  }
+  const defaultMs = DEFAULT_NO_PROGRESS_TIMEOUT_SEC * 1000;
+  return timeoutMs > defaultMs ? defaultMs : null;
 }
 
 function resolveClaudeExecutable() {
@@ -359,6 +424,17 @@ function baseEnvironment(source = process.env) {
 
 function workerEnvironment(source = process.env) {
   const env = baseEnvironment(source);
+  const inspector = trustedProcessInspector(source);
+  if (inspector) {
+    env[TRUSTED_PROCESS_INSPECTOR_ENV] = inspector;
+    env[TRUSTED_PROCESS_INSPECTOR_SHA_ENV] = source[TRUSTED_PROCESS_INSPECTOR_SHA_ENV];
+    if (source.AEGIS_HOST_OUTER_CONTAINMENT === HOST_OUTER_CONTAINMENT_BOUNDARY) {
+      env.AEGIS_HOST_OUTER_CONTAINMENT = HOST_OUTER_CONTAINMENT_BOUNDARY;
+    }
+    if (source.AEGIS_CHECK_SNAPSHOT_POLICY === CHECK_SNAPSHOT_POLICY) {
+      env.AEGIS_CHECK_SNAPSHOT_POLICY = CHECK_SNAPSHOT_POLICY;
+    }
+  }
   if (Object.keys(source).some((key) => key.startsWith('ANTHROPIC_'))) {
     env.AEGIS_REMOVED_ANTHROPIC_OVERRIDES = '1';
     if (Object.prototype.hasOwnProperty.call(source, 'ANTHROPIC_API_KEY')) {
@@ -1374,12 +1450,44 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   // Every later failure must retain enough ownership evidence to drain the
   // exact worker process group or fail closed as TERMINATION_UNVERIFIED.
   let timedOut = false;
+  let timeoutReason = null;
+  let lastProgressAtMs = Date.now();
+  let lastProgressAt = nowIso();
+  let progressKind = 'STARTED';
+  let latestAuthorizedWriteSha256 = authorizedWriteBaselineSha256;
+  const timeoutMs = normalizeTimeoutSec(payload.timeoutSec) * 1000;
+  const noProgressTimeoutMs = builderNoProgressTimeoutMs(timeoutMs);
+  let noProgressTimer = null;
+  let resolveNoProgress = null;
+  const noProgressReached = noProgressTimeoutMs === null
+    ? new Promise(() => {})
+    : new Promise((resolve) => { resolveNoProgress = resolve; });
+  const armNoProgressWatchdog = () => {
+    if (noProgressTimeoutMs === null || !resolveNoProgress) return;
+    clearTimeout(noProgressTimer);
+    noProgressTimer = setTimeout(() => {
+      const resolve = resolveNoProgress;
+      resolveNoProgress = null;
+      resolve({ lastProgressAt, progressKind });
+    }, noProgressTimeoutMs);
+  };
+  const recordProgress = (kind) => {
+    lastProgressAtMs = Date.now();
+    lastProgressAt = nowIso();
+    progressKind = kind;
+    armNoProgressWatchdog();
+  };
+  armNoProgressWatchdog();
   childOutcome = new Promise((resolve) => {
     child.once('error', (error) => resolve({ exit: 127, signal: null, error }));
     child.once('close', (code, signal) => resolve({ exit: code === null ? (timedOut ? 124 : 1) : code, signal, error: null }));
   });
-  if (child.stdout) child.stdout.on('data', (chunk) => { stdout += chunk; stdout = stdout.slice(-24000); });
-  if (child.stderr) child.stderr.on('data', (chunk) => { stderr += chunk; stderr = stderr.slice(-24000); });
+  if (child.stdout) child.stdout.on('data', (chunk) => {
+    stdout += chunk; stdout = stdout.slice(-24000); recordProgress('STDOUT');
+  });
+  if (child.stderr) child.stderr.on('data', (chunk) => {
+    stderr += chunk; stderr = stderr.slice(-24000); recordProgress('STDERR');
+  });
 
   if (process.env.NODE_ENV === 'test' && process.env.FAKE_PROCESS_IDENTITY_FAILURE === '1') {
     delete process.env.FAKE_PROCESS_IDENTITY_FAILURE;
@@ -1395,6 +1503,8 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     childProcessIdentity: childIdentity,
     workerState: 'RUNNING',
     heartbeatAt: nowIso(),
+    lastProgressAt,
+    progressKind,
     environment: {
       anthropicOverridesRemoved: removedAnthropicOverrides,
       anthropicApiKeyOverrideRemoved: process.env.AEGIS_REMOVED_ANTHROPIC_API_KEY === '1',
@@ -1421,8 +1531,15 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
 
   const heartbeat = setInterval(() => {
     try {
+      const writeSha256 = authorizedWriteDigest(contained.allowlists.writePaths, run.worktree.path);
+      if (writeSha256 !== latestAuthorizedWriteSha256) {
+        latestAuthorizedWriteSha256 = writeSha256;
+        recordProgress('AUTHORIZED_WRITE');
+      }
       updateBuild(R, run.runId, payload.attemptId, {
         heartbeatAt: nowIso(),
+        lastProgressAt,
+        progressKind,
         stdoutTail: boundedTail(stdout),
         stderrTail: boundedTail(stderr),
       });
@@ -1430,7 +1547,6 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   }, HEARTBEAT_MS);
 
   let timeoutTerminationEvidence = null;
-  const timeoutMs = normalizeTimeoutSec(payload.timeoutSec) * 1000;
   const observedChildOutcome = process.env.NODE_ENV === 'test' && process.env.FAKE_NEVER_CLOSE === '1'
     ? new Promise(() => {}) : childOutcome;
   let timeout;
@@ -1441,6 +1557,7 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   let first = await Promise.race([
     observedChildOutcome.then((result) => ({ kind: 'child', result })),
     timeoutReached.then(() => ({ kind: 'timeout' })),
+    noProgressReached.then((progress) => ({ kind: 'no-progress', progress })),
     cancellation.then((evidence) => ({ kind: 'cancel', evidence })),
   ]);
   if (first.kind === 'child' && cancellationState.requested) {
@@ -1452,9 +1569,11 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   } else if (first.kind === 'cancel') {
     clearInterval(heartbeat);
     clearTimeout(timeout);
+    clearTimeout(noProgressTimer);
     return first.evidence.terminated ? 143 : 124;
   } else {
     timedOut = true;
+    timeoutReason = first.kind === 'no-progress' ? 'NO_PROGRESS_TIMEOUT' : 'WALL_CLOCK_TIMEOUT';
     const testUnverified = process.env.NODE_ENV === 'test' && process.env.FAKE_UNVERIFIED_TIMEOUT === '1';
     const terminationOperation = testUnverified
       ? Promise.resolve({ processGroupId: process.pid, terminated: false, childCloseObserved: false,
@@ -1472,12 +1591,17 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     ]);
     timeoutTerminationEvidence = {
       ...(timeoutTerminationEvidence || {}), childCloseObserved: Boolean(closeAfterTermination),
+      timeoutReason,
+      lastProgressAt,
+      progressKind,
+      noProgressForMs: Math.max(0, Date.now() - lastProgressAtMs),
     };
     result = closeAfterTermination || { exit: 124, signal: null, error: null };
     if (result.exit === 0 || result.exit === null) result.exit = 124;
   }
   clearInterval(heartbeat);
   clearTimeout(timeout);
+  clearTimeout(noProgressTimer);
 
   const authorizedMutationObserved = authorizedWriteDigest(contained.allowlists.writePaths, run.worktree.path) !==
     authorizedWriteBaselineSha256;
@@ -1501,6 +1625,9 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     exit: result.exit,
     signal: result.signal || null,
     timedOut,
+    timeoutReason,
+    lastProgressAt,
+    progressKind,
     authorizedMutationObserved,
     timeoutTerminationEvidence,
     failure,
@@ -1577,7 +1704,8 @@ module.exports = {
   baseEnvironment, workerEnvironment, claudeEnvironment, grokEnvironment,
   assertClaudeModelSandboxPolicy,
   classifyBuilderFailure, selectFailoverBuilder, loadModelRoutingPolicy,
-  MAX_PROMPT_BYTES, MAX_TIMEOUT_SEC, CLAUDE_SETTINGS, CLAUDE_FILE_TOOLS,
+  MAX_PROMPT_BYTES, MAX_TIMEOUT_SEC, DEFAULT_NO_PROGRESS_TIMEOUT_SEC,
+  builderNoProgressTimeoutMs, CLAUDE_SETTINGS, CLAUDE_FILE_TOOLS,
   CLAUDE_DISALLOWED_TOOLS, CLAUDE_VERSION, CLAUDE_EXECUTABLE,
   GROK_EXECUTABLE, GROK_PINNED_EXECUTABLE, GROK_FILE_TOOLS, GROK_DISALLOWED_TOOLS,
   GROK_MAX_TURNS, GROK_HOME_PREFIX, MODEL_ROUTING_POLICY,

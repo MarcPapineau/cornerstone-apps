@@ -732,6 +732,303 @@ test('current-run binding uses canonical timestamps and never borrows a gate sub
   assert.strictEqual(binding.gateSubjectSha256, subject);
 });
 
+// Every process that persists governed state loads this observer first. It
+// records each write payload before delegating to the real filesystem, so the
+// proof below is about bytes handed to persistence, not about final state.
+const PERSISTENCE_OBSERVER_SOURCE = `'use strict';
+const realFs = require('fs');
+const trace = process.env.FAKE_PERSISTENCE_TRACE_FILE;
+if (trace) {
+  const append = realFs.appendFileSync.bind(realFs);
+  const payloadText = (data) => {
+    if (typeof data === 'string') return data;
+    try { return Buffer.from(data).toString('utf8'); } catch { return ''; }
+  };
+  const record = (op, target, data) => {
+    if (String(target) === trace) return;
+    try {
+      append(trace, JSON.stringify({ pid: process.pid, op, target: String(target),
+        payload: payloadText(data) }) + '\\n');
+    } catch { /* observation must never alter production behavior */ }
+  };
+  for (const op of ['writeFileSync', 'appendFileSync']) {
+    const original = realFs[op].bind(realFs);
+    realFs[op] = (target, data, ...rest) => { record(op, target, data); return original(target, data, ...rest); };
+  }
+  const originalRename = realFs.renameSync.bind(realFs);
+  realFs.renameSync = (from, to) => { record('renameSync', from + ' -> ' + to, ''); return originalRename(from, to); };
+  const originalWriteFile = realFs.writeFile;
+  realFs.writeFile = function(target, data, ...rest) { record('writeFile', target, data); return originalWriteFile.call(realFs, target, data, ...rest); };
+  const originalPromisesWrite = realFs.promises.writeFile.bind(realFs.promises);
+  realFs.promises.writeFile = (target, data, ...rest) => { record('promises.writeFile', target, data); return originalPromisesWrite(target, data, ...rest); };
+}
+`;
+
+function readPersistenceTrace(tracePath) {
+  return fs.readFileSync(tracePath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function persistenceSecretViolations(traceEntries, secrets) {
+  const violations = [];
+  for (const entry of traceEntries) {
+    for (const secret of secrets) {
+      if (String(entry.payload || '').includes(secret)) {
+        violations.push({ op: entry.op, target: entry.target, secret });
+      }
+    }
+  }
+  return violations;
+}
+
+function walkArtifactDigests(roots) {
+  const digests = new Map();
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    if (fs.lstatSync(root).isFile()) {
+      digests.set(root, crypto.createHash('sha256').update(fs.readFileSync(root)).digest('hex'));
+      continue;
+    }
+    (function walk(dir) {
+      for (const name of fs.readdirSync(dir)) {
+        const target = path.join(dir, name);
+        if (fs.lstatSync(target).isDirectory()) walk(target);
+        else digests.set(target, crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex'));
+      }
+    })(root);
+  }
+  return digests;
+}
+
+test('credential-shaped builder output never reaches any run, ledger or evidence persistence write, proven at the write boundary and after reload', () => {
+  const bearer = 'AEGIS-BETA-FAKE-BEARER-5a4b3c2d1e0f9a8b';
+  const password = 'AEGIS-BETA-FAKE-PASSWORD-6f5e4d3c';
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZWdpcy1iZXRhLWZpeHR1cmUifQ.fakeBetaSignature654321';
+  const apiKey = 'AEGIS-BETA-FAKE-API-KEY-7b6a5948';
+  const secrets = [bearer, password, jwt, apiKey];
+  const diagnostic = 'AEGIS_BETA_BUILDER_DIAGNOSTIC';
+  // The observer trace and the faulty fixture live outside every observed
+  // persistence root so the proof never scans its own instrumentation.
+  const fixtureDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-beta-observer-'));
+  const tracePath = path.join(fixtureDir, 'persistence-trace.jsonl');
+  const observerPath = path.join(fixtureDir, 'persistence-observer.cjs');
+  fs.writeFileSync(tracePath, '');
+  fs.writeFileSync(observerPath, PERSISTENCE_OBSERVER_SOURCE);
+  // The suite scratch already resolves inside the OS temp root, which is what
+  // the deterministic worker fixture and the ledger writer both require.
+  const buildFixture = path.join(scratch, 'build-fixture');
+  const worktree = path.join(buildFixture, 'worktree');
+  const bin = path.join(buildFixture, 'bin');
+  fs.mkdirSync(worktree, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(worktree, 'allowed.txt'), 'fixture\n');
+  fs.writeFileSync(path.join(worktree, 'authority-source.txt'), 'canonical\n');
+  fs.writeFileSync(path.join(worktree, 'authority-check.cjs'), 'process.exit(0);\n');
+  const packetPath = path.join(worktree, 'packet.json');
+  fs.writeFileSync(packetPath, JSON.stringify({
+    packetId: 'PKT-TEST-BETA-REDACTION', agentId: 'claude-code',
+    sourceOfTruth: ['authority-source.txt'], testsRequired: ['node authority-check.cjs'],
+    filesAllowed: ['allowed.txt'],
+  }));
+  fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+'use strict';
+for (let i = 0; i < 3000; i++) console.log('oversized-stdout-padding-line-' + i);
+console.log(${JSON.stringify(diagnostic)});
+console.log('Authorization: Bearer ' + ${JSON.stringify(bearer)});
+console.log('password=' + ${JSON.stringify(password)});
+console.log(${JSON.stringify(jwt)});
+console.log('api_key: ' + ${JSON.stringify(apiKey)});
+for (let i = 0; i < 3000; i++) console.error('oversized-stderr-padding-line-' + i);
+console.error(${JSON.stringify(diagnostic)});
+console.error('Authorization: Bearer ' + ${JSON.stringify(bearer)});
+console.error('password=' + ${JSON.stringify(password)});
+console.error(${JSON.stringify(jwt)});
+console.error('api_key: ' + ${JSON.stringify(apiKey)});
+process.exit(9);
+`, { mode: 0o755 });
+
+  const runId = 'RUN-20260901-be7a0001';
+  seedRun(runId, 'WORKTREE_READY', { worktree: { path: worktree }, packet: packetPath, build: null });
+  const runFile = AegisRun.runPath(runId);
+  const observedRoots = [runsDir, checkpointsDir, ledgerFile, buildFixture];
+  const beforeArtifacts = walkArtifactDigests(observedRoots);
+
+  const savedEnv = {};
+  for (const [key, value] of Object.entries({
+    NODE_ENV: 'test',
+    AEGIS_TEST_CLAUDE_EXECUTABLE: path.join(bin, 'claude'),
+    AEGIS_TEST_CONTAINMENT_MODE: 'DETERMINISTIC_PROFILE_ONLY',
+    FAKE_PERSISTENCE_TRACE_FILE: tracePath,
+  })) {
+    savedEnv[key] = process.env[key];
+    process.env[key] = value;
+  }
+  const workerPath = require.resolve('../aegis-worker.cjs');
+  require(workerPath);
+  const workerModule = require.cache[workerPath];
+  const originalWorker = workerModule.exports;
+  const interceptInProcess = () => {
+    const original = {
+      writeFileSync: fs.writeFileSync, appendFileSync: fs.appendFileSync, renameSync: fs.renameSync,
+    };
+    const append = original.appendFileSync.bind(fs);
+    const record = (op, target, data) => {
+      if (String(target) === tracePath) return;
+      append(tracePath, JSON.stringify({ pid: process.pid, op, target: String(target),
+        payload: typeof data === 'string' ? data : Buffer.isBuffer(data) ? data.toString('utf8') : '' }) + '\n');
+    };
+    fs.writeFileSync = (target, data, ...rest) => { record('writeFileSync', target, data);
+      return original.writeFileSync.call(fs, target, data, ...rest); };
+    fs.appendFileSync = (target, data, ...rest) => { record('appendFileSync', target, data);
+      return original.appendFileSync.call(fs, target, data, ...rest); };
+    fs.renameSync = (from, to) => { record('renameSync', `${from} -> ${to}`, '');
+      return original.renameSync.call(fs, from, to); };
+    return () => { Object.assign(fs, original); };
+  };
+  try {
+    // The production launch path is preserved byte for byte; the test-only
+    // spawn seam prepends the observer preload to the worker's node argv.
+    workerModule.exports = {
+      ...originalWorker,
+      launchWorker: (launchArgs) => originalWorker.launchWorker(launchArgs, {
+        spawn: (bin2, argv, options) =>
+          require('child_process').spawn(bin2, ['--require', observerPath, ...argv], options),
+      }),
+    };
+    const restoreInProcess = interceptInProcess();
+    let started;
+    try {
+      started = AegisRun.startWorker(runId, {
+        provider: 'claude-subscription', prompt: 'emit credential-shaped oversized output', model: 'opus',
+      }, { timeoutSec: 60 });
+    } finally { restoreInProcess(); }
+    assert.strictEqual(started.state, 'BUILDING');
+
+    const deadline = Date.now() + 30000;
+    let run = null;
+    while (Date.now() < deadline) {
+      run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+      if (run.state === 'BUILT' || run.state === 'BUILD_FAILED') break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+    assert.strictEqual(run && run.state, 'BUILD_FAILED', 'the governed builder did not complete');
+    const workerPid = run.build.workerPid;
+    const exitDeadline = Date.now() + 5000;
+    while (Date.now() < exitDeadline && AegisRun.processExistence(workerPid) !== 'absent') {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+
+    const trace = readPersistenceTrace(tracePath);
+    // The observation instrument itself is proven before any absence claim:
+    // the trace must contain the launch payload, the worker's RUNNING record,
+    // the builder-output-bearing finalization, and one intercepted temp write
+    // for every atomic publish of the run record.
+    assert.ok(trace.some((entry) => /"workerState":\s*"RUNNING"/.test(entry.payload || '')),
+      'the persistence observer never saw the worker RUNNING record');
+    const outputWrites = trace.filter((entry) => /"stdoutTail"/.test(entry.payload || ''));
+    assert.ok(outputWrites.length >= 1, 'the persistence observer never saw a builder-output payload');
+    assert.ok(outputWrites.some((entry) => String(entry.payload).includes('[REDACTED]')),
+      'no observed builder-output payload carried a redaction marker');
+    const runPublishes = trace.filter((entry) => entry.op === 'renameSync' &&
+      entry.target.endsWith(` -> ${runFile}`));
+    assert.ok(runPublishes.length >= 3, 'atomic run-record publishes were not observed');
+    for (const publish of runPublishes) {
+      const source = publish.target.slice(0, -` -> ${runFile}`.length);
+      assert.ok(trace.some((entry) => entry.op === 'writeFileSync' && entry.target === source),
+        `run-record publish from ${source} had no intercepted write payload`);
+    }
+    const ledgerEntries = JSON.parse(fs.readFileSync(ledgerFile, 'utf8'))
+      .filter((entry) => entry && entry.correlationId === runId);
+    assert.ok(ledgerEntries.some((entry) => entry.operationId === `${runId}:BUILDING->BUILD_FAILED`),
+      'the canonical ledger did not record the completed build');
+    for (const entry of ledgerEntries) {
+      assert.ok(trace.some((item) => String(item.payload || '').includes(entry.operationId)),
+        `canonical ledger entry ${entry.operationId} was appended from an unobserved payload`);
+    }
+
+    // A deliberately faulty persister that writes raw bytes first and only
+    // then replaces them with redacted bytes passes final-state inspection but
+    // must be detected by the same write-boundary observation.
+    const faultyTracePath = path.join(fixtureDir, 'faulty-trace.jsonl');
+    const faultyTarget = path.join(fixtureDir, 'faulty-run-record.json');
+    fs.writeFileSync(faultyTracePath, '');
+    const faultyRestore = (() => {
+      const original = fs.writeFileSync;
+      const append = fs.appendFileSync.bind(fs);
+      fs.writeFileSync = (target, data, ...rest) => {
+        if (String(target) !== faultyTracePath) {
+          append(faultyTracePath, JSON.stringify({ op: 'writeFileSync', target: String(target),
+            payload: typeof data === 'string' ? data : '' }) + '\n');
+        }
+        return original.call(fs, target, data, ...rest);
+      };
+      return () => { fs.writeFileSync = original; };
+    })();
+    try {
+      fs.writeFileSync(faultyTarget, JSON.stringify({ stdoutTail: `Authorization: Bearer ${bearer}` }));
+      fs.writeFileSync(faultyTarget, JSON.stringify({ stdoutTail: 'Authorization: Bearer [REDACTED]' }));
+    } finally { faultyRestore(); }
+    for (const secret of secrets) {
+      assert.ok(!fs.readFileSync(faultyTarget, 'utf8').includes(secret),
+        'the faulty fixture must end in a state that final-only inspection would accept');
+    }
+    const faultyViolations = persistenceSecretViolations(readPersistenceTrace(faultyTracePath), secrets);
+    assert.ok(faultyViolations.length >= 1,
+      'write-boundary observation failed to detect the raw-first-then-redacted fixture');
+
+    // With the instrument proven, the actual security claim: no raw secret was
+    // ever supplied to any run, ledger or evidence write.
+    const violations = persistenceSecretViolations(trace, secrets);
+    assert.deepStrictEqual(violations, [],
+      `raw credentials reached persistence writes: ${JSON.stringify(violations.map(({ op, target }) => ({ op, target })))}`);
+
+    // Every artifact the build created or changed is enumerated — from the
+    // observed roots and from every write target the trace recorded, wherever
+    // it landed — and its exact final bytes are inspected; nothing is inferred
+    // from the run alone.
+    const afterArtifacts = walkArtifactDigests(observedRoots);
+    const changedArtifacts = new Set([...afterArtifacts.keys()].filter((target) =>
+      beforeArtifacts.get(target) !== afterArtifacts.get(target)));
+    assert.ok(changedArtifacts.has(runFile), 'artifact enumeration missed the run record');
+    assert.ok(changedArtifacts.has(ledgerFile), 'artifact enumeration missed the canonical ledger');
+    for (const entry of trace) {
+      const targets = entry.op === 'renameSync' ? entry.target.split(' -> ') : [entry.target];
+      for (const target of targets) {
+        if (target !== tracePath && fs.existsSync(target) && fs.lstatSync(target).isFile()) {
+          changedArtifacts.add(target);
+        }
+      }
+    }
+    for (const target of changedArtifacts) {
+      const bytes = fs.readFileSync(target, 'utf8');
+      for (const secret of secrets) {
+        assert.ok(!bytes.includes(secret),
+          `build artifact ${path.relative(scratch, target)} retained a raw credential`);
+      }
+    }
+
+    // The durable record stays bounded and redacted after a fresh reload.
+    const reloaded = AegisRun.loadRun(runId);
+    assert.strictEqual(reloaded.state, 'BUILD_FAILED');
+    for (const secret of secrets) {
+      assert.ok(!JSON.stringify(reloaded).includes(secret), 'reloaded run state retained a raw credential');
+    }
+    for (const tail of [reloaded.build.stdoutTail, reloaded.build.stderrTail]) {
+      assert.ok(typeof tail === 'string' && tail.includes('[REDACTED]'),
+        'reloaded builder evidence lost its redaction markers');
+      assert.ok(tail.includes(diagnostic), 'reloaded builder evidence lost the useful diagnostic');
+      assert.ok(Buffer.byteLength(tail, 'utf8') <= 12000, 'reloaded builder evidence exceeded its byte bound');
+      assert.ok(tail.split('\n').length <= 24, 'reloaded builder evidence exceeded its line bound');
+    }
+  } finally {
+    workerModule.exports = originalWorker;
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 try {
   fs.rmSync(scratch, { recursive: true, force: true });
 } catch (error) {

@@ -254,7 +254,7 @@ function subjectOf(args, context = {}) {
   if (args.packet) a.push('--packet', fs.realpathSync(path.resolve(args.packet)));
   if (args.base) a.push('--base', args.base);
   if (args.head) a.push('--head', args.head);
-  const r = spawnSync('node', a, {
+  const r = spawnSync(process.execPath, a, {
     cwd: ROOT, env: context.gitEnv || strictEnvironment({}, process.env),
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
   });
@@ -309,6 +309,15 @@ Return ONLY a JSON object, no prose around it, with exactly these fields:
       "requiredCorrection": "<what must change; REQUIRED and non-empty for CRITICAL/HIGH, otherwise empty string allowed>",
       "verificationMethod": "<what proves the fix; REQUIRED and non-empty for CRITICAL/HIGH, otherwise empty string allowed>",
       "status": "OPEN"
+    }
+  ],
+  "reverifiedFindings": [
+    {
+      "sourceReviewId": "<exact prior reviewId>",
+      "findingIndex": <zero-based prior finding index>,
+      "verificationMethod": "<exact prior verificationMethod>",
+      "evidence": "<concrete evidence that the method passed>",
+      "outcome": "PASS"
     }
   ],
   "unverified": ["<anything you could not check>"]${codexProof}
@@ -549,6 +558,37 @@ function evidenceBlock(ctx) {
     lines.push('', 'EXPLICITLY UNVERIFIED (nobody checked these — do not assume either way):');
     for (const u of ctx.unverified) lines.push(`  - ${u}`);
   }
+  if (ctx.priorFindings && ctx.priorFindings.length) {
+    // A prior finding is only an unresolved attack target when current-state
+    // proof binds it to THIS subject and THIS check receipt. Everything else
+    // is history and is labelled as history, never as a live defect.
+    const targets = ctx.priorFindings.filter((finding) =>
+      isCurrentOpenReverificationTarget(finding, ctx.checkReceipt));
+    const historical = ctx.priorFindings.filter((finding) =>
+      !isCurrentOpenReverificationTarget(finding, ctx.checkReceipt));
+    if (targets.length) {
+      lines.push('', 'PRIOR FINDINGS ELIGIBLE FOR INDEPENDENT RE-VERIFICATION:');
+      lines.push('Each entry below is bound by the current-state proof map to this exact');
+      lines.push('subject SHA-256 and this deterministic-check receipt, and is classified');
+      lines.push('OPEN against the current subject. Return a reverifiedFindings PASS only');
+      lines.push('when you independently applied the exact verificationMethod and concrete');
+      lines.push('evidence proves it passed. Omit same-reviewer findings and anything you');
+      lines.push('did not actually verify.');
+      for (const finding of targets) lines.push(`  ${stableJson(finding)}`);
+    }
+    if (historical.length) {
+      lines.push('', 'HISTORICAL FINDING CONTEXT (NOT CURRENT DEFECTS — DO NOT TREAT AS UNRESOLVED):');
+      lines.push('These findings were recorded against a DIFFERENT subject hash. Their OPEN');
+      lines.push('status is what an older receipt said; no current-state proof binds any of');
+      lines.push('them to the frozen subject and its deterministic-check receipt, so none of');
+      lines.push('them is evidence that the current subject is defective. Each entry carries');
+      lines.push('its deterministic classification and the reason it is not a current target.');
+      lines.push('They are audit context only. Do not report one as a current defect and do');
+      lines.push('not return one in reverifiedFindings. If the frozen subject itself shows');
+      lines.push('the defect, report it as a new finding on your own current evidence.');
+      for (const finding of historical) lines.push(`  ${stableJson(finding)}`);
+    }
+  }
   return lines.join('\n');
 }
 
@@ -639,6 +679,202 @@ The diff is deliberately not placed in argv. The reviewer must inspect the
 digest-bound copied files above; this prevents a large subject from exceeding
 the operating-system argument limit before the governed process starts.
 ${recordContract('grok')}`;
+}
+
+// ── current-state proof map (BUILD-PROTOCOL §9A) ────────────────────────────
+// A finding recorded OPEN against a DIFFERENT subject hash is history, not a
+// current defect. Its receipt says OPEN because nobody re-ran it against this
+// subject — not because this subject is broken. Presenting it as an unresolved
+// attack target is exactly how a stale allegation re-enters a review that
+// already has current-hash executable proof elsewhere. A carried-forward
+// finding is a current OPEN target only when an explicit current-state proof
+// map binds it to THIS subject SHA-256 and THIS deterministic-check receipt
+// and classifies it OPEN. No map means no current OPEN: absent proof, history
+// stays history. Nothing is deleted — every candidate is still emitted with
+// its classification and a deterministic reason, so the record stays auditable
+// and no reviewer is told a finding was fixed without proof that it was.
+const CURRENT_STATE_CLASSIFICATIONS = Object.freeze(
+  ['OPEN', 'CURRENTLY_PROVEN_FIXED', 'SUPERSEDED', 'OUT_OF_SCOPE']);
+const UNCLASSIFIED_HISTORICAL = 'UNCLASSIFIED_HISTORICAL';
+const NO_MAP_REASON = 'no current-state proof map was supplied for this subject; the prior OPEN status is historical only and is not evidence about the current subject';
+const UNMAPPED_REASON = 'the current-state proof map for this subject does not classify this finding; the prior OPEN status is historical only';
+const MAX_PRIOR_FINDINGS = 32;
+
+function priorFindingKey(sourceReviewId, findingIndex) {
+  return `${sourceReviewId}:${findingIndex}`;
+}
+
+// True only for an entry that a current-state proof map bound to this subject
+// and check receipt and classified OPEN. Legacy entries carrying no
+// classification at all are historical by default — that is the fail-closed
+// direction: an unclassified finding is never promoted to a live target.
+function isCurrentOpenReverificationTarget(finding, checkReceipt) {
+  if (!finding || finding.classification !== 'OPEN') return false;
+  const binding = finding.currentStateBinding;
+  if (!binding || typeof binding.subjectSha256 !== 'string' || !binding.subjectSha256
+    || typeof binding.checkReceiptSha256 !== 'string' || !binding.checkReceiptSha256) return false;
+  // Defence in depth: a target must still match the receipt actually shipped in
+  // this prompt, not the one the map was written against.
+  if (checkReceipt && typeof checkReceipt.receiptSha256 === 'string'
+    && checkReceipt.receiptSha256 !== binding.checkReceiptSha256) return false;
+  return true;
+}
+
+// A supplied map that does not bind to this subject is an operator error, not
+// a reason to guess. It throws, and the caller refuses the review; only an
+// absent map degrades quietly to "everything is history".
+function loadCurrentStateProofMap(source, { subjectSha256, checkReceiptSha256 }) {
+  if (source === null || source === undefined) return null;
+  let map = source;
+  if (typeof source === 'string') {
+    const mapPath = path.resolve(source);
+    let raw;
+    try { raw = fs.readFileSync(mapPath, 'utf8'); }
+    catch (error) {
+      throw new Error(`current-state proof map is unreadable at ${mapPath}: ${error.message}`);
+    }
+    try { map = JSON.parse(raw); }
+    catch (error) {
+      throw new Error(`current-state proof map is not valid JSON at ${mapPath}: ${error.message}`);
+    }
+  }
+  if (!map || typeof map !== 'object' || Array.isArray(map)) {
+    throw new Error('current-state proof map must be a JSON object');
+  }
+  if (map.subjectSha256 !== subjectSha256) {
+    throw new Error(`current-state proof map is bound to subject ${map.subjectSha256 || 'UNSPECIFIED'}, not the frozen subject ${subjectSha256}`);
+  }
+  if (typeof checkReceiptSha256 !== 'string' || !checkReceiptSha256) {
+    throw new Error('current-state proof map cannot be honoured without the current deterministic-check receipt digest');
+  }
+  if (map.checkReceiptSha256 !== checkReceiptSha256) {
+    throw new Error(`current-state proof map is bound to check receipt ${map.checkReceiptSha256 || 'UNSPECIFIED'}, not the current receipt ${checkReceiptSha256}`);
+  }
+  if (!Array.isArray(map.entries)) {
+    throw new Error('current-state proof map must carry an entries array');
+  }
+  const byKey = new Map();
+  for (const [index, entry] of map.entries.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`current-state proof map entry ${index} is not an object`);
+    }
+    if (typeof entry.sourceReviewId !== 'string' || !entry.sourceReviewId.trim()) {
+      throw new Error(`current-state proof map entry ${index} has no sourceReviewId`);
+    }
+    if (!Number.isInteger(entry.findingIndex) || entry.findingIndex < 0) {
+      throw new Error(`current-state proof map entry ${index} has no integer findingIndex`);
+    }
+    if (!CURRENT_STATE_CLASSIFICATIONS.includes(entry.classification)) {
+      throw new Error(`current-state proof map entry ${index} classification ${stableJson(entry.classification)} is not one of ${CURRENT_STATE_CLASSIFICATIONS.join(', ')}`);
+    }
+    const proof = entry.currentProof;
+    if (entry.classification === 'OPEN'
+      && (!proof || typeof proof !== 'object' || Array.isArray(proof)
+        || typeof proof.command !== 'string' || !proof.command.trim()
+        || typeof proof.result !== 'string' || !proof.result.trim())) {
+      throw new Error(`current-state proof map entry ${index} classifies OPEN without a currentProof command and result against the current subject`);
+    }
+    const key = priorFindingKey(entry.sourceReviewId, entry.findingIndex);
+    if (byKey.has(key)) {
+      throw new Error(`current-state proof map classifies ${key} more than once`);
+    }
+    byKey.set(key, Object.freeze({
+      classification: entry.classification,
+      currentProof: proof && typeof proof === 'object' && !Array.isArray(proof)
+        ? Object.freeze({ ...proof }) : null,
+      rationale: typeof entry.rationale === 'string' && entry.rationale.trim()
+        ? entry.rationale.trim() : null,
+    }));
+  }
+  return Object.freeze({ subjectSha256, checkReceiptSha256, byKey });
+}
+
+function eligiblePriorFindings(packetPath, packetId, currentSubjectSha, reviewer, reviewsDir = REVIEWS_DIR,
+  currentState = {}) {
+  const reviewCycle = require('./review-cycle.cjs');
+  const canonicalValidator = require('./engineering-os.cjs').loadReview;
+  const loaded = reviewCycle.loadRecords(reviewsDir, {
+    validateReview: canonicalValidator,
+    packetPath,
+    packetId,
+  });
+  if (loaded.problems.length) {
+    throw new Error(`prior review evidence is invalid: ${loaded.problems.map((p) => `${p.code} ${path.basename(p.file)}: ${p.detail}`).join('; ')}`);
+  }
+  const checkReceiptSha256 = typeof currentState.checkReceiptSha256 === 'string'
+    ? currentState.checkReceiptSha256 : null;
+  const proofMap = loadCurrentStateProofMap(
+    currentState.proofMap === undefined ? null : currentState.proofMap,
+    { subjectSha256: currentSubjectSha, checkReceiptSha256 });
+  const liveRecords = liveReviewRecords(loaded.records, packetId);
+  const eligible = [];
+  for (const record of liveRecords) {
+    if (!record.reviewOf || record.reviewOf.diffSha256 === currentSubjectSha) continue;
+    if (record.reviewer === reviewer || record.reviewer === 'claude-self') continue;
+    for (const [findingIndex, finding] of (record.findings || []).entries()) {
+      if (finding.status !== 'OPEN' || typeof finding.verificationMethod !== 'string'
+        || !finding.verificationMethod.trim()) continue;
+      const mapped = proofMap
+        ? proofMap.byKey.get(priorFindingKey(record.reviewId, findingIndex)) || null
+        : null;
+      const classification = mapped ? mapped.classification : UNCLASSIFIED_HISTORICAL;
+      eligible.push({
+        sourceReviewId: record.reviewId,
+        findingIndex,
+        reviewer: record.reviewer,
+        severity: finding.severity,
+        file: finding.file || null,
+        problem: finding.problem,
+        verificationMethod: finding.verificationMethod,
+        // Auditability: what the old receipt said, which subject said it, how
+        // this subject classifies it now, and why.
+        priorStatus: finding.status,
+        priorSubjectSha256: record.reviewOf.diffSha256,
+        classification,
+        classificationReason: mapped
+          ? (mapped.rationale
+            || `the current-state proof map bound to this subject classifies this finding ${classification}`)
+          : (proofMap ? UNMAPPED_REASON : NO_MAP_REASON),
+        currentStateBinding: mapped
+          ? { subjectSha256: currentSubjectSha, checkReceiptSha256 }
+          : null,
+        currentProof: mapped ? mapped.currentProof : null,
+      });
+    }
+  }
+  // Proven current OPEN targets keep their slots first. The old tail-slice
+  // could silently drop the one finding that is actually unresolved on this
+  // subject in favour of stale history.
+  const targets = eligible.filter((entry) => entry.classification === 'OPEN')
+    .slice(-MAX_PRIOR_FINDINGS);
+  const historical = eligible.filter((entry) => entry.classification !== 'OPEN');
+  const room = MAX_PRIOR_FINDINGS - targets.length;
+  return targets.concat(room > 0 ? historical.slice(-room) : []);
+}
+
+function liveReviewRecords(records, packetId) {
+  const reviewCycle = require('./review-cycle.cjs');
+  const resolution = reviewCycle.resolveSupersessions(records, packetId);
+  if (resolution.problems.length) {
+    throw new Error(`prior review supersession evidence is invalid: ${resolution.problems.join('; ')}`);
+  }
+  return resolution.mine.filter((record) =>
+    !resolution.superseded.has(record.reviewId));
+}
+
+function reviewCycleLaunchDecision({ records, packetId, requiredReviewers, currentSubjectSha, reviewer }) {
+  const reviewCycle = require('./review-cycle.cjs');
+  const cycle = reviewCycle.analyze({ records, packetId, requiredReviewers, currentSubjectSha });
+  if (cycle.verdict !== 'PROCEED') {
+    const rules = cycle.reasons.map((reason) => `${reason.rule}: ${reason.detail}`).join(' ');
+    return Object.freeze({ ok: false, cycle,
+      reason: `${cycle.verdict}: ${rules || 'D-14 review-cycle limit reached; no further reviewer launch is permitted'}` });
+  }
+  if (!cycle.allowedReviewers.includes(reviewer)) {
+    return Object.freeze({ ok: false, cycle,
+      reason: `reviewer ${reviewer} is not pending for this subject; allowed reviewers: ${cycle.allowedReviewers.join(', ') || 'none'}` });
+  }
+  return Object.freeze({ ok: true, cycle, reason: null });
 }
 
 // ── raw output -> record ────────────────────────────────────────────────────
@@ -1177,6 +1413,7 @@ const REVIEW_KEYS = ['disposition', 'findings', 'unverified'];
 const CODEX_REVIEW_KEYS = [...REVIEW_KEYS, 'inspectionProofs'];
 const FINDING_KEYS = ['evidence', 'file', 'impact', 'location', 'problem',
   'requiredCorrection', 'severity', 'status', 'verificationMethod'];
+const REVERIFICATION_KEYS = ['evidence', 'findingIndex', 'outcome', 'sourceReviewId', 'verificationMethod'];
 const INSPECTION_PROOF_KEYS = ['lineNumber', 'lineText', 'path'];
 
 function hasExactKeys(value, expected) {
@@ -1186,8 +1423,9 @@ function hasExactKeys(value, expected) {
 
 function validateReviewPayload(value, reviewer = null) {
   const expectedKeys = reviewer === 'codex' ? CODEX_REVIEW_KEYS : REVIEW_KEYS;
-  if (!hasExactKeys(value, expectedKeys)) {
-    return { ok: false, reason: `review payload must contain exactly ${expectedKeys.join(', ')}` };
+  const extendedKeys = [...expectedKeys, 'reverifiedFindings'];
+  if (!hasExactKeys(value, expectedKeys) && !hasExactKeys(value, extendedKeys)) {
+    return { ok: false, reason: `review payload must contain exactly ${expectedKeys.join(', ')} with optional reverifiedFindings` };
   }
   if (!REVIEW_DISPOSITIONS.includes(value.disposition)) {
     return { ok: false, reason: 'review disposition is not recognized' };
@@ -1195,6 +1433,22 @@ function validateReviewPayload(value, reviewer = null) {
   if (!Array.isArray(value.findings) || !Array.isArray(value.unverified)
     || !value.unverified.every((item) => typeof item === 'string')) {
     return { ok: false, reason: 'findings and unverified must be explicit arrays with string unverified entries' };
+  }
+  if (value.reverifiedFindings !== undefined) {
+    if (!Array.isArray(value.reverifiedFindings)) {
+      return { ok: false, reason: 'reverifiedFindings must be an explicit array' };
+    }
+    for (let index = 0; index < value.reverifiedFindings.length; index++) {
+      const proof = value.reverifiedFindings[index];
+      if (!hasExactKeys(proof, REVERIFICATION_KEYS)
+        || typeof proof.sourceReviewId !== 'string' || !proof.sourceReviewId.trim()
+        || !Number.isInteger(proof.findingIndex) || proof.findingIndex < 0
+        || typeof proof.verificationMethod !== 'string' || !proof.verificationMethod.trim()
+        || typeof proof.evidence !== 'string' || !proof.evidence.trim()
+        || proof.outcome !== 'PASS') {
+        return { ok: false, reason: `re-verification proof ${index + 1} is malformed or lacks concrete PASS evidence` };
+      }
+    }
   }
   for (let index = 0; index < value.findings.length; index++) {
     const finding = value.findings[index];
@@ -1257,6 +1511,81 @@ function codexCoveredPaths(inputDelivery) {
     : [];
 }
 
+// Classify an exact-line mismatch for the failure record. This never accepts a
+// proof; it only names which byte-level difference occurred so an operator can
+// tell a real coverage gap from a reviewer formatting artefact. Every value it
+// reports is derived from the reviewer's own answer or from already-published
+// challenge fields, so it discloses nothing that would ease a future forgery.
+// Deterministic bounded tail of the challenged line.
+//
+// RUN-20260902-5226737c: Codex twice returned line 1028 of
+// builder-control/test/hosting.test.cjs without its final comma - 101 bytes
+// against a 102-byte line. The validator was right to reject it, but nothing
+// published let the reviewer catch it before answering: linePrefix constrains
+// only the head, leadingWhitespace only the indent, and lineBytes is a count a
+// reviewer cannot recompute reliably enough to notice one absent byte. A
+// published tail makes trailing punctuation directly self-checkable.
+//
+// Rule, so the reviewer and this file agree byte for byte:
+//   * at most INSPECTION_SUFFIX_MAX UTF-16 code units taken from the end;
+//   * never starting inside a surrogate pair - a lone trailing surrogate is
+//     half a code point and cannot survive UTF-8 round-tripping, so the window
+//     shrinks by one unit rather than publishing it;
+//   * never reaching left far enough to meet linePrefix. At least
+//     INSPECTION_HIDDEN_MIN code units always stay unpublished, so prefix +
+//     suffix + byte count still cannot reconstruct the line for a reviewer
+//     that never located it. Where that leaves no room the suffix is '' and
+//     imposes no constraint, exactly like the empty-prefix fallback.
+const INSPECTION_SUFFIX_MAX = 16;
+const INSPECTION_HIDDEN_MIN = 8;
+
+function inspectionLineSuffix(lineText, linePrefix) {
+  const prefixLength = typeof linePrefix === 'string' ? linePrefix.length : 0;
+  const budget = Math.min(
+    INSPECTION_SUFFIX_MAX,
+    lineText.length - prefixLength - INSPECTION_HIDDEN_MIN,
+  );
+  if (budget <= 0) return '';
+  let start = lineText.length - budget;
+  const startUnit = lineText.charCodeAt(start);
+  if (startUnit >= 0xDC00 && startUnit <= 0xDFFF) start += 1;
+  return lineText.slice(start);
+}
+
+function describeInspectionTextMismatch(lineText, challenge) {
+  const receivedBytes = Buffer.byteLength(lineText, 'utf8');
+  const receivedLeading = lineText.length - lineText.replace(/^\s+/, '').length;
+  const parts = [`returned ${receivedBytes} UTF-8 bytes`];
+  if (Number.isInteger(challenge.lineBytes)) parts.push(`challenged line is ${challenge.lineBytes} bytes`);
+  if (Number.isInteger(challenge.leadingWhitespace)) {
+    parts.push(`leading whitespace ${receivedLeading} vs challenged ${challenge.leadingWhitespace}`);
+    // Re-indentation probe: if only the leading run differs, the reviewer had
+    // the real content and re-rendered it. That is a reviewer formatting fault,
+    // not absent inspection, and the two must not be reported identically.
+    const reindented = ' '.repeat(challenge.leadingWhitespace) + lineText.replace(/^\s+/, '');
+    if (sha256Hex(Buffer.from(reindented, 'utf8')) === challenge.lineSha256) {
+      parts.push('content matches exactly after indent correction, so the reviewer re-rendered the file '
+        + 'instead of quoting raw bytes; this is a reviewer formatting fault, not missing inspection');
+    }
+  } else if (receivedLeading > 0) {
+    parts.push(`leading whitespace ${receivedLeading}`);
+  }
+  if (typeof challenge.linePrefix === 'string' && challenge.linePrefix.length
+    && !lineText.startsWith(challenge.linePrefix)) {
+    parts.push('the returned line does not begin with the challenged linePrefix');
+  }
+  // Truncation probe. A returned line that starts correctly and ends wrong has
+  // been trimmed or re-punctuated, not invented, and the operator needs to read
+  // that as a transport fault rather than as a reviewer that never opened the
+  // file. Naming it does not relax the accept test above.
+  if (typeof challenge.lineSuffix === 'string' && challenge.lineSuffix.length
+    && !lineText.endsWith(challenge.lineSuffix)) {
+    parts.push('the returned line does not end with the challenged lineSuffix, so trailing '
+      + 'characters were dropped or altered');
+  }
+  return parts.join('; ');
+}
+
 const validatedCodexInspection = new WeakSet();
 
 function validateCodexInspectionProofs(parsed, inputDelivery) {
@@ -1271,10 +1600,27 @@ function validateCodexInspectionProofs(parsed, inputDelivery) {
   const coveredPaths = [];
   for (const proof of parsed.inspectionProofs) {
     const challenge = expected.get(proof.path);
-    if (!challenge || coveredPaths.includes(proof.path)
-      || proof.lineNumber !== challenge.lineNumber
-      || sha256Hex(Buffer.from(proof.lineText, 'utf8')) !== challenge.lineSha256) {
-      return Object.freeze({ complete: false, coveredPaths: [], reason: `inspection proof failed for ${proof.path}` });
+    // The accept test is unchanged and stays byte-exact: the returned line must
+    // hash to the challenged line. Only the failure REASON is classified. An
+    // unclassified `inspection proof failed for <path>` cannot distinguish a
+    // reviewer that never opened the file from one that read it exactly and
+    // then re-rendered it, so it reads as a coverage failure in both cases.
+    const reject = (detail) => Object.freeze({
+      complete: false,
+      coveredPaths: [],
+      reason: `inspection proof failed for ${proof.path}: ${detail}`,
+    });
+    if (!challenge) {
+      return reject('the returned path was never challenged');
+    }
+    if (coveredPaths.includes(proof.path)) {
+      return reject('the same path was proven twice');
+    }
+    if (proof.lineNumber !== challenge.lineNumber) {
+      return reject(`lineNumber ${proof.lineNumber} does not match challenged lineNumber ${challenge.lineNumber}`);
+    }
+    if (sha256Hex(Buffer.from(proof.lineText, 'utf8')) !== challenge.lineSha256) {
+      return reject(describeInspectionTextMismatch(proof.lineText, challenge));
     }
     coveredPaths.push(proof.path);
   }
@@ -1291,7 +1637,8 @@ function validateCodexInspectionProofs(parsed, inputDelivery) {
 
 // Build a record. `parsed` null/unusable => UNAVAILABLE, never APPROVE.
 function buildRecord({ reviewer, reviewerModel, packetId, subject, parsed, unavailableReason, ts,
-  coveredPaths, inputDelivery, codexInspection, readCoverage, invocationId, spendAuthorization, subjectSnapshot, checkReceipt }) {
+  coveredPaths, inputDelivery, codexInspection, readCoverage, invocationId, spendAuthorization,
+  subjectSnapshot, checkReceipt, priorFindings = [] }) {
   const covered = new Set(codexInspection && Array.isArray(codexInspection.coveredPaths)
     ? codexInspection.coveredPaths : []);
   const codexCoverageComplete = reviewer !== 'codex'
@@ -1372,6 +1719,31 @@ function buildRecord({ reviewer, reviewerModel, packetId, subject, parsed, unava
     };
   }
   const findings = parsed.findings;
+  const priorByKey = new Map(priorFindings.map((finding) =>
+    [`${finding.sourceReviewId}:${finding.findingIndex}`, finding]));
+  const reverifiedFindings = Array.isArray(parsed.reverifiedFindings)
+    ? parsed.reverifiedFindings : [];
+  for (const proof of reverifiedFindings) {
+    const prior = priorByKey.get(`${proof.sourceReviewId}:${proof.findingIndex}`);
+    // Eligibility here has to be the SAME predicate the prompt used to choose
+    // re-verification targets. Membership in priorFindings is not eligibility:
+    // that list also carries the historical entries, including ones the
+    // current-state proof map already classified CURRENTLY_PROVEN_FIXED,
+    // SUPERSEDED or OUT_OF_SCOPE, and ones no map bound to this subject at all.
+    // Without this check the prompt correctly labels a stale finding as history
+    // and the record still accepts a PASS against it, which republishes the
+    // stale allegation as a re-verification performed on the current subject.
+    if (!prior || prior.reviewer === reviewer
+      || prior.verificationMethod !== proof.verificationMethod
+      || !isCurrentOpenReverificationTarget(prior, checkReceipt)) {
+      return {
+        ...base,
+        disposition: 'UNAVAILABLE',
+        unavailableReason: 'the reviewer claimed a re-verification that was not an eligible prior finding from a different reviewer with the exact verification method',
+        findings: [],
+      };
+    }
+  }
   return {
     ...base,
     disposition: parsed.disposition,
@@ -1391,12 +1763,13 @@ function buildRecord({ reviewer, reviewerModel, packetId, subject, parsed, unava
         verificationMethod: f.verificationMethod || '',
         status: 'OPEN',
       })),
+    reverifiedFindings: reverifiedFindings.map((proof) => ({ ...proof })),
     unverified: Array.isArray(parsed.unverified) ? parsed.unverified.map(String) : [],
   };
 }
 
 function validateRecord(recordPath) {
-  const r = spawnSync('node', [ENGOS, '--validate-review', recordPath, '--json'],
+  const r = spawnSync(process.execPath, [ENGOS, '--validate-review', recordPath, '--json'],
     { cwd: ROOT, encoding: 'utf8' });
   let parsed = [];
   try { parsed = JSON.parse(r.stdout); } catch { /* fall through */ }
@@ -1740,20 +2113,40 @@ function buildCodexInput(prompt, sandbox, expectedPaths, opts = {}) {
       path: entry.path,
       lineNumber: chosen.lineNumber,
       linePrefix: chosen.linePrefix,
+      // Published shape metrics. These reveal no content the reviewer does not
+      // already have to reproduce, but they let a reviewer self-check that it
+      // quoted raw file bytes rather than its own re-rendering of the file.
+      // A reviewer that parses a .json subject and pretty-prints it at a
+      // different indent returns byte-different text for a line it genuinely
+      // read; that produced a false UNAVAILABLE on an exact, real inspection.
+      lineBytes: Buffer.byteLength(chosen.lineText, 'utf8'),
+      leadingWhitespace: chosen.lineText.length - chosen.lineText.replace(/^\s+/, '').length,
+      lineSuffix: inspectionLineSuffix(chosen.lineText, chosen.linePrefix),
       lineSha256: sha256Hex(Buffer.from(chosen.lineText, 'utf8')),
     });
   });
-  const publicChallenges = inspectionChallenges.map(({ path: challengePath, lineNumber, linePrefix }) => ({
-    path: challengePath,
-    lineNumber,
-    linePrefix,
-  }));
+  const publicChallenges = inspectionChallenges.map(
+    ({ path: challengePath, lineNumber, linePrefix, lineBytes, leadingWhitespace, lineSuffix }) => ({
+      path: challengePath,
+      lineNumber,
+      linePrefix,
+      lineBytes,
+      leadingWhitespace,
+      lineSuffix,
+    }));
   const inspectionChallengeSha256 = sha256Hex(Buffer.from(stableJson(inspectionChallenges), 'utf8'));
   const challengeBlock = [
     '<<<AEGIS_CODEX_INSPECTION_CHALLENGES_V1_BEGIN>>>',
     'For every challenge below, locate the unique line beginning with linePrefix in that appended file.',
     'lineNumber is a reference, not a request to count rendered lines. Return the complete exact line',
     'excluding the newline in inspectionProofs. Preserve all whitespace exactly.',
+    'Quote the raw bytes as they appear between CONTENT_BEGIN and CONTENT_END. Do not parse, reformat,',
+    're-indent, or re-serialise the file first - a re-rendered line fails even when you did read the file.',
+    'Self-check before answering: your line must be exactly lineBytes UTF-8 bytes, must begin with',
+    'exactly leadingWhitespace whitespace characters, and must start with linePrefix.',
+    'When lineSuffix is a non-empty string your line must ALSO end with exactly those characters,',
+    'including any trailing comma, semicolon, quote, brace or bracket. Do not drop or add a trailing',
+    'character. A line that ends one byte short of lineSuffix is rejected exactly like an unread file.',
     stableJson(publicChallenges),
     '<<<AEGIS_CODEX_INSPECTION_CHALLENGES_V1_END>>>',
   ].join('\n');
@@ -1867,8 +2260,20 @@ const GROK_REVIEW_SCHEMA = {
       },
     },
     unverified: { type: 'array', items: { type: 'string' } },
+    reverifiedFindings: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          sourceReviewId: { type: 'string' }, findingIndex: { type: 'integer', minimum: 0 },
+          verificationMethod: { type: 'string' }, evidence: { type: 'string' },
+          outcome: { type: 'string', enum: ['PASS'] },
+        },
+        required: REVERIFICATION_KEYS,
+      },
+    },
   },
-  required: REVIEW_KEYS,
+  required: [...REVIEW_KEYS, 'reverifiedFindings'],
 };
 
 function buildToolArgv(reviewer, prompt, bounds, reviewCwd) {
@@ -2373,6 +2778,8 @@ async function reapUndrainedReviewerGroup(terminationEvidence, opts = {}) {
  */
 function runContainedWithWatchdog(contained, opts = {}) {
   const timeoutMs = Math.max(1, Number(opts.timeoutMs) || 1);
+  const activityExtendsTimeout = opts.activityExtendsTimeout === true;
+  const hardTimeoutMs = Math.max(timeoutMs, Number(opts.hardTimeoutMs) || timeoutMs);
   const killGraceMs = Math.max(25, Number(opts.killGraceMs) || REVIEW_KILL_GRACE_MS);
   const maxOutputBytes = Math.max(1, Number(opts.maxOutputBytes) || MAX_REVIEW_OUTPUT_BYTES);
   const groupAlive = typeof opts.processGroupAlive === 'function' ? opts.processGroupAlive : processGroupAlive;
@@ -2405,6 +2812,7 @@ function runContainedWithWatchdog(contained, opts = {}) {
       signal: null,
       error: structuredError,
       timedOut: false,
+      timeoutReason: null,
       outputOverflow: false,
       terminationSignals: [],
       terminationFailures: [],
@@ -2428,6 +2836,7 @@ function runContainedWithWatchdog(contained, opts = {}) {
     const stderr = [];
     let capturedBytes = 0;
     let timedOut = false;
+    let timeoutReason = null;
     let outputOverflow = false;
     let spawnError = null;
     let terminationStarted = false;
@@ -2436,6 +2845,10 @@ function runContainedWithWatchdog(contained, opts = {}) {
     let settling = false;
     let settled = false;
     let graceTimer = null;
+    let timeout = null;
+    let hardStop = null;
+    let absoluteStop = null;
+    let refreshActivityTimeout = () => {};
     let stdinSettled = !hasStdinInput;
     let stdinDelivered = false;
     let stdinError = null;
@@ -2574,6 +2987,7 @@ function runContainedWithWatchdog(contained, opts = {}) {
       settling = true;
       clearTimeout(timeout);
       clearTimeout(hardStop);
+      clearTimeout(absoluteStop);
       if (graceTimer) {
         clearTimeout(graceTimer);
         graceTimer = null;
@@ -2618,6 +3032,7 @@ function runContainedWithWatchdog(contained, opts = {}) {
         signal,
         error: spawnError,
         timedOut,
+        timeoutReason,
         outputOverflow,
         terminationSignals,
         terminationFailures,
@@ -2640,6 +3055,7 @@ function runContainedWithWatchdog(contained, opts = {}) {
       const remaining = Math.max(0, maxOutputBytes - capturedBytes);
       if (remaining > 0) bucket.push(buffer.subarray(0, remaining));
       capturedBytes += buffer.length;
+      refreshActivityTimeout();
       if (capturedBytes > maxOutputBytes && !outputOverflow) {
         outputOverflow = true;
         beginTermination();
@@ -2659,6 +3075,14 @@ function runContainedWithWatchdog(contained, opts = {}) {
         if (alive === false) drainageProvenBeforeClose = true;
         else if (alive === true) attemptSignal('SIGKILL', 'grace');
       }, killGraceMs).unref();
+      hardStop = setTimeout(() => {
+        if (settled || settling || childClosed || child !== ownedChild
+            || ownedChild.pid !== ownedProcessGroupId) return;
+        if (probeOwnedGroup('hard-stop') === true) attemptSignal('SIGKILL', 'hard-stop');
+        child.stdout.destroy();
+        child.stderr.destroy();
+        setTimeout(() => finish(null, 'SIGKILL', 'hard-stop'), 100).unref();
+      }, killGraceMs + 1_000);
     };
 
     child.stdout.on('data', (chunk) => capture(stdout, chunk));
@@ -2673,20 +3097,24 @@ function runContainedWithWatchdog(contained, opts = {}) {
       if (alive === false) drainageProvenBeforeClose = true;
     });
 
-    const timeout = setTimeout(() => {
+    const triggerTimeout = (reason) => {
       if (settled || settling) return;
       timedOut = true;
+      timeoutReason = reason;
       beginTermination();
-    }, timeoutMs);
+    };
 
-    const hardStop = setTimeout(() => {
-      if (settled || settling || childClosed || child !== ownedChild
-          || ownedChild.pid !== ownedProcessGroupId) return;
-      if (probeOwnedGroup('hard-stop') === true) attemptSignal('SIGKILL', 'hard-stop');
-      child.stdout.destroy();
-      child.stderr.destroy();
-      setTimeout(() => finish(null, 'SIGKILL', 'hard-stop'), 100).unref();
-    }, timeoutMs + killGraceMs + 1_000);
+    const scheduleActivityTimeout = () => {
+      if (!activityExtendsTimeout || settled || settling || terminationStarted) return;
+      clearTimeout(timeout);
+      timeout = setTimeout(() => triggerTimeout('no-output-progress'), timeoutMs);
+    };
+    refreshActivityTimeout = scheduleActivityTimeout;
+    timeout = setTimeout(() => triggerTimeout(activityExtendsTimeout
+      ? 'no-output-progress' : 'wall-clock'), timeoutMs);
+    if (hardTimeoutMs > timeoutMs) {
+      absoluteStop = setTimeout(() => triggerTimeout('hard-cap'), hardTimeoutMs);
+    }
 
     child.once('close', (status, signal) => {
       childClosed = true;
@@ -2815,6 +3243,8 @@ async function runTool(reviewer, prompt, timeoutSec, opts = {}) {
     }
     const r = await watchdogRunner(contained, {
       timeoutMs: timeoutSec * 1000,
+      activityExtendsTimeout: true,
+      hardTimeoutMs: (timeoutSec + Math.min(timeoutSec, 300)) * 1000,
       maxOutputBytes: MAX_REVIEW_OUTPUT_BYTES,
       cwd: sandbox.cwd,
       env: reviewerEnvironment(reviewer, sandbox),
@@ -2962,6 +3392,35 @@ async function cmdRun(args) {
     subjectPaths: Object.freeze(subject.subjectPaths.slice()),
   });
 
+  // The adapter is the execution boundary, so the review-cycle stop belongs
+  // here as well as in engineering-os --start. A printed recipe is guidance;
+  // this check is enforcement. It also permits only the missing reviewer(s)
+  // on an incomplete third subject and refuses duplicates.
+  try {
+    const reviewCycle = require('./review-cycle.cjs');
+    const engos = require('./engineering-os.cjs');
+    const classification = engos.classify(canonicalSubject.subjectPaths, {});
+    const loaded = reviewCycle.loadRecords(REVIEWS_DIR, {
+      validateReview: engos.loadReview,
+      packetPath: args.packet,
+      packetId: packet.packetId,
+    });
+    if (loaded.problems.length) {
+      throw new Error(`review-cycle evidence is invalid: ${loaded.problems.map((p) => `${p.code} ${path.basename(p.file)}: ${p.detail}`).join('; ')}`);
+    }
+    const decision = reviewCycleLaunchDecision({
+      records: loaded.records,
+      packetId: packet.packetId,
+      requiredReviewers: classification.requiredReviewers,
+      currentSubjectSha: canonicalSubject.subjectSha256,
+      reviewer,
+    });
+    if (!decision.ok) throw new Error(decision.reason);
+  } catch (error) {
+    console.error(`[review-adapters] refusing review-cycle launch: ${error.message}`);
+    return EXIT_BLOCK;
+  }
+
   // Chunked review: the reviewer sees only this group's paths, but the record
   // stays bound to the FULL subject hash. That is what lets several group
   // records aggregate into one verdict about one revision — and what stops a
@@ -3027,6 +3486,21 @@ async function cmdRun(args) {
     console.error(`[review-adapters] refusing review without canonical deterministic evidence: ${error.message}`);
     return EXIT_BLOCK;
   }
+  let priorFindings;
+  try {
+    priorFindings = eligiblePriorFindings(
+      args.packet, packet.packetId, canonicalSubject.subjectSha256, reviewer, REVIEWS_DIR,
+      {
+        checkReceiptSha256: checkBinding.receipt.receiptSha256,
+        // Absent flag => no map => no prior finding is presented as currently
+        // unresolved. Stale history can only become a live target when an
+        // operator supplies proof bound to this subject and this receipt.
+        proofMap: args.currentStateProofMap || null,
+      });
+  } catch (error) {
+    console.error(`[review-adapters] refusing review with untrusted prior evidence: ${error.message}`);
+    return EXIT_BLOCK;
+  }
   const promptContext = {
     specs: (packet.sourceOfTruth || []).filter((p) => fs.existsSync(path.join(runContext.sourceRoot, p))).map((p) => ({
       path: p,
@@ -3035,6 +3509,7 @@ async function cmdRun(args) {
     checks: checkBinding.receipt.results,
     checkReceipt: checkBinding.receipt,
     unverified: packet.stopConditions || [],
+    priorFindings,
   };
   const prompt = reviewer === 'codex'
     ? codexPrompt(packet.objective, subject, diff, promptContext)
@@ -3157,6 +3632,7 @@ async function cmdRun(args) {
     spendAuthorization: res.spendAuthorization || null,
     subjectSnapshot: res.subjectSnapshot || null,
     checkReceipt: checkBinding.receipt,
+    priorFindings,
   });
   if (args.groupId) {
     record.group = { groupId: args.groupId, groupDigest: args.groupDigest || null };
@@ -3263,8 +3739,15 @@ review-adapters.cjs — read-only reviewer bridges
   --run --reviewer codex|grok|copilot --packet <p> [--run-id <RUN-...>]
         [--subject-sha <sha>] [--base <ref>] [--head <ref>]
         [--timeout <seconds>] [--dry-run]
+        [--current-state-proof-map <p>]
         Run a reviewer read-only against the bound subject diff, preserve raw
         output under review-raw/, and write a validated record under reviews/.
+
+  --current-state-proof-map <p>
+        Optional BUILD-PROTOCOL 9A map, bound to this subject SHA-256 and this
+        deterministic-check receipt, classifying each carried-forward finding
+        OPEN | CURRENTLY_PROVEN_FIXED | SUPERSEDED | OUT_OF_SCOPE. Without it no
+        prior finding is presented to a reviewer as currently unresolved.
 
 No path in this file emits APPROVE unless a reviewer actually said so.
 `);
@@ -3291,6 +3774,7 @@ function parseArgs(argv) {
     else if (t === '--only-path') (a.onlyPaths = a.onlyPaths || []).push(argv[++i]);
     else if (t === '--group-id') a.groupId = argv[++i];
     else if (t === '--group-digest') a.groupDigest = argv[++i];
+    else if (t === '--current-state-proof-map') a.currentStateProofMap = argv[++i];
     else if (t === '--json') a.json = true;
     else if (t === '--doctor') a.doctor = true;
     else if (t === '--run') a.run = true;
@@ -3314,4 +3798,4 @@ if (require.main === module) {
   })();
 }
 
-module.exports = { detect, extractJson, extractGrokStreamingReview, grokStreamEvents, grokReadReceiptCoverage, enforceGrokReadReceipts, authoritativeGrokSpend, grokSpendContract, reviewerProtocolText, buildRecord, codexPrompt, grokPrompt, isUsableReview, validateReviewPayload, validateCodexInspectionProofs, codexCoveredPaths, stopWasAbnormal, validateCodexTerminalEnvelope, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, buildCodexInput, runTool, runContainedWithWatchdog, reapUndrainedReviewerGroup, processGroupAlive, prepareReviewSandbox, validateReviewManifestSnapshot, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, validateGrokExecutableIdentity, runGrokBillingAcp, validateGrokBillingEvidence, grokBillingPreflight, createInvocationIdentity, writeImmutableFile, writeRecord, runnablePacketChecks, resolveCanonicalCheckReceipt, resolveCanonicalRunContext, resolveReviewDataClass, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, MAX_REVIEW_OUTPUT_BYTES, MAX_CODEX_BUNDLE_BYTES, MAX_CODEX_INPUT_BYTES, MAX_CODEX_INPUT_CHARACTERS, REVIEW_KILL_GRACE_MS, REVIEW_REAPER_TIMEOUT_MS, GROK_BILLING_PREFLIGHT_TIMEOUT_MS, GROK_BILLING_MAX_STREAM_BYTES, GROK_EXPECTED_VERSION, GROK_EXPECTED_SHA256, GROK_REVIEW_SCHEMA, TOOLS };
+module.exports = { detect, extractJson, extractGrokStreamingReview, grokStreamEvents, grokReadReceiptCoverage, enforceGrokReadReceipts, authoritativeGrokSpend, grokSpendContract, reviewerProtocolText, buildRecord, codexPrompt, grokPrompt, eligiblePriorFindings, loadCurrentStateProofMap, isCurrentOpenReverificationTarget, CURRENT_STATE_CLASSIFICATIONS, liveReviewRecords, reviewCycleLaunchDecision, isUsableReview, validateReviewPayload, validateCodexInspectionProofs, codexCoveredPaths, stopWasAbnormal, validateCodexTerminalEnvelope, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, buildCodexInput, runTool, runContainedWithWatchdog, reapUndrainedReviewerGroup, processGroupAlive, prepareReviewSandbox, validateReviewManifestSnapshot, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, validateGrokExecutableIdentity, runGrokBillingAcp, validateGrokBillingEvidence, grokBillingPreflight, createInvocationIdentity, writeImmutableFile, writeRecord, runnablePacketChecks, resolveCanonicalCheckReceipt, resolveCanonicalRunContext, resolveReviewDataClass, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, MAX_REVIEW_OUTPUT_BYTES, MAX_CODEX_BUNDLE_BYTES, MAX_CODEX_INPUT_BYTES, MAX_CODEX_INPUT_CHARACTERS, REVIEW_KILL_GRACE_MS, REVIEW_REAPER_TIMEOUT_MS, GROK_BILLING_PREFLIGHT_TIMEOUT_MS, GROK_BILLING_MAX_STREAM_BYTES, GROK_EXPECTED_VERSION, GROK_EXPECTED_SHA256, GROK_REVIEW_SCHEMA, TOOLS };

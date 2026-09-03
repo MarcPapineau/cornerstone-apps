@@ -64,6 +64,12 @@ const EXIT_USAGE = 2;
 const EXIT_REFUSED = 3;
 
 const DEFAULT_GROUPS = 5;
+// Grok review groups for the operator beta produced multi-megabyte traces and
+// completed between roughly five and ten minutes. A shorter default turned
+// healthy in-flight reviews into signed UNAVAILABLE records. Callers may still
+// choose a tighter explicit bound for focused tests, but ordinary reviews get
+// the proven completion window.
+const DEFAULT_REVIEW_TIMEOUT_SEC = 600;
 const RUN_ID_RE = /^RUN-\d{8}-[0-9a-f]{8}$/;
 
 // GROK G9 FINDING #1: with 7 roles and DEFAULT_GROUPS = 5 the planner only ever
@@ -79,7 +85,30 @@ const RUN_ID_RE = /^RUN-\d{8}-[0-9a-f]{8}$/;
 // Changed bytes remain capped by the reviewer-work evidence above. The total
 // payload has a separate ceiling matching the Codex exact-file bundle, because
 // every group also carries pinned specifications and deterministic-check proof.
-const MAX_GROUP_BYTES = 60000;
+//
+// 2026-09-02 — raised 60000 → 70000. The dashboard subject carries one
+// INDIVISIBLE 63,232-byte file (builder-control/test/dashboard-slice.test.cjs).
+// A single file cannot be split, so a 60,000 changed-byte ceiling did not make
+// that subject smaller — it refused to plan it at all, which is not a safety
+// outcome, it is a review that never happens. The same subject's largest group
+// payload was 715,666 bytes, well under MAX_GROUP_PAYLOAD_BYTES, so nothing
+// about the reviewer's actual context load was near a limit.
+//
+// WHY THE PAYLOAD CAP REMAINS THE SAFETY AUTHORITY
+// MAX_GROUP_BYTES is a PLANNING heuristic over changed bytes only — it is a
+// proxy for reviewer work, and it does not know what a group actually costs to
+// send. MAX_GROUP_PAYLOAD_BYTES is the real ceiling: it counts changed bytes
+// PLUS the pinned specifications and deterministic-check proof every group
+// carries, and it is matched to the Codex exact-file bundle the reviewer must
+// actually receive. Raising the planning proxy therefore cannot make an
+// unsendable group sendable — the payload cap is unchanged at 1,310,720 bytes
+// and still refuses independently, and the named unsplittable refusal still
+// fires for a file genuinely too large under either ceiling.
+//
+// 70000 is deliberately the smallest round value that admits this bounded
+// subject. It stays far below the 101KB that actually exhausted a reviewer's
+// turn budget, and above the 46KB that completed in 14 turns.
+const MAX_GROUP_BYTES = 70000;
 const MAX_GROUP_PAYLOAD_BYTES = 1280 * 1024;
 const FIXED_CHECK_OVERHEAD_BYTES = 32 * 1024;
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -560,6 +589,22 @@ function selectAggregationLane(records, { subjectSha, reviewer }) {
   return { usable, excludedSubject, excludedReviewer };
 }
 
+// A run-all invocation is also the recovery command after a partial transport
+// failure. Repeating a paid, already-complete review on the same exact subject
+// is waste: retain one valid signed substantive verdict and run only lanes that
+// are missing, ambiguous, invalid, or explicitly UNAVAILABLE. A targeted
+// --run --group remains the operator's deliberate replacement mechanism.
+function reusableCompletedGroupRecord(records, lane, verifyRecord) {
+  const matching = records.filter((rec) => matchesLane(rec, lane));
+  if (matching.length !== 1) return null;
+  const candidate = matching[0];
+  if (candidate.disposition === 'UNAVAILABLE') return null;
+  let verified;
+  try { verified = verifyRecord(candidate); } catch { return null; }
+  return verified && verified.ok === true && verified.gateable === true
+    ? candidate : null;
+}
+
 // Aggregate replacement is scoped just as narrowly as group replacement. An
 // aggregate from another required reviewer is independent evidence, not a
 // predecessor. Archiving it would make a two-reviewer FULL gate impossible:
@@ -717,12 +762,23 @@ function cmdRun(args) {
     const candidates = fs.readdirSync(GROUPS_DIR, { withFileTypes: true })
       .filter((d) => d.isFile() && d.name.endsWith('.json'));
     const stale = [];
+    const laneRecords = [];
     for (const d of candidates) {
       let rec;
       try { rec = JSON.parse(fs.readFileSync(path.join(GROUPS_DIR, d.name), 'utf8')); }
       catch { continue; } // unreadable — ambiguous, left in place rather than guessed at
       if (matchesLane(rec, { groupId: g.groupId, reviewer: reviewerLane, subjectSha: subject.subjectSha256 })) {
         stale.push(d.name);
+        laneRecords.push({ ...rec, __file: path.join(GROUPS_DIR, d.name) });
+      }
+    }
+    if (args.all) {
+      const reusable = reusableCompletedGroupRecord(laneRecords, {
+        groupId: g.groupId, reviewer: reviewerLane, subjectSha: subject.subjectSha256,
+      }, (rec) => require('./review-sign.cjs').verify(rec, { packetPath: effectiveArgs.packet }));
+      if (reusable) {
+        console.log(`[review-chunker] keeping completed ${reviewerLane} ${g.groupId} for unchanged subject ${subject.subjectSha256.slice(0, 12)}…`);
+        continue;
       }
     }
     const before = new Set(candidates.map((entry) => entry.name));
@@ -797,7 +853,7 @@ function buildGroupArgv(group, subject, args) {
   const a = [ADAPTERS, '--run',
     '--reviewer', args.reviewer || 'codex',
     '--packet', args.packet,
-    '--timeout', String(args.timeout || 420)];
+    '--timeout', String(args.timeout || DEFAULT_REVIEW_TIMEOUT_SEC)];
   if (args.runId) a.push('--run-id', normalizeRunId(args.runId));
   if (args.base) a.push('--base', args.base);
   if (args.head) a.push('--head', args.head);
@@ -819,7 +875,7 @@ function runGroup(group, subject, args) {
   const a = buildGroupArgv(group, subject, args);
   const r = spawnSync('node', a, {
     cwd: ROOT, encoding: 'utf8', stdio: 'inherit',
-    timeout: (Number(args.timeout || 420) + 120) * 1000,
+    timeout: (Number(args.timeout || DEFAULT_REVIEW_TIMEOUT_SEC) + 120) * 1000,
   });
   return r.status === null ? EXIT_REFUSED : r.status;
 }
@@ -1143,4 +1199,4 @@ if (require.main === module) {
   process.exit(code);
 }
 
-module.exports = { planGroups, planSubjectGroups, pathSizes, groupBytes, fixedReviewOverheadBytes, checkCoverage, checkPlanBinding, aggregate, mergeGroupUnverified, gateableGroupProblem, schemaAggregateProblems, buildGroupArgv, roleOf, ROLES, DEFAULT_GROUPS, MAX_GROUP_BYTES, MAX_GROUP_PAYLOAD_BYTES, FIXED_CHECK_OVERHEAD_BYTES, matchesLane, partitionCreatedLaneRecords, quarantineCreatedLaneRecords, selectAggregationLane, matchesAggregateLane, selectAggregateRetention, normalizeAggregateReviewer, normalizeRunId, resolveRunContext, buildSubjectInvocation, parseArgs, publishAggregateReplacement, publishGroupReplacement };
+module.exports = { planGroups, planSubjectGroups, pathSizes, groupBytes, fixedReviewOverheadBytes, checkCoverage, checkPlanBinding, aggregate, mergeGroupUnverified, gateableGroupProblem, schemaAggregateProblems, buildGroupArgv, roleOf, ROLES, DEFAULT_GROUPS, DEFAULT_REVIEW_TIMEOUT_SEC, MAX_GROUP_BYTES, MAX_GROUP_PAYLOAD_BYTES, FIXED_CHECK_OVERHEAD_BYTES, matchesLane, reusableCompletedGroupRecord, partitionCreatedLaneRecords, quarantineCreatedLaneRecords, selectAggregationLane, matchesAggregateLane, selectAggregateRetention, normalizeAggregateReviewer, normalizeRunId, resolveRunContext, buildSubjectInvocation, parseArgs, publishAggregateReplacement, publishGroupReplacement };

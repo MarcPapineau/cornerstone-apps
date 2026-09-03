@@ -1,0 +1,52 @@
+{
+  "packetId": "PKT-20260831-REVIEW-CYCLE-LIMIT",
+  "agentId": "claude-code",
+  "objective": "Enforce AEGIS Decision Register D-19, D-20 and D-14 in the runtime. Add review-cycle.cjs, its proof suite, and wire the checker into engineering-os --start so AEGIS refuses to issue another reviewer command after the review-cycle limit or a recurring disputed finding is proven. Repair the bounded review adapter's internal Node invocations so its strict environment cannot break subject calculation or review-record validation by removing Homebrew from PATH.",
+  "constraints": [
+    "Keep the integration narrow: engineering-os --start is the only existing runtime path modified by this packet.",
+    "No new state and no counter file. The round count is derived from review evidence already on disk, because D-01 says evidence owns runtime truth and a counter would be a second owner.",
+    "The checker reports recurrence; it never writes a DISPUTED status itself. The schema requires builderResponse for that status and this module has no standing to author one.",
+    "Fail-closed: unreadable evidence exits 2 and must never print the same way as a clear-to-proceed."
+  ],
+  "sourceOfTruth": [
+    "builder-control/CONTROL-CONTRACT.md",
+    "builder-control/AI-ENGINEERING-OS.md",
+    "builder-control/schemas/engineering-review.schema.json"
+  ],
+  "filesAllowed": [
+    "builder-control/review-cycle.cjs",
+    "builder-control/test/review-cycle.test.cjs",
+    "builder-control/engineering-os.cjs",
+    "builder-control/test/engineering-os.test.cjs",
+    "builder-control/review-adapters.cjs",
+    "builder-control/test/review-adapters.test.cjs",
+    "builder-control/test/review-cycle-adapter.test.cjs",
+    "builder-control/test/host-containment.test.cjs",
+    "builder-control/packets/PKT-20260831-REVIEW-CYCLE-LIMIT.json"
+  ],
+  "testsRequired": [
+    "node --check builder-control/review-cycle.cjs",
+    "node --check builder-control/test/review-cycle.test.cjs",
+    "node --check builder-control/review-adapters.cjs",
+    "node --check builder-control/test/review-adapters.test.cjs",
+    "node builder-control/test/review-cycle.test.cjs",
+    "node builder-control/test/engineering-os.test.cjs",
+    "node builder-control/test/gate.test.cjs"
+  ],
+  "hostContainmentRequired": [
+    "node builder-control/test/host-containment.test.cjs"
+  ],
+  "stopConditions": [
+    "Marc revokes the authorization",
+    "Any existing suite regresses against its pre-patch baseline",
+    "The review cycle limit this packet introduces fires on this packet's own review"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — authorized 2026-08-31 as part of the bounded AEGIS dashboard autonomy instruction",
+    "allowsProtectedPaths": [
+      "builder-control/test/host-containment.test.cjs"
+    ],
+    "allowsPublicPush": false,
+    "allowsRelease": false
+  }
+}

@@ -545,6 +545,7 @@ function parseArgs(argv) {
     else if (t === '--run-checks') a.runChecks = true;
     else if (t === '--base') a.base = argv[++i];
     else if (t === '--head') a.head = argv[++i];
+    else if (t === '--reviews-dir') a.reviewsDir = argv[++i];
     else if (t === '--milestone') a.milestone = true;
     else if (t === '--novel') a.novel = true;
     else if (t === '--json') a.json = true;
@@ -1724,7 +1725,59 @@ function cmdStart(args) {
   const runCoordinate = ` --run-id ${args.runId || '<RUN-ID>'}`;
   const refs = (args.base ? ` --base ${args.base}` : '') + (args.head ? ` --head ${args.head}` : '');
 
-  if (args.json) { out(JSON.stringify({ subject, classification: cls }, null, 2)); return EXIT_PASS; }
+  let cycle = null;
+  if (args.packet && fs.existsSync(args.packet)) {
+    // Load this only when --start has a real packet. Other commands, including
+    // the fail-closed policy bootstrap tests, must not depend on the optional
+    // reviewer-control module merely to inspect the policy surface.
+    const reviewCycle = require(path.join(HERE, 'review-cycle.cjs'));
+    const packetId = readJSON(args.packet).packetId;
+    if (!packetId) throw new PolicyError(`packet has no packetId: ${args.packet}`);
+    if (args.reviewsDir && !syntheticAllowed(args)) {
+      throw new SyntheticInputError(
+        '--reviews-dir is test-only. Production review-cycle state is read from builder-control/reviews.'
+      );
+    }
+    const reviewsDir = args.reviewsDir || path.join(HERE, 'reviews');
+    const loaded = reviewCycle.loadRecords(reviewsDir, {
+      validateReview: loadReview,
+      packetPath: args.packet,
+      packetId,
+    });
+    if (loaded.problems.length) {
+      throw new PolicyError(
+        `review-cycle state is unreadable: ${loaded.problems.map((p) => `${p.file}: ${p.detail}`).join('; ')}`
+      );
+    }
+    cycle = reviewCycle.analyze({
+      records: loaded.records,
+      packetId,
+      requiredReviewers: cls.requiredReviewers,
+      currentSubjectSha: sha,
+    });
+    if (cycle.verdict === 'COMPLETE_GATE') {
+      out('ENGINEERING OS — REVIEW CYCLE COMPLETE');
+      out('='.repeat(60));
+      out(`packet      : ${packetId}`);
+      out(`rounds      : ${cycle.roundCount} of ${cycle.maxRounds}`);
+      out('D-14        : automated review stops here; do not launch a fourth round.');
+      out('NEXT        : run the deterministic gate/checkpoint path for this subject.');
+      out(`              node builder-control/engineering-os.cjs --gate-done --packet ${pkt} \\`);
+      out(`                --subject-sha ${sha}${refs} --run-checks`);
+      return EXIT_BLOCK;
+    }
+    if (cycle.verdict !== 'PROCEED') {
+      out('ENGINEERING OS — REVIEW CYCLE HARD STOP');
+      out('='.repeat(60));
+      out(`packet      : ${packetId}`);
+      out(`rounds      : ${cycle.roundCount} of ${cycle.maxRounds}`);
+      for (const reason of cycle.reasons) out(`${reason.rule}         : ${reason.detail}`);
+      out('D-14        : automated review stops here; accept, override, or abandon the packet.');
+      return EXIT_BLOCK;
+    }
+  }
+
+  if (args.json) { out(JSON.stringify({ subject, classification: cls, reviewCycle: cycle }, null, 2)); return EXIT_PASS; }
 
   out('ENGINEERING OS — START');
   out('='.repeat(60));
@@ -1737,6 +1790,7 @@ function cmdStart(args) {
   out(`lane        : ${cls.lane}${cls.highRisk ? ' (HIGH-RISK)' : ''}`);
   out(`packet      : ${cls.requiresPacket ? 'REQUIRED' : 'not required'}`);
   out(`reviewers   : ${cls.requiredReviewers.join(' + ') || 'none required'}`);
+  if (cycle) out(`cycle       : ${cycle.roundCount}/${cycle.maxRounds} rounds used; ${cycle.roundsRemaining} remaining`);
   out('');
   out('NEXT:');
   if (cls.lane === 'LIGHT') {
@@ -1750,7 +1804,10 @@ function cmdStart(args) {
       out(`  ${step++}. Create a task packet naming this work, then re-run --start --packet <p>.`);
       out('     node builder-control/packet-tools.cjs --new --agent claude-code --objective "…"');
     }
-    for (const r of cls.requiredReviewers) {
+    const reviewersToRun = cycle && Array.isArray(cycle.allowedReviewers)
+      ? cycle.allowedReviewers
+      : cls.requiredReviewers;
+    for (const r of reviewersToRun) {
       out(`  ${step++}. Run the ${r} review (read-only, bound to this subject):`);
       out(`     node builder-control/review-adapters.cjs --run --reviewer ${r} \\`);
       out(`       --packet ${pkt}${runCoordinate} --subject-sha ${sha}${refs}${r === 'grok'
@@ -1768,7 +1825,11 @@ function cmdStart(args) {
 }
 
 // ── dispatch ────────────────────────────────────────────────────────────────
-const args = parseArgs(process.argv.slice(2));
+// loadReview is also the canonical evidence authority for review-cycle.cjs.
+// Keep CLI execution behind require.main so sharing that validator cannot
+// accidentally execute a second engineering-os command during --start.
+function main(argv = process.argv.slice(2)) {
+const args = parseArgs(argv);
 let code;
 
 // Every command runs inside this guard. A PolicyError means a rule could not be
@@ -1855,5 +1916,9 @@ if (args.ledger && (args['gate-done'] || args.classify)) {
     notes: `engineering-os exit ${code}`,
   });
 }
+return code;
+}
 
-process.exit(code);
+module.exports = { loadReview, reviewSemantics, validateAgainst, classify, main };
+
+if (require.main === module) process.exit(main(process.argv.slice(2)));

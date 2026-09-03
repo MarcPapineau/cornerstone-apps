@@ -533,6 +533,64 @@ expect('FULL-lane start recipe prints Grok named approval and positive telemetry
     '--reviewer grok', '--allow-metered', '--approved-by "Marc Papineau"', '--cap-usd 5',
   ] });
 
+(function proveReviewCycleStopsBeforeAnotherReviewStarts() {
+  const reviewsDir = path.join(TMP, 'cycle-limit-reviews');
+  fs.mkdirSync(reviewsDir);
+  for (let i = 1; i <= 3; i++) {
+    const record = review({
+      reviewId: `REV-cycle-${i}`,
+      ts: `2026-08-3${i}T10:00:00Z`,
+      reviewer: i % 2 ? 'codex' : 'grok',
+      reviewerModel: i % 2 ? 'codex-cli-test-fixture' : 'grok-cli-test-fixture',
+      reviewOf: reviewOf('builder-control/test-fixtures/app.ts', String(i).repeat(64)),
+      disposition: 'REJECT',
+      findings: [{
+        severity: 'HIGH',
+        file: 'builder-control/test-fixtures/app.ts',
+        problem: `blocking defect in round ${i}`,
+        evidence: 'fixture evidence',
+        impact: 'The governed build cannot safely proceed.',
+        requiredCorrection: `Correct the blocking defect recorded in round ${i}.`,
+        verificationMethod: `Run the round ${i} regression proof.`,
+        status: 'OPEN',
+      }],
+    });
+    fs.renameSync(writeJSON(`cycle-round-${i}.json`, record), path.join(reviewsDir, `round-${i}.json`));
+  }
+  expect('review cycle limit stops --start before it prints another reviewer command',
+    ['--start', '--packet', FIXTURE_PACKET,
+     '--changed', 'builder-control/test-fixtures/app.ts', '--diff-lines', '12',
+     '--reviews-dir', reviewsDir],
+    { exit: 3, contains: ['REVIEW CYCLE HARD STOP', 'D-19', 'D-14'], notContains: '--reviewer codex' });
+
+  const cleanDir = path.join(TMP, 'cycle-limit-clean-reviews');
+  fs.mkdirSync(cleanDir);
+  const currentSyntheticSubject = crypto.createHash('sha256').update('').digest('hex');
+  for (let i = 1; i <= 3; i++) {
+    for (const reviewer of ['codex', 'grok']) {
+      const record = review({
+        reviewId: `REV-clean-cycle-${i}-${reviewer}`,
+        ts: `2026-08-3${i}T11:0${reviewer === 'codex' ? 0 : 1}:00Z`,
+        reviewer,
+        reviewerModel: `${reviewer}-cli-test-fixture`,
+        reviewOf: reviewOf('builder-control/test-fixtures/app.ts',
+          i === 3 ? currentSyntheticSubject : String(i).repeat(64)),
+      });
+      fs.renameSync(writeJSON(`clean-cycle-round-${i}-${reviewer}.json`, record),
+        path.join(cleanDir, `round-${i}-${reviewer}.json`));
+    }
+  }
+  expect('a clean third round routes to the gate and never prints a fourth reviewer command',
+    ['--start', '--packet', FIXTURE_PACKET,
+     '--changed', 'builder-control/test-fixtures/app.ts', '--diff-lines', '12',
+     '--reviews-dir', cleanDir],
+    { exit: 3, contains: ['REVIEW CYCLE COMPLETE', 'do not launch a fourth round', '--gate-done'], notContains: '--reviewer codex' });
+
+  expect_raw('production cannot redirect the review-cycle checker to an alternate evidence directory',
+    runProd(['--start', '--packet', REAL_PACKET, '--reviews-dir', reviewsDir]),
+    { exit: 3, contains: 'ENGOS-SYNTHETIC-INPUT-REFUSED' });
+})();
+
 expect('claude-self approval never satisfies a required slot',
   ['--gate-done', '--packet', FIXTURE_PACKET,
    '--changed', 'builder-control/test-fixtures/app.ts', '--diff-sha', SHA_A,

@@ -94,8 +94,14 @@ const STATES = {
   REVIEW_FAILED:    { step: 7,  next: ['CORRECTING', 'ABANDONED'], failure: true },
   CORRECTING:       { step: 8,  next: ['BUILDING', 'ABANDONED'] },
   CHECKPOINTED:     { step: 10, next: ['ROLLED_BACK'] },
+  // The one recovery slot for a synchronous build that timed out mid-edit.
+  // It is NOT a correction cycle and NOT reachable by any generic caller:
+  // BUILD_FAILED -> BUILD_CONTINUED -> BUILT both require the continuation
+  // capability, held only by continueTimedOutBuild() after it has itself
+  // executed the bounded same-session resume and observed exit 0.
+  BUILD_CONTINUED:  { step: 5,  next: ['BUILT', 'BUILD_FAILED', 'ABANDONED'] },
   // Terminal-ish failure states. Each can only go somewhere honest.
-  BUILD_FAILED:     { step: 5,  next: ['CORRECTING', 'ROLLED_BACK', 'ABANDONED'], failure: true },
+  BUILD_FAILED:     { step: 5,  next: ['CORRECTING', 'ROLLED_BACK', 'ABANDONED', 'BUILD_CONTINUED'], failure: true },
   CHECKS_FAILED:    { step: 6,  next: ['CORRECTING', 'ROLLED_BACK', 'ABANDONED'], failure: true },
   ROLLED_BACK:      { step: 10, next: ['ABANDONED'], failure: true },
   ABANDONED:        { step: 0,  next: [], terminal: true },
@@ -103,6 +109,38 @@ const STATES = {
 
 const MAX_CORRECTIONS = 3;
 const WORKER_LAUNCH_GRACE_MS = 5000;
+
+// ── same-attempt timeout continuation ───────────────────────────────────────
+// A synchronous builder that is SIGKILLed at its wall clock (exit 124) after it
+// has already started editing leaves real work behind and an honest
+// BUILD_FAILED. The only truthful way to reconcile that is to finish the SAME
+// model session in the SAME worktree under the SAME correction, and to record
+// what actually ran. Everything below exists to make that one narrow path
+// executable and to keep it from becoming anything wider.
+const CONTINUATION_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CONTINUATION_TIMED_OUT_EXIT = 124;
+// The command is executed WITHOUT a shell, so this charset is the whole
+// injection surface: no redirect, pipe, separator, substitution or quoting
+// character can appear at all.
+const CONTINUATION_COMMAND_CHARSET = /^[A-Za-z0-9 _-]+$/;
+const CONTINUATION_MAX_COMMAND_LEN = 512;
+// Subscription execution, proven by construction: the two API-key variables are
+// unset by the command itself, so a continuation can never bill metered spend.
+const CONTINUATION_ENV_PREFIX = Object.freeze(
+  ['env', '-u', 'ANTHROPIC_API_KEY', '-u', 'ANTHROPIC_AUTH_TOKEN']);
+const CONTINUATION_BOUNDING_COMMANDS = new Set(['timeout', 'gtimeout']);
+const CONTINUATION_MIN_TIMEOUT_SEC = 1;
+const CONTINUATION_MAX_TIMEOUT_SEC = 3600;
+// No --model, --provider or -p: resume inherits the original session's route,
+// so a continuation cannot re-select a model or smuggle in a fresh prompt.
+const CONTINUATION_OPTIONAL_FLAGS = new Set(['--print', '--dangerously-skip-permissions']);
+const CONTINUATION_MAX_PROMPT_BYTES = 8 * 1024;
+const CONTINUATION_TAIL_LINES = 12;
+const CONTINUATION_TAIL_BYTES = 4 * 1024;
+// Both execution bounds belong to the shared process-group supervisor: the
+// declared wall clock is the absolute bound, and a resume that stops producing
+// output is cut at the idle bound instead of holding the attempt open.
+const CONTINUATION_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 const CHECK_FAILURE_TAIL_LINES = 80;
 const CHECK_FAILURE_TAIL_BYTES = 16 * 1024;
 const CHECK_RECEIPT_NOTE_PREFIX = 'AEGIS_CHECK_RECEIPT_V1:';
@@ -113,6 +151,8 @@ const HOST_CONTAINMENT_AUTHORITY = 'aegis-run.cjs runHostContainmentCheck';
 const HOST_PROOF_CONTEXT_TYPE = 'AEGIS_HOST_PROOF_CONTEXT_V1';
 const HOST_PROOF_EVIDENCE_TYPE = 'AEGIS_HOST_PROOF_EVIDENCE_V1';
 const HOST_PROOF_EVIDENCE_PREFIX = `${HOST_PROOF_EVIDENCE_TYPE}:`;
+const TRUSTED_PROCESS_INSPECTOR_ENV = 'AEGIS_TRUSTED_PROCESS_INSPECTOR';
+const TRUSTED_PROCESS_INSPECTOR_SHA_ENV = 'AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256';
 const HOST_CONTAINMENT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const HOST_CONTAINMENT_ALLOWED_COMMANDS = new Set([
   'node builder-control/test/host-containment.test.cjs',
@@ -326,6 +366,48 @@ function validateCompleteCheckReceipt(receipt, expected = {}) {
   return true;
 }
 
+function trustedProcessInspector(source = process.env) {
+  if (source.AEGIS_HOST_OUTER_CONTAINMENT !== HOST_CONTAINMENT_BOUNDARY &&
+      source.AEGIS_CHECK_SNAPSHOT_POLICY !== CHECK_SNAPSHOT_POLICY) return null;
+  const candidate = source[TRUSTED_PROCESS_INSPECTOR_ENV];
+  const expectedSha256 = source[TRUSTED_PROCESS_INSPECTOR_SHA_ENV];
+  const home = source.HOME;
+  const scratch = source.TMPDIR;
+  if (typeof candidate !== 'string' || !path.isAbsolute(candidate) ||
+      !/^[0-9a-f]{64}$/.test(expectedSha256 || '') ||
+      typeof home !== 'string' || typeof scratch !== 'string') return null;
+  const root = path.dirname(home);
+  const normalizedScratch = scratch.endsWith(path.sep) ? scratch.slice(0, -1) : scratch;
+  const bin = path.join(root, 'bin');
+  if (home !== path.join(root, 'home') || normalizedScratch !== path.join(root, 'tmp') ||
+      candidate !== path.join(bin, 'ps')) return null;
+  try {
+    for (const target of [root, bin]) {
+      const stat = fs.lstatSync(target);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() ||
+          (stat.mode & 0o022) !== 0 || fs.realpathSync(target) !== target) return null;
+    }
+    const stat = fs.lstatSync(candidate);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid() ||
+        (stat.mode & 0o077) !== 0 || (stat.mode & 0o100) === 0 ||
+        fs.realpathSync(candidate) !== candidate ||
+        sha256(fs.readFileSync(candidate)) !== expectedSha256) return null;
+  } catch { return null; }
+  // The env pair alone must never be able to select an inspector outside real
+  // containment. The disposable boundary root is deliberately writable inside
+  // the check sandbox, so a writability probe proves nothing there; what only
+  // real containment can prove is deny-default reads. A host file no check
+  // profile allowlists must be unreadable — the same proof the inherited
+  // snapshot boundary already requires. Outside containment that read succeeds
+  // and the candidate is refused, leaving the system inspector authoritative.
+  try { fs.readFileSync('/private/etc/hosts'); return null; }
+  catch (error) { return ['EPERM', 'EACCES'].includes(error.code) ? candidate : null; }
+}
+
+function processInspectorExecutable(source = process.env) {
+  return trustedProcessInspector(source) || (fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps');
+}
+
 /**
  * Keep failed check diagnostics useful without turning arbitrary process output
  * into a credential store. This evidence remains in the private run record;
@@ -381,7 +463,7 @@ function processIdentity(pid) {
   } catch { /* non-Linux host or the process exited; fall through to ps */ }
 
   const psValue = (field) => {
-    const result = spawnSync('ps', ['-p', String(pid), '-o', `${field}=`], {
+    const result = spawnSync(processInspectorExecutable(), ['-p', String(pid), '-o', `${field}=`], {
       encoding: 'utf8', timeout: 1000,
     });
     return result.status === 0 ? String(result.stdout || '').trim() : '';
@@ -409,7 +491,7 @@ function processExistence(pid) {
     }
   } catch { /* non-Linux host; use a read-only ps query */ }
 
-  const result = spawnSync('ps', ['-p', String(pid), '-o', 'pid='], {
+  const result = spawnSync(processInspectorExecutable(), ['-p', String(pid), '-o', 'pid='], {
     encoding: 'utf8', timeout: 1000,
   });
   if (result.error || result.signal || result.status === null) return 'unknown';
@@ -431,7 +513,7 @@ function processGroupExistence(processGroupId) {
 
 function processGroupMembers(processGroupId, timeoutMs = 500) {
   if (!Number.isInteger(processGroupId) || processGroupId <= 1) return null;
-  const observed = spawnSync('ps', ['-axo', 'pid=,pgid='], {
+  const observed = spawnSync(processInspectorExecutable(), ['-axo', 'pid=,pgid='], {
     encoding: 'utf8', timeout: timeoutMs,
   });
   if (observed.error || observed.signal || observed.status !== 0) return null;
@@ -1059,6 +1141,10 @@ function verifyGlobalWorkerLease(runId, attemptId, workerPid) {
   const existing = readRunLaunchClaim(globalWorkerLockPath());
   const claim = existing && !existing.blocked ? existing.claim : null;
   const observed = processIdentity(workerPid);
+  if (!observed) {
+    throw new RunError('PROCESS-IDENTITY-PROBE-UNAVAILABLE',
+      `worker attempt ${attemptId} could not obtain exact process-lifetime identity`);
+  }
   if (!claim || claim.holder !== 'WORKER_LEASE' || claim.runId !== runId ||
       claim.attemptId !== attemptId || claim.pid !== workerPid ||
       claim.processGroupId !== workerPid ||
@@ -1495,6 +1581,32 @@ function hasCurrentAttemptTerminationEvidence(run) {
     sameProcessIdentity(build.childProcessIdentity, evidence.childIdentity));
 }
 
+const TIMEOUT_CONTINUATION_CAPABILITY = Symbol('executed same-attempt timeout continuation');
+const TIMEOUT_CONTINUATION_TYPE = 'AEGIS_TIMEOUT_CONTINUATION_V1';
+
+/**
+ * The capability symbol alone would still let a caller inside this module take
+ * the edge without having run anything. Both continuation edges additionally
+ * require the typed continuation record the executor writes: STARTED (with the
+ * digest of the command it is about to run) to enter, and EXECUTED with a
+ * literal exit 0 to complete. An operator-authored record cannot exist here,
+ * because nothing outside continueTimedOutBuild() ever writes this shape.
+ */
+function hasExecutedTimeoutContinuationEvidence(run, to) {
+  const c = run && run.build && run.build.continuation;
+  if (!c || c.type !== TIMEOUT_CONTINUATION_TYPE) return false;
+  if (!CONTINUATION_SESSION_ID_RE.test(c.sessionId || '')) return false;
+  if (!/^[0-9a-f]{64}$/.test(c.commandSha256 || '')) return false;
+  if (run.build.exit !== 124) return false;
+  if (to === 'BUILD_CONTINUED') return c.status === 'STARTED' && c.exit === null;
+  // Completing the slot as BUILT needs more than an exit code: the supervisor
+  // must have proven the dedicated process group drained, and the worktree's
+  // changed paths must have been verified inside the packet's allowed surface.
+  return c.status === 'EXECUTED' && c.exit === 0 && typeof c.endedAt === 'string' &&
+    Boolean(c.boundary) && c.boundary.state === 'PASSED' && c.boundary.drained === true &&
+    Boolean(c.containment) && c.containment.ok === true;
+}
+
 /** The only way a run changes state. */
 function transition(run, to, notes, authority) {
   const from = run.state;
@@ -1511,6 +1623,17 @@ function transition(run, to, notes, authority) {
     throw new RunError('TERMINATION-EVIDENCE-REQUIRED',
       'BUILDING -> ABANDONED requires authenticated child-close and process-group-drain evidence ' +
       'bound to the current worker attempt and cancellation operation.');
+  }
+  // Entering and completing the timeout-continuation recovery slot is not a
+  // generic edge. Without the capability, BUILD_FAILED still has exactly its
+  // pre-existing honest exits and BUILD_CONTINUED can only fail or abandon.
+  if (((from === 'BUILD_FAILED' && to === 'BUILD_CONTINUED') ||
+       (from === 'BUILD_CONTINUED' && to === 'BUILT')) &&
+      (authority !== TIMEOUT_CONTINUATION_CAPABILITY ||
+       !hasExecutedTimeoutContinuationEvidence(run, to))) {
+    throw new RunError('CONTINUATION-AUTHORITY-REQUIRED',
+      `${from} -> ${to} is reachable only through the same-attempt timeout continuation authority, ` +
+      'which must have executed the bounded same-session resume itself. There is no operator assertion.');
   }
   const entry = recordTransition(run, from, to, notes);
   run.state = to;
@@ -2488,6 +2611,513 @@ function cmdBuild(args) {
   }
 }
 
+// ── same-attempt timeout continuation (step 5 recovery, not a correction) ────
+// A synchronous builder killed at its wall clock leaves partial, real edits and
+// an honest BUILD_FAILED. This authority is the ONLY way that attempt is ever
+// reconciled, and it reconciles it by finishing the work itself: it validates
+// the exact bounded same-session resume command, executes it in the same
+// worktree, and records what happened. No caller may assert the outcome, no
+// correction is consumed, and one attempt is all there is.
+
+function continuationRefusal(code, message) {
+  return new AegisControlError(code, message, 409);
+}
+
+function boundedContinuationTail(value) {
+  const text = String(value || '').trim();
+  const lines = text ? text.split('\n').slice(-CONTINUATION_TAIL_LINES).join('\n') : '';
+  return lines.length > CONTINUATION_TAIL_BYTES ? lines.slice(-CONTINUATION_TAIL_BYTES) : lines;
+}
+
+/**
+ * The whole trust boundary of the continuation command, in one place.
+ * Executed without a shell, so the accepted grammar IS the argv: an explicit
+ * API-key-stripping `env` prefix, an explicit bounded timeout, and
+ * `claude --resume <the same session id>` with a closed flag allowlist.
+ */
+function parseTimeoutContinuationCommand(command, sessionId) {
+  if (typeof command !== 'string' || !command.length || command.length > CONTINUATION_MAX_COMMAND_LEN) {
+    throw continuationRefusal('INVALID_CONTINUATION_COMMAND',
+      `the continuation command must be a string of 1..${CONTINUATION_MAX_COMMAND_LEN} characters`);
+  }
+  if (!CONTINUATION_COMMAND_CHARSET.test(command)) {
+    throw continuationRefusal('INVALID_CONTINUATION_COMMAND',
+      'the continuation command may contain only letters, digits, spaces, underscores and hyphens; ' +
+      'no redirect, pipe, separator, substitution or quoting character is accepted');
+  }
+  const argv = command.split(' ');
+  if (argv.some((token) => token.length === 0)) {
+    throw continuationRefusal('INVALID_CONTINUATION_COMMAND',
+      'the continuation command must be single-space separated with no empty token');
+  }
+  const prefix = argv.slice(0, CONTINUATION_ENV_PREFIX.length);
+  if (prefix.length !== CONTINUATION_ENV_PREFIX.length ||
+      prefix.some((token, i) => token !== CONTINUATION_ENV_PREFIX[i])) {
+    throw continuationRefusal('INVALID_CONTINUATION_COMMAND',
+      `the continuation command must begin with the exact subscription prefix "${CONTINUATION_ENV_PREFIX.join(' ')}"`);
+  }
+  const bounding = argv[CONTINUATION_ENV_PREFIX.length];
+  if (!CONTINUATION_BOUNDING_COMMANDS.has(bounding)) {
+    throw continuationRefusal('UNBOUNDED_CONTINUATION_COMMAND',
+      `the continuation command must be bounded by ${[...CONTINUATION_BOUNDING_COMMANDS].join(' or ')}; an unbounded resume is refused`);
+  }
+  const seconds = argv[CONTINUATION_ENV_PREFIX.length + 1];
+  const timeoutSec = /^[1-9][0-9]{0,3}$/.test(seconds || '') ? Number(seconds) : NaN;
+  if (!Number.isInteger(timeoutSec) ||
+      timeoutSec < CONTINUATION_MIN_TIMEOUT_SEC || timeoutSec > CONTINUATION_MAX_TIMEOUT_SEC) {
+    throw continuationRefusal('UNBOUNDED_CONTINUATION_COMMAND',
+      `the continuation bound must be a whole number of seconds in ${CONTINUATION_MIN_TIMEOUT_SEC}..${CONTINUATION_MAX_TIMEOUT_SEC}`);
+  }
+  if (argv[CONTINUATION_ENV_PREFIX.length + 2] !== 'claude' ||
+      argv[CONTINUATION_ENV_PREFIX.length + 3] !== '--resume') {
+    throw continuationRefusal('NOT_A_RESUME_CONTINUATION',
+      'the continuation command must invoke exactly "claude --resume"; a fresh session is a new attempt, not a continuation');
+  }
+  const commandSessionId = argv[CONTINUATION_ENV_PREFIX.length + 4];
+  if (commandSessionId !== sessionId) {
+    throw continuationRefusal('CONTINUATION_SESSION_MISMATCH',
+      'the resumed session id in the continuation command is not the declared session id');
+  }
+  const flags = argv.slice(CONTINUATION_ENV_PREFIX.length + 5);
+  for (const flag of flags) {
+    if (!CONTINUATION_OPTIONAL_FLAGS.has(flag)) {
+      throw continuationRefusal('INVALID_CONTINUATION_COMMAND',
+        `"${flag}" is not an accepted continuation flag (accepted: ${[...CONTINUATION_OPTIONAL_FLAGS].join(', ')}); ` +
+        'a continuation may not re-select a provider, model or prompt');
+    }
+  }
+  if (new Set(flags).size !== flags.length) {
+    throw continuationRefusal('INVALID_CONTINUATION_COMMAND', 'continuation flags must not repeat');
+  }
+  return Object.freeze({
+    argv: Object.freeze(argv),
+    timeoutSec,
+    // What actually executes: the resolved claude executable with exactly these
+    // arguments. The declared env/timeout prefix is honored by the sanitized
+    // env object and the supervisor's own bounds, not by wrapper binaries.
+    resumeArgv: Object.freeze(argv.slice(CONTINUATION_ENV_PREFIX.length + 3)),
+  });
+}
+
+/** Everything the run record must already say before anything is executed. */
+function timeoutContinuationPrecondition(run) {
+  if (run.state !== 'BUILD_FAILED') {
+    return continuationRefusal('ILLEGAL_TRANSITION',
+      `timeout continuation requires BUILD_FAILED, run is ${run.state}`);
+  }
+  const build = run.build;
+  if (!build || typeof build !== 'object') {
+    return continuationRefusal('NO_TIMED_OUT_BUILD',
+      `run ${run.runId} records no build attempt to continue`);
+  }
+  if (build.exit !== CONTINUATION_TIMED_OUT_EXIT) {
+    return continuationRefusal('NOT_A_TIMEOUT',
+      `timeout continuation requires a prior builder exit of exactly ${CONTINUATION_TIMED_OUT_EXIT}; ` +
+      `run ${run.runId} recorded ${JSON.stringify(build.exit)}. A build that failed on its merits is corrected, not continued.`);
+  }
+  if (typeof build.cmd !== 'string' || !build.cmd.length || build.mode === 'async' ||
+      typeof build.attemptId === 'string' || build.workerPid !== undefined || build.control !== undefined) {
+    return continuationRefusal('NOT_A_SYNCHRONOUS_BUILD',
+      `run ${run.runId} did not record a synchronous builder attempt; detached worker attempts are reconciled by their own authority`);
+  }
+  if (build.continuation !== undefined) {
+    return continuationRefusal('CONTINUATION_ALREADY_ATTEMPTED',
+      `run ${run.runId} already has a recorded timeout continuation (${(build.continuation || {}).status}); ` +
+      'one attempt gets one continuation. Escalate rather than resuming again.');
+  }
+  const recovery = build.recovery;
+  if (recovery && recovery.retrySafe === false) {
+    return continuationRefusal('TERMINATION_UNVERIFIED',
+      `run ${run.runId} has an unsafe recovery record; continuing it would race an unverified process lifetime`);
+  }
+  if (!Number.isInteger(run.corrections) || run.corrections < 0 || run.corrections > MAX_CORRECTIONS) {
+    return continuationRefusal('INVALID_CORRECTION_STATE',
+      `run ${run.runId} does not record a valid correction count; refusing to continue an attempt whose allowance is unknown`);
+  }
+  if (!run.worktree || typeof run.worktree.path !== 'string' || !fs.existsSync(run.worktree.path)) {
+    return continuationRefusal('NO_WORKTREE',
+      `run ${run.runId} has no existing isolated worktree; a continuation runs in the same place the attempt did`);
+  }
+  return null;
+}
+
+/**
+ * Pure input validation for a continuation declaration. It runs before any
+ * claim is taken or any run state is read, so a request that could never
+ * execute is refused identically in every environment — including inside a
+ * containment snapshot — without depending on or disturbing launch state.
+ */
+function validatedContinuationDeclaration(continuation) {
+  if (!continuation || typeof continuation !== 'object' || Array.isArray(continuation)) {
+    throw new AegisControlError('INVALID_CONTINUATION',
+      'timeout continuation requires an explicit { sessionId, command } declaration', 400);
+  }
+  const unknown = Object.keys(continuation).filter((k) => !['sessionId', 'command', 'prompt'].includes(k));
+  if (unknown.length) {
+    throw new AegisControlError('INVALID_CONTINUATION',
+      `unknown continuation field(s): ${unknown.join(', ')}`, 400);
+  }
+  const { sessionId, command, prompt } = continuation;
+  if (typeof sessionId !== 'string' || !CONTINUATION_SESSION_ID_RE.test(sessionId)) {
+    throw new AegisControlError('INVALID_CONTINUATION_SESSION',
+      'timeout continuation requires an explicit lowercase canonical UUID session id', 400);
+  }
+  if (prompt !== undefined &&
+      (typeof prompt !== 'string' || Buffer.byteLength(prompt, 'utf8') > CONTINUATION_MAX_PROMPT_BYTES)) {
+    throw new AegisControlError('INVALID_CONTINUATION',
+      `the optional continuation prompt must be a string of at most ${CONTINUATION_MAX_PROMPT_BYTES} bytes`, 400);
+  }
+  const parsed = parseTimeoutContinuationCommand(command, sessionId);
+  return Object.freeze({ sessionId, command, prompt, parsed });
+}
+
+/**
+ * Subscription execution is enforced with a real env object: the exact
+ * variables the declared `env -u` prefix names are removed from the child
+ * environment, so a continuation cannot bill metered spend regardless of what
+ * is exported around it. No API key is required or consulted.
+ */
+function continuationExecutionEnv() {
+  const env = { ...process.env };
+  for (let i = 1; i + 1 < CONTINUATION_ENV_PREFIX.length; i += 2) {
+    if (CONTINUATION_ENV_PREFIX[i] === '-u') delete env[CONTINUATION_ENV_PREFIX[i + 1]];
+  }
+  return env;
+}
+
+/**
+ * Resolve the one executable the grammar names. Resolution happens here, in
+ * the executing authority, against absolute PATH entries only, and the real
+ * path is recorded as evidence — the supervisor is never handed a bare name.
+ */
+function resolveContinuationExecutable(env) {
+  for (const dir of String(env.PATH || '').split(path.delimiter)) {
+    if (!dir || !path.isAbsolute(dir)) continue;
+    const candidate = path.join(dir, 'claude');
+    try {
+      if (!fs.statSync(candidate).isFile()) continue;
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return fs.realpathSync(candidate);
+    } catch { continue; }
+  }
+  throw continuationRefusal('CONTINUATION_EXECUTABLE_UNAVAILABLE',
+    'no executable "claude" exists on an absolute PATH entry; a continuation never guesses its executor');
+}
+
+function continuationExecutionBounds(timeoutSec) {
+  let timeoutMs = timeoutSec * 1000;
+  let idleTimeoutMs = Math.min(timeoutMs, CONTINUATION_IDLE_TIMEOUT_MS);
+  // Test-only tightening, honored solely when the runs dir is disposable under
+  // the OS temp root — the same locality proof the contained check port uses.
+  try {
+    const runsReal = fs.realpathSync(RUNS_DIR);
+    const tmpReal = fs.realpathSync(os.tmpdir());
+    if (runsReal.startsWith(tmpReal + path.sep)) {
+      const absolute = Number(process.env.AEGIS_TEST_CONTINUATION_TIMEOUT_MS);
+      const idle = Number(process.env.AEGIS_TEST_CONTINUATION_IDLE_MS);
+      if (Number.isInteger(absolute) && absolute > 0 && absolute < timeoutMs) timeoutMs = absolute;
+      if (Number.isInteger(idle) && idle > 0 && idle < idleTimeoutMs) idleTimeoutMs = idle;
+    }
+  } catch { /* keep the declared bounds */ }
+  return { timeoutMs, idleTimeoutMs };
+}
+
+/**
+ * BUILT is a claim about the product, so the product must still be inside the
+ * packet: every path the worktree now carries as changed must be allowed by
+ * the exact packet generation bound at intake. An uninspectable worktree is a
+ * failed verification, never a pass.
+ */
+function continuationChangeContainment(run, filesAllowed) {
+  if (!Array.isArray(filesAllowed) || filesAllowed.length === 0 ||
+      !filesAllowed.every((entry) => typeof entry === 'string' && entry.trim())) {
+    return { ok: false, verified: false, outside: [],
+      reason: 'the intake packet declares no usable filesAllowed surface' };
+  }
+  const observed = spawnSync('git', ['-C', run.worktree.path, 'status', '--porcelain=v1', '-z'], {
+    encoding: 'utf8', timeout: 30_000, maxBuffer: 16 * 1024 * 1024, killSignal: 'SIGKILL',
+  });
+  if (observed.error || observed.status !== 0) {
+    return { ok: false, verified: false, outside: [],
+      reason: `worktree changes could not be inspected${observed.error ?
+        `: ${observed.error.message}` : ` (git status exit ${observed.status})`}` };
+  }
+  const tokens = String(observed.stdout || '').split('\0').filter((token) => token.length > 0);
+  const changed = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token.length < 4) {
+      return { ok: false, verified: false, outside: [], reason: 'unparseable git status entry' };
+    }
+    changed.push(token.slice(3));
+    // A rename/copy record carries its origin path as the next NUL field, and
+    // both ends must stay inside the allowed surface.
+    if (token[0] === 'R' || token[0] === 'C') {
+      i += 1;
+      if (tokens[i]) changed.push(tokens[i]);
+    }
+  }
+  const matchers = filesAllowed.map((entry) => {
+    if (!entry.includes('*')) return (candidate) => candidate === entry;
+    const pattern = entry.split('**').map((part) =>
+      part.split('*').map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*');
+    const re = new RegExp(`^${pattern}$`);
+    return (candidate) => re.test(candidate);
+  });
+  const outside = changed.filter((candidate) => !matchers.some((matches) => matches(candidate)));
+  return {
+    ok: outside.length === 0, verified: true, outside: outside.slice(0, 10),
+    reason: outside.length === 0 ? null :
+      `${outside.length} changed path(s) escape the packet filesAllowed surface`,
+  };
+}
+
+/**
+ * A continuation whose executing process died leaves the run honestly parked
+ * in BUILD_CONTINUED with a STARTED record. Recovery is evidence-first: only a
+ * proven-ended executor lifetime is reconciled, into BUILD_FAILED with the
+ * record preserved as INTERRUPTED. The one-continuation bar stays consumed —
+ * a crashed attempt may have executed real work, so nothing retries into it.
+ */
+function reconcileInterruptedContinuation(run) {
+  if (run.state !== 'BUILD_CONTINUED') return run;
+  const c = run.build && run.build.continuation;
+  if (!c || c.type !== TIMEOUT_CONTINUATION_TYPE || c.status !== 'STARTED') {
+    throw continuationRefusal('CONTINUATION_STATE_UNRECOGNIZED',
+      `run ${run.runId} is BUILD_CONTINUED without a STARTED continuation record; refusing to guess what is executing`);
+  }
+  const executor = c.executor;
+  if (!executor || !Number.isInteger(executor.pid) || !executor.processIdentity) {
+    throw continuationRefusal('CONTINUATION_LIFETIME_UNVERIFIED',
+      `run ${run.runId} records no provable executor identity for its in-flight continuation`);
+  }
+  const existence = processExistence(executor.pid);
+  if (existence === 'unknown') {
+    throw continuationRefusal('CONTINUATION_LIFETIME_UNVERIFIED',
+      `the executor lifetime of run ${run.runId}'s continuation cannot be established right now`);
+  }
+  if (existence === 'present') {
+    const observedIdentity = processIdentity(executor.pid);
+    if (observedIdentity && sameProcessIdentity(executor.processIdentity, observedIdentity)) {
+      throw continuationRefusal('CONTINUATION_IN_PROGRESS',
+        `run ${run.runId} already has a live continuation executor (pid ${executor.pid})`);
+    }
+    if (!observedIdentity) {
+      throw continuationRefusal('CONTINUATION_LIFETIME_UNVERIFIED',
+        `pid ${executor.pid} exists but its identity cannot be proven; refusing to reconcile over a possibly live executor`);
+    }
+    // The PID exists but belongs to a different process lifetime: the executor
+    // is gone and the PID was reused.
+  }
+  run.build = { ...run.build, continuation: { ...c, status: 'INTERRUPTED', endedAt: nowIso() } };
+  transition(run, 'BUILD_FAILED',
+    'timeout continuation executor ended without recording a result; the attempt record is preserved as INTERRUPTED');
+  return loadRun(run.runId);
+}
+
+function continueTimedOutBuildClaimed(run, declared) {
+  const { sessionId, command, prompt, parsed } = declared;
+  run = reconcileInterruptedContinuation(run);
+  const precondition = timeoutContinuationPrecondition(run);
+  if (precondition) throw precondition;
+  let packetCoordinate;
+  try { packetCoordinate = currentRunPacketCoordinate(run); }
+  catch (error) {
+    throw continuationRefusal('PACKET_CHANGED',
+      `timeout continuation requires the exact canonically valid packet recorded at intake: ${error.message}`);
+  }
+  const executionEnv = continuationExecutionEnv();
+  const executable = resolveContinuationExecutable(executionEnv);
+  const bounds = continuationExecutionBounds(parsed.timeoutSec);
+  const executorIdentity = processIdentity(process.pid);
+  if (!executorIdentity) {
+    throw continuationRefusal('CLAIM_IDENTITY_UNAVAILABLE',
+      'cannot prove the process lifetime executing this continuation');
+  }
+
+  const correctionsBefore = run.corrections;
+  const originalBuild = run.build;
+  const originalEvidence = Object.freeze({
+    cmd: originalBuild.cmd, startedAt: originalBuild.startedAt, endedAt: originalBuild.endedAt,
+    exit: originalBuild.exit, stdoutTail: originalBuild.stdoutTail, stderrTail: originalBuild.stderrTail,
+  });
+  const commandSha256 = sha256(command);
+  const startedAt = nowIso();
+  // One durable identity for this exact recovery attempt: the same inputs are
+  // the same attempt, and any changed input is a different declaration the
+  // one-attempt bar will refuse. Runtime evidence is output, never part of it.
+  const attemptKey = sha256(JSON.stringify({
+    type: TIMEOUT_CONTINUATION_TYPE,
+    runId: run.runId,
+    corrections: correctionsBefore,
+    packetSha256: packetCoordinate.sha256,
+    worktree: { path: run.worktree.path, branch: run.worktree.branch || null },
+    route: originalBuild.route || run.route || null,
+    sessionId,
+    commandSha256,
+  }));
+
+  // The STARTED record is published, and the run leaves BUILD_FAILED, BEFORE
+  // anything is executed. If this process dies mid-continuation the evidence
+  // and the one-attempt bar both survive; nothing can retry into the gap.
+  run.build = {
+    ...originalBuild,
+    continuation: {
+      type: TIMEOUT_CONTINUATION_TYPE, status: 'STARTED', attemptKey, sessionId, commandSha256,
+      timeoutSec: parsed.timeoutSec, promptSha256: prompt === undefined ? null : sha256(prompt),
+      correctionsAtContinuation: correctionsBefore,
+      executor: { pid: process.pid, processIdentity: executorIdentity },
+      executable,
+      startedAt, endedAt: null, exit: null, stdoutTail: '', stderrTail: '',
+    },
+  };
+  transition(run, 'BUILD_CONTINUED',
+    `same-attempt timeout continuation of session ${sessionId} starting`, TIMEOUT_CONTINUATION_CAPABILITY);
+
+  // The one shared asynchronous supervisor executes the resume: a dedicated
+  // process group, streamed bounded output with progress timestamps, idle and
+  // absolute bounds it owns itself, and TERM -> grace -> KILL with proven
+  // group drainage. Never a shell, never a wrapper binary, and never an
+  // asserted outcome in place of an observed one.
+  let supervised;
+  try {
+    supervised = runProcessGroupSupervisor({
+      bin: executable,
+      argv: [...parsed.resumeArgv],
+      cwd: run.worktree.path,
+      env: executionEnv,
+      input: prompt === undefined ? '' : prompt,
+      timeoutMs: bounds.timeoutMs,
+      idleTimeoutMs: bounds.idleTimeoutMs,
+      termGraceMs: CONTAINED_CHECK_TERM_GRACE_MS,
+      drainTimeoutMs: CONTAINED_CHECK_DRAIN_TIMEOUT_MS,
+    });
+  } catch (error) {
+    // Supervision itself failed to produce evidence. Whether the resume ran is
+    // unknowable, so the slot stays consumed and the run fails closed.
+    supervised = {
+      status: null, signal: null, stdout: '', stderr: '',
+      timedOut: null, progress: null,
+      executionBoundary: { state: 'FAILED', drained: false,
+        reason: `continuation supervisor failed: ${error.message || error}` },
+    };
+  }
+  const boundary = supervised.executionBoundary ||
+    { state: 'FAILED', drained: false, reason: 'the supervisor returned no execution-boundary evidence' };
+  const timedOut = supervised.timedOut || null;
+  const exit = supervised.status === null ? CONTINUATION_TIMED_OUT_EXIT : supervised.status;
+
+  const finished = loadRun(run.runId);
+  if (finished.state !== 'BUILD_CONTINUED' || !finished.build || !finished.build.continuation ||
+      finished.build.continuation.startedAt !== startedAt ||
+      finished.build.continuation.attemptKey !== attemptKey) {
+    throw continuationRefusal('CONTINUATION_SUPERSEDED',
+      `run ${run.runId} left this continuation before its result could be recorded`);
+  }
+  const containment = exit === 0 && boundary.state === 'PASSED' && boundary.drained === true
+    ? continuationChangeContainment(finished, packetCoordinate.parsed.filesAllowed)
+    : { ok: false, verified: false, outside: [],
+      reason: 'not evaluated: the resume did not complete cleanly' };
+  // The original attempt's evidence is carried through literally. A
+  // continuation adds a record; it never rewrites what the timed-out build did.
+  finished.build = {
+    ...finished.build, ...originalEvidence,
+    continuation: {
+      ...finished.build.continuation,
+      status: 'EXECUTED', endedAt: nowIso(), exit,
+      timedOut,
+      progress: supervised.progress || null,
+      boundary: { state: boundary.state, drained: boundary.drained === true, reason: boundary.reason || null },
+      containment,
+      stdoutTail: boundedContinuationTail(supervised.stdout),
+      stderrTail: boundedContinuationTail(supervised.stderr),
+    },
+  };
+  saveRun(finished);
+
+  if (exit === 0 && boundary.state === 'PASSED' && boundary.drained === true && containment.ok === true) {
+    transition(finished, 'BUILT',
+      `same-attempt timeout continuation of session ${sessionId} exited 0 with a drained process group inside packet containment`,
+      TIMEOUT_CONTINUATION_CAPABILITY);
+  } else {
+    const why = exit !== 0
+      ? (timedOut ? `hit its ${timedOut === 'IDLE' ? 'idle' : 'absolute'} bound` : `exited ${exit}`)
+      : (boundary.state !== 'PASSED' || boundary.drained !== true
+        ? `exited 0 but its execution boundary failed (${boundary.reason || 'no drainage evidence'})`
+        : `exited 0 but left changes outside packet containment (${containment.reason})`);
+    transition(finished, 'BUILD_FAILED',
+      `same-attempt timeout continuation of session ${sessionId} ${why}`);
+  }
+
+  const fresh = loadRun(run.runId);
+  if (fresh.corrections !== correctionsBefore) {
+    throw continuationRefusal('INVALID_CORRECTION_STATE',
+      `timeout continuation changed the recorded correction count of run ${run.runId}`);
+  }
+  return Object.freeze({
+    runId: fresh.runId, state: fresh.state, action: 'continue-timeout',
+    sessionId, exit, corrections: fresh.corrections,
+    nextAction: fresh.state === 'BUILT' ? 'checks' : 'escalate',
+  });
+}
+
+/**
+ * The single continuation authority. Deliberately not reachable from the
+ * dashboard: it is not in API_POST_ROUTES and no HTTP handler references it,
+ * so no browser input can select a session id or a command.
+ */
+function continueTimedOutBuild(runId, continuation) {
+  // The declaration is validated before any global claim is taken: a request
+  // that could never execute must be refused without depending on — or
+  // disturbing — launch-claim state, and identically in every environment.
+  const declared = validatedContinuationDeclaration(continuation);
+  let globalClaim;
+  let claim;
+  try {
+    globalClaim = acquireGlobalWorkerClaim(3000);
+    claim = acquireRunLaunchClaim(runId, 3000);
+  } catch (e) {
+    if (globalClaim) releaseRunLaunchClaim(globalClaim);
+    if (e instanceof RunError) {
+      if (e.code === 'BAD-RUN-ID') throw new AegisControlError('INVALID_RUN_ID', e.message, 400);
+      if (e.code === 'NO-SUCH-RUN') throw new AegisControlError('RUN_NOT_FOUND', e.message, 404);
+    }
+    throw e;
+  }
+  try {
+    assertGlobalWorkerAvailable(runId);
+    const run = loadRunForControl(runId);
+    assertPriorWorkerLaunchSafe(run);
+    return continueTimedOutBuildClaimed(run, declared);
+  } finally {
+    if (claim) releaseRunLaunchClaim(claim);
+    if (globalClaim) releaseRunLaunchClaim(globalClaim);
+  }
+}
+
+function cmdContinueTimeout(args) {
+  let result;
+  try {
+    result = continueTimedOutBuild(args.runId, {
+      sessionId: args.session,
+      command: args.continueCmd,
+      ...(args.continuePrompt === undefined ? {} : { prompt: args.continuePrompt }),
+    });
+  } catch (e) {
+    if (e instanceof AegisControlError) {
+      const cliCode = { INVALID_RUN_ID: 'BAD-RUN-ID', RUN_NOT_FOUND: 'NO-SUCH-RUN' }[e.code] || e.code;
+      throw new RunError(cliCode, e.message);
+    }
+    throw e;
+  }
+  if (result.state === 'BUILT') {
+    console.log(`continuation ok (exit 0), corrections unchanged at ${result.corrections}\nnext: --checks ${result.runId}`);
+    return EXIT_PASS;
+  }
+  console.error(`CONTINUATION FAILED (exit ${result.exit}); run remains ${result.state} at ${result.corrections} corrections`);
+  return EXIT_REFUSED;
+}
+
 // ── step 6: deterministic checks ────────────────────────────────────────────
 // This is the one canonical check executor. Both the CLI and the authenticated
 // dashboard control surface enter through runChecks(), which owns the same
@@ -2991,7 +3621,7 @@ function containedCheckSupervisorMain() {
         cwd: config.cwd,
         env: config.env,
         detached: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [config.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       });
     } catch (error) {
       process.stdout.write(JSON.stringify({
@@ -3005,23 +3635,49 @@ function containedCheckSupervisorMain() {
       child.once('error', (error) => resolve({ type: 'error', error }));
       child.once('exit', (code, signal) => resolve({ type: 'exit', code, signal }));
     });
-    child.stdout.on('data', (chunk) => appendTail(stdout, chunk));
-    child.stderr.on('data', (chunk) => appendTail(stderr, chunk));
+    // Progress is observed, never asserted: every output chunk stamps the idle
+    // clock, so a silently hung child is distinguishable from a working one.
+    const startedTs = Date.now();
+    const progress = { startedAt: new Date(startedTs).toISOString(), firstOutputAt: null, lastOutputAt: null };
+    let lastActivityTs = startedTs;
+    const observe = (state) => (chunk) => {
+      appendTail(state, chunk);
+      lastActivityTs = Date.now();
+      const stamp = new Date(lastActivityTs).toISOString();
+      if (!progress.firstOutputAt) progress.firstOutputAt = stamp;
+      progress.lastOutputAt = stamp;
+    };
+    child.stdout.on('data', observe(stdout));
+    child.stderr.on('data', observe(stderr));
+    if (config.input !== undefined && child.stdin) {
+      child.stdin.on('error', () => { /* a child may exit before reading */ });
+      child.stdin.end(String(config.input));
+    }
     const leaderPid = child.pid;
     const leaderMarker = processMarker(leaderPid);
     const observedGroup = observedProcessGroup(leaderPid);
     const groupId = leaderPid;
     const groupMismatch = observedGroup !== null && observedGroup !== groupId;
+    const idleMs = Number.isInteger(config.idleTimeoutMs) && config.idleTimeoutMs > 0
+      ? config.idleTimeoutMs : null;
+    let boundsPoll = null;
     const outcome = await new Promise((resolve) => {
-      const timeoutHandle = setTimeout(() => resolve({ type: 'timeout' }), config.timeoutMs);
-      outcomePromise.then((value) => {
-        clearTimeout(timeoutHandle);
-        resolve(value);
-      });
+      const absoluteDeadline = startedTs + config.timeoutMs;
+      boundsPoll = setInterval(() => {
+        const now = Date.now();
+        if (now >= absoluteDeadline) resolve({ type: 'timeout', mode: 'ABSOLUTE' });
+        else if (idleMs !== null && now - lastActivityTs >= idleMs) resolve({ type: 'timeout', mode: 'IDLE' });
+      }, 100);
+      outcomePromise.then(resolve);
     });
+    clearInterval(boundsPoll);
     let boundaryReason = groupMismatch
       ? `detached child did not own its dedicated process group (${observedGroup} != ${groupId})` : null;
-    if (outcome.type === 'timeout') boundaryReason = `contained check exceeded ${config.timeoutMs} ms`;
+    if (outcome.type === 'timeout') {
+      boundaryReason = outcome.mode === 'IDLE'
+        ? `contained process produced no output for ${idleMs} ms (idle bound)`
+        : `contained check exceeded ${config.timeoutMs} ms`;
+    }
     else if (outcome.type === 'error') boundaryReason = `contained check process error: ${outcome.error.message}`;
     else if (outcome.signal) boundaryReason = `contained check terminated abnormally by ${outcome.signal}`;
     else if (groupAlive(groupId)) boundaryReason = 'contained check left a live descendant process group';
@@ -3042,6 +3698,8 @@ function containedCheckSupervisorMain() {
       stdout: stdout.bytes.toString('utf8'),
       stderr: stderr.bytes.toString('utf8'),
       outputTruncated: stdout.truncated || stderr.truncated,
+      timedOut: outcome.type === 'timeout' ? outcome.mode : null,
+      progress,
       error: failedBoundary ? {
         code: outcome.type === 'timeout' ? 'CHECK_PROCESS_TIMEOUT' : 'CHECK_PROCESS_GROUP_FAILED',
         message: [boundaryReason, drainage.signals.length ?
@@ -3069,22 +3727,20 @@ function containedCheckSupervisorMain() {
 
 const CONTAINED_CHECK_SUPERVISOR_SOURCE = `(${containedCheckSupervisorMain.toString()})()`;
 
-function runContainedCheckProcess(command, cwd, env) {
-  const timeoutMs = containedCheckTimeoutMs();
-  const input = JSON.stringify({
-    bin: command.bin,
-    argv: command.argv,
-    cwd,
-    env,
-    timeoutMs,
-    termGraceMs: CONTAINED_CHECK_TERM_GRACE_MS,
-    drainTimeoutMs: CONTAINED_CHECK_DRAIN_TIMEOUT_MS,
-  });
+/**
+ * The one shared asynchronous supervisor entry point. Callers hand it a fully
+ * explicit execution — bin, argv, cwd, an env object, idle/absolute bounds —
+ * and it owns the dedicated process group, streamed bounded output with
+ * progress timestamps, and TERM -> grace -> KILL with proven group drainage.
+ * It throws only when supervision itself could not produce valid evidence;
+ * what the supervised process did is returned for the caller to judge.
+ */
+function runProcessGroupSupervisor(config) {
   const supervisor = spawnSync(process.execPath, ['-e', CONTAINED_CHECK_SUPERVISOR_SOURCE], {
-    input,
+    input: JSON.stringify(config),
     encoding: 'utf8',
     maxBuffer: 2 * 1024 * 1024,
-    timeout: timeoutMs + CONTAINED_CHECK_TERM_GRACE_MS + CONTAINED_CHECK_DRAIN_TIMEOUT_MS + 10_000,
+    timeout: config.timeoutMs + config.termGraceMs + config.drainTimeoutMs + 10_000,
     killSignal: 'SIGKILL',
   });
   if (supervisor.error || supervisor.status !== 0) {
@@ -3115,6 +3771,19 @@ function runContainedCheckProcess(command, cwd, env) {
     failure.checkGroupDrained = false;
     throw failure;
   }
+  return parsed;
+}
+
+function runContainedCheckProcess(command, cwd, env) {
+  const parsed = runProcessGroupSupervisor({
+    bin: command.bin,
+    argv: command.argv,
+    cwd,
+    env,
+    timeoutMs: containedCheckTimeoutMs(),
+    termGraceMs: CONTAINED_CHECK_TERM_GRACE_MS,
+    drainTimeoutMs: CONTAINED_CHECK_DRAIN_TIMEOUT_MS,
+  });
   if (parsed.error) {
     const failure = new RunError(parsed.error.code || 'CHECKS-CONTAINMENT-FAILED',
       boundedCheckFailureTail(parsed.error.message || parsed.executionBoundary.reason || 'contained check failed').tail);
@@ -3173,6 +3842,9 @@ function snapshotGitEnvironment(home, scratch, bin) {
   ].join(':');
   env.GIT_OPTIONAL_LOCKS = '0';
   env.AEGIS_CHECK_SNAPSHOT_POLICY = 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1';
+  const inspector = path.join(bin, 'ps');
+  env[TRUSTED_PROCESS_INSPECTOR_ENV] = inspector;
+  env[TRUSTED_PROCESS_INSPECTOR_SHA_ENV] = sha256(fs.readFileSync(inspector));
   return env;
 }
 
@@ -3187,6 +3859,23 @@ function writeSnapshotProcessInspector(bin) {
     '#include <stdlib.h>',
     '#include <string.h>',
     'int main(int argc, char **argv) {',
+    '  if (argc == 3 && !strcmp(argv[1], "-axo") && !strcmp(argv[2], "pid=,pgid=")) {',
+    '    int bytes = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);',
+    '    if (bytes <= 0) return 1;',
+    '    pid_t *pids = (pid_t *)malloc((size_t)bytes);',
+    '    if (!pids) return 1;',
+    '    int got = proc_listpids(PROC_ALL_PIDS, 0, pids, bytes);',
+    '    if (got <= 0) { free(pids); return 1; }',
+    '    int count = got / (int)sizeof(pid_t);',
+    '    for (int i = 0; i < count; i++) {',
+    '      if (pids[i] <= 0) continue;',
+    '      struct proc_bsdinfo entry;',
+    '      if (proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0, &entry, sizeof(entry)) != (int)sizeof(entry)) continue;',
+    '      printf("%d %d\\n", entry.pbi_pid, entry.pbi_pgid);',
+    '    }',
+    '    free(pids);',
+    '    return 0;',
+    '  }',
     '  if (argc != 5 || strcmp(argv[1], "-p") || strcmp(argv[3], "-o")) return 2;',
     '  char *end = NULL; long parsed = strtol(argv[2], &end, 10);',
     '  if (!end || *end || parsed <= 1) return 2;',
@@ -3210,6 +3899,13 @@ function writeSnapshotProcessInspector(bin) {
   if (observed !== String(process.pid)) {
     throw new RunError('CHECKS-CONTAINMENT-FAILED',
       'snapshot process inspector did not report its real host PID');
+  }
+  const listed = checkedSpawn('verify snapshot process-group listing', target,
+    ['-axo', 'pid=,pgid=']).stdout;
+  if (!listed.split('\n').some((line) => line.trim().match(/^(\d+)\s+(\d+)$/) &&
+      Number(line.trim().split(/\s+/)[0]) === process.pid)) {
+    throw new RunError('CHECKS-CONTAINMENT-FAILED',
+      'snapshot process inspector did not list its real host PID with a process group');
   }
 }
 
@@ -3692,12 +4388,15 @@ function topLevelHostCheckEnvironment(boundaryRoot = null, proof = null) {
   // Reuse the narrow libproc reader already used by immutable check snapshots
   // so public lifecycle controls retain real PID-lifetime evidence.
   writeSnapshotProcessInspector(bin);
+  const inspector = path.join(bin, 'ps');
   return {
     HOME: home, TMPDIR: scratch,
     PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
     LANG: 'en_CA.UTF-8', LC_ALL: 'en_CA.UTF-8',
     USER: 'aegis-host-check', LOGNAME: 'aegis-host-check',
     AEGIS_HOST_OUTER_CONTAINMENT: HOST_CONTAINMENT_BOUNDARY,
+    [TRUSTED_PROCESS_INSPECTOR_ENV]: inspector,
+    [TRUSTED_PROCESS_INSPECTOR_SHA_ENV]: sha256(fs.readFileSync(inspector)),
     ...(proof ? {
       AEGIS_HOST_PROOF_CONTEXT: proof.path,
       AEGIS_HOST_PROOF_CONTEXT_SHA256: proof.context.contextSha256,
@@ -5116,6 +5815,10 @@ function parseArgs(argv) {
     else if (t === '--worktree') { a.cmd_worktree = true; a.runId = argv[++i]; }
     else if (t === '--build') { a.cmd_build = true; a.runId = argv[++i]; }
     else if (t === '--build-async') { a.cmd_build_async = true; a.runId = argv[++i]; }
+    else if (t === '--continue-timeout') { a.cmd_continue_timeout = true; a.runId = argv[++i]; }
+    else if (t === '--session') a.session = argv[++i];
+    else if (t === '--continue-cmd') a.continueCmd = argv[++i];
+    else if (t === '--continue-prompt') a.continuePrompt = argv[++i];
     else if (t === '--checks') { a.cmd_checks = true; a.runId = argv[++i]; }
     else if (t === '--checkpoint') { a.cmd_checkpoint = true; a.runId = argv[++i]; }
     else if (t === '--rollback') { a.cmd_rollback = true; a.runId = argv[++i]; }
@@ -5145,6 +5848,7 @@ if (require.main === module) {
       throw new RunError('GOVERNED-START-REQUIRED',
         '--build-async cannot select a provider or model. Launch through the dashboard Start authority, which consumes the canonical run route.');
     }
+    else if (args.cmd_continue_timeout) code = cmdContinueTimeout(args);
     else if (args.cmd_checks) code = cmdChecks(args);
     else if (args.cmd_checkpoint) code = cmdCheckpoint(args);
     else if (args.cmd_rollback) code = cmdRollback(args);
@@ -5158,6 +5862,10 @@ aegis-run.cjs — the V1 runtime
   --new --objective "..." [--acceptance "..."] [--packet <p>]
   --worktree <runId>          create the isolated worktree (routes first)
   --build <runId> --cmd "..." run the builder INSIDE that worktree
+  --continue-timeout <runId> --session <uuid> --continue-cmd "..."
+                              finish a synchronous build that exited 124 in the
+                              SAME session and correction; the command must be a
+                              bounded "claude --resume <uuid>" subscription run
   --checks <runId>            run the packet's declared checks
   --checkpoint <runId>        record a checkpoint + rollback point
   --rollback <runId>          restore the recorded rollback point
@@ -5176,4 +5884,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, bindIndependentReview, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };

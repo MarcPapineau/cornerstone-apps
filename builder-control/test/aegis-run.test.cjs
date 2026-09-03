@@ -1108,6 +1108,10 @@ function withIntakeRecordedRun(driverBody) {
   const seed = {
     runId, createdAt: '2026-08-25T06:00:00Z', updatedAt: '2026-08-25T06:00:00Z',
     state: 'CREATED', objective: 'fixture prepareRun',
+    // Canonical runs always carry these normalized lists; buildGovernedLaunchSpec
+    // refuses a run without them. dataClass is intentionally absent — both
+    // routeRole and the hosting route default an absent class to INTERNAL.
+    constraints: [], acceptanceCriteria: [],
     packet: intakePacket,
     packetCoordinate: {
       path: intakePacket,
@@ -1334,7 +1338,10 @@ test('prepareRun: does not execute a builder, model, or create a second event st
 
 test('prepareRun: CLI --worktree calls prepareRun (single authority)', () => {
   const src = fs.readFileSync(CLI, 'utf8');
-  const cmdWorktreeSrc = src.slice(src.indexOf('function cmdWorktree'), src.indexOf('function cmdBuild'));
+  // End at the run-controls marker that immediately follows cmdWorktree. Slicing
+  // to `function cmdBuild` swept in later unrelated functions (canonicalRetryLaunchSpec
+  // and friends), so the routeRole assertion below was reading someone else's code.
+  const cmdWorktreeSrc = src.slice(src.indexOf('function cmdWorktree'), src.indexOf('// ── run controls (dashboard)'));
   assert.ok(/result = prepareRun\(args\.runId\)/.test(cmdWorktreeSrc),
     'cmdWorktree must delegate to prepareRun rather than duplicating routing/worktree logic');
   // And it must not itself call git worktree add or routeRole directly.
@@ -1356,6 +1363,7 @@ test('dashboard Start: two concurrent requests prepare and reserve exactly one w
     const childSource = String.raw\`
       const fs = require('fs');
       const crypto = require('crypto');
+      const { spawn } = require('child_process');
       const Module = require('module');
       const originalLoad = Module._load;
       Module._load = function(request, parent, isMain) {
@@ -1368,8 +1376,14 @@ test('dashboard Start: two concurrent requests prepare and reserve exactly one w
             normalizeLaunchSpec: (value) => Object.freeze({ ...value }),
             normalizeTimeoutSec: (value) => Number(value),
             launchWorker: ({ launchSpec }) => {
-              fs.appendFileSync(process.env.AEGIS_START_COUNTER, process.pid + '\\n');
-              return { workerPid: process.pid, processGroupId: process.pid,
+              // A real, disposable process-group leader: production proves ownership against
+              // the live process table, so a fabricated pid is not a stand-in for one.
+              const worker = spawn(process.execPath,
+                ['-e', 'setTimeout(()=>process.exit(0),30000); setInterval(()=>{},1000);'],
+                { detached: true, stdio: 'ignore' });
+              worker.unref();
+              fs.appendFileSync(process.env.AEGIS_START_COUNTER, worker.pid + '\\n');
+              return { workerPid: worker.pid, processGroupId: worker.pid,
                 launchSha256: crypto.createHash('sha256').update(JSON.stringify(launchSpec)).digest('hex'),
                 control: { dir: '/fixture/control-' + process.pid, secretSha256: 'fixture' } };
             },
@@ -1397,6 +1411,8 @@ test('dashboard Start: two concurrent requests prepare and reserve exactly one w
     });
     Promise.all([execute(), execute()]).then((children) => {
       const launches = fs.existsSync(counter) ? fs.readFileSync(counter, 'utf8').trim().split(/\\n/).filter(Boolean) : [];
+      // Best-effort reap of every disposable group the mocked launch leaked into the process table.
+      for (const pid of launches) { try { process.kill(-Number(pid), 'SIGKILL'); } catch {} }
       try { fs.unlinkSync(counter); } catch {}
       console.log(JSON.stringify({ children, launches }));
     });
@@ -3636,6 +3652,131 @@ test('reconcileWorkerRun: positively absent worker transitions exactly once to u
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
+hostContainmentTest('async builder: credential-shaped and oversized output persists only bounded redacted evidence on every durable surface after completion, reconciliation and reload', () => {
+  const bearer = 'AEGIS-FAKE-BEARER-2c9d1e8f7a6b5c4d';
+  const password = 'AEGIS-FAKE-PASSWORD-9e8d7c6b5a';
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZWdpcy1ydW4tZml4dHVyZSJ9.fakeAsyncSignature123456';
+  const apiKey = 'AEGIS-FAKE-API-KEY-3f2e1d0c9b8a';
+  const secrets = [bearer, password, jwt, apiKey];
+  const diagnostic = 'AEGIS_ASYNC_BUILDER_FAILURE_DIAGNOSTIC';
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-async-redaction-'));
+  const runsDir = path.join(tmp, 'runs');
+  const checkpointsDir = path.join(tmp, 'checkpoints');
+  const worktree = path.join(tmp, 'worktree');
+  const ledger = path.join(tmp, 'ledger.json');
+  const bin = path.join(tmp, 'bin');
+  for (const dir of [runsDir, checkpointsDir, worktree, bin]) fs.mkdirSync(dir);
+  fs.writeFileSync(ledger, '[]\n');
+  fs.writeFileSync(path.join(worktree, 'allowed.txt'), 'fixture\n');
+  fs.writeFileSync(path.join(worktree, 'authority-source.txt'), 'canonical\n');
+  fs.writeFileSync(path.join(worktree, 'authority-check.cjs'), 'process.exit(0);\n');
+  const packetPath = path.join(worktree, 'packet.json');
+  fs.writeFileSync(packetPath, JSON.stringify({
+    packetId: 'PKT-TEST-ASYNC-REDACTION', agentId: 'claude-code',
+    sourceOfTruth: ['authority-source.txt'], testsRequired: ['node authority-check.cjs'],
+    filesAllowed: ['allowed.txt'],
+  }));
+  // The governed builder fixture floods both streams and then finishes with
+  // every representative credential shape inside the retained tail window, so
+  // an unbounded or unredacted persistence surface cannot escape below.
+  fs.writeFileSync(path.join(bin, 'claude'), `#!${process.execPath}
+'use strict';
+for (let i = 0; i < 4000; i++) console.log('oversized-stdout-padding-line-' + i);
+console.log(${JSON.stringify(diagnostic)});
+console.log('Authorization: Bearer ' + ${JSON.stringify(bearer)});
+console.log('password=' + ${JSON.stringify(password)});
+console.log(${JSON.stringify(jwt)});
+console.log('api_key: ' + ${JSON.stringify(apiKey)});
+for (let i = 0; i < 4000; i++) console.error('oversized-stderr-padding-line-' + i);
+console.error(${JSON.stringify(diagnostic)});
+console.error('Authorization: Bearer ' + ${JSON.stringify(bearer)});
+console.error('password=' + ${JSON.stringify(password)});
+console.error(${JSON.stringify(jwt)});
+console.error('api_key: ' + ${JSON.stringify(apiKey)});
+process.exit(7);
+`, { mode: 0o755 });
+  const runId = 'RUN-20260901-ac1dbeef';
+  const runFile = path.join(runsDir, `${runId}.json`);
+  fs.writeFileSync(runFile, JSON.stringify({
+    runId, objective: 'prove bounded redacted async builder evidence', state: 'WORKTREE_READY',
+    worktree: { path: worktree }, packet: packetPath, build: null,
+    corrections: 0, transitions: [], updatedAt: new Date().toISOString(),
+  }, null, 2));
+  const env = {
+    ...process.env, NODE_ENV: 'test',
+    AEGIS_TEST_CLAUDE_EXECUTABLE: path.join(bin, 'claude'),
+    AEGIS_TEST_CONTAINMENT_MODE: 'DETERMINISTIC_PROFILE_ONLY',
+    AEGIS_RUNS_DIR: runsDir, AEGIS_CHECKPOINTS_DIR: checkpointsDir, AEGIS_LEDGER_FILE: ledger,
+  };
+  const controlled = (source) => {
+    const result = spawnSync(process.execPath, ['-e',
+      `const R=require(${JSON.stringify(CLI)});const runId=${JSON.stringify(runId)};${source}`],
+    { cwd: ROOT, env, encoding: 'utf8' });
+    assert.strictEqual(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout.trim().split('\n').pop());
+  };
+  const durableSurfaces = () => {
+    const surfaces = [ledger];
+    for (const root of [runsDir, checkpointsDir]) {
+      (function walk(dir) {
+        for (const name of fs.readdirSync(dir)) {
+          const target = path.join(dir, name);
+          if (fs.lstatSync(target).isDirectory()) walk(target);
+          else surfaces.push(target);
+        }
+      })(root);
+    }
+    return surfaces;
+  };
+  const assertBoundedRedactedSurfaces = (phase) => {
+    for (const target of durableSurfaces()) {
+      const bytes = fs.readFileSync(target, 'utf8');
+      for (const secret of secrets) {
+        assert.ok(!bytes.includes(secret),
+          `${phase}: durable surface ${path.relative(tmp, target)} retained a raw credential`);
+      }
+    }
+    const persisted = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+    for (const tail of [persisted.build.stdoutTail, persisted.build.stderrTail]) {
+      assert.ok(typeof tail === 'string' && tail.includes('[REDACTED]'),
+        `${phase}: builder evidence lost its redaction markers`);
+      assert.ok(tail.includes(diagnostic), `${phase}: builder evidence lost the useful diagnostic`);
+      assert.ok(Buffer.byteLength(tail, 'utf8') <= 12000, `${phase}: builder evidence exceeded its byte bound`);
+      assert.ok(tail.split('\n').length <= 24, `${phase}: builder evidence exceeded its line bound`);
+    }
+    assert.ok(ledgerEntriesFor(ledger, runId).some((entry) =>
+      entry.operationId === `${runId}:BUILDING->BUILD_FAILED`),
+    `${phase}: the canonical ledger did not record the completed asynchronous build`);
+  };
+  try {
+    const started = controlled(`console.log(JSON.stringify(R.startWorker(runId,
+      { provider: 'claude-subscription', prompt: 'emit credential-shaped oversized output', model: 'opus' },
+      { timeoutSec: 60 })));`);
+    assert.strictEqual(started.state, 'BUILDING');
+    const deadline = Date.now() + 30000;
+    let run = null;
+    while (Date.now() < deadline) {
+      run = JSON.parse(fs.readFileSync(runFile, 'utf8'));
+      if (run.state === 'BUILT' || run.state === 'BUILD_FAILED') break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+    assert.strictEqual(run.state, 'BUILD_FAILED', 'the asynchronous builder did not complete');
+    assert.strictEqual(run.build.exit, 7);
+    assertBoundedRedactedSurfaces('after completion');
+
+    const reconciled = controlled('console.log(JSON.stringify(R.reconcileWorkerRun(runId)));');
+    assert.strictEqual(reconciled.state, 'BUILD_FAILED');
+    const reloaded = controlled('console.log(JSON.stringify(R.loadRun(runId)));');
+    assert.strictEqual(reloaded.state, 'BUILD_FAILED');
+    for (const secret of secrets) {
+      assert.ok(!JSON.stringify(reloaded).includes(secret), 'reloaded run state retained a raw credential');
+    }
+    assertBoundedRedactedSurfaces('after reconciliation and reload');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('pauseRun: exported and refuses every state, including BUILDING, with no mutation', () => {
   assert.strictEqual(typeof R.pauseRun, 'function');
   for (const state of Object.keys(R.STATES)) {
@@ -4953,6 +5094,615 @@ test('checkpoint candidate RED: dirty tree, unrelated HEAD, or post-bind subject
     clean: true, reviewedBase: base, head, ancestor: true,
     reviewedSubject: subject, committedSubject: { ...committed, subjectSha256: 'd'.repeat(64) },
   }), 'CHECKPOINT-SUBJECT-MISMATCH');
+});
+
+// ── same-attempt timeout continuation ───────────────────────────────────────
+// The gap these close: a synchronous builder SIGKILLed at its wall clock after
+// it had already edited files leaves real work behind and an honest
+// BUILD_FAILED, with no supported way to reconcile that attempt. Closing it
+// badly is worse than leaving it open — a generic BUILD_FAILED -> BUILT edge, a
+// fourth correction wearing a recovery name, or an operator asserting an
+// outcome nobody executed. Every proof below aims at one of those three.
+
+const CONTINUATION_SESSION = '7d96736d-2e94-4c80-b5d5-47a46b550a93';
+const CONTINUATION_PREFIX = 'env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN';
+const continuationCommand = (sessionId = CONTINUATION_SESSION, bound = 'gtimeout 900') =>
+  `${CONTINUATION_PREFIX} ${bound} claude --resume ${sessionId} --print --dangerously-skip-permissions`;
+
+const CONTINUATION_TIMED_OUT_BUILD = Object.freeze({
+  cmd: 'env -u ANTHROPIC_API_KEY gtimeout 900 claude --model fable --print',
+  startedAt: '2026-09-02T20:13:01.872Z', endedAt: '2026-09-02T20:28:01.885Z',
+  exit: 124, stdoutTail: '', stderrTail: '',
+});
+
+// A disposable bin whose `claude` and `gtimeout` are shims, written by the
+// driver itself before the authority is called. The authority then runs the
+// real argv it composed, in the real worktree, and reacts to a real exit code —
+// there is no injected executor, so "it executed the continuation itself" is
+// proven rather than configured. The live model is never invoked.
+const CONTINUATION_SHIM_SETUP = `
+  const fs = require('fs');
+  const path = require('path');
+  const tmpRoot = path.dirname(process.env.AEGIS_RUNS_DIR);
+  const bin = path.join(tmpRoot, 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  for (const name of ['gtimeout', 'timeout']) {
+    fs.writeFileSync(path.join(bin, name), '#!/bin/sh\\nshift\\nexec "$@"\\n', { mode: 0o755 });
+  }
+  fs.writeFileSync(path.join(bin, 'claude'),
+    '#!/bin/sh\\n' +
+    'printf "%s\\\\n" "$*" > "$AEGIS_TEST_CONTINUATION_ARGV"\\n' +
+    'printf "%s\\\\n" "$PWD" > "$AEGIS_TEST_CONTINUATION_CWD"\\n' +
+    'if [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then echo LEAKED_CREDENTIAL; fi\\n' +
+    'cat > "$AEGIS_TEST_CONTINUATION_STDIN"\\n' +
+    'echo continuation stdout marker\\n' +
+    'echo continuation stderr marker >&2\\n' +
+    'exit "$AEGIS_TEST_CONTINUATION_EXIT"\\n', { mode: 0o755 });
+  process.env.PATH = bin + ':' + process.env.PATH;
+  process.env.ANTHROPIC_API_KEY = 'fixture-key-must-be-stripped';
+  process.env.AEGIS_TEST_CONTINUATION_ARGV = path.join(tmpRoot, 'argv.txt');
+  process.env.AEGIS_TEST_CONTINUATION_CWD = path.join(tmpRoot, 'cwd.txt');
+  process.env.AEGIS_TEST_CONTINUATION_STDIN = path.join(tmpRoot, 'stdin.txt');
+`;
+
+function continuationDriver(body, { exitCode = 0, shims = true } = {}) {
+  return `
+    ${shims ? CONTINUATION_SHIM_SETUP : ''}
+    ${shims ? `process.env.AEGIS_TEST_CONTINUATION_EXIT = ${JSON.stringify(String(exitCode))};` : ''}
+    const report = (fn) => {
+      try { console.log(JSON.stringify({ ok: true, result: fn() })); }
+      catch (e) { console.log(JSON.stringify({ ok: false, code: e.code, httpStatus: e.httpStatus, message: e.message })); }
+    };
+    ${body}
+  `;
+}
+
+// Seeds the exact shape of the real case: BUILD_FAILED at corrections=3 with a
+// synchronous attempt that exited 124, a real worktree, and the canonical
+// intake packet coordinate the authority re-validates.
+function withTimedOutSyncRun(driverBody, options = {}) {
+  const worktree = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-continuation-wt-'));
+  // The continuation verifies post-resume worktree changes against the packet
+  // surface with git itself, so the fixture worktree is a real repository.
+  for (const args of [['init', '--quiet'], ['config', 'user.email', 'aegis@test'],
+    ['config', 'user.name', 'aegis-test']]) {
+    const initialized = spawnSync('git', ['-C', worktree, ...args], { encoding: 'utf8' });
+    assert.strictEqual(initialized.status, 0,
+      `fixture worktree git ${args[0]} failed: ${initialized.stderr}`);
+  }
+  const packet = 'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json';
+  const bytes = fs.readFileSync(path.join(ROOT, packet));
+  const seeded = withSeededRun(options.state || 'BUILD_FAILED', {
+    packet,
+    packetCoordinate: {
+      path: packet,
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      packetId: JSON.parse(bytes).packetId,
+    },
+    dataClass: 'INTERNAL',
+    corrections: options.corrections === undefined ? 3 : options.corrections,
+    worktree: { path: worktree, branch: 'aegis/fixture', createdAt: '2026-09-02T17:52:16.204Z' },
+    build: 'build' in options ? options.build : { ...CONTINUATION_TIMED_OUT_BUILD },
+  }, driverBody);
+  return { ...seeded, worktree, cleanup: () => {
+    fs.rmSync(seeded.TMP, { recursive: true, force: true });
+    fs.rmSync(worktree, { recursive: true, force: true });
+  } };
+}
+
+const continuationOutcome = (r) => JSON.parse(r.stdout.trim().split('\n').pop());
+
+const CONTINUE_CALL = (overrides = '') => `
+  report(() => R.continueTimedOutBuild(runId, {
+    sessionId: ${JSON.stringify(CONTINUATION_SESSION)},
+    command: ${JSON.stringify(continuationCommand())},
+    prompt: 'finish the interrupted edits',
+    ${overrides}
+  }));
+`;
+
+test('timeout continuation: executes the bounded same-session resume itself and reaches BUILT via BUILD_CONTINUED', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(CONTINUE_CALL(), { exitCode: 0 }));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, true, `continuation refused: ${out.code} ${out.message}`);
+    assert.strictEqual(out.result.state, 'BUILT');
+    assert.strictEqual(out.result.exit, 0);
+    assert.strictEqual(out.result.action, 'continue-timeout');
+    assert.strictEqual(out.result.sessionId, CONTINUATION_SESSION);
+
+    // It ran the exact resume argv, in the run's own worktree, without the
+    // API-key variables the command unsets.
+    const argv = fs.readFileSync(path.join(fixture.TMP, 'argv.txt'), 'utf8').trim();
+    assert.strictEqual(argv,
+      `--resume ${CONTINUATION_SESSION} --print --dangerously-skip-permissions`);
+    assert.strictEqual(fs.realpathSync(fs.readFileSync(path.join(fixture.TMP, 'cwd.txt'), 'utf8').trim()),
+      fs.realpathSync(fixture.worktree));
+    assert.strictEqual(fs.readFileSync(path.join(fixture.TMP, 'stdin.txt'), 'utf8'),
+      'finish the interrupted edits');
+
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILT');
+    const reached = saved.transitions.map((t) => `${t.from}->${t.to}`);
+    assert.deepStrictEqual(reached, ['BUILD_FAILED->BUILD_CONTINUED', 'BUILD_CONTINUED->BUILT'],
+      'success must pass through the dedicated recovery state, not jump');
+    assert.ok(!reached.some((edge) => edge.endsWith('->CORRECTING')),
+      'a continuation must not record a correction cycle');
+    const ledgerEdges = ledgerEntriesFor(fixture.ledger, fixture.runId).map((e) => e.operationId);
+    assert.ok(ledgerEdges.includes(`${fixture.runId}:BUILD_FAILED->BUILD_CONTINUED`));
+    assert.ok(ledgerEdges.includes(`${fixture.runId}:BUILD_CONTINUED->BUILT`));
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation: the original timed-out build evidence is preserved verbatim and appended to', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(CONTINUE_CALL(), { exitCode: 0 }));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    assert.strictEqual(continuationOutcome(fixture.r).ok, true);
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    for (const key of ['cmd', 'startedAt', 'endedAt', 'exit', 'stdoutTail', 'stderrTail']) {
+      assert.deepStrictEqual(saved.build[key], CONTINUATION_TIMED_OUT_BUILD[key],
+        `the continuation rewrote the original build's ${key}`);
+    }
+    const c = saved.build.continuation;
+    assert.strictEqual(c.type, 'AEGIS_TIMEOUT_CONTINUATION_V1');
+    assert.strictEqual(c.status, 'EXECUTED');
+    assert.strictEqual(c.exit, 0);
+    assert.strictEqual(c.sessionId, CONTINUATION_SESSION);
+    assert.strictEqual(c.timeoutSec, 900);
+    assert.ok(/^2\d{3}-/.test(c.startedAt) && /^2\d{3}-/.test(c.endedAt),
+      'the continuation must record its own startedAt and endedAt');
+    assert.strictEqual(c.commandSha256,
+      crypto.createHash('sha256').update(continuationCommand()).digest('hex'),
+      'the continuation must record a command digest');
+    assert.ok(!Object.prototype.hasOwnProperty.call(c, 'command') &&
+      !Object.prototype.hasOwnProperty.call(c, 'prompt'),
+      'only digests are recorded, never the raw command or prompt');
+    assert.match(c.stdoutTail, /continuation stdout marker/);
+    assert.match(c.stderrTail, /continuation stderr marker/);
+    assert.ok(!/LEAKED_CREDENTIAL/.test(c.stdoutTail),
+      'the continuation command must strip the API-key variables');
+    assert.ok(c.stdoutTail.length <= 4096 && c.stderrTail.length <= 4096,
+      'continuation output tails must be bounded');
+
+    // The durable same-attempt identity is a pure function of the attempt's
+    // immutable inputs — run, correction count, packet digest, worktree
+    // identity, route and session — never of anything that happened at runtime.
+    const packetBytes = fs.readFileSync(path.join(ROOT,
+      'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json'));
+    const expectedAttemptKey = crypto.createHash('sha256').update(JSON.stringify({
+      type: 'AEGIS_TIMEOUT_CONTINUATION_V1',
+      runId: fixture.runId,
+      corrections: 3,
+      packetSha256: crypto.createHash('sha256').update(packetBytes).digest('hex'),
+      worktree: { path: fixture.worktree, branch: 'aegis/fixture' },
+      route: null,
+      sessionId: CONTINUATION_SESSION,
+      commandSha256: c.commandSha256,
+    })).digest('hex');
+    assert.strictEqual(c.attemptKey, expectedAttemptKey,
+      'the attempt key must be a deterministic digest of the attempt identity');
+
+    // The supervision evidence that gates BUILT is recorded, not asserted.
+    assert.strictEqual(c.boundary.state, 'PASSED');
+    assert.strictEqual(c.boundary.drained, true);
+    assert.strictEqual(c.containment.ok, true);
+    assert.strictEqual(c.containment.verified, true);
+    assert.strictEqual(c.timedOut, null);
+    assert.ok(c.progress && c.progress.startedAt && c.progress.firstOutputAt && c.progress.lastOutputAt,
+      'the supervisor must record progress timestamps');
+    assert.strictEqual(c.executable, fs.realpathSync(path.join(fixture.TMP, 'bin', 'claude')),
+      'the resolved executor path must be recorded as evidence');
+    assert.ok(c.executor && Number.isInteger(c.executor.pid) && c.executor.processIdentity,
+      'the executing authority must record its own provable process identity');
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation: a successful continuation leaves corrections at 3 and is not a fourth cycle', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(CONTINUE_CALL(), { exitCode: 0 }));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, true, `continuation refused: ${out.code} ${out.message}`);
+    assert.strictEqual(out.result.corrections, 3);
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.corrections, 3,
+      'a continuation must never spend or reset a correction allowance');
+    assert.strictEqual(saved.build.continuation.correctionsAtContinuation, 3);
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation RED: an executed continuation that fails stays BUILD_FAILED and keeps its evidence', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(CONTINUE_CALL(), { exitCode: 7 }));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, true, `continuation refused: ${out.code} ${out.message}`);
+    assert.strictEqual(out.result.state, 'BUILD_FAILED');
+    assert.strictEqual(out.result.exit, 7);
+    assert.strictEqual(out.result.nextAction, 'escalate');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILD_FAILED');
+    assert.strictEqual(saved.corrections, 3);
+    assert.strictEqual(saved.build.continuation.status, 'EXECUTED');
+    assert.strictEqual(saved.build.continuation.exit, 7);
+    assert.strictEqual(saved.build.exit, 124, 'the original timeout evidence must survive a failed continuation');
+    assert.deepStrictEqual(saved.transitions.map((t) => `${t.from}->${t.to}`),
+      ['BUILD_FAILED->BUILD_CONTINUED', 'BUILD_CONTINUED->BUILD_FAILED']);
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation RED: a second continuation is refused without executing anything', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(`
+    ${CONTINUE_CALL()}
+    const fs2 = require('fs');
+    fs2.unlinkSync(process.env.AEGIS_TEST_CONTINUATION_ARGV);
+    ${CONTINUE_CALL()}
+  `, { exitCode: 7 }));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const lines = fixture.r.stdout.trim().split('\n').map((l) => JSON.parse(l));
+    assert.strictEqual(lines[0].ok, true, `first continuation refused: ${lines[0].message}`);
+    assert.strictEqual(lines[1].ok, false);
+    assert.strictEqual(lines[1].code, 'CONTINUATION_ALREADY_ATTEMPTED');
+    assert.strictEqual(lines[1].httpStatus, 409);
+    assert.strictEqual(fs.existsSync(path.join(fixture.TMP, 'argv.txt')), false,
+      'the refused second continuation executed the resume anyway');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.build.continuation.exit, 7, 'the first continuation record was overwritten');
+    assert.strictEqual(saved.transitions.length, 2, 'the refused attempt recorded a transition');
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation: a leaked descendant fails the boundary and BUILT is refused despite exit 0', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(`
+    fs.writeFileSync(path.join(bin, 'claude'),
+      '#!/bin/sh\\ncat > /dev/null\\nsleep 30 &\\necho leaked descendant started\\nexit 0\\n',
+      { mode: 0o755 });
+    ${CONTINUE_CALL()}
+  `));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, true, `continuation refused: ${out.code} ${out.message}`);
+    assert.strictEqual(out.result.exit, 0);
+    assert.strictEqual(out.result.state, 'BUILD_FAILED',
+      'exit 0 with an undrained boundary must never be BUILT');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    const c = saved.build.continuation;
+    assert.strictEqual(c.boundary.state, 'FAILED');
+    assert.match(c.boundary.reason, /live descendant process group/);
+    assert.strictEqual(c.boundary.drained, true,
+      'the supervisor must actually drain the leaked descendant group, not just report it');
+    assert.deepStrictEqual(saved.transitions.map((t) => `${t.from}->${t.to}`),
+      ['BUILD_FAILED->BUILD_CONTINUED', 'BUILD_CONTINUED->BUILD_FAILED']);
+    assert.strictEqual(saved.corrections, 3);
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation: the supervisor cuts a silent resume at the idle bound', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(`
+    process.env.AEGIS_TEST_CONTINUATION_IDLE_MS = '400';
+    fs.writeFileSync(path.join(bin, 'claude'),
+      '#!/bin/sh\\ncat > /dev/null\\nsleep 20\\nexit 0\\n', { mode: 0o755 });
+    ${CONTINUE_CALL()}
+  `));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, true, `continuation refused: ${out.code} ${out.message}`);
+    assert.strictEqual(out.result.state, 'BUILD_FAILED');
+    assert.strictEqual(out.result.exit, 124,
+      'an interrupted continuation is recorded as the timeout it is, not invented as a failure code');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    const c = saved.build.continuation;
+    assert.strictEqual(c.timedOut, 'IDLE');
+    assert.match(c.boundary.reason, /idle bound/);
+    assert.strictEqual(c.boundary.drained, true);
+    assert.strictEqual(saved.build.exit, 124, 'the original timeout evidence must survive');
+    assert.strictEqual(saved.corrections, 3);
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation: the supervisor enforces the absolute bound even while output keeps flowing', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(`
+    process.env.AEGIS_TEST_CONTINUATION_TIMEOUT_MS = '700';
+    fs.writeFileSync(path.join(bin, 'claude'),
+      '#!/bin/sh\\ncat > /dev/null\\ni=0\\nwhile [ $i -lt 100 ]; do echo tick; sleep 0.1; i=$((i+1)); done\\nexit 0\\n',
+      { mode: 0o755 });
+    ${CONTINUE_CALL()}
+  `));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, true, `continuation refused: ${out.code} ${out.message}`);
+    assert.strictEqual(out.result.state, 'BUILD_FAILED');
+    assert.strictEqual(out.result.exit, 124);
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    const c = saved.build.continuation;
+    assert.strictEqual(c.timedOut, 'ABSOLUTE');
+    assert.strictEqual(c.boundary.drained, true);
+    assert.ok(c.progress && c.progress.firstOutputAt && c.progress.lastOutputAt,
+      'a producing child must leave progress timestamps even when the absolute bound cuts it');
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation: a clean exit that leaves changes outside the packet surface is not BUILT', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(`
+    const worktreePath = R.loadRun(runId).worktree.path;
+    fs.writeFileSync(path.join(worktreePath, 'escaped-product-change.txt'), 'outside the packet surface\\n');
+    ${CONTINUE_CALL()}
+  `));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, true, `continuation refused: ${out.code} ${out.message}`);
+    assert.strictEqual(out.result.exit, 0);
+    assert.strictEqual(out.result.state, 'BUILD_FAILED',
+      'a resume that escaped packet containment must not be BUILT');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    const c = saved.build.continuation;
+    assert.strictEqual(c.boundary.state, 'PASSED');
+    assert.strictEqual(c.containment.ok, false);
+    assert.strictEqual(c.containment.verified, true);
+    assert.deepStrictEqual(c.containment.outside, ['escaped-product-change.txt']);
+    assert.deepStrictEqual(saved.transitions.map((t) => `${t.from}->${t.to}`),
+      ['BUILD_FAILED->BUILD_CONTINUED', 'BUILD_CONTINUED->BUILD_FAILED']);
+  } finally { fixture.cleanup(); }
+});
+
+// A continuation record that says STARTED with a proven-dead executor is a
+// crashed executor: the run is reconciled to an honest BUILD_FAILED with the
+// record preserved as INTERRUPTED, and the one-attempt bar stays consumed.
+const SEED_INFLIGHT_CONTINUATION = (executorExpr) => `
+  const cp = require('child_process');
+  (async () => {
+    const parked = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const parkedIdentity = R.processIdentity(parked.pid);
+    parked.kill('SIGKILL');
+    for (let i = 0; i < 200 && R.processExistence(parked.pid) !== 'absent'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const executor = ${executorExpr};
+    const file = path.join(process.env.AEGIS_RUNS_DIR, runId + '.json');
+    const run = JSON.parse(fs.readFileSync(file, 'utf8'));
+    run.state = 'BUILD_CONTINUED';
+    run.build = { ...run.build, continuation: {
+      type: 'AEGIS_TIMEOUT_CONTINUATION_V1', status: 'STARTED', attemptKey: 'b'.repeat(64),
+      sessionId: ${JSON.stringify(CONTINUATION_SESSION)}, commandSha256: 'a'.repeat(64),
+      timeoutSec: 900, promptSha256: null, correctionsAtContinuation: 3,
+      executor, executable: '/tmp/claude',
+      startedAt: '2026-09-02T21:00:00.000Z', endedAt: null, exit: null, stdoutTail: '', stderrTail: '',
+    } };
+    fs.writeFileSync(file, JSON.stringify(run, null, 2));
+    report(() => R.continueTimedOutBuild(runId, {
+      sessionId: ${JSON.stringify(CONTINUATION_SESSION)},
+      command: ${JSON.stringify(continuationCommand())},
+    }));
+  })().catch((error) => { console.error(error.stack || error.message); process.exit(1); });
+`;
+
+test('timeout continuation: a crashed executor is reconciled to BUILD_FAILED and never re-executed', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(
+    SEED_INFLIGHT_CONTINUATION('{ pid: parked.pid, processIdentity: parkedIdentity }')));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'CONTINUATION_ALREADY_ATTEMPTED',
+      'the crashed attempt keeps the one-continuation slot consumed');
+    assert.strictEqual(fs.existsSync(path.join(fixture.TMP, 'argv.txt')), false,
+      'reconciliation executed a resume');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILD_FAILED');
+    assert.strictEqual(saved.build.continuation.status, 'INTERRUPTED');
+    assert.strictEqual(saved.build.continuation.exit, null,
+      'reconciliation must not invent an exit code nobody observed');
+    assert.strictEqual(saved.build.exit, 124, 'the original timeout evidence must survive reconciliation');
+    assert.strictEqual(saved.corrections, 3);
+    assert.deepStrictEqual(saved.transitions.map((t) => `${t.from}->${t.to}`),
+      ['BUILD_CONTINUED->BUILD_FAILED']);
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation: a reused executor PID with a different process lifetime counts as crashed', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(SEED_INFLIGHT_CONTINUATION(
+    '{ pid: process.pid, processIdentity: { ...R.processIdentity(process.pid), startMarker: "reused-pid-different-lifetime" } }')));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'CONTINUATION_ALREADY_ATTEMPTED');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILD_FAILED');
+    assert.strictEqual(saved.build.continuation.status, 'INTERRUPTED');
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation RED: a live matching executor blocks a second entry without touching the run', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(
+    SEED_INFLIGHT_CONTINUATION('{ pid: process.pid, processIdentity: R.processIdentity(process.pid) }')));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, false);
+    assert.strictEqual(out.code, 'CONTINUATION_IN_PROGRESS',
+      'a provably live executor must be left alone, not reconciled over');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILD_CONTINUED');
+    assert.strictEqual(saved.build.continuation.status, 'STARTED');
+    assert.strictEqual(fs.existsSync(path.join(fixture.TMP, 'argv.txt')), false);
+  } finally { fixture.cleanup(); }
+});
+
+// One table for every precondition that must refuse BEFORE anything executes.
+// Each case asserts the refusal code, that no state changed, that no ledger
+// entry was written, and that the resume was never spawned.
+for (const [name, code, options, callOverride] of [
+  ['wrong state (BUILT, not BUILD_FAILED)', 'ILLEGAL_TRANSITION', { state: 'BUILT' }, null],
+  ['wrong state (CHECKS_FAILED)', 'ILLEGAL_TRANSITION', { state: 'CHECKS_FAILED' }, null],
+  ['non-timeout exit 1', 'NOT_A_TIMEOUT',
+    { build: { ...CONTINUATION_TIMED_OUT_BUILD, exit: 1 } }, null],
+  ['non-timeout exit 0', 'NOT_A_TIMEOUT',
+    { build: { ...CONTINUATION_TIMED_OUT_BUILD, exit: 0 } }, null],
+  ['no recorded build', 'NO_TIMED_OUT_BUILD', { build: null }, null],
+  ['detached worker attempt, not a synchronous build', 'NOT_A_SYNCHRONOUS_BUILD',
+    { build: { mode: 'async', attemptId: '55555555-5555-4555-8555-555555555555', exit: 124,
+      cmd: 'ignored', startedAt: null, endedAt: null, stdoutTail: '', stderrTail: '' } }, null],
+]) {
+  test(`timeout continuation RED: ${name} is refused before execution`, () => {
+    const fixture = withTimedOutSyncRun(
+      continuationDriver(CONTINUE_CALL(callOverride || ''), { exitCode: 0 }), options);
+    try {
+      assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+      const out = continuationOutcome(fixture.r);
+      assert.strictEqual(out.ok, false, `${name} was accepted`);
+      assert.strictEqual(out.code, code);
+      assert.strictEqual(out.httpStatus, 409);
+      assert.strictEqual(fs.existsSync(path.join(fixture.TMP, 'argv.txt')), false,
+        `${name} executed the resume before refusing`);
+      const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+      assert.strictEqual(saved.state, options.state || 'BUILD_FAILED');
+      assert.strictEqual(saved.corrections, 3);
+      assert.deepStrictEqual(saved.transitions, []);
+      assert.strictEqual(ledgerEntriesFor(fixture.ledger, fixture.runId).length, 0);
+      assert.ok(!saved.build || saved.build.continuation === undefined,
+        `${name} left a continuation record behind`);
+    } finally { fixture.cleanup(); }
+  });
+}
+
+// The command/session table. This is the trust boundary: the declared session
+// must be a UUID, the command must resume that exact session, and it must be
+// bounded. Nothing here may reach a spawn.
+for (const [name, code, sessionId, command] of [
+  ['malformed session id', 'INVALID_CONTINUATION_SESSION', 'not-a-uuid', continuationCommand()],
+  ['uppercase non-canonical session id', 'INVALID_CONTINUATION_SESSION',
+    CONTINUATION_SESSION.toUpperCase(), continuationCommand(CONTINUATION_SESSION.toUpperCase())],
+  ['session id that does not match the command', 'CONTINUATION_SESSION_MISMATCH',
+    CONTINUATION_SESSION, continuationCommand('11111111-2222-4333-8444-555555555555')],
+  ['unbounded resume with no timeout', 'UNBOUNDED_CONTINUATION_COMMAND',
+    CONTINUATION_SESSION, `${CONTINUATION_PREFIX} claude --resume ${CONTINUATION_SESSION} --print`],
+  ['bound above the accepted ceiling', 'UNBOUNDED_CONTINUATION_COMMAND',
+    CONTINUATION_SESSION, continuationCommand(CONTINUATION_SESSION, 'gtimeout 9999')],
+  ['non-numeric bound', 'UNBOUNDED_CONTINUATION_COMMAND',
+    CONTINUATION_SESSION, continuationCommand(CONTINUATION_SESSION, 'gtimeout none')],
+  ['not a resume (fresh session)', 'NOT_A_RESUME_CONTINUATION',
+    CONTINUATION_SESSION, `${CONTINUATION_PREFIX} gtimeout 900 claude --continue ${CONTINUATION_SESSION}`],
+  ['metered execution with no key-stripping prefix', 'INVALID_CONTINUATION_COMMAND',
+    CONTINUATION_SESSION, `gtimeout 900 claude --resume ${CONTINUATION_SESSION} --print`],
+  ['caller-selected model', 'INVALID_CONTINUATION_COMMAND',
+    CONTINUATION_SESSION, `${continuationCommand()} --model opus`],
+  ['shell chaining', 'INVALID_CONTINUATION_COMMAND',
+    CONTINUATION_SESSION, `${continuationCommand()}; rm -rf /`],
+  ['shell redirect', 'INVALID_CONTINUATION_COMMAND',
+    CONTINUATION_SESSION, `${continuationCommand()} < /etc/passwd`],
+]) {
+  test(`timeout continuation RED: ${name} is refused before execution`, () => {
+    const fixture = withTimedOutSyncRun(continuationDriver(`
+      report(() => R.continueTimedOutBuild(runId, {
+        sessionId: ${JSON.stringify(sessionId)},
+        command: ${JSON.stringify(command)},
+      }));
+    `, { exitCode: 0 }));
+    try {
+      assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+      const out = continuationOutcome(fixture.r);
+      assert.strictEqual(out.ok, false, `${name} was accepted`);
+      assert.strictEqual(out.code, code);
+      assert.strictEqual(fs.existsSync(path.join(fixture.TMP, 'argv.txt')), false,
+        `${name} executed the resume before refusing`);
+      const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+      assert.strictEqual(saved.state, 'BUILD_FAILED');
+      assert.deepStrictEqual(saved.transitions, []);
+      assert.strictEqual(saved.build.continuation, undefined);
+    } finally { fixture.cleanup(); }
+  });
+}
+
+test('timeout continuation RED: the recovery edges are unreachable without the executing authority', () => {
+  const fixture = withTimedOutSyncRun(continuationDriver(`
+    // A caller with full module access, an already-BUILD_CONTINUED run, and a
+    // hand-written "successful" continuation record still cannot take the edge.
+    report(() => {
+      const run = R.loadRun(runId);
+      run.build = { ...run.build, continuation: {
+        type: 'AEGIS_TIMEOUT_CONTINUATION_V1', status: 'EXECUTED',
+        sessionId: ${JSON.stringify(CONTINUATION_SESSION)}, commandSha256: 'a'.repeat(64),
+        timeoutSec: 900, startedAt: '2026-09-02T21:00:00Z', endedAt: '2026-09-02T21:05:00Z', exit: 0,
+      } };
+      R.saveRun(run);
+      const codes = [];
+      for (const to of ['BUILD_CONTINUED', 'BUILT']) {
+        try { R.transition(R.loadRun(runId), to, 'asserted, not executed'); codes.push('NO-THROW:' + to); }
+        catch (e) { codes.push(e.code); }
+      }
+      return codes;
+    });
+  `, { shims: false }));
+  try {
+    assert.strictEqual(fixture.r.status, 0, `driver failed: ${fixture.r.stderr}`);
+    const out = continuationOutcome(fixture.r);
+    assert.strictEqual(out.ok, true, `driver threw: ${out.message}`);
+    assert.deepStrictEqual(out.result,
+      ['CONTINUATION-AUTHORITY-REQUIRED', 'ILLEGAL-TRANSITION'],
+      'a hand-written continuation record must not buy either recovery edge');
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.state, 'BUILD_FAILED');
+  } finally { fixture.cleanup(); }
+});
+
+test('timeout continuation: opens no generic success edge and no correction bypass', () => {
+  assert.ok(!R.STATES.BUILD_FAILED.next.includes('BUILT'),
+    'BUILD_FAILED -> BUILT must remain impossible; recovery goes through BUILD_CONTINUED');
+  assert.deepStrictEqual(R.STATES.BUILD_CONTINUED.next, ['BUILT', 'BUILD_FAILED', 'ABANDONED']);
+  assert.ok(!R.STATES.BUILD_CONTINUED.next.includes('CORRECTING'),
+    'the recovery state must not be a route into another correction cycle');
+  assert.strictEqual(R.STATES.BUILD_CONTINUED.failure, undefined);
+  assert.strictEqual(R.MAX_CORRECTIONS, 3, 'the correction cap must be unchanged');
+
+  const src = fs.readFileSync(CLI, 'utf8');
+  const authority = src.slice(src.indexOf('function continueTimedOutBuildClaimed'),
+    src.indexOf('function cmdContinueTimeout'));
+  assert.ok(!/corrections\s*(\+\+|\+=|-=|=(?!==))/.test(authority),
+    'the continuation authority must never write run.corrections');
+  assert.ok(!/'CORRECTING'/.test(authority),
+    'the continuation authority must never enter CORRECTING');
+  assert.match(authority, /runProcessGroupSupervisor\(\{/,
+    'the authority must execute the continuation itself through the shared process-group supervisor');
+  assert.match(authority, /idleTimeoutMs/,
+    'the continuation must carry both an idle and an absolute bound into the supervisor');
+  assert.ok(!/spawnSync\(/.test(authority),
+    'the executing authority must not spawn the resume outside the supervisor');
+  assert.ok(!/shell/.test(authority),
+    'the continuation must never be executed through a shell');
+  const declarationToClaim = src.slice(src.indexOf('function continueTimedOutBuild(runId'),
+    src.indexOf('function cmdContinueTimeout'));
+  assert.ok(declarationToClaim.indexOf('validatedContinuationDeclaration(') <
+      declarationToClaim.indexOf('acquireGlobalWorkerClaim('),
+    'the declaration must be validated before any global launch claim is taken');
+});
+
+test('timeout continuation: is CLI/internal only and is never exposed through dashboard HTTP', () => {
+  const hosting = fs.readFileSync(path.join(ROOT, 'builder-control', 'hosting', 'server.cjs'), 'utf8');
+  for (const token of ['continueTimedOutBuild', 'continue-timeout', 'BUILD_CONTINUED', 'sessionId']) {
+    assert.ok(!hosting.includes(token),
+      `the dashboard host references ${token}; browser input must never select a continuation`);
+  }
+  const Hosting = require('../hosting/server.cjs');
+  assert.deepStrictEqual(Object.keys(Hosting.API_POST_ROUTES).sort(),
+    ['/api/cancel', '/api/checks', '/api/objective', '/api/pause', '/api/retry',
+      '/api/review-bind', '/api/start'],
+    'the browser control surface gained or lost a route');
+  // The browser body parser accepts exactly a runId, so even a new route could
+  // not carry a session id or a command.
+  for (const key of ['sessionId', 'session', 'command', 'continuation']) {
+    assert.throws(() => Hosting.parseRunIdBody({ runId: 'RUN-20260902-5226737c', [key]: 'x' }),
+      (e) => e.code === 'INVALID_REQUEST');
+  }
+  const src = fs.readFileSync(CLI, 'utf8');
+  assert.match(src, /t === '--continue-timeout'/, 'the operator entry point must be the CLI');
 });
 
 const failed = process.exitCode ? 'at least 1' : '0';

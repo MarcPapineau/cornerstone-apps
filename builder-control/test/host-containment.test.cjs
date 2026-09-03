@@ -47,6 +47,16 @@ const CONTAINED_TEST_ENV = Object.freeze({
   AEGIS_HOST_OUTER_CONTAINMENT: process.env.AEGIS_HOST_OUTER_CONTAINMENT,
   AEGIS_TEST_HOSTING_PORT: process.env.AEGIS_TEST_HOSTING_PORT,
   AEGIS_TEST_HOSTING_API_PORT: process.env.AEGIS_TEST_HOSTING_API_PORT,
+  // The trusted process inspector coordinates come from the outer runner.
+  // Contained probes revalidate them from scratch (path shape, ownership,
+  // digest, deny-default read proof); without them, authenticated Start and
+  // Cancel cannot prove process identity inside the deny-default boundary.
+  ...(process.env.AEGIS_TRUSTED_PROCESS_INSPECTOR === undefined ? {} : {
+    AEGIS_TRUSTED_PROCESS_INSPECTOR: process.env.AEGIS_TRUSTED_PROCESS_INSPECTOR,
+  }),
+  ...(process.env.AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256 === undefined ? {} : {
+    AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256: process.env.AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256,
+  }),
 });
 
 function governedWorkerLifecycleProbeSource() {
@@ -67,17 +77,17 @@ function governedWorkerLifecycleProbeSource() {
     "process.env.NODE_ENV = 'test'; process.env.AEGIS_TEST_CLAUDE_EXECUTABLE = executable; process.env.AEGIS_TEST_CONTAINMENT_MODE = 'DETERMINISTIC_PROFILE_ONLY';",
     "process.env.AEGIS_RUNS_DIR = runs; process.env.AEGIS_CHECKPOINTS_DIR = path.join(tmp, 'checkpoints'); process.env.AEGIS_LEDGER_FILE = ledger;",
     "const R = require(runtimePath); const W = require(workerPath); const groups = new Set();",
-    "const waitFor = async (read, predicate, timeoutMs = 8000) => { const deadline = Date.now() + timeoutMs; while (Date.now() < deadline) { const value = read(); if (predicate(value)) return value; await new Promise((resolve) => setTimeout(resolve,30)); } throw new Error('timed out waiting for canonical worker lifecycle evidence'); };",
+    "const waitFor = async (label, read, predicate, timeoutMs = 20000) => { if (typeof label !== 'string' || !label) throw new Error('waitFor requires a lifecycle stage label'); const deadline = Date.now() + timeoutMs; let last; while (Date.now() < deadline) { last = read(); if (predicate(last)) return last; await new Promise((resolve) => setTimeout(resolve,30)); } throw new Error('timed out waiting for canonical worker lifecycle evidence: ' + label + ' after ' + timeoutMs + 'ms; last observed ' + JSON.stringify(last)); };",
     "const seed = (runId, objective) => { const file = path.join(runs, runId + '.json'); fs.writeFileSync(file, JSON.stringify({runId,objective,state:'WORKTREE_READY',worktree:{path:worktree},packet,build:null,corrections:0,transitions:[],updatedAt:new Date().toISOString()},null,2)); return () => JSON.parse(fs.readFileSync(file,'utf8')); };",
     "const start = (runId, prompt) => { const result = R.startWorker(runId,{provider:'claude-subscription',prompt,model:'opus'},{timeoutSec:15}); groups.add(result.workerPid); return result; };",
     "(async () => { try {",
     "delete process.env.FAKE_EXIT_CODE; process.env.FAKE_SLEEP_MS = '1600'; const successRead = seed('RUN-20260830-10000001','host success lifecycle'); const successStart = start('RUN-20260830-10000001','host success lifecycle');",
-    "const successRunning = await waitFor(successRead, (run) => run.state === 'BUILDING' && run.build && run.build.workerState === 'RUNNING' && run.build.heartbeatAt); const initialHeartbeat = successRunning.build.heartbeatAt;",
-    "const success = await waitFor(successRead, (run) => run.state === 'BUILT'); assert.strictEqual(success.build.exit,0); assert.strictEqual(success.build.workerState,'EXITED'); assert.ok(Date.parse(success.build.heartbeatAt) > Date.parse(initialHeartbeat)); assert.strictEqual(success.transitions.some((t)=>t.from==='BUILDING'&&t.to==='BUILT'),true); await waitFor(()=>W.processGroupAlive(successStart.workerPid),(alive)=>alive===false);",
-    "process.env.FAKE_SLEEP_MS = '0'; process.env.FAKE_EXIT_CODE = '7'; const failureRead = seed('RUN-20260830-10000002','host failed lifecycle'); const failureStart = start('RUN-20260830-10000002','host failed lifecycle'); const failed = await waitFor(failureRead,(run)=>run.state==='BUILD_FAILED'); assert.strictEqual(failed.build.exit,7); assert.strictEqual(failed.build.workerState,'FAILED'); assert.strictEqual(failed.transitions.some((t)=>t.from==='BUILDING'&&t.to==='BUILD_FAILED'),true); await waitFor(()=>W.processGroupAlive(failureStart.workerPid),(alive)=>alive===false);",
-    "delete process.env.FAKE_EXIT_CODE; process.env.FAKE_SLEEP_MS = '30000'; const cancelRead = seed('RUN-20260830-10000003','host cancel lifecycle'); const cancelStart = start('RUN-20260830-10000003','host cancel lifecycle'); const active = await waitFor(cancelRead,(run)=>run.state==='BUILDING'&&run.build&&run.build.workerState==='RUNNING'&&run.build.control&&run.build.childProcessIdentity); const cancelled = R.cancelRun(active.runId); assert.strictEqual(cancelled.state,'ABANDONED'); const abandoned = cancelRead(); assert.strictEqual(abandoned.build.workerState,'TERMINATED'); assert.strictEqual(abandoned.build.terminationEvidence.terminated,true); assert.strictEqual(abandoned.build.terminationEvidence.childCloseObserved,true); assert.strictEqual(abandoned.build.terminationEvidence.processGroupDrained,true); await waitFor(()=>W.processGroupAlive(cancelStart.workerPid),(alive)=>alive===false);",
+    "const successRunning = await waitFor('success RUNNING heartbeat', successRead, (run) => run.state === 'BUILDING' && run.build && run.build.workerState === 'RUNNING' && run.build.heartbeatAt); const initialHeartbeat = successRunning.build.heartbeatAt;",
+    "const success = await waitFor('success BUILT', successRead, (run) => run.state === 'BUILT'); assert.strictEqual(success.build.exit,0); assert.strictEqual(success.build.workerState,'EXITED'); assert.ok(Date.parse(success.build.heartbeatAt) > Date.parse(initialHeartbeat)); assert.strictEqual(success.transitions.some((t)=>t.from==='BUILDING'&&t.to==='BUILT'),true); await waitFor('success worker group drained', ()=>W.processGroupAlive(successStart.workerPid),(alive)=>alive===false);",
+    "process.env.FAKE_SLEEP_MS = '0'; process.env.FAKE_EXIT_CODE = '7'; const failureRead = seed('RUN-20260830-10000002','host failed lifecycle'); const failureStart = start('RUN-20260830-10000002','host failed lifecycle'); const failed = await waitFor('failure BUILD_FAILED', failureRead,(run)=>run.state==='BUILD_FAILED'); assert.strictEqual(failed.build.exit,7); assert.strictEqual(failed.build.workerState,'FAILED'); assert.strictEqual(failed.transitions.some((t)=>t.from==='BUILDING'&&t.to==='BUILD_FAILED'),true); await waitFor('failure worker group drained', ()=>W.processGroupAlive(failureStart.workerPid),(alive)=>alive===false);",
+    "delete process.env.FAKE_EXIT_CODE; process.env.FAKE_SLEEP_MS = '30000'; const cancelRead = seed('RUN-20260830-10000003','host cancel lifecycle'); const cancelStart = start('RUN-20260830-10000003','host cancel lifecycle'); const active = await waitFor('cancellation active child identity', cancelRead,(run)=>run.state==='BUILDING'&&run.build&&run.build.workerState==='RUNNING'&&run.build.control&&run.build.childProcessIdentity); const cancelled = R.cancelRun(active.runId); assert.strictEqual(cancelled.state,'ABANDONED'); const abandoned = cancelRead(); assert.strictEqual(abandoned.build.workerState,'TERMINATED'); assert.strictEqual(abandoned.build.terminationEvidence.terminated,true); assert.strictEqual(abandoned.build.terminationEvidence.childCloseObserved,true); assert.strictEqual(abandoned.build.terminationEvidence.processGroupDrained,true); await waitFor('cancellation worker group drained', ()=>W.processGroupAlive(cancelStart.workerPid),(alive)=>alive===false);",
     "console.log('18 passed, 0 skipped, 0 failed.');",
-    "} finally { for (const group of groups) { if (W.processGroupAlive(group)) { try { process.kill(-group,'SIGKILL'); } catch {} } } for (const group of groups) { try { await waitFor(()=>W.processGroupAlive(group),(alive)=>alive===false,2000); } catch {} } fs.rmSync(tmp,{recursive:true,force:true}); } })().catch((error)=>{ console.error(error.stack||error.message); process.exit(1); });",
+    "} finally { for (const group of groups) { if (W.processGroupAlive(group)) { try { process.kill(-group,'SIGKILL'); } catch {} } } for (const group of groups) { try { await waitFor('cleanup worker group drained', ()=>W.processGroupAlive(group),(alive)=>alive===false,2000); } catch {} } fs.rmSync(tmp,{recursive:true,force:true}); } })().catch((error)=>{ console.error(error.stack||error.message); process.exit(1); });",
   ].join('\n');
 }
 
@@ -87,7 +97,7 @@ const suites = [
     argv: ['-e', [
       // CoreFoundation injects its non-secret text-encoding hint on macOS even
       // when spawn receives an otherwise exact environment object.
-      "const allowed = new Set(['HOME','TMPDIR','USER','LOGNAME','LANG','LC_ALL','LC_CTYPE','TERM','PATH','AEGIS_HOST_OUTER_CONTAINMENT','AEGIS_TEST_HOSTING_PORT','AEGIS_TEST_HOSTING_API_PORT','__CF_USER_TEXT_ENCODING']);",
+      "const allowed = new Set(['HOME','TMPDIR','USER','LOGNAME','LANG','LC_ALL','LC_CTYPE','TERM','PATH','AEGIS_HOST_OUTER_CONTAINMENT','AEGIS_TEST_HOSTING_PORT','AEGIS_TEST_HOSTING_API_PORT','AEGIS_TRUSTED_PROCESS_INSPECTOR','AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256','__CF_USER_TEXT_ENCODING']);",
       "const unexpected = Object.keys(process.env).filter((key) => !allowed.has(key));",
       "if (unexpected.length) { console.error(unexpected.join(',')); process.exit(1); }",
       "console.log('1 passed, 0 skipped, 0 failed.');",
