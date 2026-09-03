@@ -305,6 +305,21 @@
      screen. Detail View keeps the same evidence unabridged. */
   .ops-value{margin-top:6px;font-size:12px;line-height:1.45;color:var(--text-0);overflow-wrap:anywhere;
     display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden}
+  /* The bound-run identity line. It is deliberately NOT clamped: it is one
+     short sentence pair, and it is the sentence that stops an older recorded
+     run from being read as live work. Every part of it wraps instead of
+     scrolling, because a canonical run id is long enough to push a phone
+     sideways on its own. */
+  .ops-run{min-width:0;padding:9px 0 0}
+  .ops-run-line{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+  .ops-run-label{font:650 10px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:#8faac0}
+  .ops-run-id{min-width:0;font-size:12px;line-height:1.45;color:var(--text-0);
+    overflow-wrap:anywhere;word-break:break-word}
+  .ops-run-canonical{min-width:0;font:650 10px/1.45 var(--mono);letter-spacing:.08em;
+    color:var(--text-2);overflow-wrap:anywhere;word-break:break-word}
+  .ops-run-line>.chip{margin:0;white-space:normal}
+  .ops-run-why{min-width:0;margin:6px 0 0;font-size:12px;line-height:1.45;color:var(--text-2);
+    overflow-wrap:anywhere}
 
   .command-shell{display:grid;grid-template-columns:minmax(280px,330px) minmax(520px,1fr) minmax(300px,360px);
     grid-template-areas:"left center right" "evidence evidence evidence";gap:14px;align-items:start;
@@ -1138,6 +1153,14 @@
 <section class="ops-strip" id="ops-strip" aria-labelledby="ops-strip-h">
   <h2 class="ops-strip-title" id="ops-strip-h"><span>Operational status</span>
     <span class="rail-note">canonical status only · no timer of its own</span></h2>
+  <!-- Which run every instrument on this page is describing. The five cells
+       below answer what is happening without ever naming the run it happened
+       to, so a finished or failed run the canonical binding still points at
+       reads like work in flight. This line is repainted by the same
+       renderFounderSummary pass, from resolutions that pass has already made. -->
+  <div class="ops-run" id="ops-strip-run">
+    <p class="empty">Loading the canonically bound current run…</p>
+  </div>
   <div class="ops-strip-cells" id="ops-strip-cells">
     <p class="empty">Loading canonical operational status…</p>
   </div>
@@ -2748,6 +2771,75 @@
     });
   }
 
+  // ── which run is on screen ────────────────────────────────────────────────
+  // The five operational cells describe what is happening without ever naming
+  // the run it is happening to, so an older failed or finished run that the
+  // canonical binding still points at reads like work in flight. This line
+  // answers only that question: WHICH run every instrument on this page is
+  // describing, what its recorded lifecycle state is in founder language, and
+  // — when that state is a record rather than active work — why it is still
+  // the run on screen.
+  //
+  // It is presentation over resolutions this page already made. runsBinding
+  // stays the only authority that may name a current run, operationalState()
+  // stays the only reading of lifecycle, and founderFinished() stays the only
+  // sentence about what finished; nothing here selects a run, changes a
+  // lifecycle, owns a clock or adds a threshold. Anything short of a
+  // positively bound run id with a matching canonical run record fails closed
+  // as UNAVAILABLE rather than falling back to a run the binding did not name.
+  var OPS_RUN_RECORDED = ['WAITING', 'BLOCKED', 'COMPLETE'];
+  function boundRunIdentity(binding, run, control, lifecycle, finished){
+    if (!binding || binding.state !== 'BOUND' || !binding.runId ||
+        !run || run.runId !== binding.runId){
+      return {
+        state: 'UNAVAILABLE', runId: 'UNAVAILABLE', canonical: 'UNAVAILABLE',
+        text: 'UNAVAILABLE — canonical binding evidence does not name a current run, so ' +
+          'nothing on this page can be attributed to one.'
+      };
+    }
+    // RUNNING is the only lifecycle reading that means a worker is recorded as
+    // working. The recorded-outcome states say so plainly, and every other
+    // reading — an unverified worker above all — refuses to claim either.
+    var liveness = lifecycle.state === 'RUNNING'
+      ? 'This is the run AEGIS is working on right now.'
+      : (OPS_RUN_RECORDED.indexOf(lifecycle.state) !== -1
+        ? 'This is recorded evidence of a run that is not working right now. It is still on ' +
+          'screen because canonical binding evidence still names it the current run.'
+        : 'Whether this run is working right now is UNAVAILABLE — canonical evidence does ' +
+          'not record active worker activity for it.');
+    return {
+      state: control.state,
+      runId: binding.runId,
+      canonical: typeof run.state === 'string' && run.state ? run.state : 'UNAVAILABLE',
+      text: (typeof finished === 'string' && finished.trim()
+        ? finished
+        : 'UNAVAILABLE — canonical run evidence does not record what finished.') + ' ' + liveness
+    };
+  }
+
+  // Text, shape and state word again: the run id, its canonical lifecycle
+  // token, the same control-plane chip the RUN STATE cell carries, and the
+  // founder sentence underneath. Nothing here is legible by colour alone.
+  function renderOpsRun(identity){
+    var host = $('ops-strip-run'); if (!host) return;
+    host.textContent = '';
+    host.setAttribute('data-ops-run', identity.state);
+    host.setAttribute('data-ops-run-id', identity.runId);
+    var line = el('div','ops-run-line');
+    line.appendChild(el('span','ops-run-label','CURRENT RUN'));
+    var idNode = el('span','ops-run-id mono',identity.runId);
+    idNode.setAttribute('data-ops-run-field','id');
+    line.appendChild(idNode);
+    var canonicalNode = el('span','ops-run-canonical',identity.canonical);
+    canonicalNode.setAttribute('data-ops-run-field','canonical');
+    line.appendChild(canonicalNode);
+    line.appendChild(chip(identity.state));
+    host.appendChild(line);
+    var why = el('p','ops-run-why',identity.text);
+    why.setAttribute('data-ops-run-field','why');
+    host.appendChild(why);
+  }
+
   function renderFounderSummary(view){
     var host = $('founder-body'); if (!host) return;
     var topologyHost = $('topology-live-body');
@@ -3412,6 +3504,10 @@
     renderOpsStrip(opsStripCells(controlState, supervision,
       evidenceCostPanel(view && view.cost),
       evidenceCheckpointPanel(boundRun, safeCheckpoint)));
+    // The one question those five cells never answer: which run they describe.
+    // Handed the same binding, run record, control verdict, lifecycle reading
+    // and finished sentence this deck already resolved above.
+    renderOpsRun(boundRunIdentity(bind, boundRun, controlState, opState, deckFinished));
 
     // The Detail View rail repaints from the SAME resolved facts this deck has
     // just used. It is given them rather than allowed to re-read the view, so

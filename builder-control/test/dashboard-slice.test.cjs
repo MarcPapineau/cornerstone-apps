@@ -788,6 +788,78 @@ test('the strip restates existing resolutions and owns no clock, threshold or se
     'the Detail View evidence rail lost its own CAD cost and checkpoint panels');
 });
 
+// ── bound-run identity line (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ──────
+// The failure the five cells above cannot catch: they answer what is happening
+// without ever naming the run it is happening to. An older failed or finished
+// run that canonical binding still points at therefore reads as live work, and
+// the operator has no way to tell which run the whole page is describing. The
+// line that fixes that has to name the bound run and its recorded state, stay a
+// pure re-read of resolutions the deck already made, fail closed when no run is
+// bound, and wrap rather than drag a narrow layout sideways.
+test('the bound-run identity line names the current run ahead of the five operational cells', () => {
+  const source = htmlSrc();
+  const strip = source.indexOf('id="ops-strip"');
+  const identity = source.indexOf('id="ops-strip-run"');
+  assert.ok(identity !== -1, 'the operational strip never names which run it is describing');
+  assert.strictEqual((source.match(/id="ops-strip-run"/g) || []).length, 1,
+    'a second identity host would let two copies of the page name different current runs');
+  assert.ok(strip !== -1 && strip < identity && identity < source.indexOf('id="ops-strip-cells"'),
+    'the run identity must be read inside the strip, ahead of the five cells it labels');
+  const markup = source.slice(identity, source.indexOf('</div>', identity));
+  for (const word of ['PASS', 'HEALTHY', 'VERIFIED', 'COMPLETE', 'RUNNING', 'IDLE', 'RECORDED', 'UNAVAILABLE']) {
+    assert.ok(!new RegExp('>\\s*' + word).test(markup),
+      `the identity line ships the literal status word ${word} in static markup`);
+  }
+});
+
+test('the identity line wraps at every width and is never clamped, hidden or animated', () => {
+  const rules = [];
+  for (const rule of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (/\.ops-run\b/.test(rule[1])) rules.push({ selectors: rule[1].trim(), body: rule[2] });
+  }
+  assert.ok(rules.length > 0, 'the identity line has no shipped layout of its own');
+  for (const rule of rules) {
+    assert.ok(!/display:none/.test(rule.body),
+      `${rule.selectors} hides the line that says which run is on screen`);
+    assert.ok(!/-webkit-line-clamp/.test(rule.body),
+      `${rule.selectors} clamps the sentence that separates a recorded run from live work`);
+    assert.ok(!/\banimation\s*:/.test(rule.body) && !/(?:^|;)transition:(?!none)/.test(rule.body),
+      `${rule.selectors} animates the identity line — it is an instrument, not decoration`);
+  }
+  // A canonical run id is long enough to push a narrow layout sideways on its
+  // own, so both the row and every dense value inside it must wrap.
+  const strip = code.slice(code.indexOf('.ops-strip{'), code.indexOf('.command-shell{display:grid'));
+  assert.ok(/\.ops-run-line\{display:flex;flex-wrap:wrap/.test(strip),
+    'the identity row cannot wrap, so a long run id overflows horizontally');
+  for (const selector of ['.ops-run-id', '.ops-run-canonical', '.ops-run-why']) {
+    assert.ok(new RegExp('\\' + selector + '\\{[^}]*overflow-wrap:anywhere').test(strip),
+      `${selector} does not wrap, so it can overflow a wide or mobile layout`);
+  }
+});
+
+test('the identity line restates existing resolutions and cannot name a run the binding did not', () => {
+  const fn = code.slice(code.indexOf('function boundRunIdentity'), code.indexOf('function renderOpsRun'));
+  assert.ok(fn.length > 0, 'no boundRunIdentity() boundary found');
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.random', 'fetch(', 'innerHTML', 'AEGIS_STATE', 'filter(', 'sort(', 'updatedAt']) {
+    assert.ok(!fn.includes(banned),
+      `the identity line uses ${banned} — it may only restate facts the deck already resolved`);
+  }
+  assert.strictEqual((code.match(/function boundRunIdentity/g) || []).length, 1,
+    'the run identity was resolved by more than one function');
+  assert.strictEqual((code.match(/renderOpsRun\(/g) || []).length, 2,
+    'the identity line is painted from more than one place, or never painted at all');
+  assert.ok(/renderOpsRun\(boundRunIdentity\(bind, boundRun, controlState, opState, deckFinished\)\)/.test(code),
+    'the identity line is not fed by the deck\'s own binding, run, control-plane, lifecycle and finished resolutions');
+  // Selection authority is unchanged: only a positively BOUND binding whose
+  // runId matches an actual canonical run record may name a run here.
+  assert.ok(/binding\.state !== 'BOUND'/.test(fn) && /!binding\.runId/.test(fn) &&
+    /run\.runId !== binding\.runId/.test(fn),
+    'the identity line accepts something weaker than an exact canonical binding');
+  assert.ok(/lifecycle\.state === 'RUNNING'/.test(fn),
+    'live work is claimed from something other than the existing lifecycle resolution');
+});
+
 // ── V2 mobile operator cockpit (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ───
 // The phone failure guarded here is a cockpit that reads like a spreadsheet:
 // the owner opens AEGIS on a phone and the first screens are routing rationale,
@@ -5565,6 +5637,117 @@ async function asyncTests() {
     for (const [kind, sentinel] of Object.entries(HOSTILE_WORKER_OUTPUT)) {
       assert.ok(!stripText.includes(sentinel), `the status strip rendered ${kind} worker output`);
     }
+  });
+
+  // ── the bound-run identity line ───────────────────────────────────────────
+  // Which run the whole page is describing, and whether that run is working now
+  // or is a record of work already finished or failed. These proofs read the
+  // line through the page's own DOM, so a line that names an unbound run, or
+  // that lets an older failed run read as live work, fails here rather than in
+  // front of the owner.
+  function opsRunLine(page) {
+    const host = page.document.getElementById('ops-strip-run');
+    const fields = {};
+    findByAttr(host, 'data-ops-run-field').forEach((node) => {
+      fields[node.attrs['data-ops-run-field']] = node;
+    });
+    const row = host.children[0] || { children: [] };
+    const chipNode = (row.children || []).find((c) => String(c.className).includes('chip'));
+    return { host, fields, chipNode };
+  }
+
+  // The identity chip states its condition three ways, exactly like a strip
+  // cell: the machine attribute, a written state word, and a glyph.
+  function assertIdentityChip(line, state) {
+    assert.strictEqual(line.host.attrs['data-ops-run'], state,
+      `the identity line does not carry the canonical state ${state}`);
+    assert.ok(line.chipNode, 'the identity line has no state chip');
+    assert.strictEqual(line.chipNode.children.length, 2,
+      'the identity chip must carry a glyph and a written state, not colour alone');
+    assert.ok(line.chipNode.children[0].textContent.trim().length > 0,
+      'the identity chip glyph is empty, leaving colour as the only shape');
+    assert.strictEqual(line.chipNode.children[1].textContent, state,
+      'the identity chip does not write out its canonical state');
+  }
+
+  const HISTORICAL_FAILED_STATUS = {
+    generatedAt: '2026-09-02T11:00:00.000Z', runsState: 'OK',
+    engineering: { state: 'OK', verdict: 'BLOCKED', problems: [], stages: [] },
+    runsBinding: { state: 'BOUND', runId: 'RUN-OLD-FAILED', updatedAt: '2026-08-30T09:00:00.000Z',
+      evidenceState: 'OK', reason: 'the run ledger still names this the current run' },
+    integration: { connectors: [] },
+    cost: { state: 'UNAVAILABLE', reason: 'no transcripts are recorded' },
+    runs: [{ runId: 'RUN-OLD-FAILED', state: 'REVIEW_FAILED', transitions: 7,
+      objective: 'An older run that stopped on independent review',
+      updatedAt: '2026-08-30T09:00:00.000Z' }],
+  };
+
+  await atest('DOM: the identity line names the bound run, its canonical state and that it is working now', async () => {
+    const page = bootPage(fixtureState(),
+      { status: supervisionStatusFixture(RECORDED_SUPERVISION_BUILD, '2026-09-02T10:10:00.000Z') });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const line = opsRunLine(page);
+    assertIdentityChip(line, 'RUNNING');
+    assert.match(line.host.textContent, /CURRENT RUN/,
+      `the identity line is not labelled: ${line.host.textContent}`);
+    assert.strictEqual(line.host.attrs['data-ops-run-id'], 'RUN-SUPERVISION');
+    assert.strictEqual(line.fields.id.textContent, 'RUN-SUPERVISION',
+      'the identity line does not name the canonically bound run');
+    assert.strictEqual(line.fields.canonical.textContent, 'BUILDING',
+      'the identity line does not carry the recorded canonical lifecycle state');
+    assert.match(line.fields.why.textContent,
+      /Nothing has finished yet — the assigned worker is still building this change\./,
+      `the recorded state is not stated in founder language: ${line.fields.why.textContent}`);
+    assert.match(line.fields.why.textContent, /This is the run AEGIS is working on right now\./,
+      `an active build was not identified as the run being worked on: ${line.fields.why.textContent}`);
+    assert.ok(!/recorded evidence of a run that is not working right now/.test(line.fields.why.textContent),
+      'an active build was explained as a historical record');
+  });
+
+  await atest('DOM: an older failed bound run is explained as recorded evidence, never as live work', async () => {
+    const page = bootPage(fixtureState(), { status: HISTORICAL_FAILED_STATUS });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const line = opsRunLine(page);
+    assertIdentityChip(line, 'BLOCKED');
+    assert.strictEqual(line.fields.id.textContent, 'RUN-OLD-FAILED');
+    assert.strictEqual(line.fields.canonical.textContent, 'REVIEW_FAILED',
+      'the recorded canonical state of the displayed run is missing');
+    assert.match(line.fields.why.textContent,
+      /Nothing finished — this run stopped on independent review\./,
+      `the failed outcome is not stated in founder language: ${line.fields.why.textContent}`);
+    assert.match(line.fields.why.textContent,
+      /This is recorded evidence of a run that is not working right now\./,
+      `a failed run was not explained as a record: ${line.fields.why.textContent}`);
+    assert.match(line.fields.why.textContent,
+      /still on screen because canonical binding evidence still names it the current run/,
+      `the reason an older run is still displayed is missing: ${line.fields.why.textContent}`);
+    assert.ok(!/is the run AEGIS is working on right now/.test(line.fields.why.textContent),
+      'a failed historical run was presented as work happening now');
+  });
+
+  await atest('DOM: unbound and ghost run evidence names no run at all and fails closed as UNAVAILABLE', async () => {
+    const page = bootPage(fixtureState(), { status: IDLE_STATUS });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    let line = opsRunLine(page);
+    assertIdentityChip(line, 'UNAVAILABLE');
+    assert.strictEqual(line.host.attrs['data-ops-run-id'], 'UNAVAILABLE');
+    assert.strictEqual(line.fields.id.textContent, 'UNAVAILABLE');
+    assert.strictEqual(line.fields.canonical.textContent, 'UNAVAILABLE');
+    assert.match(line.fields.why.textContent,
+      /UNAVAILABLE — canonical binding evidence does not name a current run/,
+      `an unbound page did not fail closed: ${line.fields.why.textContent}`);
+
+    // A binding that names a run the ledger does not carry is a ghost. Array
+    // position is not a substitute: the line may not fall back to the one run
+    // that happens to be in the list.
+    const ghost = JSON.parse(JSON.stringify(HISTORICAL_FAILED_STATUS));
+    ghost.runsBinding.runId = 'RUN-DOES-NOT-EXIST';
+    renderMinimizedStatus(page, ghost);
+    line = opsRunLine(page);
+    assertIdentityChip(line, 'UNAVAILABLE');
+    assert.strictEqual(line.fields.id.textContent, 'UNAVAILABLE');
+    assert.ok(!/RUN-OLD-FAILED|RUN-DOES-NOT-EXIST/.test(line.host.textContent),
+      `a ghost binding named a run no canonical record supports: ${line.host.textContent}`);
   });
 }
 
