@@ -124,6 +124,30 @@ test('pilot instruments answer mission, worker, now, next, blocker, decision and
   requireDomProof('DOM: a long mission renders one visible pilot headline while preserving exact truth in a collapsed disclosure');
 });
 
+// The founder's question during a build is "what is it doing right now", and
+// the only honest answer is the bounded category the worker derived from
+// authenticated progress evidence. The acceptance bar is therefore not "an
+// activity renders": it is that the sentence comes from the projection, that a
+// heartbeat alone still reads unavailable, and that Detail View restates the
+// same resolution instead of reaching its own.
+test('live builder activity reads in plain English, from the projection, on both views', () => {
+  requireDomProof('DOM: a running builder with a recorded read activity says what it is doing and when');
+  requireDomProof('DOM: a heartbeat with no real progress still reads as progress unavailable');
+  requireDomProof('DOM: Command View and Detail View print one builder-activity resolution, never two');
+  requireDomProof('DOM: no raw builder output reaches the page through the activity surface');
+  assert.ok(/commandCard\('BUILDER PROGRESS'/.test(code),
+    'the Command View has no builder progress instrument');
+  const fn = code.slice(code.indexOf('function supervisionFacts'),
+    code.indexOf('function supervisionEvidence'));
+  assert.ok(fn.length > 0, 'the supervisionFacts() boundary was not found');
+  assert.ok(/s\.activitySummary/.test(fn) && /s\.activityAt/.test(fn),
+    'the deck does not read the projected activity sentence and the time its evidence was recorded');
+  assert.ok(!/'READING'|'EDITING'|'SEARCHING'|'WORKING'/.test(fn),
+    'the page carries an activity vocabulary of its own instead of reading the canonical projection');
+  assert.ok(!/Date\.now\s*\(|new Date\s*\(/.test(fn),
+    'the activity instrument consulted a clock rather than the recorded evidence time');
+});
+
 test('the Command View fails closed without state.js but remains usable by authenticated live status', () => {
   requireDomProof('DOM: missing state.js paints UNAVAILABLE immediately and authenticated live status repopulates the pilot deck');
   requireDomProof('DOM: missing state.js and unavailable live API leave every primary instrument fail-closed, never loading');

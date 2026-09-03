@@ -749,6 +749,20 @@ const PUBLIC_PROGRESS_KINDS = Object.freeze({
   STDERR: 'Builder is emitting diagnostic stream activity',
   AUTHORIZED_WRITE: 'Builder changed a file it is authorized to write',
 });
+// progressKind answers "did the builder do something real"; this answers "what
+// kind of work was it". Both are closed vocabularies aegis-worker writes from
+// authenticated structured stream events, and every sentence below is written
+// HERE, so no tool input, prompt, path or model prose can describe the activity.
+// An unrecognised code publishes no activity at all rather than travelling.
+const PUBLIC_PROGRESS_ACTIVITIES = Object.freeze({
+  STARTING: 'Starting up',
+  READING: 'Reading files in the worktree',
+  SEARCHING: 'Searching the worktree',
+  EDITING: 'Editing files it is authorized to change',
+  WORKING: 'Using an authorized tool',
+  RESPONDING: 'Writing out its answer',
+  DIAGNOSING: 'Reporting diagnostic output',
+});
 const PUBLIC_TIMEOUT_REASONS = Object.freeze({
   NO_PROGRESS_TIMEOUT: 'Stopped because no real builder progress was observed inside the fixed no-progress limit',
   WALL_CLOCK_TIMEOUT: 'Stopped because the build reached its fixed wall-clock limit',
@@ -776,6 +790,16 @@ function minimizeSupervision(build) {
   // A phase without a time, or a time without a phase, proves nothing about
   // when the builder last did work, so the pair travels or neither does.
   const recorded = progressKind !== null && lastProgressAt !== null;
+  // The named activity rides on real progress and never on its own. A category
+  // with no observation time, an observation time with no category, or either
+  // one while no real progress is recorded at all, publishes nothing: a
+  // heartbeat can keep a stale category on screen otherwise, which is exactly
+  // the "busy right up to the moment it is killed" reading this surface refuses.
+  const activityCode = recorded && typeof build.progressActivity === 'string' &&
+    Object.prototype.hasOwnProperty.call(PUBLIC_PROGRESS_ACTIVITIES, build.progressActivity)
+    ? build.progressActivity : null;
+  const activityAt = publicTimestamp(build.progressActivityAt);
+  const activityRecorded = activityCode !== null && activityAt !== null;
   const timeoutReason = build.timedOut === true && typeof build.timeoutReason === 'string' &&
     Object.prototype.hasOwnProperty.call(PUBLIC_TIMEOUT_REASONS, build.timeoutReason)
     ? build.timeoutReason : null;
@@ -786,6 +810,12 @@ function minimizeSupervision(build) {
     lastProgressAt: recorded ? lastProgressAt : null,
     progressReason: recorded ? null
       : 'No real builder progress is recorded for this attempt, so builder liveness rests on the supervisor heartbeat alone.',
+    activityState: activityRecorded ? 'RECORDED' : 'UNRECORDED',
+    activityCode: activityRecorded ? activityCode : null,
+    activitySummary: activityRecorded ? PUBLIC_PROGRESS_ACTIVITIES[activityCode] : null,
+    activityAt: activityRecorded ? activityAt : null,
+    activityReason: activityRecorded ? null
+      : 'No bounded builder activity is recorded for this attempt, so what the builder is doing right now is unavailable.',
     noProgressLimitSec: GOVERNED_NO_PROGRESS_LIMIT_SEC,
     wallClockLimitSec: GOVERNED_BUILDER.timeoutSec,
     timeoutReason,
@@ -1732,7 +1762,8 @@ module.exports = {
   resolveCanonicalLedgerFile, GOVERNED_BUILDER, MODEL_ROUTING_POLICY, loadModelRoutingPolicy,
   canonicalWorkerRoute, buildGovernedLaunchSpec, startGovernedRun,
   minimizeWorker, minimizeSupervision,
-  PUBLIC_PROGRESS_KINDS, PUBLIC_TIMEOUT_REASONS, GOVERNED_NO_PROGRESS_LIMIT_SEC,
+  PUBLIC_PROGRESS_KINDS, PUBLIC_PROGRESS_ACTIVITIES, PUBLIC_TIMEOUT_REASONS,
+  GOVERNED_NO_PROGRESS_LIMIT_SEC,
   startRunReconciler, RUN_RECONCILE_INTERVAL_MS,
   DEFAULT_CONTROL_AUTHORITIES, resolveControlAuthorities,
 };

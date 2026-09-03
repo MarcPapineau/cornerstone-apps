@@ -2507,6 +2507,7 @@
         watchdogState: 'UNAVAILABLE',
         watchdog: 'Watchdog limits UNAVAILABLE — no builder attempt is recorded.',
         timeout: 'Timeout: UNAVAILABLE — no builder attempt is recorded.',
+        activity: null,
         detail: ['No builder attempt is recorded, so there is nothing to supervise.'] };
     }
     var heartbeat = typeof build.heartbeatAt === 'string' && build.heartbeatAt
@@ -2521,16 +2522,26 @@
         timeout: 'Timeout: ' + (build.timedOut === true
           ? 'recorded, but no canonical reason travelled with it'
           : 'UNAVAILABLE — no supervision projection reached this page.'),
+        activity: null,
         detail: ['Supervision UNAVAILABLE — no supervision projection reached this page.',
+          'Current activity: NOT RECORDED — no supervision projection reached this page.',
           'Recovery: ' + recoveryFacts(build)] };
     }
     var seconds = function(value){
       return Number.isFinite(value) ? value + 's' : 'UNAVAILABLE';
     };
     var recorded = s.progressState === 'RECORDED';
+    // What the builder is doing, in plain English, with the time the evidence
+    // for it was recorded. The projection publishes this only from a bounded
+    // category the worker derived from an authenticated structured event, so an
+    // attempt with nothing but a heartbeat reads as unavailable here too.
+    var activity = s.activityState === 'RECORDED' && s.activitySummary && s.activityAt
+      ? s.activitySummary + ' — activity evidence recorded ' + s.activityAt + '.'
+      : null;
     var headline = (s.timeoutReason ? s.timeoutSummary + '. ' : '') +
       (recorded
-        ? s.progressSummary + ' — last real progress ' + s.lastProgressAt + '.'
+        ? (activity ? activity + ' ' : '') +
+          s.progressSummary + ' — last real progress ' + s.lastProgressAt + '.'
         : (s.progressReason || 'No real builder progress is recorded for this attempt.')) +
       ' Supervisor heartbeat ' + heartbeat + ' is liveness only, never progress.';
     // The two watchdog sentences are built once and read twice: the deep block
@@ -2555,7 +2566,10 @@
           ? 'RECORDED' : 'UNAVAILABLE'),
       watchdog: watchdog,
       timeout: timeout,
+      activity: activity,
       detail: [
+        'Current activity: ' + (activity || ('NOT RECORDED — ' +
+          (s.activityReason || 'no bounded builder activity is recorded.'))),
         'Progress phase: ' + (recorded ? s.progressKind + ' — ' + s.progressSummary : 'NOT RECORDED'),
         'Last real progress: ' + (recorded ? s.lastProgressAt
           : 'NOT RECORDED — ' + (s.progressReason || 'no real builder progress is recorded.')),
@@ -2573,6 +2587,7 @@
         watchdogState: 'NOT_RUNNING',
         watchdog: 'No run is active, so no builder watchdog is armed.',
         timeout: 'Timeout: none — no run is active.',
+        activity: null,
         detail: [] };
     }
     return supervisionFacts(run.build || null);

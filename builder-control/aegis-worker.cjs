@@ -59,6 +59,18 @@ const CLAUDE_STREAM_PROGRESS_ARGV = Object.freeze([
 const STREAM_EVIDENCE_BYTES = 24000;
 const STREAM_ERROR_TEXT_BYTES = 400;
 const STREAM_TEXT_LINE_BYTES = 1000;
+// The bounded activity vocabulary the supervision surface is allowed to state.
+// A tool name is a fixed protocol identifier the client emits, not model
+// output, so mapping one to a category carries no prose, prompt, path, tool
+// input or file content across the boundary. A tool this map does not name
+// yields WORKING rather than travelling verbatim.
+const CLAUDE_TOOL_ACTIVITY = Object.freeze({
+  Read: 'READING', Glob: 'SEARCHING', Grep: 'SEARCHING',
+  Edit: 'EDITING', Write: 'EDITING',
+});
+const PROGRESS_ACTIVITY_CODES = Object.freeze([
+  'STARTING', 'READING', 'SEARCHING', 'EDITING', 'WORKING', 'RESPONDING', 'DIAGNOSING',
+]);
 const GROK_FILE_TOOLS = Object.freeze(['read_file', 'search_replace', 'grep', 'list_dir']);
 const GROK_DISALLOWED_TOOLS = Object.freeze(['run_terminal_cmd', 'web_search', 'web_fetch', 'task']);
 const GROK_MAX_TURNS = 32;
@@ -223,6 +235,44 @@ function summarizeClaudeStreamLine(line) {
 }
 
 /**
+ * Reduce one Claude stream-json line to one bounded activity code.
+ *
+ * Only the protocol's own event shape and tool identifiers are read; assistant
+ * text, thinking, tool inputs and tool results are never inspected, so the
+ * result is always one of PROGRESS_ACTIVITY_CODES or null.  A line that names
+ * no activity returns null, so the caller keeps the last activity it actually
+ * observed instead of inventing a newer one for it.
+ */
+function claudeStreamActivity(line) {
+  const text = String(line === null || line === undefined ? '' : line).trim();
+  if (!text || text[0] !== '{') return null;
+  let event;
+  try { event = JSON.parse(text); } catch { return null; }
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return null;
+  const stream = event.event && typeof event.event === 'object' && !Array.isArray(event.event)
+    ? event.event : null;
+  const blocks = [];
+  if (stream && stream.content_block && typeof stream.content_block === 'object') {
+    blocks.push(stream.content_block);
+  }
+  if (event.message && Array.isArray(event.message.content)) {
+    for (const block of event.message.content) {
+      if (block && typeof block === 'object') blocks.push(block);
+    }
+  }
+  let responding = Boolean(stream && stream.delta && stream.delta.type === 'text_delta');
+  for (const block of blocks) {
+    if (block.type === 'tool_use') {
+      return typeof block.name === 'string' &&
+        Object.prototype.hasOwnProperty.call(CLAUDE_TOOL_ACTIVITY, block.name)
+        ? CLAUDE_TOOL_ACTIVITY[block.name] : 'WORKING';
+    }
+    if (block.type === 'text') responding = true;
+  }
+  return responding ? 'RESPONDING' : null;
+}
+
+/**
  * Line-buffered accumulator over the child's stdout.  Repeated event shapes
  * collapse into a count so a high-rate partial-message stream cannot flood the
  * bounded evidence tail.
@@ -232,6 +282,7 @@ function createClaudeStreamProgressDigest(limitBytes = STREAM_EVIDENCE_BYTES) {
   let digest = '';
   let current = null;
   let repeats = 0;
+  let latestActivity = null;
   const render = () => (repeats > 1 ? `${current} x${repeats}` : current);
   const commit = () => {
     if (current === null) return;
@@ -242,6 +293,8 @@ function createClaudeStreamProgressDigest(limitBytes = STREAM_EVIDENCE_BYTES) {
     repeats = 0;
   };
   const take = (line) => {
+    const observed = claudeStreamActivity(line);
+    if (observed !== null) latestActivity = observed;
     const summary = summarizeClaudeStreamLine(line);
     if (summary === null) return;
     if (summary === current) { repeats += 1; return; }
@@ -267,6 +320,9 @@ function createClaudeStreamProgressDigest(limitBytes = STREAM_EVIDENCE_BYTES) {
       return text();
     },
     text,
+    // The last activity a structured event actually named, or null when none
+    // has been observed yet. It is never inferred from byte counts or timing.
+    activity() { return latestActivity; },
   });
 }
 
@@ -1889,6 +1945,8 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   let lastProgressAtMs = Date.now();
   let lastProgressAt = nowIso();
   let progressKind = 'STARTED';
+  let progressActivity = 'STARTING';
+  let progressActivityAt = lastProgressAt;
   let latestAuthorizedWriteSha256 = authorizedWriteBaselineSha256;
   const timeoutMs = normalizeTimeoutSec(payload.timeoutSec) * 1000;
   const noProgressTimeoutMs = builderNoProgressTimeoutMs(timeoutMs);
@@ -1906,10 +1964,17 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
       resolve({ lastProgressAt, progressKind });
     }, noProgressTimeoutMs);
   };
-  const recordProgress = (kind) => {
+  const recordProgress = (kind, activity) => {
     lastProgressAtMs = Date.now();
     lastProgressAt = nowIso();
     progressKind = kind;
+    // The activity stamp moves only when a structured event actually named an
+    // activity, so the published evidence time belongs to the event that named
+    // it and never to a later event that named nothing.
+    if (typeof activity === 'string' && PROGRESS_ACTIVITY_CODES.includes(activity)) {
+      progressActivity = activity;
+      progressActivityAt = lastProgressAt;
+    }
     armNoProgressWatchdog();
   };
   armNoProgressWatchdog();
@@ -1922,10 +1987,10 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     // Every stream event is real execution activity, so the existing stdout
     // progress path resets the no-progress watchdog while the retained
     // evidence stays a bounded, content-free event digest.
-    stdout = stdoutProgress.push(chunk); recordProgress('STDOUT');
+    stdout = stdoutProgress.push(chunk); recordProgress('STDOUT', stdoutProgress.activity());
   });
   if (child.stderr) child.stderr.on('data', (chunk) => {
-    stderr += chunk; stderr = stderr.slice(-24000); recordProgress('STDERR');
+    stderr += chunk; stderr = stderr.slice(-24000); recordProgress('STDERR', 'DIAGNOSING');
   });
 
   if (process.env.NODE_ENV === 'test' && process.env.FAKE_PROCESS_IDENTITY_FAILURE === '1') {
@@ -1944,6 +2009,8 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     heartbeatAt: nowIso(),
     lastProgressAt,
     progressKind,
+    progressActivity,
+    progressActivityAt,
     environment: {
       anthropicOverridesRemoved: removedAnthropicOverrides,
       anthropicApiKeyOverrideRemoved: process.env.AEGIS_REMOVED_ANTHROPIC_API_KEY === '1',
@@ -1973,12 +2040,14 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
       const writeSha256 = authorizedWriteDigest(contained.allowlists.writePaths, run.worktree.path);
       if (writeSha256 !== latestAuthorizedWriteSha256) {
         latestAuthorizedWriteSha256 = writeSha256;
-        recordProgress('AUTHORIZED_WRITE');
+        recordProgress('AUTHORIZED_WRITE', 'EDITING');
       }
       updateBuild(R, run.runId, payload.attemptId, {
         heartbeatAt: nowIso(),
         lastProgressAt,
         progressKind,
+        progressActivity,
+        progressActivityAt,
         stdoutTail: boundedTail(stdout),
         stderrTail: boundedTail(stderr),
       });
@@ -2107,6 +2176,8 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
     timeoutReason,
     lastProgressAt,
     progressKind,
+    progressActivity,
+    progressActivityAt,
     authorizedMutationObserved: replacement
       ? replacement.authorizedMutationObserved : authorizedMutationObserved,
     timeoutTerminationEvidence,
@@ -2186,7 +2257,8 @@ if (require.main === module) {
 module.exports = {
   launchWorker,
   processAlive, processGroupAlive, boundedTail,
-  summarizeClaudeStreamLine, createClaudeStreamProgressDigest,
+  summarizeClaudeStreamLine, createClaudeStreamProgressDigest, claudeStreamActivity,
+  CLAUDE_TOOL_ACTIVITY, PROGRESS_ACTIVITY_CODES,
   normalizeLaunchSpec, normalizeTimeoutSec, resolveClaudeExecutable, resolveGrokExecutable,
   launchClaudeProcess, grokArgv, prepareGrokLaunch,
   runContainedClaudeAuthStatus,

@@ -4326,6 +4326,145 @@ test('DOM: repeated status snapshots read as one counted item that keeps every r
     'the feed holds fewer exact receipts than the number of canonical updates it received');
 });
 
+// ── founder-readable builder activity (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// "Stream activity was observed" is true and tells the owner nothing. The
+// supervision projection now carries a bounded category and the time its own
+// evidence was recorded, and these proofs hold the three properties that make
+// that safe: the category is stated in plain English with its evidence time, a
+// heartbeat with no real progress still reads unavailable, and Command View and
+// Detail View print it from the one shared resolution rather than two.
+const RECORDED_ACTIVITY_SUPERVISION = Object.freeze({
+  progressState: 'RECORDED', progressKind: 'STDOUT',
+  progressSummary: 'Builder is emitting model and tool stream activity',
+  lastProgressAt: '2026-09-03T14:09:50.000Z', progressReason: null,
+  activityState: 'RECORDED', activityCode: 'READING',
+  activitySummary: 'Reading files in the worktree',
+  activityAt: '2026-09-03T14:09:45.000Z', activityReason: null,
+  noProgressLimitSec: 300, wallClockLimitSec: 900,
+  timeoutReason: null, timeoutSummary: null,
+});
+const HEARTBEAT_ONLY_SUPERVISION = Object.freeze({
+  progressState: 'UNRECORDED', progressKind: null, progressSummary: null,
+  lastProgressAt: null,
+  progressReason: 'No real builder progress is recorded for this attempt, so builder ' +
+    'liveness rests on the supervisor heartbeat alone.',
+  activityState: 'UNRECORDED', activityCode: null, activitySummary: null, activityAt: null,
+  activityReason: 'No bounded builder activity is recorded for this attempt, so what the ' +
+    'builder is doing right now is unavailable.',
+  noProgressLimitSec: 300, wallClockLimitSec: 900,
+  timeoutReason: null, timeoutSummary: null,
+});
+
+function liveActivityRun(supervision) {
+  return {
+    runId: 'RUN-ACTIVITY', state: 'BUILDING',
+    objective: 'Make live builder activity founder-readable',
+    updatedAt: '2026-09-03T14:10:00.000Z', transitions: 4,
+    build: {
+      mode: 'async', status: 'RUNNING', workerPid: 7171,
+      startedAt: '2026-09-03T14:00:00.000Z', heartbeatAt: '2026-09-03T14:09:59.000Z',
+      endedAt: null, exit: null, timedOut: false, cancelAvailable: true,
+      activity: { active: true, phase: 'RUNNING', code: 'RUNNING', summary: 'Builder is running' },
+      supervision: supervision,
+    },
+  };
+}
+
+function liveActivityPage(supervision) {
+  const run = liveActivityRun(supervision);
+  return bootPage(fixtureState({
+    generatedAt: '2026-09-03T14:10:00.000Z',
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      reason: 'exact current run is bound',
+    } },
+  }));
+}
+
+function builderProgressCard(page) {
+  const cards = findByAttr(page.document.getElementById('founder-body'), 'data-supervision-state');
+  assert.strictEqual(cards.length, 1, `expected one BUILDER PROGRESS card, found ${cards.length}`);
+  return cards[0];
+}
+
+test('DOM: a running builder with a recorded read activity says what it is doing and when', () => {
+  const page = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION);
+  const card = builderProgressCard(page);
+  assert.strictEqual(card.attrs['data-supervision-state'], 'PROGRESS_RECORDED');
+  assert.match(card.textContent,
+    /Reading files in the worktree — activity evidence recorded 2026-09-03T14:09:45\.000Z\./,
+    'the deck does not state the current activity in plain English with its own evidence time');
+  // The two facts stay separate: what it is doing, and when it last did
+  // anything real. Merging them is how a stalled build reads as busy.
+  assert.match(card.textContent, /last real progress 2026-09-03T14:09:50\.000Z/,
+    'the activity replaced the last-real-progress fact instead of joining it');
+  assert.match(card.textContent,
+    /Supervisor heartbeat 2026-09-03T14:09:59\.000Z is liveness only, never progress\./,
+    'the heartbeat qualifier was dropped once an activity was available');
+});
+
+test('DOM: a heartbeat with no real progress still reads as progress unavailable', () => {
+  const page = liveActivityPage(HEARTBEAT_ONLY_SUPERVISION);
+  const card = builderProgressCard(page);
+  assert.strictEqual(card.attrs['data-supervision-state'], 'PROGRESS_UNRECORDED');
+  assert.match(card.textContent, /liveness rests on the supervisor heartbeat alone/,
+    'a heartbeating builder with no progress did not say what its liveness actually rests on');
+  for (const invented of [/activity evidence recorded/, /Reading files/, /Editing files/,
+    /last real progress/]) {
+    assert.doesNotMatch(card.textContent, invented,
+      `a heartbeat produced ${invented}, which no canonical progress evidence supports`);
+  }
+  const detail = page.text('runs-list');
+  assert.match(detail, /Current activity: NOT RECORDED/,
+    'Detail View filled an unrecorded activity in rather than stating the absence');
+});
+
+test('DOM: Command View and Detail View print one builder-activity resolution, never two', () => {
+  const page = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION);
+  const facts = page.sandbox.AEGIS_DASHBOARD.supervisionFacts(
+    liveActivityRun(RECORDED_ACTIVITY_SUPERVISION).build);
+  assert.strictEqual(facts.activity,
+    'Reading files in the worktree — activity evidence recorded 2026-09-03T14:09:45.000Z.');
+  assert.ok(builderProgressCard(page).textContent.includes(facts.headline),
+    'the Command View card printed something other than the shared resolution headline');
+  const detailBlocks = findByAttr(page.document.getElementById('runs-list'), 'data-supervision-state');
+  assert.strictEqual(detailBlocks.length, 1,
+    `expected one Detail View supervision block, found ${detailBlocks.length}`);
+  assert.strictEqual(detailBlocks[0].attrs['data-supervision-state'],
+    builderProgressCard(page).attrs['data-supervision-state'],
+    'the two surfaces disagree about the supervision state');
+  assert.ok(detailBlocks[0].textContent.includes('Current activity: ' + facts.activity),
+    'Detail View derived its own activity sentence instead of restating the resolved one');
+  // One resolution, read twice — not two renderers that happen to agree today.
+  assert.ok(/window\.AEGIS_DASHBOARD\.supervisionFacts\(build\)/.test(code),
+    'Detail View no longer reads the shared supervision resolution');
+  assert.strictEqual((code.match(/function supervisionFacts\(/g) || []).length, 1,
+    'a second supervision resolution would drift from the first');
+});
+
+test('DOM: no raw builder output reaches the page through the activity surface', () => {
+  const run = liveActivityRun(RECORDED_ACTIVITY_SUPERVISION);
+  // Exactly the fields a compromised or careless worker record could carry.
+  Object.assign(run.build, {
+    stdoutTail: HOSTILE_WORKER_OUTPUT.source + '\n' + HOSTILE_WORKER_OUTPUT.pem,
+    stderrTail: HOSTILE_WORKER_OUTPUT.jwt,
+    rawOutput: HOSTILE_WORKER_OUTPUT.unlabelled,
+  });
+  const page = bootPage(fixtureState({
+    generatedAt: '2026-09-03T14:10:00.000Z',
+    runs: { state: 'OK', runs: [run], current: {
+      state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt, reason: 'exact current run is bound',
+    } },
+  }));
+  const rendered = ['founder-body', 'runs-list', 'evidence-rail-body', 'ops-strip-cells']
+    .map((id) => page.text(id)).join(' ');
+  for (const [kind, sentinel] of Object.entries(HOSTILE_WORKER_OUTPUT)) {
+    assert.ok(!rendered.includes(sentinel), `the rendered page leaked ${kind} worker output`);
+  }
+  assert.match(rendered, /Reading files in the worktree/,
+    'the bounded activity category must still reach the page beside the refused raw output');
+});
+
 // ── FINDING #7 RED PROOF: the summary must REPAINT from the live stream ────
 // The panel used to render once from the generated snapshot and never again,
 // so a founder watching the page saw an old objective and an old verdict

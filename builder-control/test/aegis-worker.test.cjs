@@ -2370,6 +2370,85 @@ test('stream progress evidence stays bounded and carries no raw model output', (
   assert.strictEqual(WORKER.summarizeClaudeStreamLine('   '), null);
 });
 
+// ── the bounded activity category (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// "The builder emitted stream activity" is true and useless to a founder. The
+// category below answers what kind of work it was, using only the protocol's
+// own tool identifiers — never the prompt, the tool input, the file path or a
+// word the model wrote.
+test('stream activity resolves to a bounded category from tool identity alone', () => {
+  const activity = WORKER.claudeStreamActivity;
+  assert.deepStrictEqual(WORKER.CLAUDE_TOOL_ACTIVITY, {
+    Read: 'READING', Glob: 'SEARCHING', Grep: 'SEARCHING', Edit: 'EDITING', Write: 'EDITING',
+  });
+  // Every tool the builder is actually granted has a category, so a real build
+  // can never fall through to the unnamed case by accident.
+  for (const tool of WORKER.CLAUDE_FILE_TOOLS) {
+    assert.ok(WORKER.PROGRESS_ACTIVITY_CODES.includes(WORKER.CLAUDE_TOOL_ACTIVITY[tool]), tool);
+  }
+  const toolUse = (name, input) => JSON.stringify({
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', name, input: input || { file_path: '/secret/path' } }] },
+  });
+  assert.strictEqual(activity(toolUse('Read')), 'READING');
+  assert.strictEqual(activity(toolUse('Grep')), 'SEARCHING');
+  assert.strictEqual(activity(toolUse('Glob')), 'SEARCHING');
+  assert.strictEqual(activity(toolUse('Edit')), 'EDITING');
+  assert.strictEqual(activity(toolUse('Write')), 'EDITING');
+  // A tool identity this map does not name, or one shaped like a prototype key,
+  // is a category AEGIS cannot state — it is generic work, never a guess.
+  assert.strictEqual(activity(toolUse('SomeFutureTool')), 'WORKING');
+  assert.strictEqual(activity(toolUse('constructor')), 'WORKING');
+  assert.strictEqual(activity(toolUse('__proto__')), 'WORKING');
+  // The streaming form names the same tool through content_block.
+  assert.strictEqual(activity(JSON.stringify({
+    type: 'stream_event',
+    event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Edit' } },
+  })), 'EDITING');
+  assert.strictEqual(activity(JSON.stringify({
+    type: 'stream_event',
+    event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'CONFIDENTIAL PROSE' } },
+  })), 'RESPONDING');
+  // Nothing that names no activity may invent one. Null keeps the last category
+  // the builder actually earned rather than restamping it with a newer time.
+  for (const quiet of ['', '   ', 'not json at all', '{"type":"system","subtype":"init"}',
+    '{"type":"stream_event","event":{"type":"ping"}}', '[]', '{', null, undefined]) {
+    assert.strictEqual(activity(quiet), null, JSON.stringify(quiet));
+  }
+  // Whatever it returns is inside the closed vocabulary, always.
+  for (const line of [toolUse('Read'), toolUse('SomeFutureTool'),
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"CONFIDENTIAL"}]}}']) {
+    const observed = activity(line);
+    assert.ok(WORKER.PROGRESS_ACTIVITY_CODES.includes(observed), line);
+    assert.strictEqual(String(observed).includes('CONFIDENTIAL'), false);
+    assert.strictEqual(String(observed).includes('/secret/path'), false);
+  }
+});
+
+test('the stream digest carries the latest named activity beside its bounded evidence', () => {
+  const digest = WORKER.createClaudeStreamProgressDigest();
+  assert.strictEqual(digest.activity(), null, 'an unread stream must claim no activity');
+  digest.push('{"type":"system","subtype":"init","model":"opus"}\n');
+  assert.strictEqual(digest.activity(), null, 'a system init is not builder work');
+  digest.push('{"type":"assistant","message":{"content":[' +
+    '{"type":"tool_use","name":"Read","input":{"file_path":"/secret/path"}}]}}\n');
+  assert.strictEqual(digest.activity(), 'READING');
+  // An event that names nothing leaves the last real category standing.
+  digest.push('{"type":"stream_event","event":{"type":"ping"}}\n');
+  assert.strictEqual(digest.activity(), 'READING');
+  digest.push('{"type":"assistant","message":{"content":[' +
+    '{"type":"tool_use","name":"Edit","input":{"file_path":"/secret/path"}}]}}\n');
+  assert.strictEqual(digest.activity(), 'EDITING');
+  // A category split across two chunks is only named once the line completes.
+  const split = WORKER.createClaudeStreamProgressDigest();
+  split.push('{"type":"assistant","message":{"content":[{"type":"tool_use","na');
+  assert.strictEqual(split.activity(), null, 'half a line named an activity');
+  split.push('me":"Write"}]}}\n');
+  assert.strictEqual(split.activity(), 'EDITING');
+  const evidence = digest.end();
+  assert.strictEqual(evidence.includes('/secret/path'), false);
+  assert.strictEqual(digest.activity(), 'EDITING');
+});
+
 (async () => {
   let passed = 0;
   let skipped = 0;

@@ -892,7 +892,8 @@ test('RED: the public worker projection is an exact lifecycle allowlist with no 
     ['activity', 'cancelAvailable', 'endedAt', 'exit', 'failover', 'failure', 'heartbeatAt', 'mode',
       'recoveryCode', 'retrySafe', 'startedAt', 'status', 'supervision', 'timedOut', 'workerPid'].sort());
   assert.deepStrictEqual(Object.keys(worker.supervision).sort(),
-    ['lastProgressAt', 'noProgressLimitSec', 'progressKind', 'progressReason', 'progressState',
+    ['activityAt', 'activityCode', 'activityReason', 'activityState', 'activitySummary',
+      'lastProgressAt', 'noProgressLimitSec', 'progressKind', 'progressReason', 'progressState',
       'progressSummary', 'timeoutReason', 'timeoutSummary', 'wallClockLimitSec'].sort());
   assert.strictEqual(worker.status, 'RUNNING');
   assert.strictEqual(worker.cancelAvailable, false,
@@ -1090,6 +1091,74 @@ test('RED: a heartbeating builder with no recorded progress fails closed to UNRE
     assert.strictEqual(refused.progressKind, null, label);
     assert.strictEqual(refused.lastProgressAt, null, label);
     assertNoHostileWorkerOutput(refused, `supervision (${label})`);
+  }
+});
+
+// ── the bounded activity category (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// "Real progress was observed" still does not tell a founder what the builder
+// is doing. The activity category does, in a closed vocabulary hosting owns —
+// and it is published only when authenticated progress evidence backs it.
+test('a recorded read or edit activity travels as plain English with its own evidence time', () => {
+  for (const [code, expected] of [
+    ['READING', 'Reading files in the worktree'],
+    ['EDITING', 'Editing files it is authorized to change'],
+  ]) {
+    const supervision = S.minimizeWorker({
+      mode: 'async', workerState: 'RUNNING', workerPid: 4242,
+      heartbeatAt: '2026-09-03T10:09:59.000Z',
+      lastProgressAt: '2026-09-03T10:09:40.000Z', progressKind: 'STDOUT',
+      progressActivity: code, progressActivityAt: '2026-09-03T10:09:30.000Z',
+      stdoutTail: HOSTILE_WORKER_OUTPUT.source, stderrTail: HOSTILE_WORKER_OUTPUT.pem,
+    }, 'BUILDING').supervision;
+    assert.strictEqual(supervision.activityState, 'RECORDED', code);
+    assert.strictEqual(supervision.activityCode, code);
+    assert.strictEqual(supervision.activitySummary, expected,
+      'the activity sentence must be hosting\'s own, not the worker\'s or the model\'s');
+    assert.strictEqual(supervision.activityAt, '2026-09-03T10:09:30.000Z',
+      'the activity carries the time its own evidence was observed, not the later progress stamp');
+    assert.strictEqual(supervision.activityReason, null);
+    assertNoHostileWorkerOutput(supervision, `activity supervision (${code})`);
+  }
+  assert.deepStrictEqual(Object.keys(S.PUBLIC_PROGRESS_ACTIVITIES).sort(),
+    ['DIAGNOSING', 'EDITING', 'READING', 'RESPONDING', 'SEARCHING', 'STARTING', 'WORKING'],
+    'the public activity vocabulary is no longer the closed set the worker derives');
+  assert.ok(Object.isFrozen(S.PUBLIC_PROGRESS_ACTIVITIES));
+});
+
+test('RED: a heartbeat, a half pair, or an unknown category publishes no activity at all', () => {
+  const heartbeatOnly = S.minimizeWorker({
+    mode: 'async', workerState: 'RUNNING', heartbeatAt: '2026-09-03T10:09:59.000Z',
+    // A worker that recorded a category but no real progress is exactly the
+    // stalled-but-heartbeating case: the category must not survive alone.
+    progressActivity: 'EDITING', progressActivityAt: '2026-09-03T10:00:00.000Z',
+  }, 'BUILDING').supervision;
+  assert.strictEqual(heartbeatOnly.progressState, 'UNRECORDED');
+  assert.strictEqual(heartbeatOnly.activityState, 'UNRECORDED');
+  assert.strictEqual(heartbeatOnly.activityCode, null);
+  assert.strictEqual(heartbeatOnly.activitySummary, null);
+  assert.strictEqual(heartbeatOnly.activityAt, null);
+  assert.match(heartbeatOnly.activityReason, /unavailable/,
+    'an unrecorded activity must say plainly that it is unavailable');
+
+  const progressing = {
+    mode: 'async', workerState: 'RUNNING',
+    lastProgressAt: '2026-09-03T10:09:40.000Z', progressKind: 'STDOUT',
+  };
+  for (const [label, partial] of [
+    ['category without a time', { progressActivity: 'READING' }],
+    ['time without a category', { progressActivityAt: '2026-09-03T10:09:30.000Z' }],
+    ['unknown vocabulary', { progressActivity: 'DEPLOYING', progressActivityAt: '2026-09-03T10:09:30.000Z' }],
+    ['model prose as a category', { progressActivity: HOSTILE_WORKER_OUTPUT.source,
+      progressActivityAt: '2026-09-03T10:09:30.000Z' }],
+    ['unparseable evidence time', { progressActivity: 'READING', progressActivityAt: 'a moment ago' }],
+  ]) {
+    const refused = S.minimizeWorker({ ...progressing, ...partial }, 'BUILDING').supervision;
+    assert.strictEqual(refused.progressState, 'RECORDED', label);
+    assert.strictEqual(refused.activityState, 'UNRECORDED', label);
+    assert.strictEqual(refused.activityCode, null, label);
+    assert.strictEqual(refused.activitySummary, null, label);
+    assert.strictEqual(refused.activityAt, null, label);
+    assertNoHostileWorkerOutput(refused, `activity supervision (${label})`);
   }
 });
 
