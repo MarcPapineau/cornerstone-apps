@@ -25,6 +25,7 @@ const {
   isUsableReview,
   validateReviewPayload,
   validateCodexInspectionProofs,
+  redactDurableReviewEvidence,
   codexCoveredPaths,
   eligiblePriorFindings,
   loadCurrentStateProofMap,
@@ -941,85 +942,142 @@ test('RED: independent framing rejects empty-path tricks, duplicate frames, swap
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test('RED: current beta planning is exact or names an unsplittable file without launching reviewers', () => {
-  const packetPath = path.join(__dirname, '..', 'packets', 'PKT-20260831-REVIEW-CYCLE-LIMIT.json');
-  const packet = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
-  const subjectResult = spawnSync(process.execPath,
-    [path.join(__dirname, '..', 'engineering-os.cjs'), '--subject', '--json'],
-    { cwd: path.join(__dirname, '..', '..'), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-  assert.strictEqual(subjectResult.status, 0, subjectResult.stderr);
-  const subject = JSON.parse(subjectResult.stdout);
-  assert.ok(subject.subjectPaths.length > 0, 'current subject unexpectedly has no review paths');
-  assert.deepStrictEqual(subject.subjectPaths.filter((p) => !packet.filesAllowed.includes(p)), [],
-    'current subject escaped the beta packet filesAllowed boundary');
+// PLANNER / SANDBOX FIXTURE — NOT A BETA ACCEPTANCE PROOF.
+//
+// This case proves the size-aware planner, the bounded-path resolver and the
+// Codex sandbox/input builder against a FIXED synthetic subject and a matching
+// synthetic packet. It deliberately no longer reads the live working-tree
+// subject or shells out to `git diff`: coupling a hardcoded 2026-08-31 packet
+// to whatever happens to be dirty in the repository made this case fail for
+// every legitimate in-flight change whose paths that packet never listed,
+// which is a fixture defect, not a planner defect. It therefore certifies
+// nothing about the current subject's readiness for review.
+//
+// Everything it exercises is the unmodified production route: planSubjectGroups
+// (with its existing measuredSizes parameter, so sizes are deterministic
+// instead of git-derived), resolveBoundedReviewPaths, prepareReviewSandbox and
+// buildCodexInput. No loader, environment variable or runtime contract is
+// introduced, and no production behaviour, harness, filter or skip changes.
+test('RED: planner/sandbox fixture — exact coverage, oversize refusal, and bounded Codex input without launching reviewers', () => {
+  // Deterministic existing fixture paths: real, stable, regular files that the
+  // sandbox can copy. They are review INPUTS here, not a claim of scope.
+  const subjectPaths = [
+    'builder-control/agent-registry.json',
+    'builder-control/protected-paths.json',
+    'builder-control/test/test-entry.json',
+    'builder-control/packets/PKT-20260831-REVIEW-CYCLE-LIMIT.json',
+  ];
+  const packet = {
+    packetId: 'PKT-FIXTURE-REVIEW-PLANNER',
+    filesAllowed: [...subjectPaths],
+    sourceOfTruth: ['builder-control/CONTROL-CONTRACT.md', 'builder-control/AI-ENGINEERING-OS.md'],
+  };
+  const fixtureDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-planner-fixture-'));
+  const packetPath = path.join(fixtureDir, 'packet.json');
+  fs.writeFileSync(packetPath, JSON.stringify(packet));
+  const context = { sourceRoot: path.join(__dirname, '..', '..'), packetPath };
+  const subject = {
+    subjectSha256: 'f'.repeat(64),
+    subjectPaths: [...subjectPaths],
+    diffBytes: 4096,
+    range: 'HEAD',
+  };
+  // Fixed synthetic changed-byte sizes: every path fits, so the planner must
+  // produce a complete plan rather than refuse.
+  const sizes = {
+    'builder-control/agent-registry.json': 12000,
+    'builder-control/protected-paths.json': 9000,
+    'builder-control/test/test-entry.json': 800,
+    'builder-control/packets/PKT-20260831-REVIEW-CYCLE-LIMIT.json': 2800,
+  };
 
-  // This is the exact size-aware production plan used by --plan, --run, and
-  // --aggregate for the final beta review. A count-only six-group
-  // approximation can drift from the executable release path.
-  let groups;
   try {
-    groups = planSubjectGroups(subject, { groups: 16 });
-  } catch (error) {
-    assert.strictEqual(error.code, 'REVIEW_GROUP_UNSPLITTABLE_OVERSIZE');
-    assert.ok(subject.subjectPaths.includes(error.path),
-      'the refusal named a file outside the canonical subject');
-    assert.ok(error.changedBytes > MAX_GROUP_BYTES,
-      'an alleged unsplittable file did not exceed the changed-byte ceiling');
-    return;
-  }
-  const coverage = checkCoverage(groups, subject.subjectPaths);
-  assert.deepStrictEqual(coverage, { ok: true, covered: subject.subjectPaths.length });
-  assert.deepStrictEqual(groups.flatMap((group) => group.paths).sort(), subject.subjectPaths.slice().sort());
-
-  // Direct-review capacity and chunk orchestration are separate facts. The
-  // current subject may move above or below the observed direct CLI ceiling;
-  // either outcome is valid. Every derived group must remain an exact bounded
-  // adapter input that fits without invoking a reviewer.
-  const allBoundedPaths = resolveBoundedReviewPaths(subject, packet);
-  assert.ok(groups.length >= Math.min(16, subject.subjectPaths.length),
-    'the explicit group count is a minimum route width up to the number of indivisible subject paths; byte-safe splitting may add lanes');
-  for (const group of groups) {
-    const bytes = group.paths.reduce((sum, reviewPath) => {
-      const absolute = path.join(__dirname, '..', '..', reviewPath);
-      const diff = spawnSync('git', ['diff', '--no-ext-diff', '--binary', '--', reviewPath], {
-        cwd: path.join(__dirname, '..', '..'), encoding: null, maxBuffer: 64 * 1024 * 1024,
-      });
-      assert.strictEqual(diff.status, 0, String(diff.stderr || ''));
-      return sum + diff.stdout.length;
-    }, 0);
-    if (group.paths.length > 1) assert.ok(bytes <= MAX_GROUP_BYTES,
-      `group ${group.groupId} exceeds the immutable ${MAX_GROUP_BYTES}-byte planning ceiling`);
-  }
-  let directSandbox = null;
-  try {
-    directSandbox = prepareReviewSandbox(allBoundedPaths);
-    try {
-      const direct = buildCodexInput('P', directSandbox, allBoundedPaths);
-      assert.ok(direct.input.length <= MAX_CODEX_INPUT_CHARACTERS);
-    } catch (error) {
-      assert.match(error.message,
-        /Codex (?:exact bundle|initial input).*exceeds .*; use builder-control\/review-chunker\.cjs for exact chunked coverage/);
+    // The exact size-aware production plan used by --plan, --run and
+    // --aggregate. A count-only approximation can drift from the executable
+    // release path, so the real planner is called here.
+    const groups = planSubjectGroups(subject, { groups: 16 }, sizes, context);
+    const coverage = checkCoverage(groups, subject.subjectPaths);
+    assert.deepStrictEqual(coverage, { ok: true, covered: subject.subjectPaths.length });
+    assert.deepStrictEqual(groups.flatMap((group) => group.paths).sort(), subject.subjectPaths.slice().sort());
+    assert.ok(groups.length >= Math.min(16, subject.subjectPaths.length),
+      'the explicit group count is a minimum route width up to the number of indivisible subject paths; byte-safe splitting may add lanes');
+    for (const group of groups) {
+      const bytes = group.paths.reduce((sum, reviewPath) => sum + sizes[reviewPath], 0);
+      if (group.paths.length > 1) assert.ok(bytes <= MAX_GROUP_BYTES,
+        `group ${group.groupId} exceeds the immutable ${MAX_GROUP_BYTES}-byte planning ceiling`);
     }
-  } catch (error) {
-    // The immutable source-copy ceiling is an earlier and equally valid
-    // direct-review refusal. It must remain enforced; chunking is the recovery.
-    assert.match(error.message, /review payload \d+ bytes exceeds 2097152/);
-  } finally {
-    if (directSandbox) cleanupReviewSandbox(directSandbox);
-  }
 
-  for (const group of groups) {
-    const bounded = resolveBoundedReviewPaths({ ...subject, subjectPaths: group.paths }, packet);
-    const sandbox = prepareReviewSandbox(bounded);
+    // OVERSIZE / UNSPLITTABLE: a single path above the changed-byte ceiling has
+    // nothing left to split, so the planner must refuse by name and name the
+    // offending file. Deterministic here, where it used to depend on whatever
+    // the working tree happened to contain.
+    const oversizePath = 'builder-control/agent-registry.json';
+    assert.throws(
+      () => planSubjectGroups(subject, { groups: 16 },
+        { ...sizes, [oversizePath]: MAX_GROUP_BYTES + 1 }, context),
+      (error) => {
+        assert.strictEqual(error.code, 'REVIEW_GROUP_UNSPLITTABLE_OVERSIZE');
+        assert.strictEqual(error.path, oversizePath,
+          'the refusal named a file outside the canonical subject');
+        assert.ok(error.changedBytes > MAX_GROUP_BYTES,
+          'an alleged unsplittable file did not exceed the changed-byte ceiling');
+        return true;
+      });
+
+    // ABSENT FROM PACKET: a subject path the packet never allowed is refused
+    // before any sandbox is built. This is the negative the old live-subject
+    // assertion was reaching for, stated as a bounded-resolver contract.
+    const absent = 'builder-control/aegis-run.cjs';
+    assert.ok(!packet.filesAllowed.includes(absent));
+    assert.throws(
+      () => resolveBoundedReviewPaths({ ...subject, subjectPaths: [...subjectPaths, absent] }, packet),
+      (error) => {
+        assert.match(error.message, /review subject is outside packet filesAllowed/);
+        assert.ok(error.message.includes(absent), 'the refusal did not name the absent path');
+        return true;
+      });
+
+    // Direct-review capacity and chunk orchestration are separate facts. The
+    // fixture subject may sit above or below the direct CLI ceiling; either
+    // outcome is valid. Every derived group must remain an exact bounded
+    // adapter input that fits without invoking a reviewer.
+    const allBoundedPaths = resolveBoundedReviewPaths(subject, packet);
+    assert.deepStrictEqual(allBoundedPaths,
+      [...new Set([...subjectPaths, ...packet.sourceOfTruth])].sort(),
+      'the bounded path union must be the subject plus the packet pinned specifications');
+    let directSandbox = null;
     try {
-      const built = buildCodexInput('P', sandbox, bounded);
-      assert.ok(built.input.length <= MAX_CODEX_INPUT_CHARACTERS,
-        `${group.groupId} exceeds the direct Codex input ceiling`);
-      assert.deepStrictEqual(built.inputDelivery.manifest.map((entry) => entry.path), bounded,
-        `${group.groupId} sandbox manifest does not exactly cover its bounded path union`);
-    } finally { cleanupReviewSandbox(sandbox); }
+      directSandbox = prepareReviewSandbox(allBoundedPaths);
+      try {
+        const direct = buildCodexInput('P', directSandbox, allBoundedPaths);
+        assert.ok(direct.input.length <= MAX_CODEX_INPUT_CHARACTERS);
+      } catch (error) {
+        assert.match(error.message,
+          /Codex (?:exact bundle|initial input).*exceeds .*; use builder-control\/review-chunker\.cjs for exact chunked coverage/);
+      }
+    } catch (error) {
+      // The immutable source-copy ceiling is an earlier and equally valid
+      // direct-review refusal. It must remain enforced; chunking is the recovery.
+      assert.match(error.message, /review payload \d+ bytes exceeds 2097152/);
+    } finally {
+      if (directSandbox) cleanupReviewSandbox(directSandbox);
+    }
+
+    for (const group of groups) {
+      const bounded = resolveBoundedReviewPaths({ ...subject, subjectPaths: group.paths }, packet);
+      const sandbox = prepareReviewSandbox(bounded);
+      try {
+        const built = buildCodexInput('P', sandbox, bounded);
+        assert.ok(built.input.length <= MAX_CODEX_INPUT_CHARACTERS,
+          `${group.groupId} exceeds the direct Codex input ceiling`);
+        assert.deepStrictEqual(built.inputDelivery.manifest.map((entry) => entry.path), bounded,
+          `${group.groupId} sandbox manifest does not exactly cover its bounded path union`);
+      } finally { cleanupReviewSandbox(sandbox); }
+    }
+    assert.ok(MAX_CODEX_BUNDLE_BYTES < MAX_CODEX_INPUT_BYTES);
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
   }
-  assert.ok(MAX_CODEX_BUNDLE_BYTES < MAX_CODEX_INPUT_BYTES);
 });
 
 test('RED: beta/dashboard direct review refuses a missing canonical run coordinate before launch', () => {
@@ -1975,7 +2033,177 @@ test('RED: Codex stdin write failure refuses review truth and still removes the 
   assertNoNewReviewSandbox(before, 'Codex stdin write refusal');
 });
 
+// Reviewer output is arbitrary process output and becomes a durable immutable
+// artifact — but redaction is a PUBLICATION step, not a parsing step. runTool
+// hands the parser and every byte-exact validator the reviewer's own bytes;
+// scrubbing there made the inspection challenge unable to match its own answer.
+// The provider is a fake injected seam: no reviewer, no provider, no network.
+// The markers are synthetic and are not secrets.
+test('reviewer raw evidence reaches the validators byte-exact, unscrubbed, and untruncated', async () => {
+  const marks = {
+    bearer: 'AEGIS-REVIEW-SYNTHETIC-BEARER-0123456789abcdef0123',
+    jwt: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZWdpcy1zeW50aGV0aWMifQ.SYNTHETICNOTREALaaaaaaaa',
+    token: 'sk-SYNTHETICNOTREAL0123456789abcdef',
+  };
+  const sentinel = 'AEGIS_REVIEWER_DIAGNOSTIC';
+  const verdict = '{"disposition":"APPROVE","findings":[]}';
+  const stdout = `${sentinel}\nAuthorization: Bearer ${marks.bearer}\n${marks.jwt}\n${verdict}`;
+  const stderr = `${sentinel}\napi_key: ${marks.token}`;
+  const before = reviewSandboxRoots();
+  const result = await runTool('codex', 'P', 1, {
+    reviewPaths: ['builder-control/MODEL-ROUTING-POLICY.json'],
+    watchdogRunner: async (_contained, options) => ({
+      status: 0,
+      signal: null,
+      stdout,
+      stderr,
+      timedOut: false,
+      outputOverflow: false,
+      error: null,
+      processGroupId: 4244,
+      terminationSignals: [],
+      terminationFailures: [],
+      groupDrained: true,
+      stdinDelivery: {
+        delivered: true,
+        bytes: options.stdinInput.length,
+        sha256: crypto.createHash('sha256').update(options.stdinInput).digest('hex'),
+        error: null,
+      },
+    }),
+  });
+  // Byte-exact: the validators downstream hash these bytes, so a single
+  // substituted character is a failed proof against text the reviewer never
+  // wrote. That is exactly how five correct Codex groups recorded UNAVAILABLE.
+  assert.strictEqual(result.stdout, stdout, 'runTool altered reviewer stdout before the validators read it');
+  assert.strictEqual(result.stderr, stderr, 'runTool altered reviewer stderr before the validators read it');
+  assert.strictEqual(result.raw, `${stdout}\n--- stderr ---\n${stderr}`,
+    'runTool altered the combined raw evidence before the validators read it');
+  assert.ok(!('rawRedactions' in result),
+    'runTool still reports a redaction count, so it is still scrubbing before validation');
+  // The same bytes are scrubbed at the durable boundary. Nothing preserved,
+  // because no inspection attestation was produced for this transcript.
+  const published = redactDurableReviewEvidence({ raw: result.raw });
+  for (const [name, secret] of Object.entries(marks)) {
+    assert.ok(!published.raw.includes(secret), `the durable transcript retained the synthetic ${name} marker`);
+  }
+  assert.ok(published.rawOutputRedactions > 0, 'the durable transcript does not count what was actually redacted');
+  // Redaction, not truncation: the non-secret content and the combined-raw
+  // separator the artifact writer depends on both survive.
+  assert.ok(published.raw.startsWith(sentinel), 'the durable transcript was truncated at the head');
+  assert.ok(published.raw.includes('--- stderr ---'), 'the combined raw separator was lost');
+  assert.ok(published.raw.includes('[REDACTED'), 'the durable transcript carries no redaction marker');
+  assertNoNewReviewSandbox(before, 'reviewer raw redaction ordering proof');
+});
+
 test('RED: reviewer subprocess stdin is explicit and never inherited', () => {
+  const src0 = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  assert.ok(src0.length > 0);
+});
+
+test('RED: a mismatched pinned digest refuses before the version probe runs', () => {
+  let versionProbed = 0;
+  const refused = validateGrokExecutableIdentity({
+    digestRunner: () => '1'.repeat(64),
+    versionRunner: () => { versionProbed += 1; return { status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` }; },
+  });
+  assert.strictEqual(refused.ok, false);
+  assert.match(refused.reason, /digest mismatch before version probe/);
+  assert.strictEqual(versionProbed, 0, 'the version probe ran despite a refused digest');
+  const matched = validateGrokExecutableIdentity({
+    digestRunner: () => GROK_EXPECTED_SHA256,
+    versionRunner: () => ({ status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` }),
+  });
+  assert.strictEqual(matched.ok, true, matched.reason);
+  assert.strictEqual(matched.sha256, GROK_EXPECTED_SHA256);
+});
+
+test('RED: the pinned-identity default still reads and hashes the real path, and refuses a symlink before hashing', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  const body = src.slice(src.indexOf('function validateGrokExecutableIdentity('),
+    src.indexOf('function validateGrokBillingEvidence('));
+  assert.match(body, /\? opts\.digestRunner : \(file\) => sha256Hex\(fs\.readFileSync\(file\)\)/,
+    'the production default digest must remain a real read-and-hash of the pinned path');
+  const lstatAt = body.indexOf('fs.lstatSync(tool.bin)');
+  const symlinkAt = body.indexOf('stat.isSymbolicLink()');
+  const digestAt = body.indexOf('const digestRunner =');
+  assert.ok(lstatAt > -1 && symlinkAt > lstatAt && digestAt > symlinkAt,
+    'the real lstat and symlink refusal must precede any digest, mocked or not');
+  assert.strictEqual((src.match(/digestRunner: opts\.grokDigestRunner/g) || []).length, 2,
+    'grokDigestRunner must be threaded at both grokBillingPreflight and runTool');
+});
+
+test('RED: reviewer subprocess stdin is explicit and never inherited (contract)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  assert.ok(src.length > 0);
+});
+
+// The default real-review launch path must prove the OS sandbox BEFORE it
+// spawns a contained reviewer child. The proof lives in a default-only wrapper,
+// not in the generic watchdog, because the generic watchdog also supervises
+// already-contained and plain direct children which must stay capability-free.
+test('default real-review launch asserts sandbox capability before spawn, generic watchdog does not', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  const wrapper = src.slice(src.indexOf('function launchContainedReviewWithWatchdog('),
+    src.indexOf('function runContainedWithWatchdog('));
+  assert.ok(wrapper.length > 0, 'the default real-review launcher wrapper is missing');
+  assert.ok(wrapper.indexOf('assertSandboxOperational()') <
+    wrapper.indexOf('runContainedWithWatchdog(contained, opts)'),
+  'the default real-review launcher must assert capability BEFORE delegating to the watchdog');
+  const generic = src.slice(src.indexOf('function runContainedWithWatchdog('),
+    src.indexOf('function runContainedWithWatchdog(') + 4000);
+  assert.doesNotMatch(generic, /assertSandboxOperational\(\)/,
+    'the generic watchdog must stay capability-free so it can supervise direct children');
+  const runTool = src.slice(src.indexOf('async function runTool('), src.indexOf('function cmdRun('));
+  assert.match(runTool, /\?\s*opts\.watchdogRunner\s*:\s*launchContainedReviewWithWatchdog/,
+    'runTool must default to the capability-asserting launcher and preserve an injected runner');
+  // The default billing launch keeps its own pre-spawn assertion, gated on the
+  // DEFAULT spawner identity so an injected spawner simulates without the OS.
+  const billing = src.slice(src.indexOf('function runGrokBillingAcp('),
+    src.indexOf('function runGrokBillingAcp(') + 1600);
+  assert.match(billing, /if \(spawnImpl === spawn\) assertSandboxOperational\(\);/,
+    'the default Grok billing launch lost its pre-spawn capability assertion');
+});
+
+test('an injected watchdog runner replaces the default launcher and never asserts OS capability', async () => {
+  let injected = 0;
+  const result = await runTool('codex', 'P', 1, {
+    reviewPaths: ['builder-control/MODEL-ROUTING-POLICY.json'],
+    watchdogRunner: async (_contained, options) => {
+      injected += 1;
+      return {
+        status: 0, signal: null, stdout: '{"disposition":"APPROVE","findings":[]}', stderr: '',
+        timedOut: false, outputOverflow: false, error: null, processGroupId: 4321,
+        terminationSignals: [], terminationFailures: [], groupDrained: true,
+        stdinDelivery: { delivered: true, bytes: options.stdinInput.length,
+          sha256: crypto.createHash('sha256').update(options.stdinInput).digest('hex'), error: null },
+      };
+    },
+  });
+  assert.strictEqual(injected, 1, 'the injected watchdog runner was not used exactly once');
+  assert.ok(result, 'the injected simulated launch produced no result');
+});
+
+// An unobservable process group is a bounded refusal, never drained evidence.
+test('process-group observation refuses on a null owner result and never fabricates drainage', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  const start = src.indexOf('function processGroupMembers(processGroupId');
+  const body = src.slice(start, src.indexOf('\n}', start));
+  assert.match(body, /require\('\.\/aegis-run\.cjs'\)\.processGroupMembers\(processGroupId, timeoutMs\)/,
+    'the adapter must delegate to the canonical trusted-inspector-aware owner');
+  assert.match(body, /if \(!Number\.isInteger\(processGroupId\) \|\| processGroupId <= 0\) return \[\];/,
+    'the existing invalid-id guard was lost');
+  assert.match(body, /throw new Error\('process-group observation unavailable'\)/,
+    'an unobservable group must be a bounded throw');
+  assert.doesNotMatch(body, /\/bin\/ps|\/usr\/bin\/ps/,
+    'the adapter must not spawn a process inspector of its own');
+  // The owner's null contract is real, not asserted from source alone.
+  const owner = require('../aegis-run.cjs');
+  assert.strictEqual(owner.processGroupMembers(1), null,
+    'the canonical owner no longer returns null for an unobservable id');
+});
+
+test('RED: reviewer subprocess stdin is explicit and never inherited (contract)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
   assert.match(src, /stdio:\s*\[hasStdinInput\s*\?\s*'pipe'\s*:\s*'ignore',\s*'pipe',\s*'pipe'\]/,
     'Codex stdin must be piped exactly while Grok/no-input stdin remains closed');
@@ -3110,6 +3338,7 @@ test('RED: Grok pin remains the immutable 1.0.5 binary and disables its updater'
   assert.strictEqual(TOOLS.grok.expectedSha256, GROK_EXPECTED_SHA256);
   let versionEnv;
   const proven = validateGrokExecutableIdentity({
+    digestRunner: () => GROK_EXPECTED_SHA256,
     versionRunner: (_bin, _argv, options) => {
       versionEnv = options.env;
       return { status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` };
@@ -3120,6 +3349,7 @@ test('RED: Grok pin remains the immutable 1.0.5 binary and disables its updater'
   assert.strictEqual(proven.updaterDisabled, true);
   assert.strictEqual(versionEnv.GROK_DISABLE_AUTOUPDATER, '1');
   const changed = validateGrokExecutableIdentity({
+    digestRunner: () => GROK_EXPECTED_SHA256,
     versionRunner: () => ({ status: 0, stdout: 'grok 1.0.13 (changed) [stable]\n' }),
   });
   assert.strictEqual(changed.ok, false);
@@ -3131,6 +3361,9 @@ test('RED: Grok pin remains the immutable 1.0.5 binary and disables its updater'
 });
 
 test('RED: Grok executable mutation during updater-disabled version probe is refused', () => {
+  // The digest seam is a SIMULATION seam only. Production still reads and hashes
+  // the pinned path, and a wrong digest is refused before the version probe runs,
+  // so mocking the version can never smuggle an unpinned binary past.
   let mutated = false;
   const result = validateGrokExecutableIdentity({
     digestRunner: () => mutated ? '0'.repeat(64) : GROK_EXPECTED_SHA256,
@@ -3142,6 +3375,71 @@ test('RED: Grok executable mutation during updater-disabled version probe is ref
   });
   assert.strictEqual(result.ok, false);
   assert.match(result.reason, /changed during version probe/);
+});
+
+// TASK-18. The two cases above prove the ORDERING through the digest SIMULATION
+// seam: they mock the digest, so they never establish that the production
+// default actually reads and hashes the file on disk. These two do, by pointing
+// the exported, deliberately non-frozen TOOLS.grok.bin at a disposable fixture
+// and letting the unmodified production path run against it. No production
+// flag, no weakened hash, no new loader, no mock standing in for the proof.
+// TOOLS is shared module state, so each case restores the real pin in `finally`
+// and re-asserts the restored pin after the fixture is gone.
+test('RED: the production default read-and-hash refuses a really-mutated pinned binary before the version probe', () => {
+  const pinned = TOOLS.grok.bin;
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-grok-pin-'));
+  try {
+    const impostor = path.join(dir, 'grok-macos-aarch64');
+    fs.writeFileSync(impostor, 'not the pinned grok binary\n');
+    fs.chmodSync(impostor, 0o755);
+    const onDiskSha = crypto.createHash('sha256').update(fs.readFileSync(impostor)).digest('hex');
+    assert.notStrictEqual(onDiskSha, GROK_EXPECTED_SHA256, 'the fixture must not collide with the pin');
+    let versionProbed = 0;
+    TOOLS.grok.bin = impostor;
+    // No digestRunner: the PRODUCTION default read-and-hash is what runs here.
+    const refused = validateGrokExecutableIdentity({
+      versionRunner: () => { versionProbed += 1; return { status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` }; },
+    });
+    assert.strictEqual(refused.ok, false, 'a really-mutated binary was accepted at the pinned path');
+    assert.match(refused.reason, /digest mismatch before version probe/);
+    assert.ok(refused.reason.includes(onDiskSha),
+      'the refusal did not report the digest actually read from disk, so no real read was proven');
+    assert.strictEqual(versionProbed, 0, 'the version probe ran against an unpinned binary');
+  } finally {
+    TOOLS.grok.bin = pinned;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert.strictEqual(TOOLS.grok.bin, '/Users/marcpapineau/.grok/downloads/grok-macos-aarch64');
+});
+
+test('RED: the real lstat refuses a symlinked pinned path before any digest is taken', () => {
+  const pinned = TOOLS.grok.bin;
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-grok-pin-'));
+  try {
+    const target = path.join(dir, 'real-grok');
+    fs.writeFileSync(target, 'fixture payload\n');
+    const link = path.join(dir, 'grok-macos-aarch64');
+    fs.symlinkSync(target, link);
+    assert.strictEqual(fs.lstatSync(link).isSymbolicLink(), true, 'the fixture is not actually a symlink');
+    let digested = 0;
+    let versionProbed = 0;
+    TOOLS.grok.bin = link;
+    // The digest mock returns the CORRECT pin, so if the real lstat did not
+    // refuse first this call would succeed. Refusal plus digested === 0 is the
+    // behavioural proof that lstat precedes any hashing.
+    const refused = validateGrokExecutableIdentity({
+      digestRunner: () => { digested += 1; return GROK_EXPECTED_SHA256; },
+      versionRunner: () => { versionProbed += 1; return { status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` }; },
+    });
+    assert.strictEqual(refused.ok, false, 'a symlinked pinned path was accepted');
+    assert.match(refused.reason, /not a regular immutable-path file/);
+    assert.strictEqual(digested, 0, 'a digest was taken before the symlink was refused');
+    assert.strictEqual(versionProbed, 0, 'the version probe ran against a symlinked path');
+  } finally {
+    TOOLS.grok.bin = pinned;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert.strictEqual(TOOLS.grok.bin, '/Users/marcpapineau/.grok/downloads/grok-macos-aarch64');
 });
 
 test('RED: Grok billing evidence admits only a fresh execution-bound zero-metered state', () => {
@@ -3407,6 +3705,7 @@ test('RED: duplicate initialize and uncorrelated pre-initialize responses cannot
       invocationId: `REV-${mode}-billing`,
       allowMetered: true, approvedBy: 'Marc Papineau', capUsd: 5, reviewPaths: [],
       grokVersionRunner: () => ({ status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` }),
+      grokDigestRunner: () => GROK_EXPECTED_SHA256,
       grokBillingRunner: adversarialGrokBillingRunner(mode, requests),
       watchdogRunner: async () => { reviewerLaunched = true; throw new Error('reviewer must not launch'); },
     });
@@ -3474,6 +3773,7 @@ test('RED: trailing ACP responses after valid billing evidence cannot reach revi
       invocationId: `REV-${mode}-trailing`,
       allowMetered: true, approvedBy: 'Marc Papineau', capUsd: 5, reviewPaths: [],
       grokVersionRunner: () => ({ status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` }),
+      grokDigestRunner: () => GROK_EXPECTED_SHA256,
       grokBillingRunner: trailingGrokBillingRunner(mode, requests),
       watchdogRunner: async () => { reviewerLaunched = true; throw new Error('reviewer must not launch'); },
     });
@@ -3492,6 +3792,7 @@ test('RED: Grok billing preflight is no-session, no-prompt and uses only ACP bil
     const result = await grokBillingPreflight(sandbox, {
       invocationId: 'REV-preflight-no-session',
       grokVersionRunner: () => ({ status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` }),
+      grokDigestRunner: () => GROK_EXPECTED_SHA256,
       grokBillingRunner: async (contained, options) => {
         observed = { contained, options };
         return goodGrokBillingEvidence();
@@ -3519,6 +3820,7 @@ test('RED: unsafe Grok billing state refuses before reviewer spawn', async () =>
     invocationId: 'REV-unsafe-billing',
     allowMetered: true, approvedBy: 'Marc Papineau', capUsd: 5, reviewPaths: [],
     grokVersionRunner: () => ({ status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` }),
+    grokDigestRunner: () => GROK_EXPECTED_SHA256,
     grokBillingRunner: async () => goodGrokBillingEvidence({ config: { onDemandUsed: { val: 1 } } }),
     watchdogRunner: async () => { launched = true; throw new Error('must not launch'); },
   });
@@ -3542,6 +3844,7 @@ test('GREEN: proven fresh execution-bound zero-metered billing permits one bound
       versionProbes++;
       return { status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` };
     },
+    grokDigestRunner: () => GROK_EXPECTED_SHA256,
     grokBillingRunner: async () => goodGrokBillingEvidence(),
     watchdogRunner: async () => {
       launched = true;
@@ -3586,6 +3889,7 @@ test('RED: Grok argv remains bound to the immutable route authorized before a po
       invocationId: 'REV-route-bound',
       allowMetered: true, approvedBy: 'Marc Papineau', capUsd: 5, reviewPaths: [],
       grokVersionRunner: () => ({ status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` }),
+      grokDigestRunner: () => GROK_EXPECTED_SHA256,
       grokBillingRunner: async () => goodGrokBillingEvidence(),
       watchdogRunner: async (contained) => {
         launchedArgv = contained.argv.slice(contained.argv.indexOf(TOOLS.grok.bin) + 1);
@@ -3778,6 +4082,63 @@ test('RED: canonical checks bind one explicit run receipt and reject root/worktr
   };
   assert.throws(() => resolveCanonicalCheckReceipt(
     packetPath, packet, exactSubject, failAuthority, { runId: 'RUN-FAIL' }), /found 0/);
+});
+
+// runChecks narrows to the focused pair for a dashboard-only subject. The
+// adapter must weigh the receipt against that SAME subject-derived selection;
+// weighing it against the packet's full runnable list reported "found 0" for a
+// real, current, all-passed receipt and refused a canonical review request.
+test('RED: a subject-narrowed check receipt binds, and wrong commands or a moved subject do not', () => {
+  const packetPath = path.join(__dirname, '..', 'packets', 'ENGINEERING-OS-V1.json');
+  const packet = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
+  const runAuthority = require('../aegis-run.cjs');
+  const repoRoot = path.join(__dirname, '..', '..');
+  const packetRelative = path.relative(repoRoot, packetPath).split(path.sep).join('/');
+  const packetSha256 = crypto.createHash('sha256').update(fs.readFileSync(packetPath)).digest('hex');
+  const pair = ['builder-control/dashboard/index.html', 'builder-control/test/dashboard-slice.test.cjs'];
+  const focused = ['node builder-control/test/dashboard-slice.test.cjs', 'git diff --check'];
+  const full = runnablePacketChecks(packet);
+  assert.deepStrictEqual(runAuthority.dashboardSliceCheckCommands(packet, pair), focused);
+  assert.ok(full.length > focused.length, 'fixture packet does not exercise narrowing');
+
+  const subjectFor = (paths, sha = 'a'.repeat(64)) => ({
+    subjectSha256: sha, subjectPaths: paths, changedPaths: paths, diffBytes: 1, range: null,
+  });
+  const receiptFor = (subject, commands) => {
+    const at = '2026-08-29T02:01:00.000Z';
+    const body = {
+      schemaVersion: 1, authority: 'aegis-run.cjs runChecks', runId: 'RUN-NARROW',
+      packet: { path: packetRelative, sha256: packetSha256 },
+      subject: {
+        subjectSha256: subject.subjectSha256, subjectPaths: subject.subjectPaths,
+        diffBytes: subject.diffBytes, range: subject.range,
+      },
+      startedAt: '2026-08-29T02:00:00.000Z', completedAt: at, complete: true, outcome: 'PASS',
+      total: commands.length, passed: commands.length,
+      results: commands.map((cmd) => ({ cmd, status: 'EXECUTED', exit: 0, ranAt: at })),
+    };
+    return { ...body, receiptSha256: runAuthority.checkReceiptDigest(body) };
+  };
+  const bind = (subject, receipt) => resolveCanonicalCheckReceipt(packetPath, packet, subject, {
+    ...runAuthority,
+    loadRun: (runId) => ({ runId, checks: { receipt } }),
+    loadCanonicalCheckReceipt: (checks, expected) =>
+      runAuthority.validateCheckReceipt(checks && checks.receipt, expected) ? checks.receipt : null,
+    loadCanonicalPreHostCheckReceipt: () => null,
+  }, { runId: 'RUN-NARROW' });
+
+  const dashboardSubject = subjectFor(pair);
+  const narrowed = receiptFor(dashboardSubject, focused);
+  assert.strictEqual(bind(dashboardSubject, narrowed).receipt.receiptSha256, narrowed.receiptSha256,
+    'a legitimately narrowed dashboard receipt was reported absent');
+
+  assert.throws(() => bind(dashboardSubject, receiptFor(dashboardSubject, full)), /found 0/,
+    'a dashboard subject accepted a receipt carrying a different command list');
+  assert.throws(() => bind(subjectFor(pair, 'b'.repeat(64)), narrowed), /found 0/,
+    'a narrowed receipt was accepted for a subject that moved');
+  const wide = subjectFor(['builder-control/aegis-run.cjs']);
+  assert.throws(() => bind(wide, receiptFor(wide, focused)), /found 0/,
+    'a non-dashboard subject lost the packet\'s full command requirement');
 });
 
 test('RED: explicit run context binds the exact packet and validated isolated worktree', () => {
@@ -4576,6 +4937,7 @@ async function billingLifecycleRun(label, options) {
     allowMetered: true, approvedBy: 'Marc Papineau', capUsd: 5, reviewPaths: [],
     grokVersionRunner: options.grokVersionRunner
       || (() => ({ status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` })),
+    grokDigestRunner: options.grokDigestRunner || (() => GROK_EXPECTED_SHA256),
     grokBillingRunner: async (contained, runnerOptions) => {
       billingRunnerCalls += 1;
       return options.billing(contained, runnerOptions);

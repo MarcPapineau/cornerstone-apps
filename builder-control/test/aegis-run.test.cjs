@@ -76,6 +76,15 @@ const REVIEW_ADMISSION_ONLY = process.argv.slice(2).includes('--review-admission
 // frozen literal list of case names and nothing else; it is a subset, never a
 // gate, and it claims nothing about the rest of the suite.
 const CHECKPOINT_ONLY = process.argv.slice(2).includes('--checkpoint-only');
+// The same fixed-purpose shape for the fixed-policy check-selector proofs. It
+// adds no framework and no pattern matching: a frozen literal list of case
+// names, every one of which must still run.
+const CHECK_SELECTOR_ONLY = process.argv.slice(2).includes('--check-selector-only');
+// The same fixed-purpose shape for the same-sandbox drainage proofs. It
+// selects a frozen literal list of case names and nothing else; it is a
+// subset, never a gate, and it claims nothing about the rest of the suite.
+const SANDBOX_DRAINAGE_ONLY = process.argv.slice(2).includes('--sandbox-drainage-only');
+const SANDBOX_EXEC_PATH = '/usr/bin/sandbox-exec';
 
 function assertIsolatedRepositoryMarker() {
   const marker = process.env.AEGIS_TEST_ISOLATED_REPOSITORY;
@@ -130,7 +139,8 @@ function runInDisposableExactRepository() {
       checkedTestCommand('publish canonical untracked subject intent', 'git',
         ['add', '-N', '--', relative], { cwd: repo });
     }
-    const frozenReviewFixtures = HOST_ONLY || REVIEW_ADMISSION_ONLY || CHECKPOINT_ONLY ? [] : [
+    const frozenReviewFixtures = HOST_ONLY || REVIEW_ADMISSION_ONLY || CHECKPOINT_ONLY ||
+      CHECK_SELECTOR_ONLY || SANDBOX_DRAINAGE_ONLY ? [] : [
       'builder-control/review-raw/20260828220306-grok.txt',
       'builder-control/review-raw/20260829021134-grok.txt',
     ];
@@ -159,6 +169,8 @@ function runInDisposableExactRepository() {
       ...(HOST_PROOF_ONLY ? ['--host-proof-only'] : []),
       ...(REVIEW_ADMISSION_ONLY ? ['--review-admission-only'] : []),
       ...(CHECKPOINT_ONLY ? ['--checkpoint-only'] : []),
+      ...(CHECK_SELECTOR_ONLY ? ['--check-selector-only'] : []),
+      ...(SANDBOX_DRAINAGE_ONLY ? ['--sandbox-drainage-only'] : []),
     ], {
       cwd: repo,
       env: { ...process.env, AEGIS_TEST_ISOLATED_REPOSITORY: isolatedRoot },
@@ -305,6 +317,7 @@ const REVIEW_ADMISSION_CASES = Object.freeze([
   'review request: only this invocation\'s own lifecycle evidence frees admission',
   'review request: an unexpected preflight or admission failure is answered, not thrown',
   'review request: a failed cleanup neither escapes nor reports a freed hold',
+  'prepareIndependentReview: a subject-narrowed check receipt is admitted, and wrong commands or a moved subject still refuse',
 ]);
 const selectedReviewAdmissionCases = new Set();
 // The exact cases --checkpoint-only selects: the existing step 10 checkpoint
@@ -320,8 +333,32 @@ const CHECKPOINT_CASES = Object.freeze([
   'checkpoint before independent review: callable and CLI refuse identically and mutate nothing',
   'checkpoint: the CLI and the internal callable are one authority with one refusal vocabulary',
   'checkpoint callable is internal only: it carries no host or browser surface of its own',
+  'checkpoint: a subject-narrowed receipt completes the evidence chain, and wrong or non-dashboard commands do not',
 ]);
 const selectedCheckpointCases = new Set();
+// The exact cases --check-selector-only selects: the fixed-policy check
+// selector proofs, including the host proof prerequisite rule. Same rule as
+// above — a subset that must never be reported as full coverage.
+const CHECK_SELECTOR_CASES = Object.freeze([
+  'check selector: a host-proof packet narrows to the dashboard checks plus its declared prerequisites',
+  'check selector: a dashboard packet without host containment still narrows to exactly the pair',
+  'check selector: any non-dashboard changed path falls back to the packet checks unchanged',
+  'check selector: a packet missing either dashboard command falls back to its own checks',
+  'check selector: an undeclared host proof prerequisite is refused by name, not narrowed around',
+  'check selector: host applicability is the existing host authority, not a truthy field read',
+  'check selector: the narrowed list carries complete PRE_HOST evidence, the old pair does not',
+  'check selector is consulted only after a validated canonical subject and before execution',
+  'check boundary writes exclude the root so the snapshot accepts its own trusted process inspector',
+]);
+const selectedCheckSelectorCases = new Set();
+// The exact cases --sandbox-drainage-only selects: the two proofs for the
+// authorized same-sandbox signal rule. Same rule as above — a subset that
+// must never be reported as full coverage.
+const SANDBOX_DRAINAGE_CASES = Object.freeze([
+  'check boundary drains the reparented TERM-resistant descendant of a normally closed leader',
+  'same-sandbox signal authority stops at the sandbox instance, not at identical profile text',
+]);
+const selectedSandboxDrainageCases = new Set();
 function executeTest(n, fn) {
   if (REVIEW_ADMISSION_ONLY) {
     if (!REVIEW_ADMISSION_CASES.includes(n)) return;
@@ -330,6 +367,14 @@ function executeTest(n, fn) {
   if (CHECKPOINT_ONLY) {
     if (!CHECKPOINT_CASES.includes(n)) return;
     selectedCheckpointCases.add(n);
+  }
+  if (CHECK_SELECTOR_ONLY) {
+    if (!CHECK_SELECTOR_CASES.includes(n)) return;
+    selectedCheckSelectorCases.add(n);
+  }
+  if (SANDBOX_DRAINAGE_ONLY) {
+    if (!SANDBOX_DRAINAGE_CASES.includes(n)) return;
+    selectedSandboxDrainageCases.add(n);
   }
   try {
     const result = fn();
@@ -574,7 +619,7 @@ test('RED: absent transcripts render UNAVAILABLE, not zero cost', () => {
 // once, here, is what lets the CLI proof and the internal-callable proof consume
 // the SAME prerequisites instead of two fixtures that could quietly disagree
 // about what was proven.
-function createCheckpointFixture() {
+function createCheckpointFixture(options = {}) {
   const TMP = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-cp-'));
   const repo = path.join(TMP, 'repo');
   const runsDir = path.join(TMP, 'runs');
@@ -592,15 +637,24 @@ function createCheckpointFixture() {
     fs.rmSync(TMP, { recursive: true, force: true });
   };
   process.once('exit', cleanup);
-  const fixtureRel = `builder-control/.aegis-checkpoint-fixture-${process.pid}.txt`;
+  // Default: one throwaway non-dashboard path, exactly as before. A caller may
+  // name the real dashboard slice instead to exercise subject-derived check
+  // narrowing over a genuinely committed subject.
+  const subjectRels = options.subjectPaths || [`builder-control/.aegis-checkpoint-fixture-${process.pid}.txt`];
+  const fixtureRel = subjectRels[0];
   const fixtureFile = path.join(repo, fixtureRel);
-  fs.writeFileSync(fixtureFile, 'good state\n');
-  g(['add', '--', fixtureRel]);
+  for (const relative of subjectRels) {
+    fs.mkdirSync(path.dirname(path.join(repo, relative)), { recursive: true });
+    fs.writeFileSync(path.join(repo, relative), 'good state\n');
+    g(['add', '--', relative]);
+  }
   g(['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=AEGIS Fixture',
     'commit', '-q', '-m', 'fixture base']);
   const reviewedBase = g(['rev-parse', 'HEAD']).stdout.trim();
   assert.ok(/^[0-9a-f]{40}$/.test(reviewedBase), 'fixture repo has no commit');
-  fs.writeFileSync(fixtureFile, 'reviewed good state\n');
+  for (const relative of subjectRels) {
+    fs.writeFileSync(path.join(repo, relative), 'reviewed good state\n');
+  }
 
   // The run must reach CHECKS_PASSED through REAL transitions, because the
   // watchdog cross-checks every transition against the canonical ledger — a
@@ -650,7 +704,7 @@ function createCheckpointFixture() {
   const packetPath = path.join(ROOT, seed.packet);
   const packetSha256 = crypto.createHash('sha256').update(fs.readFileSync(packetPath)).digest('hex');
   const packet = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
-  const commands = (packet.testsRequired || []).filter((command) => {
+  const commands = options.commands || (packet.testsRequired || []).filter((command) => {
     const tokens = String(command).trim().split(/\s+/);
     return !(tokens[0] === 'node' && (tokens[1] || '').replace(/^\.\//, '') === 'builder-control/engineering-os.cjs' && tokens.includes('--gate-done'));
   });
@@ -693,7 +747,8 @@ function createCheckpointFixture() {
 
   return Object.freeze({
     TMP, repo, runsDir, cpDir, ledger, env, runId, branch, reviewedBase,
-    fixtureRel, fixtureFile, subject, receipt, packetRel: seed.packet, packetSha256,
+    fixtureRel, fixtureFile, subjectRels, commands, subject, receipt,
+    packetRel: seed.packet, packetSha256,
     objective: seed.objective, g, exec,
     head: () => g(['rev-parse', 'HEAD']).stdout.trim(),
     tree: () => g(['rev-parse', 'HEAD^{tree}']).stdout.trim(),
@@ -701,7 +756,7 @@ function createCheckpointFixture() {
     // The ONLY way the reviewed bytes become a commit. Neither entry point
     // creates one, which is exactly what the dirty-tree refusal proves.
     commitReviewedSubject: () => {
-      g(['add', '--', fixtureRel]);
+      g(['add', '--', ...subjectRels]);
       g(['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=AEGIS Fixture',
         'commit', '-q', '-m', 'reviewed good']);
     },
@@ -803,6 +858,58 @@ test('STEP 10: checkpoint consumes authenticated prerequisites and records a rea
 // printed text. The risk in closing it is a SECOND checkpoint path with softer
 // gates, so every proof below is aimed at that: same authority, same refusals,
 // same evidence chain, no commit, and nothing exposed to a browser.
+// Step 10 reads the receipt after the subject is committed, so its narrowing
+// decision must come from the reviewed..HEAD range — not an empty working-tree
+// diff and not the run's own check summary. Weighing a legitimately narrowed
+// receipt against the packet's full list broke the evidence chain outright.
+test('checkpoint: a subject-narrowed receipt completes the evidence chain, and wrong or non-dashboard commands do not', () => {
+  const pair = ['builder-control/dashboard/index.html', 'builder-control/test/dashboard-slice.test.cjs'];
+  // This packet declares host containment, so the narrowed list runChecks
+  // produces keeps the pre-host coverage commands the host proof is validated
+  // against. The pre-prerequisite pair below is the list the old selector
+  // produced, and it no longer completes the chain.
+  const focused = [
+    'node builder-control/test/functional-beta-snapshot.test.cjs',
+    'node builder-control/test/dashboard-slice.test.cjs',
+    'git diff --check',
+  ];
+  const preHostStrippedPair = [
+    'node builder-control/test/dashboard-slice.test.cjs', 'git diff --check',
+  ];
+  const scenarios = [
+    {
+      label: 'dashboard subject with the narrowed receipt runChecks would produce',
+      options: { subjectPaths: pair, commands: focused }, status: 0, state: 'CHECKPOINTED',
+    },
+    {
+      label: 'dashboard subject with a receipt that dropped the host proof prerequisite',
+      options: { subjectPaths: pair, commands: preHostStrippedPair }, status: 3, state: 'REVIEW_BOUND',
+    },
+    {
+      label: 'dashboard subject with a receipt carrying the full packet list',
+      options: { subjectPaths: pair }, status: 3, state: 'REVIEW_BOUND',
+    },
+    {
+      label: 'non-dashboard subject keeps the full requirement',
+      options: { commands: focused }, status: 3, state: 'REVIEW_BOUND',
+    },
+  ];
+  for (const scenario of scenarios) {
+    const f = createCheckpointFixture(scenario.options);
+    try {
+      f.commitReviewedSubject();
+      const cp = f.exec(['--checkpoint', f.runId]);
+      assert.strictEqual(cp.status, scenario.status,
+        `${scenario.label}: ${cp.stderr || cp.stdout}`);
+      if (scenario.status !== 0) {
+        assert.match(`${cp.stderr}\n${cp.stdout}`, /CHECKPOINT-EVIDENCE-INVALID/, scenario.label);
+      }
+      assert.strictEqual(f.readRun().state, scenario.state, scenario.label);
+      f.assertNoLeakedClaim(scenario.label);
+    } finally { f.finish(); }
+  }
+});
+
 test('checkpoint callable: one internal run-id-only call refuses a dirty subject, then records the same governed checkpoint the CLI records', () => {
   const f = createCheckpointFixture();
   try {
@@ -2268,9 +2375,22 @@ function engineeringSubjectSequenceMock(subjects, packetPath) {
 const REVIEW_PACKET = 'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json';
 const REVIEW_PACKET_ID = JSON.parse(fs.readFileSync(path.join(ROOT, REVIEW_PACKET), 'utf8')).packetId;
 function createCanonicalReviewWorktreeFixture() {
-  const root = fs.mkdtempSync(path.join(
-    OUTER_SNAPSHOT ? OUTER_SNAPSHOT.boundaryRoot : fs.realpathSync(os.tmpdir()),
-    'aegis-review-worktree-'));
+  // This fixture must sit BESIDE the snapshot worktree, never inside it, so a
+  // `git worktree add` target can never alter the copied subject. It used to be
+  // created at the boundary ROOT, which the check profile no longer grants:
+  // the root must stay unwritable or trustedProcessInspector refuses this
+  // boundary's own compiled `ps`. The boundary's scratch directory is the
+  // writable sibling of `worktree` inside the SAME active boundary, so the
+  // active-boundary property is preserved — and asserted here rather than
+  // assumed, which is stronger than trusting boundaryRoot alone.
+  const fixtureRoot = fs.realpathSync(os.tmpdir());
+  if (OUTER_SNAPSHOT) {
+    assert.ok(fixtureRoot.startsWith(OUTER_SNAPSHOT.boundaryRoot + path.sep),
+      'the snapshot scratch directory is not inside the active immutable check boundary');
+    assert.notStrictEqual(fixtureRoot, fs.realpathSync(ROOT),
+      'the review worktree fixture would be created inside the copied subject');
+  }
+  const root = fs.mkdtempSync(path.join(fixtureRoot, 'aegis-review-worktree-'));
   const worktree = path.join(root, 'worktree');
   const branch = `aegis/test-review-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).stdout.trim();
@@ -2285,7 +2405,7 @@ function createCanonicalReviewWorktreeFixture() {
   // Mirror them into this disposable worktree exactly as a real governed run
   // does; they remain outside filesAllowed and cannot change the subject hash.
   const reviewWorktreeFixtures = HOST_ONLY || REVIEW_ADMISSION_ONLY || CHECKPOINT_ONLY ||
-    OUTER_SNAPSHOT ? [] : [
+    CHECK_SELECTOR_ONLY || SANDBOX_DRAINAGE_ONLY || OUTER_SNAPSHOT ? [] : [
     'builder-control/review-raw/20260828220306-grok.txt',
     'builder-control/review-raw/20260829021134-grok.txt',
   ];
@@ -2461,10 +2581,11 @@ function passingHostContainmentReceipt(runId, packetCoordinate, subject, command
   };
   return { ...body, receiptSha256: R.hostContainmentReceiptDigest(body) };
 }
-function passedChecksFor(runId, subject = reviewSubject(), packetPath = REVIEW_PACKET) {
+function passedChecksFor(runId, subject = reviewSubject(), packetPath = REVIEW_PACKET,
+  commandsOverride = null) {
   const absolutePacket = path.resolve(ROOT, packetPath);
   const packet = JSON.parse(fs.readFileSync(absolutePacket, 'utf8'));
-  const commands = (packet.testsRequired || []).filter((command) => {
+  const commands = commandsOverride || (packet.testsRequired || []).filter((command) => {
     const tokens = String(command).trim().split(/\s+/);
     return !(tokens[0] === 'node' && (tokens[1] || '').replace(/^\.\//, '') ===
       'builder-control/engineering-os.cjs' && tokens.includes('--gate-done'));
@@ -2507,7 +2628,7 @@ function passedChecksFor(runId, subject = reviewSubject(), packetPath = REVIEW_P
 function preHostChecksFor(runId, subject = reviewSubject(), packetPath = REVIEW_PACKET, options = {}) {
   const absolutePacket = path.resolve(ROOT, packetPath);
   const packet = JSON.parse(fs.readFileSync(absolutePacket, 'utf8'));
-  const commands = (packet.testsRequired || []).filter((command) => {
+  const commands = options.commands || (packet.testsRequired || []).filter((command) => {
     const tokens = String(command).trim().split(/\s+/);
     return !(tokens[0] === 'node' && (tokens[1] || '').replace(/^\.\//, '') ===
       'builder-control/engineering-os.cjs' && tokens.includes('--gate-done'));
@@ -3319,6 +3440,80 @@ test('prepareIndependentReview RED: wrong state, exhausted cycle, absent receipt
   }
 });
 
+// runChecks narrows to the focused pair for a dashboard-only subject, so the
+// review preflight must weigh the receipt against that SAME subject-derived
+// selection. Weighing it against the packet's full runnable list called a real,
+// current, all-passed receipt stale and refused an admissible run.
+test('prepareIndependentReview: a subject-narrowed check receipt is admitted, and wrong commands or a moved subject still refuse', () => {
+  const pair = ['builder-control/dashboard/index.html', 'builder-control/test/dashboard-slice.test.cjs'];
+  // Host containment is declared by this packet, so the admitted narrowed list
+  // retains the declared pre-host coverage commands.
+  const focused = [
+    'node builder-control/test/functional-beta-snapshot.test.cjs',
+    'node builder-control/test/dashboard-slice.test.cjs',
+    'git diff --check',
+  ];
+  const preHostStrippedPair = [
+    'node builder-control/test/dashboard-slice.test.cjs', 'git diff --check',
+  ];
+  const narrowed = reviewSubject({ subjectPaths: pair, changedPaths: pair });
+  const wide = reviewSubject({ changedPaths: reviewSubject().subjectPaths });
+  const moved = reviewSubject({
+    subjectSha256: 'b'.repeat(64), diffBytes: 4097, subjectPaths: pair, changedPaths: pair,
+  });
+  const scenarios = [
+    {
+      label: 'narrowed receipt for a dashboard-only subject',
+      checks: (id) => passedChecksFor(id, narrowed, REVIEW_PACKET, focused),
+      responses: [{ status: 0, body: narrowed }, { status: 3, body: pendingReviewGate(narrowed) },
+        reviewCycleStart(narrowed)],
+      status: 'REVIEW_PERMITTED', reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+      nextAction: 'independent-review',
+    },
+    {
+      label: 'dashboard subject with the packet\'s full command list',
+      checks: (id) => passedChecksFor(id, narrowed),
+      responses: [{ status: 0, body: narrowed }],
+      status: 'REFUSED', reasonCode: 'REVIEW-CHECKS-STALE', nextAction: 'none',
+    },
+    {
+      label: 'dashboard receipt that dropped the host proof prerequisite',
+      checks: (id) => passedChecksFor(id, narrowed, REVIEW_PACKET, preHostStrippedPair),
+      responses: [{ status: 0, body: narrowed }],
+      status: 'REFUSED', reasonCode: 'REVIEW-CHECKS-STALE', nextAction: 'none',
+    },
+    {
+      label: 'narrowed receipt bound to a subject that moved',
+      checks: (id) => passedChecksFor(id, narrowed, REVIEW_PACKET, focused),
+      responses: [{ status: 0, body: moved }],
+      status: 'REFUSED', reasonCode: 'REVIEW-CHECKS-STALE', nextAction: 'none',
+    },
+    {
+      label: 'non-dashboard subject keeps the full requirement',
+      checks: (id) => passedChecksFor(id, wide, REVIEW_PACKET, focused),
+      responses: [{ status: 0, body: wide }],
+      status: 'REFUSED', reasonCode: 'REVIEW-CHECKS-STALE', nextAction: 'none',
+    },
+  ];
+  for (const scenario of scenarios) {
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+      ...REVIEW_RUN, checks: scenario.checks(seedRunId),
+    }), PREFLIGHT_OBSERVATION_DRIVER,
+    `${engineeringOsMock(scenario.responses)}
+     ${spawnLedgerProbe()}`);
+    assert.strictEqual(r.status, 0, `${scenario.label}: ${r.stderr}`);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.result.status, scenario.status, scenario.label);
+    assert.strictEqual(out.result.reasonCode, scenario.reasonCode, scenario.label);
+    assert.strictEqual(out.result.nextAction, scenario.nextAction, scenario.label);
+    assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('UNEXPECTED')), [],
+      scenario.label);
+    const saved = assertPreflightLeftNothingBehind(out, runsDir, ledger, runId, scenario.label);
+    assert.strictEqual(saved.state, 'CHECKS_PASSED', scenario.label);
+    fs.rmSync(TMP, { recursive: true, force: true });
+  }
+});
+
 // The gate names who owes an exact-subject review; the canonical review cycle
 // answers whether another round may start at all. The preflight reports the
 // intersection, and never names a reviewer the cycle did not permit.
@@ -3746,6 +3941,413 @@ hostContainmentTest('runChecks: a signal-resistant descendant is drained before 
   }
 });
 
+// ---------------------------------------------------------------------------
+// TASK-20 permanent acceptance for the two authorized
+// `(allow signal (target same-sandbox))` profile lines. The first case proves
+// a check boundary drains its OWN reparented residue; the second proves that
+// authority stops at the sandbox INSTANCE, so a peer sandbox carrying
+// byte-identical profile text and a process outside every sandbox both stay
+// unreachable. Instance isolation is attested on this host only.
+// ---------------------------------------------------------------------------
+
+hostContainmentTest('check boundary drains the reparented TERM-resistant descendant of a normally closed leader', () => {
+  const marker = `aegis-reparented-ready-${crypto.randomBytes(6).toString('hex')}`;
+  const token = `AEGIS-REPARENTED-DESCENDANT-${crypto.randomBytes(6).toString('hex')}`;
+  const descendant = [
+    `const fs = require('fs'); const path = require('path');`,
+    // Refusing SIGTERM removes the grace stage: only the KILL stage of the
+    // boundary's own drainage can remove this process, and only if the
+    // boundary may signal something that is no longer its child.
+    `process.on('SIGTERM', () => {});`,
+    `setInterval(() => {}, 1000);`,
+    // fd 1 synchronously, so the identity is on the supervised pipe before the
+    // leader is allowed to close.
+    `fs.writeSync(1, 'REPARENTED_DESCENDANT_PID:' + process.pid + '\\n');`,
+    `fs.writeFileSync(path.join(process.env.TMPDIR, ${JSON.stringify(marker)}), ${JSON.stringify(token)});`,
+  ].join(' ');
+  // The leader closes NORMALLY once the descendant has published itself. The
+  // survivor is then reparented away from the in-sandbox supervisor entirely,
+  // which is the exact case where kill(-pgid) used to be refused EPERM.
+  const command = [
+    `node -e ${JSON.stringify(descendant)} &`,
+    `i=0; while [ ! -s "$TMPDIR/${marker}" ] && [ $i -lt 400 ]; do sleep 0.02; i=$((i+1)); done;`,
+    'exit 0',
+  ].join(' ');
+  const packet = writeCanonicalCheckPacket([command]);
+  const before = new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('aegis-check-boundary-')));
+  const fixture = withSeededRun('BUILT', { ...REVIEW_RUN, packet: packet.relative }, `
+    const out = R.runChecks(runId);
+    console.log('SUPERVISOR_BOUNDARY:' + JSON.stringify(supervisorBoundaries));
+    console.log(JSON.stringify(out));
+  `, `
+    // The supervisor already reports drainage on its own stdout contract. This
+    // reads that existing evidence rather than adding a persisted field for a
+    // test to check.
+    const supervisorChildProcess = require('child_process');
+    const originalSupervisorSpawnSync = supervisorChildProcess.spawnSync;
+    const supervisorBoundaries = [];
+    supervisorChildProcess.spawnSync = function(command, args) {
+      const result = originalSupervisorSpawnSync.apply(this, arguments);
+      if (Array.isArray(args) && args[0] === '-e' && typeof args[1] === 'string' &&
+          args[1].includes('containedCheckSupervisorMain') && result && typeof result.stdout === 'string') {
+        try {
+          const parsed = JSON.parse(result.stdout);
+          if (parsed && parsed.executionBoundary) supervisorBoundaries.push(parsed.executionBoundary);
+        } catch { /* a non-supervisor payload is never drainage evidence */ }
+      }
+      return result;
+    };
+  `);
+  let descendantPid = null;
+  try {
+    assert.strictEqual(fixture.r.status, 0, fixture.r.stderr);
+    const lines = fixture.r.stdout.trim().split('\n');
+    const out = JSON.parse(lines.pop());
+    const evidenceLine = lines.filter((line) => line.startsWith('SUPERVISOR_BOUNDARY:')).pop();
+    assert.ok(evidenceLine, `the supervisor published no execution-boundary evidence: ${fixture.r.stdout}`);
+    const boundaries = JSON.parse(evidenceLine.slice('SUPERVISOR_BOUNDARY:'.length));
+    const residue = boundaries.filter((boundary) =>
+      /left a live descendant process group/.test(boundary.reason || ''));
+    assert.strictEqual(residue.length, 1,
+      `expected exactly one leaked-residue boundary: ${JSON.stringify(boundaries)}`);
+    // The repaired capability, stated by the boundary itself: it reported the
+    // residue AND proved it drained it. Before the same-sandbox rule the KILL
+    // was refused EPERM and this field was false.
+    assert.strictEqual(residue[0].drained, true,
+      'the check boundary reported live residue that it could not drain');
+    assert.strictEqual(residue[0].state, 'FAILED',
+      'draining leaked residue must still fail the boundary, never launder it into a pass');
+    assert.strictEqual(out.state, 'CHECKS_FAILED');
+    assert.deepStrictEqual(out.checks, { passed: 0, total: 1 });
+    const saved = JSON.parse(fs.readFileSync(path.join(fixture.runsDir, `${fixture.runId}.json`), 'utf8'));
+    assert.strictEqual(saved.checks.executionBoundary.state, 'FAILED');
+    assert.match(saved.checks.executionBoundary.reason, /left a live descendant process group/);
+    assert.strictEqual(saved.checks.results[0].status, 'REFUSED');
+    assert.strictEqual(saved.checks.results[0].exit, 125);
+    const stdoutTail = saved.checks.results[0].executionEvidence.stdoutTail;
+    const pidMatch = stdoutTail.match(/REPARENTED_DESCENDANT_PID:(\d+)/);
+    assert.ok(pidMatch, `the reparented descendant never published its identity: ${stdoutTail}`);
+    descendantPid = Number(pidMatch[1]);
+    // ESRCH is positive absence. EPERM is the ORIGINAL failure wearing the
+    // same shape, so it is named and refused explicitly rather than caught.
+    let probe = 'ALIVE';
+    try { process.kill(descendantPid, 0); }
+    catch (error) { probe = (error && error.code) || 'UNKNOWN'; }
+    assert.strictEqual(probe, 'ESRCH',
+      `post-drain probe of the reparented descendant observed ${probe}; only positive absence ` +
+      'proves drainage, and a permission denial is not a drain');
+    const boundariesAfter = fs.readdirSync(os.tmpdir()).filter((name) =>
+      name.startsWith('aegis-check-boundary-') && !before.has(name));
+    assert.deepStrictEqual(boundariesAfter, [], 'drained check boundary was not cleaned up');
+  } finally {
+    // Identity-guarded: only a process whose command still carries this case's
+    // unique token is ever signalled.
+    if (descendantPid !== null) {
+      const identity = fixtureProcessIdentity(descendantPid);
+      if (identity && identity.command.includes(token)) {
+        try { process.kill(descendantPid, 'SIGKILL'); } catch { /* already absent */ }
+      }
+    }
+    for (const name of fs.readdirSync(os.tmpdir())) {
+      if (name.startsWith('aegis-check-boundary-') && !before.has(name)) {
+        fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+      }
+    }
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
+});
+
+hostContainmentTest('same-sandbox signal authority stops at the sandbox instance, not at identical profile text', () => {
+  if (!fs.existsSync(SANDBOX_EXEC_PATH)) {
+    return skip(`UNAVAILABLE: ${SANDBOX_EXEC_PATH}`);
+  }
+  const src = fs.readFileSync(CLI, 'utf8');
+  const declared = [...src.matchAll(/'(\(allow signal \(target same-sandbox\)\))',/g)].map((m) => m[1]);
+  assert.strictEqual(declared.length, 2,
+    'the same-sandbox rule is not present at exactly the two authorized profile sites');
+  assert.strictEqual(new Set(declared).size, 1,
+    'the two authorized profile sites do not carry byte-identical rule text');
+  for (const widened of ['(allow signal (target others))', '(allow signal (target pgrp))', "'(allow signal)'"]) {
+    assert.strictEqual(src.includes(widened), false,
+      `the runtime widened signal authority beyond the authorized rule: ${widened}`);
+  }
+  // The behavioural instances below carry the rule text EXTRACTED from the
+  // runtime, so this proof cannot drift away from the line it is about. It
+  // exercises that rule's semantics, not the runtime's full profile.
+  const signalRule = declared[0];
+  const nonce = crypto.randomBytes(6).toString('hex');
+  const token = `AEGIS-SAME-SANDBOX-FIXTURE-${nonce}`;
+  const boundaryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-same-sandbox-'));
+  const state = path.join(boundaryRoot, 'state');
+  fs.mkdirSync(state);
+  // Both instances execute the Node runtime, which lives outside the fixed
+  // read list below. Grant its install root and nothing wider: reads are not
+  // the boundary under proof here — signal authority is — and every write
+  // still stays inside this case's own scratch directory.
+  const nodeReadRoot = path.sep + fs.realpathSync(process.execPath).split(path.sep).filter(Boolean)[0];
+  const childProcessModule = require('child_process');
+  const openFds = [];
+  const instances = [];
+  let outside = null;
+  const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  // Bounded, and it returns the moment the condition holds. No wait below is
+  // padded, and no conclusion below is drawn from how long a wait took: every
+  // fact this case asserts comes from a marker some process actually wrote.
+  const waitFor = (predicate, budgetMs) => {
+    const deadline = Date.now() + budgetMs;
+    while (Date.now() < deadline) {
+      if (predicate()) return true;
+      sleepSync(25);
+    }
+    return predicate();
+  };
+  const readText = (file) => { try { return fs.readFileSync(file, 'utf8'); } catch { return ''; } };
+  const readJson = (file) => {
+    const text = readText(file);
+    if (!text.trim()) return null;
+    try { return JSON.parse(text); } catch { return null; }
+  };
+  try {
+    // ONE profile text, used byte-identically by both instances. If
+    // same-sandbox were scoped to the profile rather than to the sandbox
+    // instance, these two could signal each other. They cannot.
+    const profileText = [
+      '(version 1)',
+      '(deny default)',
+      '(allow process*)',
+      '(allow signal (target self))',
+      '(allow signal (target children))',
+      signalRule,
+      '(allow sysctl-read)',
+      '(allow mach-lookup)',
+      '(allow ipc-posix-shm)',
+      '(allow system-socket)',
+      '(allow user-preference-read)',
+      '(allow file-ioctl)',
+      '(allow file-read-metadata)',
+      '(allow file-read-data (literal "/"))',
+      '(allow file-read* (subpath "/System") (subpath "/usr/lib") (subpath "/usr/bin") (subpath "/bin") ' +
+        '(subpath "/usr/sbin") (subpath "/sbin") (subpath "/usr/share") (subpath "/private/var/db/dyld") ' +
+        '(literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))',
+      `(allow file-read* (subpath ${JSON.stringify(nodeReadRoot)}))`,
+      `(allow file-read* (subpath ${JSON.stringify(boundaryRoot)}))`,
+      `(allow file-write* (subpath ${JSON.stringify(state)}) (literal "/dev/null"))`,
+    ].join('\n') + '\n';
+    const profilePath = path.join(boundaryRoot, 'instance.sb');
+    fs.writeFileSync(profilePath, profileText, { mode: 0o400, flag: 'wx' });
+    const readyFile = (side) => path.join(state, `${side}.ready.json`);
+    const probeFile = (side) => path.join(state, `${side}.probe.json`);
+    const drainedFile = (side) => path.join(state, `${side}.drained.json`);
+    const liveFile = path.join(state, 'simultaneously-live.json');
+    // The survivor is ONE long-lived Node process per instance. It publishes
+    // its own pid and start time only after its blocking handle is installed,
+    // so the marker's existence is the readiness fact — never elapsed time.
+    const survivorSource = [
+      `/* ${token} survivor */`,
+      `const fs = require('fs');`,
+      `process.on('SIGTERM', () => {});`,
+      `setTimeout(() => process.exit(0), 120000).unref();`,
+      `setInterval(() => {}, 1000);`,
+      `fs.writeFileSync(process.env.AEGIS_READY, JSON.stringify({`,
+      `  side: process.env.AEGIS_SIDE, pid: process.pid, ppid: process.ppid, startedAtMs: Date.now(),`,
+      `}), { flag: 'wx' });`,
+    ].join('\n');
+    // The relay exists only to orphan the survivor: it spawns it detached and
+    // exits at once, so the survivor is neither a child nor a process-group
+    // member of the instance leader. Neither (target children) nor (target
+    // pgrp) can explain the positive control below — only same-sandbox can.
+    const relaySource = [
+      `/* ${token} relay */`,
+      `const cp = require('child_process');`,
+      `const child = cp.spawn(process.execPath, ['-e', process.env.AEGIS_SURVIVOR_SOURCE],`,
+      `  { detached: true, stdio: 'ignore', env: process.env });`,
+      `child.unref();`,
+      `process.exit(0);`,
+    ].join('\n');
+    // The leader blocks on its stdin pipe — it never polls and never sleeps.
+    // The trusted outer, which is inside neither sandbox, drives every step.
+    const leaderSource = [
+      `/* ${token} leader */`,
+      `const fs = require('fs');`,
+      `const cp = require('child_process');`,
+      `const relay = cp.spawn(process.execPath, ['-e', process.env.AEGIS_RELAY_SOURCE], { stdio: 'ignore' });`,
+      `const outcome = (pid, signal) => {`,
+      `  try { process.kill(pid, signal); return 'PERMITTED'; }`,
+      `  catch (error) { return (error && error.code) || 'UNKNOWN'; }`,
+      `};`,
+      `relay.on('exit', () => {`,
+      `  let buffered = '';`,
+      `  process.stdin.setEncoding('utf8');`,
+      `  process.stdin.on('data', (piece) => {`,
+      `    buffered += piece;`,
+      `    let index;`,
+      `    while ((index = buffered.indexOf('\\n')) >= 0) {`,
+      `      const line = buffered.slice(0, index);`,
+      `      buffered = buffered.slice(index + 1);`,
+      `      if (!line.trim()) continue;`,
+      `      const message = JSON.parse(line);`,
+      `      const own = JSON.parse(fs.readFileSync(process.env.AEGIS_READY, 'utf8'));`,
+      `      if (message.op === 'probe') {`,
+      `        const record = (pid) => ({ pid, zero: outcome(pid, 0), cont: outcome(pid, 'SIGCONT') });`,
+      `        fs.writeFileSync(process.env.AEGIS_PROBE, JSON.stringify({`,
+      `          own: record(own.pid), peer: record(message.peer), outside: record(message.outside),`,
+      `        }), { flag: 'wx' });`,
+      `      } else if (message.op === 'drain') {`,
+      `        const sent = outcome(own.pid, 'SIGKILL');`,
+      `        fs.writeFileSync(process.env.AEGIS_DRAINED,`,
+      `          JSON.stringify({ pid: own.pid, sent }), { flag: 'wx' });`,
+      `        process.exit(0);`,
+      `      }`,
+      `    }`,
+      `  });`,
+      `});`,
+    ].join('\n');
+    // The outside fixture belongs to no sandbox at all and self-terminates, so
+    // no fixture can outlive this case even if cleanup itself is interrupted.
+    const outsideSource = [
+      `/* ${token} outside */`,
+      `process.on('SIGTERM', () => {});`,
+      `setTimeout(() => process.exit(0), 120000);`,
+      `setInterval(() => {}, 1000);`,
+    ].join(' ');
+    outside = childProcessModule.spawn(process.execPath, ['-e', outsideSource], { stdio: 'ignore' });
+    outside.unref();
+    assert.ok(Number.isInteger(outside.pid) && outside.pid > 1, 'the outside fixture did not start');
+    for (const side of ['a', 'b']) {
+      const out = fs.openSync(path.join(boundaryRoot, `${side}.out`), 'w');
+      const err = fs.openSync(path.join(boundaryRoot, `${side}.err`), 'w');
+      openFds.push(out, err);
+      instances.push(childProcessModule.spawn(SANDBOX_EXEC_PATH,
+        ['-f', profilePath, process.execPath, '-e', leaderSource], {
+          cwd: state,
+          env: {
+            PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+            HOME: state,
+            TMPDIR: state + path.sep,
+            LANG: 'en_CA.UTF-8',
+            LC_ALL: 'en_CA.UTF-8',
+            AEGIS_SIDE: side,
+            AEGIS_READY: readyFile(side),
+            AEGIS_PROBE: probeFile(side),
+            AEGIS_DRAINED: drainedFile(side),
+            AEGIS_SURVIVOR_SOURCE: survivorSource,
+            AEGIS_RELAY_SOURCE: relaySource,
+          },
+          stdio: ['pipe', out, err],
+        }));
+    }
+    const stderrTail = () =>
+      `a stderr: ${readText(path.join(boundaryRoot, 'a.err'))}; b stderr: ${readText(path.join(boundaryRoot, 'b.err'))}`;
+    assert.ok(waitFor(() => readJson(readyFile('a')) && readJson(readyFile('b')), 60_000),
+      `both sandbox instances must publish a readiness marker (${stderrTail()})`);
+    const ready = { a: readJson(readyFile('a')), b: readJson(readyFile('b')) };
+    for (const side of ['a', 'b']) {
+      const marker = ready[side];
+      assert.strictEqual(marker.side, side, `instance ${side.toUpperCase()} published another side's marker`);
+      assert.ok(Number.isInteger(marker.pid) && marker.pid > 1,
+        `instance ${side.toUpperCase()} published a non-pid descendant identity`);
+      assert.ok(Number.isFinite(marker.startedAtMs) && marker.startedAtMs > 0,
+        `instance ${side.toUpperCase()} published no descendant start time`);
+      assert.strictEqual(marker.ppid, 1,
+        `instance ${side.toUpperCase()}'s descendant was not orphaned, so (target children) could explain it`);
+      const identity = fixtureProcessIdentity(marker.pid);
+      assert.ok(identity && identity.command.includes(token),
+        `instance ${side.toUpperCase()}'s published pid is not this case's own descendant`);
+      assert.ok(identity.command.includes('survivor'),
+        `instance ${side.toUpperCase()} published the wrong fixture process`);
+    }
+    assert.notStrictEqual(ready.a.pid, ready.b.pid, 'the two instances published one shared descendant');
+    // Simultaneous liveness is established HERE, by the trusted outer, from
+    // the two markers plus an independent existence observation — and this
+    // final marker is written by this test, never inferred by an instance
+    // from how long it waited.
+    const aliveNow = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const liveRecord = {
+      observedBy: process.pid,
+      a: { pid: ready.a.pid, startedAtMs: ready.a.startedAtMs, alive: aliveNow(ready.a.pid) },
+      b: { pid: ready.b.pid, startedAtMs: ready.b.startedAtMs, alive: aliveNow(ready.b.pid) },
+      outside: { pid: outside.pid, alive: aliveNow(outside.pid) },
+    };
+    fs.writeFileSync(liveFile, JSON.stringify(liveRecord), { flag: 'wx' });
+    const live = readJson(liveFile);
+    assert.ok(live && live.a.alive && live.b.alive && live.outside.alive,
+      'the two sandbox instances and the outside fixture were never proven simultaneously live');
+    // Drive the probes only once both targets are proven alive, so a refusal
+    // below can never be absence reported as a denial.
+    instances[0].stdin.write(`${JSON.stringify({ op: 'probe', peer: ready.b.pid, outside: outside.pid })}\n`);
+    instances[1].stdin.write(`${JSON.stringify({ op: 'probe', peer: ready.a.pid, outside: outside.pid })}\n`);
+    assert.ok(waitFor(() => readJson(probeFile('a')) && readJson(probeFile('b')), 30_000),
+      `both sandbox instances must publish a probe result (${stderrTail()})`);
+    const probe = { a: readJson(probeFile('a')), b: readJson(probeFile('b')) };
+    assert.strictEqual(probe.a.peer.pid, ready.b.pid, 'instance A did not probe instance B\'s descendant');
+    assert.strictEqual(probe.b.peer.pid, ready.a.pid, 'instance B did not probe instance A\'s descendant');
+    for (const side of ['a', 'b']) {
+      const label = side.toUpperCase();
+      // Positive control: a sandbox MAY signal its own orphaned descendant.
+      assert.strictEqual(probe[side].own.zero, 'PERMITTED',
+        `instance ${label} could not reach its own descendant (${stderrTail()})`);
+      assert.strictEqual(probe[side].own.cont, 'PERMITTED',
+        `instance ${label} could not signal its own descendant (${stderrTail()})`);
+      // The boundary: identical profile text, different instance, refused —
+      // and refused with EPERM, which is a denial, not the ESRCH of absence.
+      for (const target of ['peer', 'outside']) {
+        assert.strictEqual(probe[side][target].zero, 'EPERM',
+          `instance ${label} did not receive a permission denial reaching the ${target}: ` +
+          `${probe[side][target].zero}`);
+        assert.strictEqual(probe[side][target].cont, 'EPERM',
+          `instance ${label} did not receive a permission denial signalling the ${target}: ` +
+          `${probe[side][target].cont}`);
+      }
+      assert.strictEqual(probe[side].outside.pid, outside.pid);
+    }
+    // Each instance drains its OWN descendant through its own boundary.
+    for (const child of instances) {
+      child.stdin.write(`${JSON.stringify({ op: 'drain' })}\n`);
+      child.stdin.end();
+    }
+    assert.ok(waitFor(() => readJson(drainedFile('a')) && readJson(drainedFile('b')), 30_000),
+      `both sandbox instances must publish a drain result (${stderrTail()})`);
+    for (const side of ['a', 'b']) {
+      const drained = readJson(drainedFile(side));
+      assert.strictEqual(drained.pid, ready[side].pid,
+        `instance ${side.toUpperCase()} drained a process it never published`);
+      assert.strictEqual(drained.sent, 'PERMITTED',
+        `instance ${side.toUpperCase()} could not drain its own descendant: ${drained.sent}`);
+    }
+    // Absence AFTER the drain, observed from the trusted outer. The outside
+    // fixture is still alive: no instance was ever able to reach it.
+    const absent = (pid) => { try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; } };
+    assert.ok(waitFor(() => absent(ready.a.pid) && absent(ready.b.pid), 20_000),
+      'a drained descendant is still present after its own boundary drained it');
+    assert.strictEqual(aliveNow(outside.pid), true,
+      'the outside fixture did not survive, so the refusals above may have been absence');
+  } finally {
+    // Every synthetic fixture is identity-recorded: a pid is signalled only
+    // when its command still carries this case's unique token, so no real
+    // process can ever be reached from here.
+    const candidates = new Set();
+    if (outside && Number.isInteger(outside.pid)) candidates.add(outside.pid);
+    for (const child of instances) {
+      if (!child) continue;
+      try { if (child.stdin && !child.stdin.destroyed) child.stdin.destroy(); } catch { /* already closed */ }
+      if (Number.isInteger(child.pid)) candidates.add(child.pid);
+    }
+    for (const side of ['a', 'b']) {
+      const marker = readJson(path.join(state, `${side}.ready.json`));
+      if (marker && Number.isInteger(marker.pid) && marker.pid > 1) candidates.add(marker.pid);
+    }
+    for (const pid of candidates) {
+      const identity = fixtureProcessIdentity(pid);
+      if (identity && identity.command.includes(token)) {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* already absent */ }
+      }
+    }
+    for (const fd of openFds) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+    fs.rmSync(boundaryRoot, { recursive: true, force: true });
+  }
+});
+
 hostContainmentTest('runChecks: trusted cleanup refusal marks the execution boundary FAILED after a contained check', () => {
   const packet = writeCanonicalCheckPacket(['node -e "process.exit(0)"']);
   const before = new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith('aegis-check-boundary-')));
@@ -4100,19 +4702,57 @@ function selectorPacket() {
   return { parsed, runnable };
 }
 
-test('check selector: dashboard-only changed paths narrow to the two declared dashboard checks', () => {
+const HOST_PRE_HOST_COVERAGE = [
+  'node builder-control/test/functional-beta-snapshot.test.cjs',
+  'node builder-control/test/dashboard-slice.test.cjs',
+];
+const DASHBOARD_PAIR = ['node builder-control/test/dashboard-slice.test.cjs', 'git diff --check'];
+// A dashboard packet that declares no host containment at all. Narrowing must
+// still reduce it to exactly the pair: the prerequisite rule adds nothing where
+// no host proof will ever be built.
+function nonHostSelectorPacket() {
   const { parsed } = selectorPacket();
+  const packet = { ...parsed, packetId: 'PKT-TEST-NONHOST-DASHBOARD' };
+  delete packet.hostContainmentRequired;
+  return packet;
+}
+
+test('check selector: a host-proof packet narrows to the dashboard checks plus its declared prerequisites', () => {
+  const { parsed } = selectorPacket();
+  const expected = [
+    'node builder-control/test/functional-beta-snapshot.test.cjs',
+    'node builder-control/test/dashboard-slice.test.cjs',
+    'git diff --check',
+  ];
+  assert.ok(Array.isArray(parsed.hostContainmentRequired) && parsed.hostContainmentRequired.length,
+    'this proof requires a packet that declares host containment');
   assert.deepStrictEqual(
-    R.dashboardSliceCheckCommands(parsed, ['builder-control/dashboard/index.html']),
-    ['node builder-control/test/dashboard-slice.test.cjs', 'git diff --check']);
+    R.dashboardSliceCheckCommands(parsed, ['builder-control/dashboard/index.html']), expected);
   assert.deepStrictEqual(
     R.dashboardSliceCheckCommands(parsed,
       ['builder-control/test/dashboard-slice.test.cjs', 'builder-control/dashboard/index.html']),
-    ['node builder-control/test/dashboard-slice.test.cjs', 'git diff --check']);
+    expected);
   for (const command of R.dashboardSliceCheckCommands(parsed, ['builder-control/dashboard/index.html'])) {
     assert.ok(parsed.testsRequired.includes(command),
       `selector returned ${command}, which the packet never declared`);
   }
+  // The command the old selector dropped is exactly the one the host proof
+  // context cannot be built without.
+  for (const command of HOST_PRE_HOST_COVERAGE) {
+    assert.ok(expected.includes(command),
+      `the narrowed list dropped required pre-host coverage command ${command}`);
+  }
+});
+
+test('check selector: a dashboard packet without host containment still narrows to exactly the pair', () => {
+  const packet = nonHostSelectorPacket();
+  assert.deepStrictEqual(
+    R.dashboardSliceCheckCommands(packet, ['builder-control/dashboard/index.html']),
+    DASHBOARD_PAIR);
+  assert.deepStrictEqual(
+    R.dashboardSliceCheckCommands(packet,
+      ['builder-control/test/dashboard-slice.test.cjs', 'builder-control/dashboard/index.html']),
+    DASHBOARD_PAIR);
 });
 
 test('check selector: any non-dashboard changed path falls back to the packet checks unchanged', () => {
@@ -4131,9 +4771,10 @@ test('check selector: any non-dashboard changed path falls back to the packet ch
 });
 
 test('check selector: a packet missing either dashboard command falls back to its own checks', () => {
-  const { parsed, runnable } = selectorPacket();
-  for (const absent of ['node builder-control/test/dashboard-slice.test.cjs', 'git diff --check']) {
-    const packet = { ...parsed, testsRequired: runnable.filter((c) => c !== absent) };
+  const { runnable } = selectorPacket();
+  const base = nonHostSelectorPacket();
+  for (const absent of DASHBOARD_PAIR) {
+    const packet = { ...base, testsRequired: runnable.filter((c) => c !== absent) };
     assert.deepStrictEqual(
       R.dashboardSliceCheckCommands(packet, ['builder-control/dashboard/index.html']),
       packet.testsRequired,
@@ -4141,6 +4782,97 @@ test('check selector: a packet missing either dashboard command falls back to it
   }
   assert.deepStrictEqual(
     R.dashboardSliceCheckCommands({ testsRequired: [] }, ['builder-control/dashboard/index.html']), []);
+});
+
+test('check selector: an undeclared host proof prerequisite is refused by name, not narrowed around', () => {
+  const { parsed, runnable } = selectorPacket();
+  for (const absent of HOST_PRE_HOST_COVERAGE) {
+    const packet = { ...parsed, testsRequired: runnable.filter((c) => c !== absent) };
+    for (const changed of [
+      ['builder-control/dashboard/index.html'],
+      ['builder-control/dashboard/index.html', 'builder-control/aegis-run.cjs'],
+      [],
+      undefined,
+    ]) {
+      assert.throws(() => R.dashboardSliceCheckCommands(packet, changed), (error) =>
+        error instanceof R.RunError && error.code === 'HOST-PROOF-CONTEXT-INVALID' &&
+        error.message.includes(absent),
+        `a host packet without ${absent} must be refused by name for changed paths ${JSON.stringify(changed)}`);
+    }
+    // The refusal never invents the missing command for the packet.
+    assert.ok(!packet.testsRequired.includes(absent));
+  }
+  // The presentation packet shape is the real instance of this defect: it
+  // declares host containment and only the dashboard pair. Asserted against
+  // the literal shape, and against the packet on disk when it is present —
+  // the disposable exact-source repository carries only subject paths.
+  const presentationPath = path.join(ROOT,
+    'builder-control/packets/PKT-20260904-DASHBOARD-PRESENTATION.json');
+  const presentations = [{
+    packetId: 'PKT-20260904-DASHBOARD-PRESENTATION',
+    testsRequired: DASHBOARD_PAIR,
+    hostContainmentRequired: ['node builder-control/test/host-containment.test.cjs'],
+  }];
+  if (fs.existsSync(presentationPath)) {
+    presentations.push(JSON.parse(fs.readFileSync(presentationPath, 'utf8')));
+  }
+  for (const presentation of presentations) {
+    assert.throws(
+      () => R.dashboardSliceCheckCommands(presentation, ['builder-control/dashboard/index.html']),
+      (error) => error.code === 'HOST-PROOF-CONTEXT-INVALID' &&
+        error.message.includes('node builder-control/test/functional-beta-snapshot.test.cjs'),
+      `${presentation.packetId} was narrowed instead of refused`);
+  }
+});
+
+test('check selector: host applicability is the existing host authority, not a truthy field read', () => {
+  const { parsed, runnable } = selectorPacket();
+  const withoutPrerequisite = runnable.filter((c) =>
+    c !== 'node builder-control/test/functional-beta-snapshot.test.cjs');
+  // A packet id the host authority requires containment for is still a host
+  // packet when the field is absent entirely.
+  const undeclared = { ...parsed, testsRequired: withoutPrerequisite };
+  delete undeclared.hostContainmentRequired;
+  assert.throws(() => R.dashboardSliceCheckCommands(undeclared, ['builder-control/dashboard/index.html']),
+    (error) => error.code === 'HOST-CONTAINMENT-PACKET-INVALID',
+    'a required packet id with no declaration must still be refused by the host authority');
+  // A malformed declaration is refused by that same authority rather than read
+  // as "no host proof applies".
+  for (const malformed of [[], ['node builder-control/test/unrelated.test.cjs'],
+    'node builder-control/test/host-containment.test.cjs',
+    ['node builder-control/test/host-containment.test.cjs',
+      'node builder-control/test/host-containment.test.cjs']]) {
+    const packet = { ...parsed, packetId: 'PKT-TEST-NONHOST-DASHBOARD',
+      testsRequired: withoutPrerequisite, hostContainmentRequired: malformed };
+    assert.throws(() => R.dashboardSliceCheckCommands(packet, ['builder-control/dashboard/index.html']),
+      (error) => error.code === 'HOST-CONTAINMENT-PACKET-INVALID',
+      `a malformed hostContainmentRequired (${JSON.stringify(malformed)}) must not read as non-host`);
+  }
+});
+
+test('check selector: the narrowed list carries complete PRE_HOST evidence, the old pair does not', () => {
+  const runId = 'RUN-20260904-deadbeef';
+  const pair = ['builder-control/dashboard/index.html', 'builder-control/test/dashboard-slice.test.cjs'];
+  const subject = reviewSubject({ subjectPaths: pair, changedPaths: pair });
+  const { parsed } = selectorPacket();
+  const selected = R.dashboardSliceCheckCommands(parsed, pair);
+  const accepted = preHostChecksFor(runId, subject, REVIEW_PACKET, { commands: selected });
+  const ref = {
+    entryId: `LED-CHECK-${'a'.repeat(32)}`,
+    receiptSha256: accepted.preHostReceipt.receiptSha256,
+  };
+  const context = R.buildHostProofContext(accepted.preHostReceipt, ref);
+  assert.deepStrictEqual(context.preHostCommandCoverage.map((item) => item.command),
+    HOST_PRE_HOST_COVERAGE,
+    'the selected commands did not cover the host proof context exactly');
+  // The list the old selector produced is the counterfactual: same authority,
+  // same subject, refused for the named missing command.
+  const stripped = preHostChecksFor(runId, subject, REVIEW_PACKET, { commands: DASHBOARD_PAIR });
+  assert.throws(() => R.buildHostProofContext(stripped.preHostReceipt, {
+    entryId: ref.entryId, receiptSha256: stripped.preHostReceipt.receiptSha256,
+  }), (error) => error.code === 'HOST-PROOF-CONTEXT-INVALID' &&
+    error.message.includes('node builder-control/test/functional-beta-snapshot.test.cjs'),
+    'the pre-repair narrowed pair still built a host proof context');
 });
 
 test('check selector is consulted only after a validated canonical subject and before execution', () => {
@@ -4175,6 +4907,108 @@ test('check selector is consulted only after a validated canonical subject and b
     'no check list may exist before the validated subject narrows it');
 });
 
+// The immutable check snapshot compiles a disposable libproc `ps` into its own
+// bin because sandbox-exec refuses the setuid system /bin/ps. trustedProcessInspector
+// accepts that binary ONLY when a probe write at the boundary ROOT is refused —
+// a caller that can write the root could plant its own executable there. While
+// the check profile granted (subpath boundaryRoot) the probe SUCCEEDED, so the
+// snapshot rejected its own inspector, every contained process fell back to the
+// denied /bin/ps, and a governed worker launched inside a check died silently
+// with the run stranded in BUILDING.
+//
+// This proves the contract the contracted write scope has to satisfy, using a
+// real EACCES rather than a source grep. It does NOT execute sandbox-exec: the
+// end-to-end proof that the corrected profile actually delivers this denial is
+// the credential-shaped worker scenario in functional-beta-snapshot.test.cjs,
+// executed through the canonical snapshot helper.
+test('check boundary writes exclude the root so the snapshot accepts its own trusted process inspector', () => {
+  const W = require('../aegis-worker.cjs');
+  const CheckContainment = require('../sandbox-containment.cjs');
+  const boundaryRoot = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-boundary-probe-')));
+  const snapshotRoot = path.join(boundaryRoot, 'worktree');
+  const home = path.join(boundaryRoot, 'home');
+  const scratch = path.join(boundaryRoot, 'tmp');
+  const bin = path.join(boundaryRoot, 'bin');
+  try {
+    for (const dir of [snapshotRoot, home, scratch, bin]) fs.mkdirSync(dir, { mode: 0o700 });
+    const inspector = path.join(bin, 'ps');
+    fs.writeFileSync(inspector, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    const inspectorSha256 = crypto.createHash('sha256').update(fs.readFileSync(inspector)).digest('hex');
+    const source = () => ({
+      AEGIS_CHECK_SNAPSHOT_POLICY: 'AEGIS_IMMUTABLE_CHECK_SNAPSHOT_V1',
+      AEGIS_TRUSTED_PROCESS_INSPECTOR: inspector,
+      AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256: inspectorSha256,
+      HOME: home,
+      TMPDIR: `${scratch}${path.sep}`,
+      PATH: '/usr/bin:/bin',
+      USER: 'aegis-check',
+      LOGNAME: 'aegis-check',
+    });
+    const forwarded = (env) => [
+      'AEGIS_TRUSTED_PROCESS_INSPECTOR',
+      'AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256',
+      'AEGIS_CHECK_SNAPSHOT_POLICY',
+    ].filter((key) => typeof env[key] === 'string' && env[key]);
+
+    // The state generator writes its real --out path inside snapshotRoot, so
+    // snapshotRoot must stay writable. The contracted authorities are exactly
+    // the three the runtime now asks for, and the root is not one of them.
+    const authorities = CheckContainment.resolveWriteAuthorities(
+      [snapshotRoot, home, scratch], boundaryRoot, 'check boundary write path');
+    const authorized = authorities.map((entry) => entry.path).sort();
+    assert.deepStrictEqual(authorized, [snapshotRoot, home, scratch].sort(),
+      'the contracted check write scope is not exactly snapshotRoot, home and scratch');
+    assert.ok(!authorized.includes(boundaryRoot),
+      'the disposable boundary ROOT is writable again, which re-breaks the inspector probe');
+    assert.ok(!authorized.includes(bin),
+      'the compiled inspector directory is writable from inside the boundary');
+    const statePath = path.join(snapshotRoot, 'builder-control', 'dashboard', 'state.js');
+    assert.ok(authorized.some((root) => statePath.startsWith(`${root}${path.sep}`)),
+      'the canonical dashboard state path is no longer inside the contracted write scope');
+
+    // DEFECTIVE SHAPE: the boundary root is writable, the probe succeeds, and
+    // the inspector is refused. This is what the old (subpath boundaryRoot)
+    // grant produced, and none of the three keys reach a worker.
+    fs.writeFileSync(path.join(boundaryRoot, '.writable-root-probe'), '', { mode: 0o600 });
+    fs.unlinkSync(path.join(boundaryRoot, '.writable-root-probe'));
+    assert.deepStrictEqual(forwarded(W.workerEnvironment(source())), [],
+      'a boundary whose root is writable must never have its inspector accepted');
+
+    // CORRECTED SHAPE: the root is not writable, the probe is denied, the
+    // inspector is accepted, and exactly the three keys are forwarded.
+    fs.chmodSync(boundaryRoot, 0o500);
+    let probeCode = null;
+    try { fs.writeFileSync(path.join(boundaryRoot, '.denied-root-probe'), '', { flag: 'wx', mode: 0o600 }); }
+    catch (error) { probeCode = error.code; }
+    assert.ok(['EPERM', 'EACCES'].includes(probeCode),
+      `the boundary root write probe was not denied (observed ${probeCode})`);
+    const accepted = W.workerEnvironment(source());
+    assert.deepStrictEqual(forwarded(accepted).sort(), [
+      'AEGIS_CHECK_SNAPSHOT_POLICY',
+      'AEGIS_TRUSTED_PROCESS_INSPECTOR',
+      'AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256',
+    ], 'the accepted inspector did not forward its coordinate, its digest and the snapshot policy');
+    assert.strictEqual(accepted.AEGIS_TRUSTED_PROCESS_INSPECTOR, inspector);
+    assert.strictEqual(accepted.AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256, inspectorSha256);
+
+    // Forwarding stays CONDITIONAL: an unwritable root does not by itself make
+    // an inspector trustworthy. A wrong digest, a wrong coordinate, a missing
+    // snapshot policy and an absent binary are each still refused outright.
+    for (const [name, mutate] of [
+      ['digest', (s) => ({ ...s, AEGIS_TRUSTED_PROCESS_INSPECTOR_SHA256: 'a'.repeat(64) })],
+      ['coordinate', (s) => ({ ...s, AEGIS_TRUSTED_PROCESS_INSPECTOR: path.join(home, 'ps') })],
+      ['policy', (s) => { const next = { ...s }; delete next.AEGIS_CHECK_SNAPSHOT_POLICY; return next; }],
+      ['home', (s) => ({ ...s, HOME: scratch })],
+    ]) {
+      assert.deepStrictEqual(forwarded(W.workerEnvironment(mutate(source()))), [],
+        `an inspector with a wrong ${name} was still forwarded to the worker`);
+    }
+  } finally {
+    try { fs.chmodSync(boundaryRoot, 0o700); } catch { /* best effort */ }
+    fs.rmSync(boundaryRoot, { recursive: true, force: true });
+  }
+});
+
 // ── automatic focused dashboard checks ─────────────────────────────────────
 const FOCUSED_DASHBOARD_PAIR = [
   'node builder-control/test/dashboard-slice.test.cjs',
@@ -4205,10 +5039,21 @@ hostContainmentTest('automatic checks accept a dashboard-created BUILT dashboard
     subjectPaths: ['builder-control/dashboard/index.html'],
     diffBytes: 256,
   });
+  // The fixture packet must declare no host containment. Host proof
+  // prerequisites are deliberately NOT narrowable, so a packet that requires
+  // containment resolves to the pair PLUS its declared pre-host coverage and
+  // is refused here by design — the behaviour the check-selector cases prove.
+  // Only a dashboard packet without containment can reduce to exactly the
+  // pair, which is the proposition this case is about; the previous fixture
+  // was the canonical review packet, which does require containment.
+  const packet = writeCanonicalCheckPacket(FOCUSED_DASHBOARD_PAIR);
+  assert.strictEqual(
+    JSON.parse(fs.readFileSync(packet.absolute, 'utf8')).hostContainmentRequired, undefined,
+    'the focused-pair fixture packet must declare no host containment');
   const { r, runsDir, ledger, runId, TMP } = withSeededRun('BUILT',
-    { ...REVIEW_RUN, automaticChecks: true }, `
+    { ...REVIEW_RUN, packet: packet.relative, automaticChecks: true }, `
       console.log(JSON.stringify(R.automaticDashboardChecksEligibility(runId)));
-    `, engineeringSubjectSequenceMock([subject], REVIEW_PACKET));
+    `, engineeringSubjectSequenceMock([subject], packet.relative));
   try {
     assert.strictEqual(r.status, 0, r.stderr);
     const out = JSON.parse(r.stdout.trim().split('\n').pop());
@@ -4220,7 +5065,10 @@ hostContainmentTest('automatic checks accept a dashboard-created BUILT dashboard
     assert.strictEqual(saved.state, 'BUILT');
     assert.strictEqual(saved.checks, null);
     assert.deepStrictEqual(JSON.parse(fs.readFileSync(ledger, 'utf8')), []);
-  } finally { fs.rmSync(TMP, { recursive: true, force: true }); }
+  } finally {
+    fs.rmSync(TMP, { recursive: true, force: true });
+    fs.rmSync(packet.absolute, { force: true });
+  }
 });
 
 hostContainmentTest('RED: a run that is not dashboard-created is never automatically checked, and no subject is computed', () => {
@@ -7785,6 +8633,26 @@ if (CHECKPOINT_ONLY) {
     process.exitCode = 1;
   }
   console.log(`checkpoint subset: ${CHECKPOINT_CASES.length} selected cases.`);
+}
+if (CHECK_SELECTOR_ONLY) {
+  // A selector that silently dropped a renamed case would report a smaller
+  // green subset, which is exactly the false comfort this switch must not buy.
+  const missing = CHECK_SELECTOR_CASES.filter((name) => !selectedCheckSelectorCases.has(name));
+  if (missing.length) {
+    console.error(`FAIL check-selector selector: unmatched case names ${JSON.stringify(missing)}`);
+    process.exitCode = 1;
+  }
+  console.log(`check-selector subset: ${CHECK_SELECTOR_CASES.length} selected cases.`);
+}
+if (SANDBOX_DRAINAGE_ONLY) {
+  // A selector that silently dropped a renamed case would report a smaller
+  // green subset, which is exactly the false comfort this switch must not buy.
+  const missing = SANDBOX_DRAINAGE_CASES.filter((name) => !selectedSandboxDrainageCases.has(name));
+  if (missing.length) {
+    console.error(`FAIL sandbox-drainage selector: unmatched case names ${JSON.stringify(missing)}`);
+    process.exitCode = 1;
+  }
+  console.log(`sandbox-drainage subset: ${SANDBOX_DRAINAGE_CASES.length} selected cases.`);
 }
 const failed = process.exitCode ? 'at least 1' : '0';
 console.log(`${passed} passed, ${skipped} skipped, ${failed} failed.`);

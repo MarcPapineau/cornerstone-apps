@@ -413,8 +413,15 @@ function processInspectorExecutable(source = process.env) {
  * into a credential store. This evidence remains in the private run record;
  * the dashboard control response still returns counts only.
  */
-function boundedCheckFailureTail(value) {
-  let text = String(value || '')
+/**
+ * The same redaction boundedCheckFailureTail has always applied, extracted so
+ * evidence that must NOT be truncated can still be scrubbed. Returns the full
+ * redacted text plus the number of substitutions actually made, so callers can
+ * record how much was removed instead of asserting it from the source. Nothing
+ * here truncates: bounds stay the caller's decision.
+ */
+function redactSecretMarkers(value) {
+  const text = String(value || '')
     .replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '')
     .replace(/-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/g, '[REDACTED PEM]')
     .replace(/((?:set-)?cookie\s*:\s*)[^\r\n]*/ig, '$1[REDACTED]')
@@ -430,6 +437,14 @@ function boundedCheckFailureTail(value) {
     // hash, but a digest is less useful than an accidentally persisted token.
     .replace(/(?<![A-Za-z0-9])[A-Za-z0-9_+\/=.-]{32,}(?![A-Za-z0-9])/g, '[REDACTED OPAQUE]')
     .replace(/[^\S\r\n]+$/gm, '');
+  const redactions = (text.match(/\[REDACTED(?: [A-Z]+)?\]/g) || []).length;
+  return { text, redactions };
+}
+
+function boundedCheckFailureTail(value) {
+  // Redaction first, existing bounds after. Identical behaviour to the chain
+  // this now delegates to, so the tail-line and tail-byte contract is unchanged.
+  let text = redactSecretMarkers(value).text;
   const lines = text.split(/\r?\n/);
   let truncated = lines.length > CHECK_FAILURE_TAIL_LINES;
   text = lines.slice(-CHECK_FAILURE_TAIL_LINES).join('\n');
@@ -832,12 +847,35 @@ const DASHBOARD_SLICE_CHECKS = Object.freeze([
   'git diff --check',
 ]);
 
+// Host proof prerequisites are not narrowable. Applicability is decided by the
+// existing host authority — runnableHostContainmentCommands, which also refuses
+// a malformed declaration and knows the packet ids that require containment
+// whether or not they declare it — never by a truthiness read of the field.
+// When containment applies, the pre-host coverage that buildHostProofContext
+// validates the host receipt against must already be declared in testsRequired
+// and must survive narrowing. The selector still returns only commands the
+// packet declared itself: an undeclared prerequisite is refused here, before
+// any check or review runs, rather than injected.
+function hostProofPrerequisiteCommands(packet, runnable) {
+  if (!runnableHostContainmentCommands(packet || {}).length) return [];
+  const declared = new Set(runnable);
+  const missing = HOST_PRE_HOST_COVERAGE_COMMANDS.filter((command) => !declared.has(command));
+  if (missing.length) {
+    throw new RunError('HOST-PROOF-CONTEXT-INVALID',
+      'host containment applies to this packet, so every pre-host coverage command must be declared ' +
+      `in testsRequired. Missing: ${missing.join(', ')}`);
+  }
+  return [...HOST_PRE_HOST_COVERAGE_COMMANDS];
+}
+
 function dashboardSliceCheckCommands(packet, changedPaths) {
   const commands = runnableCheckCommands(packet || {});
+  const hostPrerequisites = hostProofPrerequisiteCommands(packet, commands);
   if (!Array.isArray(changedPaths) || changedPaths.length === 0) return commands;
   if (!changedPaths.every((p) => typeof p === 'string' && DASHBOARD_SLICE_PATHS.includes(p))) return commands;
   if (!DASHBOARD_SLICE_CHECKS.every((command) => commands.includes(command))) return commands;
-  return commands.filter((command) => DASHBOARD_SLICE_CHECKS.includes(command));
+  const retained = new Set([...DASHBOARD_SLICE_CHECKS, ...hostPrerequisites]);
+  return commands.filter((command) => retained.has(command));
 }
 
 function runnableHostContainmentCommands(packet) {
@@ -2966,10 +3004,20 @@ function cmdBuildClaimed(run, args) {
     timeout: Number(args.timeout || 900) * 1000,
   });
   const exit = r.status === null ? 124 : r.status;
+  // The command executed above from the ephemeral argv value. What becomes
+  // DURABLE here is evidence, not an executable, so every persisted field is
+  // redacted first: arbitrary builder output — and the command line itself —
+  // must never turn the run record into a credential store. The tails keep
+  // their existing 12-line bound; redaction does not truncate.
+  const redactedCmd = redactSecretMarkers(args.cmd);
+  const redactedStdout = redactSecretMarkers((r.stdout || '').trim());
+  const redactedStderr = redactSecretMarkers((r.stderr || '').trim());
   run.build = {
-    cmd: args.cmd, startedAt: started, endedAt: nowIso(), exit,
-    stdoutTail: (r.stdout || '').trim().split('\n').slice(-12).join('\n'),
-    stderrTail: (r.stderr || '').trim().split('\n').slice(-12).join('\n'),
+    cmd: redactedCmd.text, startedAt: started, endedAt: nowIso(), exit,
+    stdoutTail: redactedStdout.text.split('\n').slice(-12).join('\n'),
+    stderrTail: redactedStderr.text.split('\n').slice(-12).join('\n'),
+    redactions: redactedCmd.redactions + redactedStdout.redactions + redactedStderr.redactions,
+    commandRedacted: redactedCmd.redactions > 0,
   };
   saveRun(run);
 
@@ -3104,6 +3152,15 @@ function timeoutContinuationPrecondition(run) {
       typeof build.attemptId === 'string' || build.workerPid !== undefined || build.control !== undefined) {
     return continuationRefusal('NOT_A_SYNCHRONOUS_BUILD',
       `run ${run.runId} did not record a synchronous builder attempt; detached worker attempts are reconciled by their own authority`);
+  }
+  // A redacted stored command is evidence of what ran, not a runnable command:
+  // replaying it would execute "[REDACTED]" as a literal argument. Refuse by
+  // name so the operator re-supplies the real command, and so no future caller
+  // can quietly resurrect a scrubbed command line into a fresh launch record.
+  if (build.commandRedacted === true || /\[REDACTED(?: [A-Z]+)?\]/.test(build.cmd)) {
+    return continuationRefusal('REDACTED_COMMAND',
+      `run ${run.runId} stored a redacted builder command; the recorded text is evidence, not an executable. ` +
+      'Re-supply the exact command rather than continuing a scrubbed one.');
   }
   if (build.continuation !== undefined) {
     return continuationRefusal('CONTINUATION_ALREADY_ATTEMPTED',
@@ -4578,14 +4635,30 @@ function executeCheckInSnapshot(cmd, worktreeReal, capture) {
       bin: CheckContainment.SANDBOX_EXEC,
       executable: '/bin/bash',
       root: boundaryRoot,
+      // Writes are confined to the three subpaths the contained check actually
+      // needs, never to the boundary root itself. The root must stay unwritable
+      // because trustedProcessInspector accepts this boundary's compiled ps
+      // ONLY when a probe write at the root is refused; granting the root made
+      // that probe succeed, so the snapshot rejected its own inspector and
+      // every contained process fell back to the setuid /bin/ps that
+      // sandbox-exec denies. snapshotRoot stays writable: the canonical
+      // dashboard state-generator preflight writes its real --out path there.
       writeAuthorities: CheckContainment.resolveWriteAuthorities(
-        [boundaryRoot], boundaryRoot, 'check boundary write path'),
+        [snapshotRoot, home, scratch], boundaryRoot, 'check boundary write path'),
       profile: [
         '(version 1)',
         '(deny default)',
         '(allow process*)',
         '(allow signal (target self))',
         '(allow signal (target children))',
+        // A contained check whose leader exits can leave a reparented,
+        // TERM-resistant descendant that is no longer this supervisor's child,
+        // so kill(-pgid) on it is refused EPERM and the boundary cannot drain
+        // its own residue. same-sandbox scopes to the sandbox INSTANCE, not to
+        // the profile text: two concurrent checks carrying byte-identical
+        // profiles still cannot signal each other, and nothing outside the
+        // boundary is reachable. Instance isolation verified only on this host.
+        '(allow signal (target same-sandbox))',
         '(allow sysctl-read)',
         '(allow mach-lookup)',
         '(allow ipc-posix-shm)',
@@ -4600,7 +4673,7 @@ function executeCheckInSnapshot(cmd, worktreeReal, capture) {
           .map((anchor) => `(literal ${JSON.stringify(anchor)})`).join(' ')})`,
         `(deny file-write-flags ${[boundaryRoot, snapshotRoot, home, scratch, bin]
           .map((anchor) => `(literal ${JSON.stringify(anchor)})`).join(' ')})`,
-        `(allow file-write* (subpath ${JSON.stringify(boundaryRoot)}) (literal "/dev/null"))`,
+        `(allow file-write* (subpath ${JSON.stringify(snapshotRoot)}) (subpath ${JSON.stringify(home)}) (subpath ${JSON.stringify(scratch)}) (literal "/dev/null"))`,
         ...loopbackRules,
       ].join('\n') + '\n',
     };
@@ -4810,6 +4883,9 @@ function outerHostContainmentProfile(boundaryRoot, loopbackPorts = []) {
       '(allow process*)',
       '(allow signal (target self))',
       '(allow signal (target children))',
+      // Same instance-scoped residue drainage as the contained check boundary
+      // above; see that rationale. Verified only on this host.
+      '(allow signal (target same-sandbox))',
       '(allow sysctl-read)',
       '(allow mach-lookup)',
       '(allow ipc-posix-shm)',
@@ -5827,7 +5903,6 @@ function canonicalReviewCoordinates(run) {
   if (!packet) throw new RunError('REVIEW-PACKET-INVALID', 'review binding requires the packet already bound to the run');
   const env = canonicalGitEnvironment(run);
   const packetNow = packetCoordinate(packet);
-  const commands = runnableCheckCommands(packetNow.parsed);
   const hostCommands = runnableHostContainmentCommands(packetNow.parsed);
 
   const first = runCanonicalEngineeringOs([
@@ -5838,6 +5913,10 @@ function canonicalReviewCoordinates(run) {
       !Number.isInteger(subject.diffBytes) || subject.diffBytes <= 0) {
     throw new RunError('REVIEW-SUBJECT-INVALID', 'canonical subject is empty, malformed, or unavailable');
   }
+  // The same fixed-policy, subject-derived selection runChecks made, taken from
+  // the subject this authority just validated. Reading the packet's full
+  // runnable list instead would call a legitimately narrowed receipt stale.
+  const commands = dashboardSliceCheckCommands(packetNow.parsed, subject.changedPaths);
   const checkReceipt = loadCanonicalCheckReceipt(run.checks, {
     runId: run.runId, packetPath: packetNow.path, packetSha256: packetNow.sha256,
     subject, commands, hostCommands,
@@ -6849,6 +6928,24 @@ const CHECKPOINT_REFUSAL_CODES = Object.freeze({
 const CHECKPOINT_CLI_CODES = Object.freeze(Object.fromEntries(
   Object.entries(CHECKPOINT_REFUSAL_CODES).map(([cli, control]) => [control, cli])));
 
+// By step 10 the reviewed subject is already committed, so the working-tree
+// diff is empty and the run's own check summary is not authority. The one
+// phase-appropriate reader of what changed is the canonical subject authority
+// over the reviewed..HEAD range. Anything unreadable answers null, and the
+// packet's full requirement stands — narrowing is never assumed.
+function committedRangeChangedPaths(run, env, packetNow) {
+  const base = run.reviewGate && run.reviewGate.headCommit;
+  const head = (git(['-C', env.GIT_WORK_TREE, 'rev-parse', 'HEAD']).stdout || '').trim();
+  if (!/^[0-9a-f]{40,64}$/.test(base || '') || !/^[0-9a-f]{40,64}$/.test(head) || base === head) return null;
+  let answer;
+  try {
+    answer = runCanonicalEngineeringOs([
+      '--subject', '--packet', packetNow.path, '--base', base, '--head', head, '--json'], env);
+  } catch { return null; }
+  const changed = answer.status === 0 && answer.parsed ? answer.parsed.changedPaths : null;
+  return Array.isArray(changed) ? changed : null;
+}
+
 // The pre-existing claimed authority, under its existing name. It decides
 // everything it decided before and relaxes nothing. The only change is that it
 // RETURNS the coordinates it recorded instead of printing them, so a caller
@@ -6883,7 +6980,8 @@ function cmdCheckpointClaimed(run) {
   const packetNow = packetCoordinate(packet);
   const receipt = loadCanonicalCheckReceipt(run.checks, {
     runId: run.runId, packetPath: packetNow.path, packetSha256: packetNow.sha256,
-    commands: runnableCheckCommands(packetNow.parsed),
+    commands: dashboardSliceCheckCommands(
+      packetNow.parsed, committedRangeChangedPaths(run, env, packetNow)),
     hostCommands: runnableHostContainmentCommands(packetNow.parsed),
   });
   if (!receipt || !run.reviewGate || run.reviewGate.subjectSha256 !== receipt.subject.subjectSha256 ||
@@ -7170,4 +7268,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, prepareIndependentReview, bindIndependentReview, requestIndependentReview, REVIEW_REQUEST_FIELDS, REVIEW_REQUEST_REVIEWERS, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, acquireGlobalReviewHold, releaseGlobalReviewHold, reviewLifecycleProofPermitsRelease, REVIEW_HOLD_HOLDER, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, checkpointRun, CHECKPOINT_REFUSAL_CODES, CHECKPOINT_CLI_CODES, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { redactSecretMarkers, STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, prepareIndependentReview, bindIndependentReview, requestIndependentReview, REVIEW_REQUEST_FIELDS, REVIEW_REQUEST_REVIEWERS, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, acquireGlobalReviewHold, releaseGlobalReviewHold, reviewLifecycleProofPermitsRelease, REVIEW_HOLD_HOLDER, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, checkpointRun, CHECKPOINT_REFUSAL_CODES, CHECKPOINT_CLI_CODES, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };

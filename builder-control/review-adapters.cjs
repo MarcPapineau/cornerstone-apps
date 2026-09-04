@@ -441,7 +441,15 @@ function resolveCanonicalCheckReceipt(packetPath, packet, subject, authority, op
   }
   const packetRelative = path.relative(ROOT, packetReal).split(path.sep).join('/');
   const packetSha256 = sha256Hex(fs.readFileSync(packetReal));
-  const commands = runnablePacketChecks(packet);
+  // One canonical narrowing policy, shared with runChecks and the review
+  // preflight. A receipt for a dashboard-only subject legitimately carries the
+  // focused pair rather than the packet's full list, and weighing it against
+  // the full list refused a real, current, all-passed receipt as "found 0".
+  // The selector is fixed-policy and subject-derived; an authority that cannot
+  // supply it leaves the packet's full requirement standing.
+  const commands = typeof runAuthority.dashboardSliceCheckCommands === 'function'
+    ? runAuthority.dashboardSliceCheckCommands(packet, subject && subject.changedPaths)
+    : runnablePacketChecks(packet);
   const hostCommands = runnableHostContainmentChecks(packet);
   if (!commands.length) throw new Error('packet declares no runnable deterministic checks');
   const expected = { packetPath: packetRelative, packetSha256, subject, commands, hostCommands };
@@ -1768,6 +1776,140 @@ function buildRecord({ reviewer, reviewerModel, packetId, subject, parsed, unava
   };
 }
 
+// ── durable evidence redaction ──────────────────────────────────────────────
+// Redaction is a PUBLICATION step, not a parsing step.
+//
+// ROOT CAUSE (observed 2026-09-04): runTool scrubbed reviewer stdout the
+// instant the process closed, so everything downstream — extractJson,
+// validateCodexInspectionProofs, the terminal-envelope check — read scrubbed
+// bytes. The canonical scrubber's last rule treats any unknown opaque run of
+// 32+ [A-Za-z0-9_+/=.-] characters as a secret, and a repo-relative path such
+// as builder-control/packets/PKT-...-REPAIR.json is exactly that shape. The
+// challenged path came back as [REDACTED OPAQUE], the byte-exact challenge
+// could not match, and five V3 Codex groups recorded UNAVAILABLE while their
+// inspection proofs were in fact correct.
+//
+// The order is now: parse and validate against the exact unredacted in-memory
+// bytes, publish nothing durable until that has happened, then scrub on the
+// way to disk.
+//
+// The scrubber in aegis-run.cjs is NOT modified and NO regex exception is
+// added. Preservation is structural: each verbatim token is swapped for a
+// nonce placeholder, the unchanged scrubber runs over the whole string, and
+// the placeholders are swapped back. A placeholder is delimited by a control
+// character and its interior is far shorter than the opaque rule's
+// 32-character floor, so the substitution can only make a boundary MORE
+// redactable, never less — a secret abutting a preserved path loses the
+// character-class lookbehind that used to shield it.
+const PRESERVE_SENTINEL = '\u0001';
+
+function redactWithPreservedTokens(value, preserveTokens) {
+  const redactor = require('./aegis-run.cjs').redactSecretMarkers;
+  const text = String(value == null ? '' : value);
+  const tokens = Array.from(new Set((preserveTokens || [])
+    .filter((token) => typeof token === 'string' && token.length > 0)))
+    .filter((token) => text.includes(token))
+    // Longest first so a path that is a prefix of another cannot shadow it.
+    .sort((a, b) => b.length - a.length);
+  if (!tokens.length) return redactor(text);
+  let nonce;
+  do { nonce = crypto.randomBytes(6).toString('hex'); } while (text.includes(nonce));
+  const placeholders = new Map();
+  let masked = '';
+  for (let i = 0; i < text.length;) {
+    const token = tokens.find((candidate) => text.startsWith(candidate, i));
+    if (!token) { masked += text[i]; i += 1; continue; }
+    if (!placeholders.has(token)) {
+      placeholders.set(token, `${PRESERVE_SENTINEL}p${placeholders.size}${nonce}${PRESERVE_SENTINEL}`);
+    }
+    masked += placeholders.get(token);
+    i += token.length;
+  }
+  const scrubbed = redactor(masked);
+  let restored = scrubbed.text;
+  for (const [token, placeholder] of placeholders) restored = restored.split(placeholder).join(token);
+  return { text: restored, redactions: scrubbed.redactions };
+}
+
+// Model-authored free text in a durable record. Deliberately an allowlist:
+// reviewId, ts, reviewer, packetId, disposition, severity, status and
+// reviewOf.changedPaths are adapter-authored coordinates, not reviewer prose,
+// and scrubbing them would corrupt the gate's own bindings.
+const REDACTED_FINDING_TEXT_FIELDS = ['file', 'location', 'problem', 'impact', 'evidence',
+  'requiredCorrection', 'verificationMethod', 'builderResponse'];
+const REDACTED_REVERIFIED_TEXT_FIELDS = ['verificationMethod', 'evidence'];
+
+// Only an attestation THIS process produced through validateCodexInspectionProofs
+// can buy verbatim preservation. A forged {complete:true, coveredPaths:[…]}
+// literal is not in the WeakSet, so it preserves nothing and its paths are
+// scrubbed like any other model-authored string.
+function preservedInspectionPaths(codexInspection) {
+  if (!codexInspection || !validatedCodexInspection.has(codexInspection)
+    || codexInspection.complete !== true
+    || !Array.isArray(codexInspection.coveredPaths)) return [];
+  return codexInspection.coveredPaths.filter((p) => typeof p === 'string' && p.length > 0);
+}
+
+function redactDurableReviewEvidence({ raw, record, codexInspection } = {}) {
+  const preserve = preservedInspectionPaths(codexInspection);
+  const rawResult = redactWithPreservedTokens(raw, preserve);
+  let structuredRecordRedactions = 0;
+  const scrub = (value) => {
+    const result = redactWithPreservedTokens(value, preserve);
+    structuredRecordRedactions += result.redactions;
+    return result.text;
+  };
+  let redacted = null;
+  if (record && typeof record === 'object') {
+    redacted = { ...record };
+    for (const field of ['unavailableReason', 'notes']) {
+      if (typeof redacted[field] === 'string') redacted[field] = scrub(redacted[field]);
+    }
+    if (Array.isArray(redacted.findings)) {
+      redacted.findings = redacted.findings.map((finding) => {
+        const out = { ...finding };
+        for (const field of REDACTED_FINDING_TEXT_FIELDS) {
+          if (typeof out[field] === 'string') out[field] = scrub(out[field]);
+        }
+        return out;
+      });
+    }
+    if (Array.isArray(redacted.reverifiedFindings)) {
+      redacted.reverifiedFindings = redacted.reverifiedFindings.map((proof) => {
+        const out = { ...proof };
+        for (const field of REDACTED_REVERIFIED_TEXT_FIELDS) {
+          if (typeof out[field] === 'string') out[field] = scrub(out[field]);
+        }
+        return out;
+      });
+    }
+    if (Array.isArray(redacted.unverified)) {
+      redacted.unverified = redacted.unverified.map((entry) => scrub(String(entry)));
+    }
+    // The two counts are recorded SEPARATELY so "the raw transcript carried
+    // secrets" and "the reviewer's structured verdict carried secrets" can
+    // never be read as one number. They ride the existing free-text `notes`
+    // extension point: engineering-review.schema.json is
+    // additionalProperties:false at the top level, so a new field would be a
+    // schema change and this adds none. The line is adapter-authored digits
+    // and is appended AFTER scrubbing, so it cannot be scrubbed away.
+    const countsNote = `evidenceRedaction ${stableJson({
+      rawOutputRedactions: rawResult.redactions,
+      structuredRecordRedactions,
+      preservedInspectionPaths: preserve.length,
+    })}`;
+    redacted.notes = typeof redacted.notes === 'string' && redacted.notes
+      ? `${redacted.notes}\n${countsNote}` : countsNote;
+  }
+  return Object.freeze({
+    raw: rawResult.text,
+    record: redacted,
+    rawOutputRedactions: rawResult.redactions,
+    structuredRecordRedactions,
+    preservedPaths: Object.freeze(preserve.slice()),
+  });
+}
+
 function validateRecord(recordPath) {
   const r = spawnSync(process.execPath, [ENGOS, '--validate-review', recordPath, '--json'],
     { cwd: ROOT, encoding: 'utf8' });
@@ -2362,7 +2504,6 @@ function containedReviewerCommand(reviewer, sandbox, argv) {
     .replace('(allow process*)', `(allow process-info*)\n(allow process-fork)\n(allow process-exec (literal "${executable}"))`)
     .replace('(allow network-outbound)', `(allow network-outbound (process-path "${executable}"))`);
   const profile = Object.freeze({ ...generated, profile: profileText });
-  assertSandboxOperational();
   return Object.freeze({ ...sandboxedCommand(profile, argv), profile });
 }
 
@@ -2407,6 +2548,13 @@ function validateGrokExecutableIdentity(opts = {}) {
 function runGrokBillingAcp(contained, opts = {}) {
   const timeoutMs = Math.max(1, Number(opts.timeoutMs) || GROK_BILLING_PREFLIGHT_TIMEOUT_MS);
   const spawnImpl = typeof opts.spawnImpl === 'function' ? opts.spawnImpl : spawn;
+  // DEFAULT billing launch: fail-closed OS preflight immediately before the
+  // real spawn. It lives here rather than in descriptor construction, so
+  // describing a command no longer requires a usable sandbox while every real
+  // launch still proves one. The guard is the DEFAULT spawner identity, not a
+  // caller flag: a caller that supplies its own spawner is not launching a
+  // contained child through us, so there is nothing for the OS probe to prove.
+  if (spawnImpl === spawn) assertSandboxOperational();
   const killImpl = typeof opts.killImpl === 'function' ? opts.killImpl : process.kill.bind(process);
   return new Promise((resolve) => {
     let child;
@@ -2633,7 +2781,14 @@ async function grokBillingPreflight(sandbox, opts = {}) {
   catch (error) { return Object.freeze({ ok: false, reason: `Grok billing containment unavailable: ${error.message}` }); }
   // Prove the immutable pin after every non-invoking preparation step and
   // immediately before the ACP executable is allowed to start.
-  const identity = validateGrokExecutableIdentity({ versionRunner: opts.grokVersionRunner });
+  const identity = validateGrokExecutableIdentity({
+    versionRunner: opts.grokVersionRunner,
+    // Threaded exactly as grokVersionRunner already is. The production default
+    // remains the real read-and-hash of the pinned path; this only lets a
+    // simulated launch that already mocks the version probe also mock the
+    // digest, instead of being forced to read the operator's pinned binary.
+    digestRunner: opts.grokDigestRunner,
+  });
   if (!identity.ok) return Object.freeze({ ok: false, reason: identity.reason, identity });
   const runner = typeof opts.grokBillingRunner === 'function' ? opts.grokBillingRunner : runGrokBillingAcp;
   // Everything above this line is preparation that starts nothing. The next
@@ -2689,25 +2844,22 @@ function processGroupAlive(pid) {
   }
 }
 
+// A thin adapter-local wrapper over the canonical owner. The previous body
+// spawned the setuid system /bin/ps directly, which the immutable check
+// boundary refuses with EPERM, so every drainage observation inside a governed
+// check threw an OS error instead of observing the group. aegis-run.cjs already
+// owns a trusted-inspector-aware processGroupMembers and already exports it; it
+// is reached here through the lazy require this module already uses for that
+// authority, so no import cycle, new inspector, module or export is introduced.
+//
+// The invalid-id guard and the adapter timeout are retained exactly. An
+// unobservable group is a BOUNDED THROW, never an empty array: turning "I could
+// not look" into "nothing is there" would manufacture drainage evidence.
 function processGroupMembers(processGroupId, timeoutMs = 1_000) {
   if (!Number.isInteger(processGroupId) || processGroupId <= 0) return [];
-  const ps = fs.existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
-  const observed = spawnSync(ps, ['-axo', 'pid=,pgid='], {
-    encoding: 'utf8',
-    timeout: timeoutMs,
-    killSignal: 'SIGKILL',
-  });
-  if (observed.error) throw observed.error;
-  if (observed.status !== 0) {
-    throw new Error(`process-group member probe exited ${String(observed.status)}`);
-  }
-  const members = [];
-  for (const line of String(observed.stdout || '').split('\n')) {
-    const match = line.trim().match(/^(\d+)\s+(\d+)$/);
-    if (!match || Number(match[2]) !== processGroupId) continue;
-    members.push(Number(match[1]));
-  }
-  return members;
+  const observed = require('./aegis-run.cjs').processGroupMembers(processGroupId, timeoutMs);
+  if (!Array.isArray(observed)) throw new Error('process-group observation unavailable');
+  return observed;
 }
 
 function signalProcessGroup(pid, signal) {
@@ -2790,6 +2942,21 @@ async function reapUndrainedReviewerGroup(terminationEvidence, opts = {}) {
  * drain window has expired. The caller always treats an undrained result as a
  * refusal, never as usable review evidence.
  */
+// DEFAULT real-review launcher. runTool's default path launches a CONTAINED
+// reviewer child, so the sandbox must be proven before that spawn. The proof
+// lives here rather than in runContainedWithWatchdog because the generic
+// watchdog also supervises already-contained or plain direct children (the
+// process.execPath lifecycle fixtures), which must stay capability-free.
+//
+// This wrapper is selected ONLY as runTool's default. An injected
+// watchdogRunner still replaces it wholesale, so simulated launches never
+// attempt nested OS profile application. There is no flag and no bypass:
+// the default path cannot reach a real contained spawn without this assertion.
+function launchContainedReviewWithWatchdog(contained, opts = {}) {
+  assertSandboxOperational();
+  return runContainedWithWatchdog(contained, opts);
+}
+
 function runContainedWithWatchdog(contained, opts = {}) {
   const timeoutMs = Math.max(1, Number(opts.timeoutMs) || 1);
   const activityExtendsTimeout = opts.activityExtendsTimeout === true;
@@ -3241,11 +3408,12 @@ async function runTool(reviewer, prompt, timeoutSec, opts = {}) {
     try { contained = containedReviewerCommand(reviewer, sandbox, argv); }
     catch (e) { return { ok: false, reason: `OS containment unavailable: ${e.message}`, raw: '' }; }
     const watchdogRunner = typeof opts.watchdogRunner === 'function'
-      ? opts.watchdogRunner : runContainedWithWatchdog;
+      ? opts.watchdogRunner : launchContainedReviewWithWatchdog;
     let reviewExecutableIdentity = null;
     if (reviewer === 'grok') {
       reviewExecutableIdentity = validateGrokExecutableIdentity({
         versionRunner: opts.grokVersionRunner,
+        digestRunner: opts.grokDigestRunner,
       });
       if (!reviewExecutableIdentity.ok) {
         return {
@@ -3269,6 +3437,13 @@ async function runTool(reviewer, prompt, timeoutSec, opts = {}) {
       stdinInput: codexInput ? codexInput.inputBuffer : null,
       stdinWriter: opts.stdinWriter,
     });
+    // Reviewer output stays EXACTLY as the process produced it here. Every
+    // protocol decision downstream — extractJson, the Grok receipt stream,
+    // validateCodexInspectionProofs, the terminal-envelope check — is
+    // byte-exact against the reviewer's own bytes, so scrubbing at this point
+    // makes those checks read text the reviewer never wrote. Redaction is a
+    // PUBLICATION step and belongs at the durable write boundary; see
+    // redactDurableReviewEvidence.
     const stdout = r.stdout || '';
     const stderr = r.stderr || '';
     const raw = stdout + (stderr ? `\n--- stderr ---\n${stderr}` : '');
@@ -3582,7 +3757,20 @@ async function cmdRun(args) {
       completionEvidence: res.completionEvidence || null,
     }, null, 2)}\n`
     : '';
-  writeImmutableFile(rawPath, (res.raw || '(no output captured)') + rawInputDelivery + rawControlEvidence);
+  const rawTranscript = (res.raw || '(no output captured)') + rawInputDelivery + rawControlEvidence;
+  // NOTHING durable is written until the reviewer's exact bytes have been
+  // parsed and validated. The raw transcript used to be published here, before
+  // any of that ran; because the bytes were already scrubbed by then, the
+  // byte-exact inspection challenge could not match its own answer. Publication
+  // now happens once, below, after validation — and never before it.
+  let rawPublished = false;
+  const publishRawTranscript = (validatedInspection) => {
+    if (rawPublished) return;
+    rawPublished = true;
+    writeImmutableFile(rawPath, redactDurableReviewEvidence({
+      raw: rawTranscript, codexInspection: validatedInspection,
+    }).raw);
+  };
 
   // Failed Codex transport still becomes durable UNAVAILABLE evidence. It
   // carries zero verified changedPaths and can never satisfy a reviewer slot,
@@ -3641,6 +3829,16 @@ async function cmdRun(args) {
       why = `the reviewer stopped early (stopReason="${stop}"${turns ? `, ${turns} turns` : ''}) without emitting a review record`;
     }
   }
+  // Every byte-exact check against the reviewer's own output has now run. This
+  // is the earliest point at which anything may become durable, and it is
+  // still before the record is built, so an unexpected failure in record
+  // construction cannot cost the operator the transcript.
+  //
+  // Only an attestation this process produced buys verbatim preservation. When
+  // Codex coverage was refused, codexInspection is incomplete and not in the
+  // WeakSet, so the transcript is scrubbed with nothing preserved.
+  publishRawTranscript(reviewer === 'codex' ? codexInspection : null);
+
   const record = buildRecord({
     reviewer,
     reviewerModel: reviewer === 'codex' ? 'codex-cli (ChatGPT.app)' : 'grok-cli (grok-macos-aarch64)',
@@ -3668,7 +3866,13 @@ async function cmdRun(args) {
   // the aggregate reaches the gate, and only when every group beneath it
   // covered the subject exactly. A stray group record must never be mistaken
   // for a review of the whole change.
-  return writeRecord(record, `${invocation.base}${args.groupId ? '-' + args.groupId : ''}`, rawPath,
+  // The record reaches writeRecord already redacted, so the signature, the
+  // quarantine copy, the invalid-record diagnostic and the published file all
+  // carry the same scrubbed bytes. writeRecord itself stays generic.
+  const durable = redactDurableReviewEvidence({
+    raw: rawTranscript, record, codexInspection: reviewer === 'codex' ? codexInspection : null,
+  });
+  return writeRecord(durable.record, `${invocation.base}${args.groupId ? '-' + args.groupId : ''}`, rawPath,
     { packetPath: args.packet, subdir: args.groupId ? 'groups' : null });
 }
 
@@ -4056,4 +4260,4 @@ if (require.main === module) {
 
 module.exports = { requestCanonicalReview, CALLABLE_REVIEW_FIELDS, reviewCallOutcome,
   reviewProcessLifecycle, reviewerLifecycleFromTermination, createReviewLifecycleRecorder,
-  REVIEW_PROCESS_LIFECYCLE_STATES, REVIEW_PROCESS_LIFECYCLE_PROVENANCE, detect, extractJson, extractGrokStreamingReview, grokStreamEvents, grokReadReceiptCoverage, enforceGrokReadReceipts, authoritativeGrokSpend, grokSpendContract, reviewerProtocolText, buildRecord, codexPrompt, grokPrompt, eligiblePriorFindings, loadCurrentStateProofMap, isCurrentOpenReverificationTarget, CURRENT_STATE_CLASSIFICATIONS, liveReviewRecords, reviewCycleLaunchDecision, isUsableReview, validateReviewPayload, validateCodexInspectionProofs, codexCoveredPaths, stopWasAbnormal, validateCodexTerminalEnvelope, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, buildCodexInput, runTool, runContainedWithWatchdog, reapUndrainedReviewerGroup, processGroupAlive, prepareReviewSandbox, validateReviewManifestSnapshot, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, validateGrokExecutableIdentity, runGrokBillingAcp, validateGrokBillingEvidence, grokBillingPreflight, createInvocationIdentity, writeImmutableFile, writeRecord, runnablePacketChecks, resolveCanonicalCheckReceipt, resolveCanonicalRunContext, resolveReviewDataClass, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, MAX_REVIEW_OUTPUT_BYTES, MAX_CODEX_BUNDLE_BYTES, MAX_CODEX_INPUT_BYTES, MAX_CODEX_INPUT_CHARACTERS, REVIEW_KILL_GRACE_MS, REVIEW_REAPER_TIMEOUT_MS, GROK_BILLING_PREFLIGHT_TIMEOUT_MS, GROK_BILLING_MAX_STREAM_BYTES, GROK_EXPECTED_VERSION, GROK_EXPECTED_SHA256, GROK_REVIEW_SCHEMA, TOOLS };
+  REVIEW_PROCESS_LIFECYCLE_STATES, REVIEW_PROCESS_LIFECYCLE_PROVENANCE, detect, extractJson, extractGrokStreamingReview, grokStreamEvents, grokReadReceiptCoverage, enforceGrokReadReceipts, authoritativeGrokSpend, grokSpendContract, reviewerProtocolText, buildRecord, codexPrompt, grokPrompt, eligiblePriorFindings, loadCurrentStateProofMap, isCurrentOpenReverificationTarget, CURRENT_STATE_CLASSIFICATIONS, liveReviewRecords, reviewCycleLaunchDecision, isUsableReview, validateReviewPayload, validateCodexInspectionProofs, redactDurableReviewEvidence, codexCoveredPaths, stopWasAbnormal, validateCodexTerminalEnvelope, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, buildCodexInput, runTool, runContainedWithWatchdog, reapUndrainedReviewerGroup, processGroupAlive, prepareReviewSandbox, validateReviewManifestSnapshot, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, validateGrokExecutableIdentity, runGrokBillingAcp, validateGrokBillingEvidence, grokBillingPreflight, createInvocationIdentity, writeImmutableFile, writeRecord, runnablePacketChecks, resolveCanonicalCheckReceipt, resolveCanonicalRunContext, resolveReviewDataClass, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, MAX_REVIEW_OUTPUT_BYTES, MAX_CODEX_BUNDLE_BYTES, MAX_CODEX_INPUT_BYTES, MAX_CODEX_INPUT_CHARACTERS, REVIEW_KILL_GRACE_MS, REVIEW_REAPER_TIMEOUT_MS, GROK_BILLING_PREFLIGHT_TIMEOUT_MS, GROK_BILLING_MAX_STREAM_BYTES, GROK_EXPECTED_VERSION, GROK_EXPECTED_SHA256, GROK_REVIEW_SCHEMA, TOOLS };

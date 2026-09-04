@@ -544,12 +544,70 @@ test('review binding and checkpoint reload the mandatory host receipt from canon
     source.indexOf('function bindIndependentReview(runId)'));
   const checkpoint = source.slice(source.indexOf('function cmdCheckpoint'),
     source.indexOf('function cmdRollback'));
-  assert.match(review, /hostCommands = runnableHostContainmentCommands\(packetNow\.parsed\)/);
-  assert.match(review, /loadCanonicalPreHostCheckReceipt\(run\.checks/);
+  // The reload was extracted into the shared canonicalReviewCoordinates
+  // authority by cb8ba37 so the read-only review preflight resolves the same
+  // coordinates. Pin the DELEGATION EDGE plus the authority that now owns the
+  // reload, so deleting the call is still caught, and prove the reload's
+  // BEHAVIOUR below rather than asserting where its source lines sit.
+  const coordinates = source.slice(source.indexOf('function canonicalReviewCoordinates'),
+    source.indexOf('function bindIndependentReviewClaimed'));
+  assert.match(review, /const coordinates = canonicalReviewCoordinates\(run\)/,
+    'review binding no longer resolves its coordinates from the canonical authority');
+  assert.match(review, /hostCommands, subject, preHostReceipt/,
+    'review binding no longer takes the host commands and pre-host receipt from that authority');
+  assert.match(coordinates, /hostCommands = runnableHostContainmentCommands\(packetNow\.parsed\)/);
+  assert.match(coordinates, /loadCanonicalPreHostCheckReceipt\(run\.checks/);
   assert.match(review, /subject, commands, hostCommands/);
   assert.ok(review.indexOf("'--gate-done'") < review.indexOf('finalizeReviewedHostContainment('),
     'subject-controlled host containment can execute before the exact-subject review gate');
   assert.match(checkpoint, /hostCommands: runnableHostContainmentCommands\(packetNow\.parsed\)/);
+
+  // Behaviour, not source text: the exact coordinates the authority passes must
+  // load the canonical pre-host receipt, and every single wrong coordinate must
+  // refuse it. The suite's ledger is restored byte for byte afterwards.
+  const ledgerBefore = fs.readFileSync(ledgerFile);
+  try {
+    const receipt = validPreHostReceipt();
+    const entryId = `LED-CHECK-${receipt.receiptSha256.slice(0, 32)}`;
+    const results = receipt.results.map(({ cmd, exit }) => ({ cmd, exit }));
+    fs.writeFileSync(ledgerFile, JSON.stringify([...JSON.parse(ledgerBefore.toString('utf8')), {
+      entryId,
+      gate: 'aegis-pre-host-check-receipt',
+      plane: 'CONTROL',
+      correlationId: receipt.runId,
+      status: 'PASS',
+      bundleHash: receipt.receiptSha256,
+      notes: `AEGIS_PRE_HOST_CHECK_RECEIPT_V1:${Buffer.from(JSON.stringify(receipt), 'utf8').toString('base64url')}`,
+      changed: receipt.subject.subjectPaths,
+      commandsRun: results,
+      testsRun: results.map(({ cmd }) => cmd),
+    }]));
+    const checks = { preHostReceiptRef: { entryId, receiptSha256: receipt.receiptSha256 } };
+    const exact = {
+      runId: receipt.runId,
+      packetPath: receipt.packet.path,
+      packetSha256: receipt.packet.sha256,
+      subject: receipt.subject,
+      commands: receipt.results.map(({ cmd }) => cmd),
+      hostCommands: receipt.hostContainment.commands,
+    };
+    const loaded = AegisRun.loadCanonicalPreHostCheckReceipt(checks, exact);
+    assert.ok(loaded && loaded.receiptSha256 === receipt.receiptSha256,
+      'the exact review coordinates did not reload the canonical pre-host receipt');
+    for (const [name, wrong] of [
+      ['runId', { ...exact, runId: 'RUN-20260829-99999999' }],
+      ['packetPath', { ...exact, packetPath: 'builder-control/packets/OTHER.json' }],
+      ['packetSha256', { ...exact, packetSha256: 'd'.repeat(64) }],
+      ['subject', { ...exact, subject: { ...exact.subject, subjectSha256: 'e'.repeat(64) } }],
+      ['commands', { ...exact, commands: ['node builder-control/test/unrelated.test.cjs'] }],
+      ['hostCommands', { ...exact, hostCommands: ['node builder-control/test/unrelated.test.cjs'] }],
+    ]) {
+      assert.strictEqual(AegisRun.loadCanonicalPreHostCheckReceipt(checks, wrong), null,
+        `a receipt bound to a different ${name} was accepted as this subject's evidence`);
+    }
+  } finally {
+    fs.writeFileSync(ledgerFile, ledgerBefore);
+  }
 });
 
 test('pre-host PASS is separately typed and cannot satisfy the final check authority', () => {
@@ -1027,6 +1085,90 @@ process.exit(9);
     }
     fs.rmSync(fixtureDir, { recursive: true, force: true });
   }
+});
+
+// The asynchronous worker path already proves redaction above. This is the
+// SYNCHRONOUS builder path: what --build persists through saveRun is evidence,
+// not an executable, so the stored command and both output tails must carry no
+// credential-shaped marker. Markers here are synthetic and are not secrets.
+test('synchronous builder evidence is redacted before it becomes durable, and a redacted command is never continued', () => {
+  const marks = {
+    bearer: 'AEGIS-BETA-SYNTHETIC-BEARER-0123456789abcdef0123',
+    jwt: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZWdpcy1zeW50aGV0aWMifQ.SYNTHETICNOTREALaaaaaaaa',
+    token: 'sk-SYNTHETICNOTREAL0123456789abcdef',
+  };
+  const sentinel = 'AEGIS_SYNC_BUILD_DIAGNOSTIC';
+  const runId = 'RUN-20260901-be7a0002';
+  // A private control plane: the suite's own worker proof holds the shared
+  // global launch claim, and this proof is about persistence, not admission.
+  const priv = path.join(scratch, 'sync-build');
+  const privRuns = path.join(priv, 'runs');
+  fs.mkdirSync(privRuns, { recursive: true });
+  fs.mkdirSync(path.join(priv, 'checkpoints'), { recursive: true });
+  fs.writeFileSync(path.join(priv, 'ledger.json'), '[]\n', { mode: 0o600 });
+  const privEnv = { ...process.env, AEGIS_RUNS_DIR: privRuns,
+    AEGIS_CHECKPOINTS_DIR: path.join(priv, 'checkpoints'),
+    AEGIS_LEDGER_FILE: path.join(priv, 'ledger.json') };
+  const runFile = path.join(privRuns, `${runId}.json`);
+  const worktree = path.join(priv, 'worktree');
+  fs.mkdirSync(worktree, { recursive: true });
+  const at = '2026-09-01T05:00:00.000Z';
+  fs.writeFileSync(runFile, JSON.stringify({
+    runId, createdAt: at, updatedAt: at, state: 'WORKTREE_READY',
+    objective: 'synchronous builder redaction acceptance', project: 'aegis',
+    constraints: [], acceptanceCriteria: [], dataClass: 'INTERNAL', packet: null,
+    baseCommit: 'HEAD', worktree: { path: worktree, branch: 'aegis/proof', createdAt: at, baseCommit: 'HEAD' },
+    build: null, checks: null, checkpoint: null, corrections: 0,
+    transitions: [{ at, to: 'WORKTREE_READY', note: 'seeded disposable fixture' }],
+    risk: 'FULL', route: { model: 'none', execution: 'none', source: 'fixture' },
+  }, null, 2));
+  const emit = [
+    `printf '%s\n' ${JSON.stringify(sentinel)}`,
+    `printf '%s\n' ${JSON.stringify(`Authorization: Bearer ${marks.bearer}`)}`,
+    `printf '%s\n' ${JSON.stringify(marks.jwt)}`,
+    `printf '%s\n' ${JSON.stringify(`api_key: ${marks.token}`)} 1>&2`,
+    `printf '%s\n' ${JSON.stringify(sentinel)} 1>&2`,
+  ].join('; ');
+  const CLI = path.join(ROOT, 'builder-control', 'aegis-run.cjs');
+  const built = spawnSync(process.execPath, [CLI, '--build', runId, '--cmd', emit],
+    { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, env: privEnv });
+  assert.strictEqual(built.status, 0, built.stderr);
+
+  const persisted = fs.readFileSync(runFile, 'utf8');
+  const reloaded = JSON.parse(persisted);
+  assert.strictEqual(reloaded.state, 'BUILT');
+  for (const [name, secret] of Object.entries(marks)) {
+    assert.ok(!persisted.includes(secret),
+      `the durable run record retained the synthetic ${name} marker`);
+  }
+  // Redaction must not truncate: the useful non-secret diagnostic survives on
+  // both streams, and the stored command is still recognisably the command.
+  assert.ok(reloaded.build.stdoutTail.includes(sentinel), 'stdout evidence lost its diagnostic');
+  assert.ok(reloaded.build.stderrTail.includes(sentinel), 'stderr evidence lost its diagnostic');
+  assert.ok(reloaded.build.stdoutTail.includes('[REDACTED'), 'stdout evidence carries no redaction marker');
+  assert.ok(reloaded.build.stderrTail.includes('[REDACTED'), 'stderr evidence carries no redaction marker');
+  assert.ok(reloaded.build.cmd.includes('printf'), 'the stored command was truncated rather than redacted');
+  assert.ok(Number.isInteger(reloaded.build.redactions) && reloaded.build.redactions > 0,
+    'the run record does not count what was actually redacted');
+  assert.strictEqual(reloaded.build.commandRedacted, true);
+
+  // A redacted command is evidence, not something to replay. The continuation
+  // authority must refuse by name, before any child process is launched.
+  const timedOut = JSON.parse(persisted);
+  timedOut.state = 'BUILD_FAILED';
+  timedOut.build.exit = 124;
+  fs.writeFileSync(runFile, JSON.stringify(timedOut, null, 2));
+  const beforeRefusal = fs.readFileSync(runFile, 'utf8');
+  const session = '00000000-0000-4000-8000-000000000000';
+  const refused = spawnSync(process.execPath, [CLI, '--continue-timeout', runId,
+    '--session', session, '--continue-cmd',
+    `env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN timeout 600 claude --resume ${session} --print`],
+    { cwd: ROOT, encoding: 'utf8', env: privEnv });
+  assert.notStrictEqual(refused.status, 0, 'a redacted command was accepted for continuation');
+  assert.match(`${refused.stdout}${refused.stderr}`, /REDACTED_COMMAND/,
+    'the continuation refusal was not the named redacted-command refusal');
+  assert.strictEqual(fs.readFileSync(runFile, 'utf8'), beforeRefusal,
+    'the refused continuation still mutated the run record');
 });
 
 try {
