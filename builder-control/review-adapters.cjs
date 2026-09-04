@@ -2636,6 +2636,12 @@ async function grokBillingPreflight(sandbox, opts = {}) {
   const identity = validateGrokExecutableIdentity({ versionRunner: opts.grokVersionRunner });
   if (!identity.ok) return Object.freeze({ ok: false, reason: identity.reason, identity });
   const runner = typeof opts.grokBillingRunner === 'function' ? opts.grokBillingRunner : runGrokBillingAcp;
+  // Everything above this line is preparation that starts nothing. The next
+  // statement may spawn a detached ACP process group, so the uncertainty is
+  // published FIRST: an invocation that dies, throws, or refuses from here on
+  // must read UNKNOWN, never "no process was launched". This is billing
+  // activity and says nothing about review execution or approval.
+  noteReviewerLifecycle(opts, 'UNKNOWN', 'grok-billing-preflight-launch-attempted');
   let raw;
   try {
     raw = await runner(contained, {
@@ -2644,7 +2650,15 @@ async function grokBillingPreflight(sandbox, opts = {}) {
       env: reviewerEnvironment('grok', sandbox),
     });
   } catch (error) {
+    // No evidence came back. The UNKNOWN stamped before the spawn stands.
     return Object.freeze({ ok: false, reason: `Grok billing preflight failed: ${error.message}`, identity });
+  }
+  // Drainage is READ from the runner's own explicit process evidence and from
+  // nothing else — not from ok, not from a reason, not from retainSandbox, not
+  // from an exit code. A missing or non-boolean flag leaves UNKNOWN standing.
+  if (raw && typeof raw.groupDrained === 'boolean') {
+    noteReviewerLifecycle(opts, raw.groupDrained ? 'LAUNCHED_DRAINED' : 'LAUNCHED_UNDRAINED',
+      'grok-billing-preflight-drainage-evidence');
   }
   if (!raw || raw.ok !== true) {
     return Object.freeze({ ok: false,
@@ -3241,6 +3255,10 @@ async function runTool(reviewer, prompt, timeoutSec, opts = {}) {
         };
       }
     }
+    // A reviewer launch is about to happen and no drainage evidence exists yet.
+    // If this invocation dies here the caller must read UNKNOWN, never "no
+    // reviewer was launched".
+    noteReviewerLifecycle(opts, 'UNKNOWN', 'runtool-launch-attempted');
     const r = await watchdogRunner(contained, {
       timeoutMs: timeoutSec * 1000,
       activityExtendsTimeout: true,
@@ -3260,6 +3278,8 @@ async function runTool(reviewer, prompt, timeoutSec, opts = {}) {
       failures: Array.isArray(r.terminationFailures) ? r.terminationFailures.slice() : [],
       groupDrained: r.groupDrained === true,
     });
+    noteReviewerLifecycle(opts, reviewerLifecycleFromTermination(terminationEvidence),
+      'runtool-watchdog-drainage-evidence');
     const terminationFailureNote = terminationEvidence.failures.length
       ? `; termination signalling failed: ${terminationEvidence.failures.map((failure) =>
         `${failure.phase}/${failure.signal}${failure.code ? ` ${failure.code}` : ''}: ${failure.message}`).join(' | ')}`
@@ -3338,6 +3358,10 @@ async function runTool(reviewer, prompt, timeoutSec, opts = {}) {
       retainReviewSandbox = true;
       const reaper = await reapUndrainedReviewerGroup(terminationEvidence, opts.reaperOptions || {});
       if (reaper.drained) retainReviewSandbox = false;
+      // The bounded reaper's own identity-bound probe is drainage proof of the
+      // same kind the watchdog produces. The review stays refused either way.
+      noteReviewerLifecycle(opts, reaper.drained ? 'LAUNCHED_DRAINED' : 'LAUNCHED_UNDRAINED',
+        'runtool-bounded-reaper-drainage');
       return { ok: false, reason: `${t.label} process group did not drain after forced termination${terminationFailureNote}`, ...commonEvidence,
         sandboxRetention: Object.freeze({ retained: retainReviewSandbox,
           cleanup: 'bounded-identity-bound-reaper', reason: reaper.reason,
@@ -3522,6 +3546,9 @@ async function cmdRun(args) {
 
   const timeoutSec = Number(args.timeout) > 0 ? Number(args.timeout) : 900;
   const res = await runTool(reviewer, prompt, timeoutSec, {
+    // Absent on the command line; supplied only by the callable entry, which
+    // has no terminal to read the reviewer's process evidence from.
+    lifecycleSink: args.lifecycleSink,
     invocationId: invocation.reviewId,
     dataClass: reviewDataClass,
     allowMetered: args.allowMetered,
@@ -3645,6 +3672,131 @@ async function cmdRun(args) {
     { packetPath: args.packet, subdir: args.groupId ? 'groups' : null });
 }
 
+// ── reviewer process lifecycle evidence ─────────────────────────────────────
+// runTool already owns the process-group watchdog and the drainage proof it
+// produces; the callable outcome used to drop that evidence, so a caller could
+// read RECORD_WRITTEN and still not know whether the reviewer it started ever
+// stopped. These fields carry runTool's existing evidence outward and add no
+// second monitor. Drainage is never inferred from an exit code, a reviewer
+// verdict, a written record, a dead caller, or absent output: a launch whose
+// drainage was not proven inside this invocation stays LAUNCHED_UNDRAINED, and
+// a launch whose evidence never arrived stays UNKNOWN. This is process
+// evidence, never independent review approval.
+const REVIEW_PROCESS_LIFECYCLE_STATES = Object.freeze(
+  ['NOT_LAUNCHED', 'LAUNCHED_DRAINED', 'LAUNCHED_UNDRAINED', 'UNKNOWN']);
+const REVIEW_PROCESS_LIFECYCLE_PROVENANCE = Object.freeze([
+  'callable-entry-before-launch',
+  'runtool-launch-attempted',
+  'runtool-watchdog-drainage-evidence',
+  'runtool-bounded-reaper-drainage',
+  // The Grok billing preflight starts a DETACHED ACP process group of its own,
+  // before the reviewer watchdog exists. It is process activity and gets its
+  // own provenance so it can never be read as review execution or approval.
+  'grok-billing-preflight-launch-attempted',
+  'grok-billing-preflight-drainage-evidence',
+  'unavailable',
+]);
+const REVIEW_PROCESS_LIFECYCLE_BILLING_PROVENANCE = Object.freeze([
+  'grok-billing-preflight-launch-attempted',
+  'grok-billing-preflight-drainage-evidence',
+]);
+// Fixed text selected by state. Nothing here interpolates reviewer output, an
+// error message, a prompt, a secret, or a filesystem path.
+const REVIEW_PROCESS_LIFECYCLE_DETAIL = Object.freeze({
+  NOT_LAUNCHED: 'no reviewer process was launched during this invocation',
+  LAUNCHED_DRAINED: 'a reviewer process group was launched and this invocation proved it drained',
+  LAUNCHED_UNDRAINED: 'a reviewer process group was launched and this invocation did not prove it drained',
+  UNKNOWN: 'reviewer process provenance is unavailable for this invocation',
+});
+// The same four states, said about billing-preflight process activity only.
+// Separate fixed text, no interpolation, and none of it claims a review ran.
+const REVIEW_PROCESS_LIFECYCLE_BILLING_DETAIL = Object.freeze({
+  NOT_LAUNCHED: 'no billing preflight process was launched during this invocation',
+  LAUNCHED_DRAINED: 'a billing preflight process group was launched and proved drained; no review ran',
+  LAUNCHED_UNDRAINED: 'a billing preflight process group was launched and was not proved drained',
+  UNKNOWN: 'billing preflight process provenance is unavailable for this invocation',
+});
+// How much uncertainty a state carries. Used ONLY to keep the cumulative
+// answer from improving: nothing a later process activity proves about itself
+// can retire what an earlier one left unproven.
+const REVIEW_PROCESS_LIFECYCLE_RANK = Object.freeze({
+  NOT_LAUNCHED: 0, LAUNCHED_DRAINED: 1, UNKNOWN: 2, LAUNCHED_UNDRAINED: 3,
+});
+
+function reviewProcessLifecycle(state, provenance) {
+  const known = REVIEW_PROCESS_LIFECYCLE_STATES.includes(state)
+    && REVIEW_PROCESS_LIFECYCLE_PROVENANCE.includes(provenance);
+  const resolved = known ? state : 'UNKNOWN';
+  const billing = known && REVIEW_PROCESS_LIFECYCLE_BILLING_PROVENANCE.includes(provenance);
+  return Object.freeze({
+    state: resolved,
+    launched: resolved === 'NOT_LAUNCHED' ? false : resolved === 'UNKNOWN' ? null : true,
+    drainageProven: resolved === 'LAUNCHED_DRAINED' ? true
+      : resolved === 'LAUNCHED_UNDRAINED' ? false : null,
+    provenance: known ? provenance : 'unavailable',
+    detail: (billing ? REVIEW_PROCESS_LIFECYCLE_BILLING_DETAIL
+      : REVIEW_PROCESS_LIFECYCLE_DETAIL)[resolved],
+  });
+}
+
+// Which process activity a stamp is about. An invocation can start at most two
+// process groups — the billing preflight and the reviewer — and each resolves
+// only its OWN provisional UNKNOWN.
+function reviewLifecycleActivity(provenance) {
+  return REVIEW_PROCESS_LIFECYCLE_BILLING_PROVENANCE.includes(provenance)
+    ? 'grok-billing-preflight' : 'reviewer-run';
+}
+
+// The only reading of runTool's frozen termination evidence. A missing or
+// non-boolean drainage flag is UNKNOWN, never "drained".
+function reviewerLifecycleFromTermination(terminationEvidence) {
+  if (!terminationEvidence || typeof terminationEvidence.groupDrained !== 'boolean') return 'UNKNOWN';
+  return terminationEvidence.groupDrained ? 'LAUNCHED_DRAINED' : 'LAUNCHED_UNDRAINED';
+}
+
+function noteReviewerLifecycle(opts, state, provenance) {
+  const sink = opts && opts.lifecycleSink;
+  if (typeof sink === 'function') sink(reviewProcessLifecycle(state, provenance));
+}
+
+// Starts at the one thing the callable knows before it delegates: nothing has
+// been launched yet. Only runTool and the billing preflight advance it, so a
+// refusal that stopped before either spawn cannot be reported as a drained — or
+// merely unknown — reviewer.
+//
+// An invocation can start TWO detached process groups: the Grok billing
+// preflight, then the reviewer. Each keeps its own slot, because later evidence
+// resolves the activity it describes and no other. What the caller reads is the
+// most uncertain slot, so a reviewer that proved its own drainage cannot retire
+// an earlier billing spawn this invocation never accounted for. Ties keep the
+// most recent stamp, which leaves the ordinary single-activity path reporting
+// exactly the provenance that produced it.
+function createReviewLifecycleRecorder() {
+  const initial = reviewProcessLifecycle('NOT_LAUNCHED', 'callable-entry-before-launch');
+  const activities = new Map();
+  let sequence = 0;
+  return Object.freeze({
+    current: () => {
+      let worst = null;
+      for (const entry of activities.values()) {
+        if (!worst || entry.rank > worst.rank
+          || (entry.rank === worst.rank && entry.sequence > worst.sequence)) worst = entry;
+      }
+      return worst ? worst.lifecycle : initial;
+    },
+    sink: (lifecycle) => {
+      const stamp = lifecycle && REVIEW_PROCESS_LIFECYCLE_STATES.includes(lifecycle.state)
+        ? lifecycle : reviewProcessLifecycle('UNKNOWN', 'unavailable');
+      sequence += 1;
+      activities.set(reviewLifecycleActivity(stamp.provenance), {
+        lifecycle: stamp,
+        rank: REVIEW_PROCESS_LIFECYCLE_RANK[stamp.state],
+        sequence,
+      });
+    },
+  });
+}
+
 // ── callable review entry ───────────────────────────────────────────────────
 // A dashboard-requested review must reach the SAME orchestration the CLI runs,
 // not a second one that happens to resemble it. This entry therefore owns no
@@ -3678,7 +3830,7 @@ const CALLABLE_REVIEW_FIELDS = Object.freeze([
   'groupId', 'groupDigest', 'currentStateProofMap',
 ]);
 
-function reviewCallOutcome(exitCode, reason) {
+function reviewCallOutcome(exitCode, reason, processLifecycle) {
   const code = Number.isInteger(exitCode) ? exitCode : EXIT_BLOCK;
   return Object.freeze({
     ok: code === EXIT_PASS,
@@ -3686,30 +3838,40 @@ function reviewCallOutcome(exitCode, reason) {
     outcome: code === EXIT_PASS ? 'RECORD_WRITTEN'
       : code === EXIT_USAGE ? 'REFUSED_REQUEST' : 'REFUSED',
     reason: reason === undefined || reason === null ? null : String(reason),
+    // Reported SEPARATELY from the review result above and never allowed to
+    // change it. RECORD_WRITTEN still means only that a record was written —
+    // not that the review approved anything, and not that the reviewer stopped.
+    processLifecycle: processLifecycle
+      && REVIEW_PROCESS_LIFECYCLE_STATES.includes(processLifecycle.state)
+      && REVIEW_PROCESS_LIFECYCLE_PROVENANCE.includes(processLifecycle.provenance)
+      ? processLifecycle
+      : reviewProcessLifecycle('UNKNOWN', 'unavailable'),
   });
 }
 
 async function requestCanonicalReview(request) {
+  const lifecycle = createReviewLifecycleRecorder();
+  const outcome = (exitCode, reason) => reviewCallOutcome(exitCode, reason, lifecycle.current());
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
-    return reviewCallOutcome(EXIT_USAGE, 'a canonical review request object is required');
+    return outcome(EXIT_USAGE, 'a canonical review request object is required');
   }
   // An unrecognised key is refused rather than dropped. A caller that misspells
   // runId would otherwise have its coordinate silently discarded, and the only
   // thing standing between that and an unbound review is this check.
   const unknown = Object.keys(request).filter((key) => !CALLABLE_REVIEW_FIELDS.includes(key));
   if (unknown.length) {
-    return reviewCallOutcome(EXIT_USAGE, `unknown review request field(s): ${unknown.sort().join(', ')}`);
+    return outcome(EXIT_USAGE, `unknown review request field(s): ${unknown.sort().join(', ')}`);
   }
   for (const field of ['runId', 'reviewer', 'packet']) {
     if (typeof request[field] !== 'string' || !request[field].trim()) {
-      return reviewCallOutcome(EXIT_USAGE,
+      return outcome(EXIT_USAGE,
         `a canonical review request requires a non-empty ${field} coordinate`);
     }
   }
   if (request.onlyPaths !== undefined &&
       (!Array.isArray(request.onlyPaths)
         || request.onlyPaths.some((value) => typeof value !== 'string' || !value.trim()))) {
-    return reviewCallOutcome(EXIT_USAGE, 'onlyPaths must be an array of non-empty repository-relative paths');
+    return outcome(EXIT_USAGE, 'onlyPaths must be an array of non-empty repository-relative paths');
   }
   // A dry run stops after building the prompt and returns cmdRun's PASS code
   // WITHOUT writing a record. On the command line that is honest: the operator
@@ -3719,18 +3881,23 @@ async function requestCanonicalReview(request) {
   // happened. The refusal is what keeps that outcome name true; the truthiness
   // test is deliberately the same one cmdRun applies to args.dryRun.
   if (request.dryRun) {
-    return reviewCallOutcome(EXIT_USAGE,
+    return outcome(EXIT_USAGE,
       'dryRun is not available on the callable review entry: it writes no review record, '
       + 'so it has no outcome this caller can act on — use the --dry-run CLI flag instead');
   }
-  const args = { run: true };
+  // The sink is not a request field: CALLABLE_REVIEW_FIELDS refuses any key it
+  // does not name, so no caller can supply, redirect or suppress it.
+  const args = { run: true, lifecycleSink: lifecycle.sink };
   for (const field of CALLABLE_REVIEW_FIELDS) {
     if (request[field] !== undefined) args[field] = request[field];
   }
   try {
-    return reviewCallOutcome(await cmdRun(args));
+    return outcome(await cmdRun(args));
   } catch (error) {
-    return reviewCallOutcome(EXIT_BLOCK, error && error.message ? error.message : error);
+    // A throw after a launch keeps whatever runTool last proved — UNKNOWN when
+    // the launch outcome never came back — so a post-launch exception can never
+    // be read as a reviewer that was never started or one that stopped.
+    return outcome(EXIT_BLOCK, error && error.message ? error.message : error);
   }
 }
 
@@ -3887,4 +4054,6 @@ if (require.main === module) {
   })();
 }
 
-module.exports = { requestCanonicalReview, CALLABLE_REVIEW_FIELDS, detect, extractJson, extractGrokStreamingReview, grokStreamEvents, grokReadReceiptCoverage, enforceGrokReadReceipts, authoritativeGrokSpend, grokSpendContract, reviewerProtocolText, buildRecord, codexPrompt, grokPrompt, eligiblePriorFindings, loadCurrentStateProofMap, isCurrentOpenReverificationTarget, CURRENT_STATE_CLASSIFICATIONS, liveReviewRecords, reviewCycleLaunchDecision, isUsableReview, validateReviewPayload, validateCodexInspectionProofs, codexCoveredPaths, stopWasAbnormal, validateCodexTerminalEnvelope, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, buildCodexInput, runTool, runContainedWithWatchdog, reapUndrainedReviewerGroup, processGroupAlive, prepareReviewSandbox, validateReviewManifestSnapshot, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, validateGrokExecutableIdentity, runGrokBillingAcp, validateGrokBillingEvidence, grokBillingPreflight, createInvocationIdentity, writeImmutableFile, writeRecord, runnablePacketChecks, resolveCanonicalCheckReceipt, resolveCanonicalRunContext, resolveReviewDataClass, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, MAX_REVIEW_OUTPUT_BYTES, MAX_CODEX_BUNDLE_BYTES, MAX_CODEX_INPUT_BYTES, MAX_CODEX_INPUT_CHARACTERS, REVIEW_KILL_GRACE_MS, REVIEW_REAPER_TIMEOUT_MS, GROK_BILLING_PREFLIGHT_TIMEOUT_MS, GROK_BILLING_MAX_STREAM_BYTES, GROK_EXPECTED_VERSION, GROK_EXPECTED_SHA256, GROK_REVIEW_SCHEMA, TOOLS };
+module.exports = { requestCanonicalReview, CALLABLE_REVIEW_FIELDS, reviewCallOutcome,
+  reviewProcessLifecycle, reviewerLifecycleFromTermination, createReviewLifecycleRecorder,
+  REVIEW_PROCESS_LIFECYCLE_STATES, REVIEW_PROCESS_LIFECYCLE_PROVENANCE, detect, extractJson, extractGrokStreamingReview, grokStreamEvents, grokReadReceiptCoverage, enforceGrokReadReceipts, authoritativeGrokSpend, grokSpendContract, reviewerProtocolText, buildRecord, codexPrompt, grokPrompt, eligiblePriorFindings, loadCurrentStateProofMap, isCurrentOpenReverificationTarget, CURRENT_STATE_CLASSIFICATIONS, liveReviewRecords, reviewCycleLaunchDecision, isUsableReview, validateReviewPayload, validateCodexInspectionProofs, codexCoveredPaths, stopWasAbnormal, validateCodexTerminalEnvelope, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, buildCodexInput, runTool, runContainedWithWatchdog, reapUndrainedReviewerGroup, processGroupAlive, prepareReviewSandbox, validateReviewManifestSnapshot, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, validateGrokExecutableIdentity, runGrokBillingAcp, validateGrokBillingEvidence, grokBillingPreflight, createInvocationIdentity, writeImmutableFile, writeRecord, runnablePacketChecks, resolveCanonicalCheckReceipt, resolveCanonicalRunContext, resolveReviewDataClass, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, MAX_REVIEW_OUTPUT_BYTES, MAX_CODEX_BUNDLE_BYTES, MAX_CODEX_INPUT_BYTES, MAX_CODEX_INPUT_CHARACTERS, REVIEW_KILL_GRACE_MS, REVIEW_REAPER_TIMEOUT_MS, GROK_BILLING_PREFLIGHT_TIMEOUT_MS, GROK_BILLING_MAX_STREAM_BYTES, GROK_EXPECTED_VERSION, GROK_EXPECTED_SHA256, GROK_REVIEW_SCHEMA, TOOLS };

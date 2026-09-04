@@ -4290,6 +4290,487 @@ test('RED: a dry run can never be reported to a caller as a written review recor
   assertNoNewReviewSandbox(sandboxesBefore, 'callable dry-run refusal');
 });
 
+// ── CALLABLE REVIEWER PROCESS LIFECYCLE ───────────────────────────────────
+// The callable outcome answered "was a record written" and nothing about the
+// process that wrote it, so a governed launcher could not tell a reviewer that
+// finished from one still running. What is proved here is that the outcome now
+// carries runTool's OWN drainage evidence, that the four states stay distinct,
+// and that none of them can be reached by inference: an exit code of 0, an
+// APPROVE verdict, a written record and absent output all leave an unproven
+// drainage unproven. No reviewer or model is executed below.
+const {
+  reviewCallOutcome,
+  reviewProcessLifecycle,
+  reviewerLifecycleFromTermination,
+  createReviewLifecycleRecorder,
+  REVIEW_PROCESS_LIFECYCLE_STATES,
+  REVIEW_PROCESS_LIFECYCLE_PROVENANCE,
+  CALLABLE_REVIEW_FIELDS,
+} = require('../review-adapters.cjs');
+
+const NO_LAUNCH_LIFECYCLE = {
+  state: 'NOT_LAUNCHED',
+  launched: false,
+  drainageProven: null,
+  provenance: 'callable-entry-before-launch',
+  detail: 'no reviewer process was launched during this invocation',
+};
+
+// One bounded Codex watchdog reply. Overrides change only what a case is about.
+function lifecycleWatchdog(overrides = {}) {
+  return async (_contained, options) => ({
+    status: 0,
+    signal: null,
+    stdout: '{"disposition":"APPROVE","findings":[],"unverified":[]}',
+    stderr: '',
+    timedOut: false,
+    outputOverflow: false,
+    error: null,
+    processGroupId: 7401,
+    terminationSignals: [],
+    terminationFailures: [],
+    groupDrained: true,
+    stdinDelivery: {
+      delivered: true,
+      bytes: options.stdinInput.length,
+      sha256: crypto.createHash('sha256').update(options.stdinInput).digest('hex'),
+      error: null,
+    },
+    ...overrides,
+  });
+}
+
+test('RED: a callable refusal before launch reports proven no-launch, not unknown or drained', async () => {
+  const { requestCanonicalReview } = require('../review-adapters.cjs');
+  const sandboxesBefore = reviewSandboxRoots();
+  const artifactsBefore = reviewArtifactListing();
+  const refusals = [
+    // Refused on request shape — cmdRun is never entered.
+    [undefined, 2, 'REFUSED_REQUEST'],
+    [{ runId: ABSENT_RUN_ID, reviewer: 'codex' }, 2, 'REFUSED_REQUEST'],
+    [{ run_id: ABSENT_RUN_ID, runId: ABSENT_RUN_ID, reviewer: 'codex', packet: BETA_PACKET_PATH },
+      2, 'REFUSED_REQUEST'],
+    [{ runId: ABSENT_RUN_ID, reviewer: 'codex', packet: BETA_PACKET_PATH, dryRun: true },
+      2, 'REFUSED_REQUEST'],
+    // Refused deeper, by the canonical run resolution cmdRun already performs,
+    // and still before any reviewer process could exist.
+    [{ runId: ABSENT_RUN_ID, reviewer: 'codex', packet: BETA_PACKET_PATH }, 3, 'REFUSED'],
+    [{ runId: MALFORMED_RUN_ID, reviewer: 'codex', packet: BETA_PACKET_PATH }, 3, 'REFUSED'],
+  ];
+  for (const [request, exitCode, outcomeName] of refusals) {
+    const outcome = await requestCanonicalReview(request);
+    const label = JSON.stringify(request);
+    assert.strictEqual(outcome.ok, false, `accepted ${label}`);
+    assert.strictEqual(outcome.exitCode, exitCode, `wrong exit code for ${label}`);
+    assert.strictEqual(outcome.outcome, outcomeName, `wrong outcome for ${label}`);
+    assert.deepStrictEqual(outcome.processLifecycle, NO_LAUNCH_LIFECYCLE,
+      `a refusal that never launched a reviewer did not report a proven no-launch for ${label}`);
+  }
+  assert.deepStrictEqual(reviewArtifactListing(), artifactsBefore,
+    'a refused callable request still wrote review evidence');
+  assertNoNewReviewSandbox(sandboxesBefore, 'callable no-launch lifecycle');
+});
+
+test('RED: only runTool drainage evidence — never exit 0, a verdict or a record — proves the reviewer stopped', async () => {
+  const reviewPaths = ['builder-control/MODEL-ROUTING-POLICY.json'];
+  const sandboxesBefore = reviewSandboxRoots();
+  const run = async (options) => {
+    const stamps = [];
+    const result = await runTool('codex', 'P', 1, {
+      reviewPaths, lifecycleSink: (lifecycle) => stamps.push(lifecycle), ...options,
+    });
+    return { stamps, result };
+  };
+  try {
+    // A launch is always announced as UNKNOWN before it happens, so an
+    // invocation that dies mid-flight can never read as "nothing was launched".
+    const drained = await run({ watchdogRunner: lifecycleWatchdog() });
+    assert.strictEqual(drained.result.ok, true, drained.result.reason);
+    assert.deepStrictEqual(drained.stamps.map((entry) => [entry.state, entry.provenance]), [
+      ['UNKNOWN', 'runtool-launch-attempted'],
+      ['LAUNCHED_DRAINED', 'runtool-watchdog-drainage-evidence'],
+    ]);
+    assert.strictEqual(drained.stamps.at(-1).launched, true);
+    assert.strictEqual(drained.stamps.at(-1).drainageProven, true);
+
+    // A refused review whose process DID drain keeps that drainage. The two
+    // questions are answered separately or neither answer is worth anything.
+    const drainedTimeout = await run({
+      watchdogRunner: lifecycleWatchdog({ status: null, signal: 'SIGKILL', timedOut: true }),
+    });
+    assert.strictEqual(drainedTimeout.result.ok, false);
+    assert.match(drainedTimeout.result.reason, /exceeded the 1s timeout/);
+    assert.deepStrictEqual(drainedTimeout.stamps.at(-1).state, 'LAUNCHED_DRAINED');
+    assert.strictEqual(drainedTimeout.stamps.at(-1).drainageProven, true);
+
+    // Exit 0, an APPROVE verdict and complete input delivery — and drainage was
+    // still not proven. The lifecycle must follow the watchdog, not the verdict.
+    const undrained = await run({
+      watchdogRunner: lifecycleWatchdog({ groupDrained: false }),
+      reaperOptions: { processGroupMembers: () => [7401] },
+    });
+    assert.strictEqual(undrained.result.ok, false);
+    assert.match(undrained.result.reason, /process group did not drain/);
+    assert.deepStrictEqual(undrained.stamps.map((entry) => [entry.state, entry.provenance]), [
+      ['UNKNOWN', 'runtool-launch-attempted'],
+      ['LAUNCHED_UNDRAINED', 'runtool-watchdog-drainage-evidence'],
+      ['LAUNCHED_UNDRAINED', 'runtool-bounded-reaper-drainage'],
+    ]);
+    assert.strictEqual(undrained.stamps.at(-1).launched, true);
+    assert.strictEqual(undrained.stamps.at(-1).drainageProven, false);
+
+    // The bounded reaper's identity-bound probe is the same kind of positive
+    // proof the watchdog produces, so it — and only it — may upgrade the state.
+    const reaped = await run({
+      watchdogRunner: lifecycleWatchdog({ groupDrained: false }),
+      reaperOptions: { processGroupMembers: () => [] },
+    });
+    assert.strictEqual(reaped.result.ok, false);
+    assert.deepStrictEqual(reaped.stamps.at(-1).state, 'LAUNCHED_DRAINED');
+    assert.strictEqual(reaped.stamps.at(-1).provenance, 'runtool-bounded-reaper-drainage');
+
+    // A refusal that stops before the watchdog stamps nothing at all, leaving
+    // the caller's recorder on its proven no-launch starting state.
+    const prelaunch = await run({ reviewPaths: ['../outside'],
+      watchdogRunner: async () => { throw new Error('must not launch'); } });
+    assert.strictEqual(prelaunch.result.ok, false);
+    assert.match(prelaunch.result.reason, /review sandbox preparation failed/);
+    assert.deepStrictEqual(prelaunch.stamps, []);
+
+    // A throw after the launch leaves UNKNOWN standing. It cannot become a
+    // no-launch, and it certainly cannot become proven drainage.
+    const exploded = await (async () => {
+      const stamps = [];
+      await assert.rejects(runTool('codex', 'P', 1, {
+        reviewPaths,
+        lifecycleSink: (lifecycle) => stamps.push(lifecycle),
+        watchdogRunner: async () => { throw new Error('injected post-launch failure'); },
+      }), /injected post-launch failure/);
+      return stamps;
+    })();
+    assert.deepStrictEqual(exploded.map((entry) => [entry.state, entry.provenance]), [
+      ['UNKNOWN', 'runtool-launch-attempted'],
+    ]);
+    assert.strictEqual(exploded.at(-1).launched, null);
+    assert.strictEqual(exploded.at(-1).drainageProven, null);
+
+    // What the callable would return for that exception: refused, and unknown.
+    const outcome = reviewCallOutcome(3, 'injected post-launch failure', exploded.at(-1));
+    assert.strictEqual(outcome.ok, false);
+    assert.strictEqual(outcome.outcome, 'REFUSED');
+    assert.strictEqual(outcome.processLifecycle.state, 'UNKNOWN');
+  } finally {
+    // The undrained case deliberately retains its sandbox for bounded cleanup.
+    for (const leaked of reviewSandboxRoots().filter((root) => !sandboxesBefore.includes(root))) {
+      fs.rmSync(leaked, { recursive: true, force: true });
+    }
+  }
+});
+
+test('RED: lifecycle evidence stays typed, bounded and separate from the review result', async () => {
+  // Termination evidence is READ, never guessed: an absent or non-boolean
+  // drainage flag is UNKNOWN, and only an explicit true is drainage.
+  assert.strictEqual(reviewerLifecycleFromTermination({ groupDrained: true }), 'LAUNCHED_DRAINED');
+  assert.strictEqual(reviewerLifecycleFromTermination({ groupDrained: false }), 'LAUNCHED_UNDRAINED');
+  for (const evidence of [null, undefined, {}, { groupDrained: 'true' }, { groupDrained: 1 }]) {
+    assert.strictEqual(reviewerLifecycleFromTermination(evidence), 'UNKNOWN',
+      `drainage was inferred from ${JSON.stringify(evidence)}`);
+  }
+
+  // The four states stay distinct and no fifth state can be invented.
+  assert.deepStrictEqual(REVIEW_PROCESS_LIFECYCLE_STATES,
+    ['NOT_LAUNCHED', 'LAUNCHED_DRAINED', 'LAUNCHED_UNDRAINED', 'UNKNOWN']);
+  const distinct = REVIEW_PROCESS_LIFECYCLE_STATES.map((state) =>
+    JSON.stringify(reviewProcessLifecycle(state, 'runtool-watchdog-drainage-evidence')));
+  assert.strictEqual(new Set(distinct).size, REVIEW_PROCESS_LIFECYCLE_STATES.length);
+  for (const forged of ['DRAINED', 'APPROVED', '', null, 'not_launched']) {
+    assert.strictEqual(reviewProcessLifecycle(forged, 'runtool-watchdog-drainage-evidence').state,
+      'UNKNOWN', `${JSON.stringify(forged)} was accepted as a lifecycle state`);
+  }
+  assert.deepStrictEqual(reviewProcessLifecycle('LAUNCHED_DRAINED', 'operator-said-so'),
+    reviewProcessLifecycle('UNKNOWN', 'unavailable'),
+    'drainage was accepted from an unrecognised provenance');
+
+  // The recorder starts at the only thing a caller knows before delegating.
+  const recorder = createReviewLifecycleRecorder();
+  assert.deepStrictEqual(recorder.current(), NO_LAUNCH_LIFECYCLE);
+  recorder.sink({ state: 'LAUNCHED_DRAINED', drainageProven: true });
+  assert.strictEqual(recorder.current().state, 'LAUNCHED_DRAINED',
+    'the recorder dropped a stamp from runTool');
+  recorder.sink({ state: 'SAFE' });
+  assert.deepStrictEqual(recorder.current(), reviewProcessLifecycle('UNKNOWN', 'unavailable'),
+    'an unrecognised stamp was retained instead of degrading to unknown');
+
+  // RECORD_WRITTEN keeps its exact meaning, and a missing lifecycle fails to
+  // unknown rather than to a reviewer that stopped.
+  const written = reviewCallOutcome(0, null,
+    reviewProcessLifecycle('LAUNCHED_DRAINED', 'runtool-watchdog-drainage-evidence'));
+  assert.strictEqual(written.ok, true);
+  assert.strictEqual(written.outcome, 'RECORD_WRITTEN');
+  assert.strictEqual(written.reason, null);
+  assert.strictEqual(written.processLifecycle.drainageProven, true);
+  for (const absent of [undefined, null, {}, { state: 'LAUNCHED_DRAINED' }]) {
+    assert.deepStrictEqual(reviewCallOutcome(0, null, absent).processLifecycle,
+      reviewProcessLifecycle('UNKNOWN', 'unavailable'),
+      `${JSON.stringify(absent)} was published as callable lifecycle evidence`);
+    assert.strictEqual(reviewCallOutcome(0, null, absent).outcome, 'RECORD_WRITTEN',
+      'unknown process evidence silently changed the review result');
+  }
+
+  // The evidence carries no reviewer output, prompt, path or error text.
+  const stamps = [];
+  const sentinel = 'LIFECYCLE-LEAK-SENTINEL';
+  await runTool('codex', `P ${sentinel}`, 1, {
+    reviewPaths: ['builder-control/MODEL-ROUTING-POLICY.json'],
+    lifecycleSink: (lifecycle) => stamps.push(lifecycle),
+    watchdogRunner: lifecycleWatchdog({ stdout: `${sentinel}\n{"disposition":"APPROVE","findings":[]}`,
+      stderr: sentinel }),
+  });
+  assert.strictEqual(stamps.length, 2);
+  for (const stamp of stamps) {
+    assert.deepStrictEqual(Object.keys(stamp).sort(),
+      ['detail', 'drainageProven', 'launched', 'provenance', 'state']);
+    assert.strictEqual(Object.isFrozen(stamp), true, 'lifecycle evidence is mutable');
+    const serialised = JSON.stringify(stamp);
+    assert.ok(!serialised.includes(sentinel), 'reviewer output reached the lifecycle evidence');
+    assert.ok(!serialised.includes('/'), `a path reached the lifecycle evidence: ${serialised}`);
+    assert.strictEqual(typeof stamp.detail, 'string');
+    assert.ok(stamp.detail.length < 128, 'lifecycle detail is not bounded fixed text');
+  }
+
+  // Every callable answer is stamped from the recorder, so no future return can
+  // publish a lifecycle the invocation never proved.
+  const source = fs.readFileSync(ADAPTER_PATH, 'utf8');
+  const start = source.indexOf('async function requestCanonicalReview(');
+  const end = source.indexOf('\nfunction writeRecord(', start);
+  const callable = source.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(callable, /const lifecycle = createReviewLifecycleRecorder\(\);/);
+  assert.match(callable, /reviewCallOutcome\(exitCode, reason, lifecycle\.current\(\)\)/);
+  assert.strictEqual(callable.split('reviewCallOutcome(').length - 1, 1,
+    'a callable answer bypassed the invocation-bound lifecycle recorder');
+  assert.match(callable, /lifecycleSink: lifecycle\.sink/);
+  assert.ok(!CALLABLE_REVIEW_FIELDS.includes('lifecycleSink'),
+    'a caller can supply or suppress the lifecycle sink');
+});
+
+// ── BILLING-PREFLIGHT PROCESS ACTIVITY ────────────────────────────────────
+// The billing preflight spawns a DETACHED ACP process group of its own, before
+// the reviewer watchdog exists. Until now nothing announced that spawn, so a
+// preflight that failed, threw, or left its group undrained returned while the
+// callable lifecycle still read NOT_LAUNCHED — a proven no-launch that was not
+// true. What is proved below is that the spawn is announced first, that its
+// outcome is read only from the runner's own explicit groupDrained flag, and
+// that a genuine pre-spawn refusal still keeps NOT_LAUNCHED.
+//
+// Every runner here is INJECTED. These are contract proofs about what the
+// adapter publishes; none of them starts a Grok process, so none of them is
+// evidence about a live process group.
+async function billingLifecycleRun(label, options) {
+  const recorder = createReviewLifecycleRecorder();
+  const stamps = [];
+  let reviewerLaunched = false;
+  let billingRunnerCalls = 0;
+  const result = await runTool('grok', 'P', 1, {
+    invocationId: `REV-${label}`,
+    allowMetered: true, approvedBy: 'Marc Papineau', capUsd: 5, reviewPaths: [],
+    grokVersionRunner: options.grokVersionRunner
+      || (() => ({ status: 0, stdout: `${GROK_EXPECTED_VERSION}\n` })),
+    grokBillingRunner: async (contained, runnerOptions) => {
+      billingRunnerCalls += 1;
+      return options.billing(contained, runnerOptions);
+    },
+    watchdogRunner: async () => {
+      reviewerLaunched = true;
+      throw new Error('reviewer must not launch');
+    },
+    lifecycleSink: (lifecycle) => { stamps.push(lifecycle); recorder.sink(lifecycle); },
+  });
+  return { result, stamps, recorder, reviewerLaunched, billingRunnerCalls };
+}
+
+const billingStates = (run) => run.stamps.map((entry) => [entry.state, entry.provenance]);
+
+test('RED: a billing-preflight spawn is announced before it happens and never inferred away', async () => {
+  const sandboxesBefore = reviewSandboxRoots();
+  try {
+    // Explicit undrained process evidence — the one case that is allowed to say
+    // a process group was left behind, and it must say exactly that.
+    const undrained = await billingLifecycleRun('billing-undrained', {
+      billing: async () => ({
+        ok: false,
+        reason: 'Grok billing ACP timed out before complete evidence',
+        groupDrained: false,
+        retainSandbox: true,
+      }),
+    });
+    assert.strictEqual(undrained.result.ok, false);
+    assert.strictEqual(undrained.reviewerLaunched, false,
+      'the main reviewer watchdog launched after a refused billing preflight');
+    assert.match(undrained.result.reason, /zero-metered billing preflight refused launch/);
+    assert.deepStrictEqual(billingStates(undrained), [
+      ['UNKNOWN', 'grok-billing-preflight-launch-attempted'],
+      ['LAUNCHED_UNDRAINED', 'grok-billing-preflight-drainage-evidence'],
+    ]);
+    assert.strictEqual(undrained.recorder.current().state, 'LAUNCHED_UNDRAINED');
+    assert.strictEqual(undrained.recorder.current().launched, true);
+    assert.strictEqual(undrained.recorder.current().drainageProven, false);
+
+    // Absent or non-boolean drainage evidence. Nothing here — not ok, not a
+    // reason, not retainSandbox, not an exit code — may be read as drainage,
+    // and none of it may collapse back to a proven no-launch.
+    const unproven = [
+      ['no evidence at all', null],
+      ['a refusal carrying no drainage flag',
+        { ok: false, reason: 'Grok billing ACP closed before complete evidence (exit 1)' }],
+      ['a refusal that only cleared its sandbox',
+        { ok: false, reason: 'Grok billing ACP process error: EPIPE', retainSandbox: false }],
+      ['a stringly drainage flag',
+        { ...goodGrokBillingEvidence(), groupDrained: 'true' }],
+    ];
+    for (const [index, [label, raw]] of unproven.entries()) {
+      const run = await billingLifecycleRun(`billing-unproven-${index}`, {
+        billing: async () => raw,
+      });
+      assert.strictEqual(run.result.ok, false, label);
+      assert.strictEqual(run.reviewerLaunched, false, label);
+      assert.deepStrictEqual(billingStates(run),
+        [['UNKNOWN', 'grok-billing-preflight-launch-attempted']],
+        `drainage was published without explicit process evidence for ${label}`);
+      assert.strictEqual(run.recorder.current().state, 'UNKNOWN', label);
+      assert.strictEqual(run.recorder.current().launched, null, label);
+      assert.strictEqual(run.recorder.current().drainageProven, null, label);
+    }
+
+    // A throw from the billing transport leaves the pre-spawn UNKNOWN standing.
+    // The spawn may or may not have happened; the answer is that we do not know.
+    const exploded = await billingLifecycleRun('billing-throw', {
+      billing: async () => { throw new Error('injected billing transport failure'); },
+    });
+    assert.strictEqual(exploded.result.ok, false);
+    assert.strictEqual(exploded.reviewerLaunched, false);
+    assert.match(exploded.result.reason, /Grok billing preflight failed: injected billing transport failure/);
+    assert.deepStrictEqual(billingStates(exploded),
+      [['UNKNOWN', 'grok-billing-preflight-launch-attempted']]);
+    assert.strictEqual(exploded.recorder.current().state, 'UNKNOWN');
+
+    // A billing process that PROVED it drained, refused afterwards on policy.
+    // Both facts survive: the process is accounted for, and no review ran.
+    const refusedAfterDrain = await billingLifecycleRun('billing-policy-refusal', {
+      billing: async () => goodGrokBillingEvidence({ config: { onDemandUsed: { val: 1 } } }),
+    });
+    assert.strictEqual(refusedAfterDrain.result.ok, false);
+    assert.strictEqual(refusedAfterDrain.reviewerLaunched, false,
+      'a billing-policy refusal still reached the main reviewer watchdog');
+    assert.match(refusedAfterDrain.result.reason,
+      /zero-metered billing preflight refused launch.*onDemandUsed\.val === 0/);
+    assert.deepStrictEqual(billingStates(refusedAfterDrain), [
+      ['UNKNOWN', 'grok-billing-preflight-launch-attempted'],
+      ['LAUNCHED_DRAINED', 'grok-billing-preflight-drainage-evidence'],
+    ]);
+    const drained = refusedAfterDrain.recorder.current();
+    assert.strictEqual(drained.state, 'LAUNCHED_DRAINED');
+    assert.strictEqual(drained.launched, true);
+    assert.strictEqual(drained.drainageProven, true);
+    assert.notStrictEqual(drained.state, 'NOT_LAUNCHED');
+
+    // A GENUINE pre-spawn refusal — the immutable pin is re-proven before the
+    // ACP binary may start, and a failed pin stops there. Nothing was spawned,
+    // so the proven no-launch is the honest answer and it is kept.
+    const preSpawn = await billingLifecycleRun('billing-identity-refusal', {
+      grokVersionRunner: () => ({ status: 0, stdout: '0.0.0-not-the-pinned-build\n' }),
+      billing: async () => { throw new Error('the billing runner must not be reached'); },
+    });
+    assert.strictEqual(preSpawn.result.ok, false);
+    assert.strictEqual(preSpawn.billingRunnerCalls, 0,
+      'the billing runner was reached despite a refused executable identity');
+    assert.strictEqual(preSpawn.reviewerLaunched, false);
+    assert.deepStrictEqual(preSpawn.stamps, [],
+      'a refusal that spawned nothing still stamped process activity');
+    assert.deepStrictEqual(preSpawn.recorder.current(), NO_LAUNCH_LIFECYCLE);
+  } finally {
+    // The undrained case deliberately retains its sandbox for bounded cleanup.
+    for (const leaked of reviewSandboxRoots().filter((root) => !sandboxesBefore.includes(root))) {
+      fs.rmSync(leaked, { recursive: true, force: true });
+    }
+  }
+});
+
+test('RED: a later reviewer lifecycle cannot retire earlier billing-process uncertainty', () => {
+  const billingLaunch = reviewProcessLifecycle('UNKNOWN', 'grok-billing-preflight-launch-attempted');
+  const billingDrained = reviewProcessLifecycle('LAUNCHED_DRAINED', 'grok-billing-preflight-drainage-evidence');
+  const billingUndrained = reviewProcessLifecycle('LAUNCHED_UNDRAINED', 'grok-billing-preflight-drainage-evidence');
+  const reviewLaunch = reviewProcessLifecycle('UNKNOWN', 'runtool-launch-attempted');
+  const reviewDrained = reviewProcessLifecycle('LAUNCHED_DRAINED', 'runtool-watchdog-drainage-evidence');
+  const reviewUndrained = reviewProcessLifecycle('LAUNCHED_UNDRAINED', 'runtool-watchdog-drainage-evidence');
+  const replay = (stamps) => {
+    const recorder = createReviewLifecycleRecorder();
+    for (const stamp of stamps) recorder.sink(stamp);
+    return recorder.current();
+  };
+
+  // A billing spawn whose outcome never came back is not retired by a reviewer
+  // that accounted for ITSELF. The cumulative answer stays the unsafe one.
+  assert.deepStrictEqual(replay([billingLaunch, reviewLaunch, reviewDrained]), billingLaunch);
+  assert.deepStrictEqual(replay([billingUndrained, reviewLaunch, reviewDrained]), billingUndrained);
+
+  // The reverse holds too: a clean billing preflight cannot soften an
+  // unaccounted reviewer group.
+  assert.deepStrictEqual(replay([billingLaunch, billingDrained, reviewLaunch, reviewUndrained]),
+    reviewUndrained);
+
+  // Each activity still resolves its OWN provisional unknown, so the ordinary
+  // path — billing drained, then reviewer drained — reports proven drainage
+  // from the evidence that produced it and reads as launched, never no-launch.
+  const ordinary = replay([billingLaunch, billingDrained, reviewLaunch, reviewDrained]);
+  assert.deepStrictEqual(ordinary, reviewDrained);
+  assert.strictEqual(ordinary.launched, true);
+
+  // A billing preflight alone, with no reviewer stage, keeps its own answer.
+  assert.deepStrictEqual(replay([billingLaunch, billingDrained]), billingDrained);
+  assert.deepStrictEqual(replay([billingLaunch]), billingLaunch);
+  // And an invocation that stamped nothing is still the only proven no-launch.
+  assert.deepStrictEqual(replay([]), NO_LAUNCH_LIFECYCLE);
+});
+
+test('RED: billing process evidence stays bounded and distinct from review execution', () => {
+  assert.deepStrictEqual(REVIEW_PROCESS_LIFECYCLE_PROVENANCE, [
+    'callable-entry-before-launch',
+    'runtool-launch-attempted',
+    'runtool-watchdog-drainage-evidence',
+    'runtool-bounded-reaper-drainage',
+    'grok-billing-preflight-launch-attempted',
+    'grok-billing-preflight-drainage-evidence',
+    'unavailable',
+  ]);
+  for (const forged of ['grok-billing-preflight', 'billing', '', null]) {
+    assert.strictEqual(reviewProcessLifecycle('LAUNCHED_DRAINED', forged).state, 'UNKNOWN',
+      `${JSON.stringify(forged)} was accepted as billing provenance`);
+  }
+  for (const provenance of ['grok-billing-preflight-launch-attempted',
+    'grok-billing-preflight-drainage-evidence']) {
+    for (const state of REVIEW_PROCESS_LIFECYCLE_STATES) {
+      const billing = reviewProcessLifecycle(state, provenance);
+      const review = reviewProcessLifecycle(state, 'runtool-watchdog-drainage-evidence');
+      assert.strictEqual(billing.state, state);
+      // Same typed answer, different sentence: a reader can never mistake
+      // billing-transport activity for the review itself.
+      assert.notStrictEqual(billing.detail, review.detail,
+        `billing activity is described exactly like review execution for ${state}`);
+      assert.match(billing.detail, /billing preflight/);
+      assert.ok(!/approv|verdict|finding|review ran|reviewer process/i.test(
+        billing.detail.replace('; no review ran', '')),
+        `billing detail implies review execution or approval: ${billing.detail}`);
+      assert.deepStrictEqual(Object.keys(billing).sort(),
+        ['detail', 'drainageProven', 'launched', 'provenance', 'state']);
+      assert.strictEqual(Object.isFrozen(billing), true);
+      assert.ok(billing.detail.length < 128, 'billing detail is not bounded fixed text');
+      assert.ok(!JSON.stringify(billing).includes('/'),
+        `a path reached billing lifecycle evidence: ${billing.detail}`);
+    }
+  }
+});
+
 Promise.all(pendingTests).then(() => {
   const failedCount = process.exitCode ? 'at least 1' : '0';
   console.log(`${passed} passed, ${skipped} skipped, ${failedCount} failed.`);
