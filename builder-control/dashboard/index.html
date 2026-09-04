@@ -2615,6 +2615,32 @@
   }
 
   var currentOperatorContext = null;
+
+  // Plain words for the two fields a recorded route carries. Only labels the
+  // routing policy actually writes are named here; anything else — an unknown
+  // provider or execution label — is shown exactly as recorded rather than
+  // given an invented alias, and no word is added to the recorded value.
+  var EXECUTION_WORDS = { SUBSCRIPTION: 'Subscription', METERED: 'Metered' };
+  function plainRouteWord(value, table){
+    if (table && Object.prototype.hasOwnProperty.call(table, value)) return table[value];
+    return /^[a-z]+$/.test(value) ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+  }
+
+  // The exact recorded route fields, unedited, so the readable cards above can
+  // stay in plain English without dropping the identifiers and source marker an
+  // engineer needs. Nothing is decided here: it prints the fields present.
+  function routeProvenance(run){
+    var route = (run && run.route) || null;
+    if (!route) return '';
+    var parts = [];
+    if (route.state) parts.push('state ' + route.state);
+    if (route.model) parts.push('model ' + route.model);
+    if (route.execution) parts.push('execution ' + route.execution);
+    if (route.code) parts.push('code ' + route.code);
+    if (route.source) parts.push('recorded by ' + route.source);
+    return parts.length ? 'Recorded route: ' + parts.join(' · ') : '';
+  }
+
   function crewIdentity(run){
     if (!run) return 'No worker is assigned.';
     var route = run.route || null;
@@ -2625,11 +2651,15 @@
     if (route && route.source === 'tool-router.cjs routeRole' &&
         typeof route.model === 'string' && route.model &&
         typeof route.execution === 'string' && route.execution) {
-      return route.model + ' via ' + route.execution + ' · router-selected';
+      return plainRouteWord(route.model) + ' · ' +
+        plainRouteWord(route.execution, EXECUTION_WORDS) + ' · Selected by AEGIS';
     }
     var builder = run.builder || (lastLaunchedRunId === run.runId ? lastLaunchedBuilder : null);
     if (builder && (builder.provider || builder.model)) {
-      return [builder.model, builder.provider].filter(Boolean).join(' via ');
+      // Named on the run record only. Saying so keeps it from reading like the
+      // router-selected line above, which is the one proven assignment.
+      return [builder.model, builder.provider].filter(Boolean).join(' via ') +
+        ' · named on the run record, not a recorded AEGIS selection';
     }
     if (run.build && run.build.activity && run.build.activity.active === true) {
       return 'Governed builder active · model identity UNAVAILABLE in current status evidence.';
@@ -2657,9 +2687,11 @@
     if (route && route.source === 'tool-router.cjs routeRole' &&
         typeof route.model === 'string' && route.model &&
         typeof route.execution === 'string' && route.execution){
-      return 'AEGIS routing selected ' + route.model + ', recorded by ' + route.source +
-        ' with execution path ' + route.execution + '. No selection reason is recorded with that route, ' +
-        'so why this model was chosen is UNAVAILABLE.';
+      // Plain copy, exact meaning: the source marker that proves the selection
+      // is kept as the card's accessible detail instead of being read aloud.
+      return 'AEGIS chose ' + plainRouteWord(route.model) + ' for this run, and recorded ' +
+        plainRouteWord(route.execution, EXECUTION_WORDS) + ' as the way to run it. ' +
+        'No selection reason is recorded with that choice, so why AEGIS picked this one is UNAVAILABLE.';
     }
     var named = run.builder && (run.builder.model || run.builder.provider)
       ? [run.builder.model, run.builder.provider].filter(Boolean).join(' via ')
@@ -4105,6 +4137,8 @@
     var controlState = controlPlaneState(e, bind, boundRun, emptyRunsAvailable);
     var crew = crewIdentity(boundRun);
     var routing = routingRationale(boundRun);
+    // The unedited route fields the two readable cards above are built from.
+    var routeExact = routeProvenance(boundRun);
     var currentAction = boundRun ? opState.plain : 'Nothing is currently running.';
     if (reviewRun && reviewRun.state === 'CHECKS_PASSED' && reviewEvidenceReady &&
         ['UNVERIFIED','BLOCKED','UNAVAILABLE'].indexOf(controlState.state) === -1){
@@ -4247,18 +4281,19 @@
 
     var provenHandoff = renderHandoff(host, boundRun, currentAction);
 
-    function commandCard(label, value, cls){
+    function commandCard(label, value, cls, exact){
       var card = el('div','command-card ' + (cls || ''));
       card.setAttribute('data-operator-field', label.toLowerCase().replace(/\s+/g, '-'));
+      if (exact) card.setAttribute('title', exact);
       card.appendChild(el('div','command-label',label));
       card.appendChild(el('div','command-value',value));
       return card;
     }
     var commandGrid = el('div','command-grid');
-    commandGrid.appendChild(commandCard('CREW / MODEL', crew, 'is-crew'));
+    commandGrid.appendChild(commandCard('CREW / MODEL', crew, 'is-crew', routeExact));
     // Kept adjacent to CREW / MODEL, and rendered for every run state, so an
     // active build never shows a worker without its recorded routing evidence.
-    commandGrid.appendChild(commandCard('WHY THIS MODEL / TOOL', routing, 'is-routing'));
+    commandGrid.appendChild(commandCard('WHY THIS MODEL / TOOL', routing, 'is-routing', routeExact));
     commandGrid.appendChild(commandCard('CURRENT ACTION', currentAction, 'is-now'));
     // Kept immediately beside CURRENT ACTION so the recorded evidence the live
     // surface rests on is read at the same moment as the claim it supports.

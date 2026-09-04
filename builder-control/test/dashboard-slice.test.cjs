@@ -2539,7 +2539,7 @@ test('DOM: routed Command View renders canonical pilot cards and accessible plai
     .map((node) => [node.attrs['data-operator-field'], node.textContent]));
   assert.match(page.text('founder-body'), /Render the governed Command View/,
     'the rendered Mission card lost the canonical objective');
-  assert.match(fields['crew-/-model'], /claude-opus-5 via claude-cli · router-selected/,
+  assert.match(fields['crew-/-model'], /claude-opus-5 · claude-cli · Selected by AEGIS/,
     'the rendered Crew / Model card did not use canonical routing evidence');
   assert.match(fields['current-action'], /Building the operator controls/,
     'the rendered Current Action card lost live worker evidence');
@@ -3721,13 +3721,50 @@ test('DOM: a router-selected route names the selection and its authority, and st
     'the routing instrument lost its founder-readable label');
   const text = routingText(page);
   assert.match(text, /claude-opus-5/, 'the card does not name the routed model');
-  assert.match(text, /tool-router\.cjs routeRole/,
-    'the card does not attribute the selection to the canonical routing authority');
+  assert.match(text, /^AEGIS chose /, `the selection is not stated in plain English: ${text}`);
   assert.match(text, /claude-cli/, 'the card does not name the recorded execution path');
   assert.match(text, /No selection reason is recorded[\s\S]*UNAVAILABLE/,
     `a recorded selection reason was invented: ${text}`);
   assert.doesNotMatch(text, /capabilit|cost|cheap|fallback|failover|fastest|best/i,
     `the card claimed a capability, cost or fallback fact: ${text}`);
+  // The source marker is provenance, not headline copy: it must leave the
+  // sentence and stay reachable as the card's accessible detail.
+  assert.doesNotMatch(text, /tool-router\.cjs|routeRole|\.cjs/,
+    `a source function name is still primary card copy: ${text}`);
+  for (const field of ['why-this-model-/-tool', 'crew-/-model']) {
+    const node = operatorFields(page).find((n) => n.attrs['data-operator-field'] === field);
+    assert.strictEqual(node.attrs.title,
+      'Recorded route: model claude-opus-5 · execution claude-cli · recorded by tool-router.cjs routeRole',
+      `${field} no longer keeps the exact recorded route reachable: ${node.attrs.title}`);
+  }
+});
+
+test('DOM: the canonical Claude subscription route reads naturally and keeps its exact record', () => {
+  const page = bootPage(routingFixture(routingRun({
+    route: { model: 'claude', execution: 'SUBSCRIPTION', source: 'tool-router.cjs routeRole' },
+  })));
+  const crew = operatorFields(page).find((n) => n.attrs['data-operator-field'] === 'crew-/-model');
+  assert.strictEqual(crew.lastChild.textContent, 'Claude · Subscription · Selected by AEGIS',
+    `the recorded subscription route does not read as plain English: ${crew.lastChild.textContent}`);
+  assert.strictEqual(page.text('hud-crew'), crew.lastChild.textContent,
+    'the HUD and the deck stopped sharing one crew identity');
+  assert.strictEqual(routingText(page),
+    'AEGIS chose Claude for this run, and recorded Subscription as the way to run it. ' +
+    'No selection reason is recorded with that choice, so why AEGIS picked this one is UNAVAILABLE.',
+    `the routing card invented or lost part of the recorded selection: ${routingText(page)}`);
+  assert.match(crew.attrs.title, /model claude · execution SUBSCRIPTION · recorded by tool-router\.cjs routeRole/,
+    `the exact recorded identifiers are no longer reachable: ${crew.attrs.title}`);
+});
+
+test('DOM: an unknown provider or execution label is shown as recorded, never given a friendly alias', () => {
+  const page = bootPage(routingFixture(routingRun({
+    route: { model: 'grok-builder', execution: 'CANON_UNKNOWN_REQUIRES_PREFLIGHT',
+      source: 'tool-router.cjs routeRole' },
+  })));
+  const crew = operatorFields(page).find((n) => n.attrs['data-operator-field'] === 'crew-/-model');
+  assert.strictEqual(crew.lastChild.textContent,
+    'grok-builder · CANON_UNKNOWN_REQUIRES_PREFLIGHT · Selected by AEGIS',
+    `an unrecognised route label was renamed instead of shown as recorded: ${crew.lastChild.textContent}`);
 });
 
 test('DOM: a REFUSED route renders its canonical refusal code and recorded reason', () => {
@@ -3752,6 +3789,16 @@ test('DOM: a named worker without router evidence reports the routing reason as 
     'This run names claude-opus-5 via claude-subscription as its worker, but no canonical routing ' +
     'decision is recorded for it, so the routing reason is UNAVAILABLE.',
     `a routing reason the run never recorded was inferred for a named worker: ${text}`);
+  // The crew line carries the same distinction, because it is also read alone
+  // on the HUD and on the build-sequence strip.
+  const crew = operatorFields(page).find((n) => n.attrs['data-operator-field'] === 'crew-/-model');
+  assert.strictEqual(crew.lastChild.textContent,
+    'claude-opus-5 via claude-subscription · named on the run record, not a recorded AEGIS selection',
+    `a builder-only name was presented as a proven AEGIS selection: ${crew.lastChild.textContent}`);
+  assert.doesNotMatch(crew.lastChild.textContent, /Selected by AEGIS/,
+    'a builder-only name borrowed the router-selected wording');
+  assert.strictEqual(crew.attrs.title, undefined,
+    'a run with no recorded route advertised route provenance it does not have');
 });
 
 test('DOM: a run with no routing evidence states UNAVAILABLE and names no model', () => {
