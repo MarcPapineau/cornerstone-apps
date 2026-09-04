@@ -237,32 +237,36 @@ test('switchboard: review verification uses the canonical bind-only route only f
 });
 
 test('control authority composition seam is exact, frozen, and unavailable to browser input', () => {
+  const SEAM = ['bindIndependentReview', 'prepareIndependentReview',
+    'requestIndependentReview', 'runChecks'];
   assert.ok(Object.isFrozen(S.DEFAULT_CONTROL_AUTHORITIES));
-  assert.deepStrictEqual(Object.keys(S.DEFAULT_CONTROL_AUTHORITIES).sort(),
-    ['bindIndependentReview', 'prepareIndependentReview', 'runChecks']);
+  assert.deepStrictEqual(Object.keys(S.DEFAULT_CONTROL_AUTHORITIES).sort(), SEAM);
   assert.ok(Object.isFrozen(S.CONTROL_AUTHORITY_NAMES), 'the seam membership list must be frozen');
-  assert.deepStrictEqual([...S.CONTROL_AUTHORITY_NAMES],
-    ['bindIndependentReview', 'prepareIndependentReview', 'runChecks']);
+  assert.deepStrictEqual([...S.CONTROL_AUTHORITY_NAMES], SEAM);
   assert.throws(() => S.resolveControlAuthorities({ runChecks() {} }), /provide exactly/);
   assert.throws(() => S.resolveControlAuthorities({
     runChecks() {}, bindIndependentReview() {},
   }), /provide exactly/, 'a seam missing the preflight authority was accepted');
   assert.throws(() => S.resolveControlAuthorities({
-    runChecks() {}, bindIndependentReview() {}, prepareIndependentReview() {}, startRun() {},
+    runChecks() {}, bindIndependentReview() {}, prepareIndependentReview() {},
+  }), /provide exactly/, 'a seam missing the review-request authority was accepted');
+  assert.throws(() => S.resolveControlAuthorities({
+    runChecks() {}, bindIndependentReview() {}, prepareIndependentReview() {},
+    requestIndependentReview() {}, startRun() {},
   }), /provide exactly/);
   const supplied = S.resolveControlAuthorities({
     runChecks() { return 'checks'; },
     bindIndependentReview() { return 'review'; },
     prepareIndependentReview() { return 'preflight'; },
+    requestIndependentReview() { return 'request'; },
   });
   assert.ok(Object.isFrozen(supplied));
-  assert.deepStrictEqual(Object.keys(supplied).sort(),
-    ['bindIndependentReview', 'prepareIndependentReview', 'runChecks']);
+  assert.deepStrictEqual(Object.keys(supplied).sort(), SEAM);
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8');
   assert.match(serverSource, /http\.createServer\(handler\(config\)\)/,
     'production server construction must not inject alternate control authorities');
   assert.throws(() => S.resolveControlAuthorities(Object.defineProperty({
-    bindIndependentReview() {}, prepareIndependentReview() {},
+    bindIndependentReview() {}, prepareIndependentReview() {}, requestIndependentReview() {},
   }, 'runChecks', { enumerable: true, get() { throw new Error('getter executed'); } })),
   /provide exactly/, 'accessor-backed control authority was accepted');
 });
@@ -289,6 +293,34 @@ test('the review preflight route is a named POST bound to the canonical read-onl
     'startGovernedRun', 'saveRun', 'transition', 'spawn']) {
     assert.ok(!route.includes(forbidden),
       `the preflight route reaches ${forbidden}, which is not a read-only question`);
+  }
+});
+
+test('the Codex review request is one named POST pinned to the canonical callable, and nothing more', () => {
+  assert.strictEqual(S.API_POST_ROUTES['/api/request-codex-review'], 'request-codex-review',
+    'hosting does not declare the canonical Codex review-request route');
+  assert.strictEqual(S.DEFAULT_CONTROL_AUTHORITIES.requestIndependentReview,
+    require('../aegis-run.cjs').requestIndependentReview,
+    'the production HTTP route is not pinned to canonical requestIndependentReview');
+  assert.strictEqual(S.REVIEW_REQUEST_REVIEWER, 'codex',
+    'the reviewer word must be a server constant, never a request field');
+  // Grok stays a canonical reviewer. This route is Codex-only; it removes nobody.
+  assert.ok(require('../aegis-run.cjs').REVIEW_REQUEST_REVIEWERS.includes('grok'),
+    'this Codex-only route must not remove Grok from canonical model policy');
+
+  const source = fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8');
+  const route = source.slice(source.indexOf('async function requestCodexReview('),
+    source.indexOf('async function handleApi('));
+  assert.match(route, /await controlAuthorities\.requestIndependentReview\(\s*\{ runId, reviewer: REVIEW_REQUEST_REVIEWER \}\)/,
+    'the route is not a single awaited pass-through with a server-fixed reviewer');
+  assert.strictEqual((route.match(/requestIndependentReview\(/g) || []).length, 1,
+    'the route invokes the canonical review request more than once');
+  // Sequencing, leases, processes and retries all belong to the callable.
+  for (const forbidden of ['acquireGlobalReviewHold', 'releaseGlobalReviewHold',
+    'acquireRunLaunchClaim', 'launchWorker', 'startGovernedRun', 'runChecks',
+    'bindIndependentReview', 'saveRun', 'setTimeout', 'setInterval', 'spawn']) {
+    assert.ok(!route.includes(forbidden),
+      `the review-request route reaches ${forbidden}, which the canonical callable owns`);
   }
 });
 
@@ -1889,6 +1921,10 @@ async function runReviewPreflightCompositionSuite() {
   const calls = [];
   let answer = null;
   let thrown = null;
+  // The review-request double is a FUNCTION, so one closed test authority can
+  // answer, defer, reject or throw without a second fixture. It reaches no
+  // reviewer, no provider and no paid API — nothing here executes a review.
+  let requestResult = null;
   const controlAuthorities = {
     prepareIndependentReview(runId) {
       calls.push({ route: 'prepareIndependentReview', runId });
@@ -1897,13 +1933,32 @@ async function runReviewPreflightCompositionSuite() {
     },
     runChecks(runId) { calls.push({ route: 'runChecks', runId }); return { runId }; },
     bindIndependentReview(runId) { calls.push({ route: 'bindIndependentReview', runId }); return { runId }; },
+    requestIndependentReview(request) {
+      calls.push({ route: 'requestIndependentReview', request });
+      return requestResult === null ? null : requestResult();
+    },
   };
   const preflightCalls = () => calls.filter((c) => c.route === 'prepareIndependentReview');
   const forbiddenCalls = () => calls.filter((c) => c.route !== 'prepareIndependentReview');
+  const requestCalls = () => calls.filter((c) => c.route === 'requestIndependentReview');
   const canonicalAnswer = (fields) => ({
     runId: RUN_ID, state: 'CHECKS_PASSED', action: 'prepare-independent-review',
     authority: 'aegis-run.cjs prepareIndependentReview (read-only)', mutations: 'NONE',
     pendingReviewers: [], ...fields,
+  });
+  // Shaped exactly like the canonical callable's own answer, including a
+  // summary sentence the host must never republish.
+  const canonicalRequestAnswer = (fields) => ({
+    runId: RUN_ID, reviewer: 'codex', action: 'request-independent-review',
+    authority: 'aegis-run.cjs requestIndependentReview',
+    review: 'NOT_REQUESTED', reviewProcess: 'NOT_LAUNCHED', admission: 'NOT_ACQUIRED',
+    reasonCode: 'REVIEW_NOT_PERMITTED', summary: `canonical text ${CANONICAL_ONLY}`, ...fields,
+  });
+  const expectedRequestDto = (review, reviewProcess, admission, reasonCode) => ({
+    runId: RUN_ID, reviewer: 'codex', review,
+    reviewProcess, reviewProcessSummary: S.PUBLIC_REVIEW_PROCESS_SUMMARIES[reviewProcess],
+    admission, admissionSummary: S.PUBLIC_REVIEW_ADMISSION_SUMMARIES[admission],
+    reasonCode, reasonSummary: S.PUBLIC_REVIEW_REQUEST_REASONS[reasonCode],
   });
   const ask = (path_, options = {}) => post(PORT, path_, { agent, ...options });
   const askPreflight = (body, extra = {}) => ask('/api/review-preflight', {
@@ -1912,6 +1967,20 @@ async function runReviewPreflightCompositionSuite() {
     ...(extra.cookie ? { cookie: extra.cookie } : {}),
     body,
   });
+  const askRequest = (body, extra = {}) => ask('/api/request-codex-review', {
+    headers: { authorization: 'Bearer ' + PREFLIGHT_TOKEN, 'content-type': 'application/json',
+      origin: ORIGIN, ...(extra.headers || {}) },
+    ...(extra.cookie ? { cookie: extra.cookie } : {}),
+    body,
+  });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 250));
+  const waitFor = async (predicate, what) => {
+    const deadline = Date.now() + 2000;
+    while (!predicate()) {
+      assert.ok(Date.now() < deadline, `timed out waiting for ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
   // Each case owns the recorder and the stubbed answer outright. Resetting at
   // the end of a case only resets the cases that pass: one failed assertion
   // used to hand the next case a dirty call log and report a second failure
@@ -1921,6 +1990,7 @@ async function runReviewPreflightCompositionSuite() {
     calls.length = 0;
     answer = null;
     thrown = null;
+    requestResult = null;
     return fn();
   });
 
@@ -2165,6 +2235,208 @@ async function runReviewPreflightCompositionSuite() {
       }
       assert.deepStrictEqual(forbiddenCalls(), []);
     });
+
+    // ── POST /api/request-codex-review ──────────────────────────────────────
+    // The one action that ASKS for a review. Same transport fixture, same
+    // closed doubles, same per-case reset — and still no reviewer, no provider
+    // and no paid API anywhere in it.
+    //
+    // What these cases do NOT prove, deliberately: that a pending request means
+    // a reviewer is running (it means this host is waiting for an outcome),
+    // that the outcome survives a restart (there is no durable, reconnectable
+    // status), or that a server-process death is recovered from (it is not —
+    // the canonical hold is simply left unresolved).
+    await ptest('API RED: unauthenticated, cross-origin, non-POST and malformed review requests reach no authority', async () => {
+      const unauth = await ask('/api/request-codex-review', {
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: RUN_ID }),
+      });
+      assert.strictEqual(unauth.status, 401);
+
+      const crossOrigin = await askRequest(JSON.stringify({ runId: RUN_ID }),
+        { headers: { origin: 'http://evil.example' } });
+      assert.strictEqual(crossOrigin.status, 403);
+      const cookieNoOrigin = await ask('/api/request-codex-review', {
+        headers: { 'content-type': 'application/json' },
+        cookie: `aegis_session=${S.sessionFor(PREFLIGHT_TOKEN)}`,
+        body: JSON.stringify({ runId: RUN_ID }),
+      });
+      assert.strictEqual(cookieNoOrigin.status, 403);
+      assert.strictEqual(JSON.parse(cookieNoOrigin.body).error.code, 'CSRF_ORIGIN_REQUIRED');
+
+      for (const method of ['GET', 'HEAD']) {
+        const r = await new Promise((resolve) => {
+          const req = http.request({ host: '127.0.0.1', port: PORT, path: '/api/request-codex-review',
+            method, agent, headers: { authorization: 'Bearer ' + PREFLIGHT_TOKEN } },
+          (res) => { res.resume(); res.on('end', () => resolve({ status: res.statusCode })); });
+          req.on('error', () => resolve({ status: 0 }));
+          req.end();
+        });
+        assert.strictEqual(r.status, 405, `${method} reached the review-request dispatcher`);
+      }
+
+      const wrongType = await askRequest(JSON.stringify({ runId: RUN_ID }),
+        { headers: { 'content-type': 'text/plain' } });
+      assert.strictEqual(wrongType.status, 415);
+      const malformed = await askRequest('{ not json');
+      assert.strictEqual(malformed.status, 400);
+      const oversized = await askRequest(JSON.stringify({
+        runId: RUN_ID, pad: 'p'.repeat(S.MAX_API_BODY_BYTES + 1024) }));
+      assert.strictEqual(oversized.status, 413);
+
+      // The reviewer word is the server's. So is every other coordinate the
+      // canonical callable refuses to take from a caller.
+      for (const key of ['reviewer', 'packet', 'subject', 'subjectSha', 'command', 'timeoutSec',
+        'processLifecycle', 'capUsd', 'allowMetered', 'approvedBy', 'model', 'provider']) {
+        const r = await askRequest(JSON.stringify({ runId: RUN_ID, [key]: 'caller-controlled' }));
+        assert.strictEqual(r.status, 400, `${key} was not refused: ${r.body}`);
+        assert.strictEqual(JSON.parse(r.body).error.code, 'INVALID_REQUEST');
+      }
+      for (const body of ['[]', '{}', '"RUN-20260904-0badc0de"',
+        JSON.stringify({ runId: '' }), JSON.stringify({ runId: 7 })]) {
+        const r = await askRequest(body);
+        assert.strictEqual(r.status, 400, `${body} was not refused: ${r.body}`);
+      }
+      // A well-formed body naming a non-canonical run id is refused by this
+      // host before the authority is reached, so no unvalidated string is ever
+      // handed to the canonical callable or echoed back out of it.
+      const badId = await askRequest(JSON.stringify({ runId: '../../etc/passwd' }));
+      assert.strictEqual(badId.status, 400, badId.body);
+      assert.deepStrictEqual(JSON.parse(badId.body), { error: { code: 'INVALID_RUN_ID',
+        message: 'runId is not a canonical AEGIS run identifier.' } });
+
+      assert.deepStrictEqual(calls, [],
+        'a refused review request reached a control authority');
+    });
+
+    await ptest('an authenticated review request awaits the canonical callable once, with the server-fixed Codex reviewer', async () => {
+      requestResult = () => canonicalRequestAnswer({
+        review: 'RECORD_WRITTEN', reviewProcess: 'DRAINED', admission: 'RELEASED',
+        reasonCode: 'REVIEW_RECORD_WRITTEN',
+      });
+      const r = await askRequest(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(r.status, 200, r.body);
+      assert.strictEqual(r.headers['cache-control'], 'no-store');
+      assert.deepStrictEqual(calls, [{ route: 'requestIndependentReview',
+        request: { runId: RUN_ID, reviewer: 'codex' } }],
+      'the canonical review request was not made exactly once with only the validated runId and fixed reviewer');
+      assert.deepStrictEqual(JSON.parse(r.body), expectedRequestDto(
+        'RECORD_WRITTEN', 'DRAINED', 'RELEASED', 'REVIEW_RECORD_WRITTEN'));
+      assert.ok(!r.body.includes(CANONICAL_ONLY),
+        `the response echoed canonical summary text the host never wrote: ${r.body}`);
+      assert.match(JSON.parse(r.body).reasonSummary, /not an approval and it moves no gate/,
+        'a written review record was published without saying it approves nothing');
+    });
+
+    await ptest('a deferred canonical review request produces no premature success', async () => {
+      let release;
+      requestResult = () => new Promise((resolve) => { release = resolve; });
+      const pending = askRequest(JSON.stringify({ runId: RUN_ID }));
+      let responded = false;
+      pending.then(() => { responded = true; });
+      // A failed assertion must never leave the request open: the fixture's own
+      // close() would then wait on a connection nothing will ever answer.
+      try {
+        await settle();
+        assert.strictEqual(responded, false,
+          'the host answered before the canonical review request produced an outcome');
+        assert.strictEqual(requestCalls().length, 1, 'the deferred request was made more than once');
+      } finally {
+        release(canonicalRequestAnswer({ review: 'REVIEW_REFUSED', reviewProcess: 'DRAINED',
+          admission: 'RELEASED', reasonCode: 'REVIEW_REQUEST_REFUSED' }));
+      }
+      const r = await pending;
+      assert.strictEqual(r.status, 200, r.body);
+      assert.deepStrictEqual(JSON.parse(r.body), expectedRequestDto(
+        'REVIEW_REFUSED', 'DRAINED', 'RELEASED', 'REVIEW_REQUEST_REFUSED'));
+      assert.strictEqual(requestCalls().length, 1);
+    });
+
+    await ptest('a client disconnect cancels nothing, retries nothing and releases nothing', async () => {
+      let release;
+      requestResult = () => new Promise((resolve) => { release = resolve; });
+      const body = JSON.stringify({ runId: RUN_ID });
+      const req = http.request({ host: '127.0.0.1', port: PORT, path: '/api/request-codex-review',
+        method: 'POST', agent,
+        headers: { authorization: 'Bearer ' + PREFLIGHT_TOKEN, 'content-type': 'application/json',
+          origin: ORIGIN, 'content-length': Buffer.byteLength(body) } });
+      req.on('error', () => { /* the socket is destroyed on purpose below */ });
+      req.end(body);
+      try {
+        await waitFor(() => requestCalls().length === 1, 'the canonical review request');
+        req.destroy();
+        await settle();
+        // The canonical call owns its own outcome. The disconnect must not have
+        // torn it down, and the host must not have started a second one.
+        assert.strictEqual(requestCalls().length, 1,
+          'a client disconnect caused a duplicate or retried canonical review request');
+      } finally {
+        req.destroy();
+        if (release) {
+          release(canonicalRequestAnswer({ review: 'RECORD_WRITTEN', reviewProcess: 'UNDRAINED',
+            admission: 'HELD', reasonCode: 'REVIEW_RECORD_WRITTEN' }));
+        }
+      }
+      await settle();
+      assert.strictEqual(requestCalls().length, 1,
+        'the canonical review request was repeated after its outcome arrived');
+      assert.deepStrictEqual(forbiddenCalls().filter((c) => c.route !== 'requestIndependentReview'), [],
+        'a disconnected review request reached the checks or binding authority');
+    });
+
+    await ptest('API RED: refused, held, unconfirmed, malformed and rejected results leak nothing and free nothing', async () => {
+      // Every canonical outcome that must not read as success, including the
+      // held slot and the unconfirmed admission the callable reports.
+      for (const [review, reviewProcess, admission, reasonCode] of [
+        ['NOT_REQUESTED', 'NOT_LAUNCHED', 'NOT_ACQUIRED', 'ADMISSION_UNAVAILABLE'],
+        ['NOT_REQUESTED', 'NOT_LAUNCHED', 'UNCONFIRMED', 'ADMISSION_UNCONFIRMED'],
+        ['REVIEW_UNCOMPLETED', 'UNKNOWN', 'HELD', 'REVIEW_CALL_FAILED'],
+        ['NOT_REQUESTED', 'NOT_LAUNCHED', 'NOT_ACQUIRED', 'REVIEW_EVIDENCE_CHANGED'],
+      ]) {
+        requestResult = () => canonicalRequestAnswer({ review, reviewProcess, admission, reasonCode });
+        const r = await askRequest(JSON.stringify({ runId: RUN_ID }));
+        assert.strictEqual(r.status, 200, r.body);
+        assert.deepStrictEqual(JSON.parse(r.body),
+          expectedRequestDto(review, reviewProcess, admission, reasonCode));
+      }
+
+      // A malformed, foreign or rejected canonical result is normalized to one
+      // fixed unknown answer. It never claims the process stopped, and it never
+      // reports the governed admission slot as freed.
+      const unreadable = expectedRequestDto('UNKNOWN', 'UNKNOWN', 'UNCONFIRMED', 'REVIEW_RESULT_UNREADABLE');
+      const hostile = canonicalRequestAnswer({
+        review: 'APPROVED', reviewProcess: 'DRAINED', admission: 'RELEASED',
+        reasonCode: 'REVIEW_RECORD_WRITTEN',
+        transcript: HOSTILE_WORKER_OUTPUT.source, stdoutTail: HOSTILE_WORKER_OUTPUT.unlabelled,
+        credentials: HOSTILE_WORKER_OUTPUT.jwt + ' ' + HOSTILE_WORKER_OUTPUT.cookie,
+        packet: '/Users/someone/checkout/builder-control/packets/p.json',
+        summary: HOSTILE_WORKER_OUTPUT.pem,
+      });
+      for (const result of [
+        () => hostile,
+        () => canonicalRequestAnswer({ runId: 'RUN-20260904-deadbeef' }),
+        () => canonicalRequestAnswer({ reviewer: 'grok' }),
+        () => canonicalRequestAnswer({ authority: 'somewhere-else' }),
+        () => canonicalRequestAnswer({ reasonCode: 'REVIEW_RESULT_UNREADABLE' }),
+        () => 'RECORD_WRITTEN',
+        () => Promise.reject(new Error(
+          `review blew up in /Users/someone/checkout ${HOSTILE_WORKER_OUTPUT.pem}`)),
+        () => { throw new Error(`synchronous ${HOSTILE_WORKER_OUTPUT.jwt}`); },
+      ]) {
+        requestResult = result;
+        const r = await askRequest(JSON.stringify({ runId: RUN_ID }));
+        assert.strictEqual(r.status, 200, r.body);
+        assert.deepStrictEqual(JSON.parse(r.body), unreadable, r.body);
+        assertNoHostileWorkerOutput(JSON.parse(r.body), '/api/request-codex-review');
+        assert.ok(!/Users|packets|BEGIN PRIVATE KEY/.test(r.body),
+          `the review-request response leaked a path or credential: ${r.body}`);
+      }
+      assert.ok(!unreadable.reviewProcessSummary.includes('No reviewer process was started'),
+        'an unreadable result claimed no reviewer process was started');
+      assert.ok(!/released|freed/i.test(unreadable.admissionSummary),
+        'an unreadable result claimed the governed admission slot was freed');
+      assert.deepStrictEqual(forbiddenCalls().filter((c) => c.route !== 'requestIndependentReview'), []);
+    });
   } finally {
     agent.destroy();
     await new Promise((resolve) => srv.close(resolve));
@@ -2253,6 +2525,17 @@ async function runApiSuite() {
       prepareIndependentReview(runId) {
         record('prepareIndependentReview', runId);
         return AegisRun.prepareIndependentReview(runId);
+      },
+      // Closed and inert: the seam records the request and answers with a
+      // canonical-shaped refusal. No reviewer, no paid API and no admission
+      // slot is ever reached from this fixture.
+      async requestIndependentReview(request) {
+        record('requestIndependentReview', request && request.runId);
+        return { runId: request.runId, reviewer: request.reviewer,
+          action: 'request-independent-review',
+          authority: 'aegis-run.cjs requestIndependentReview',
+          review: 'NOT_REQUESTED', reviewProcess: 'NOT_LAUNCHED', admission: 'NOT_ACQUIRED',
+          reasonCode: 'REVIEW_NOT_PERMITTED', summary: 'fixture refusal' };
       },
     };
     const launchedWorkers = [];

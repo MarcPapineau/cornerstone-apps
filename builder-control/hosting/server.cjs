@@ -75,6 +75,10 @@ const API_POST_ROUTES = {
   // route on this table: it asks the canonical preflight what review action is
   // permitted right now and launches, binds and writes nothing.
   '/api/review-preflight': 'review-preflight',
+  // The one action that ASKS for a review. The reviewer word is fixed by this
+  // table's own route name and by a server constant below — it is never a body
+  // field — and the route does nothing but await the canonical request once.
+  '/api/request-codex-review': 'request-codex-review',
   '/api/review-bind': 'review-bind',
   '/api/research-approve': 'research-approve',
   '/api/research-park': 'research-park',
@@ -127,13 +131,14 @@ const DEFAULT_CONTROL_AUTHORITIES = Object.freeze({
   runChecks: AegisRun.runChecks,
   bindIndependentReview: AegisRun.bindIndependentReview,
   prepareIndependentReview: AegisRun.prepareIndependentReview,
+  requestIndependentReview: AegisRun.requestIndependentReview,
 });
 
 // The composition seam is a CLOSED set, sorted, and every member must be an own
 // data property holding a function. Naming them here rather than inline keeps
 // the exact-membership rule one list instead of a widening chain of ors.
 const CONTROL_AUTHORITY_NAMES = Object.freeze(
-  ['bindIndependentReview', 'prepareIndependentReview', 'runChecks']);
+  ['bindIndependentReview', 'prepareIndependentReview', 'requestIndependentReview', 'runChecks']);
 
 function resolveControlAuthorities(candidate) {
   if (candidate === undefined) return DEFAULT_CONTROL_AUTHORITIES;
@@ -149,12 +154,14 @@ function resolveControlAuthorities(candidate) {
       CONTROL_AUTHORITY_NAMES.some((name, i) => keys[i] !== name ||
         !descriptors[name] || typeof descriptors[name].value !== 'function')) {
     throw new TypeError(
-      'controlAuthorities must provide exactly runChecks, bindIndependentReview and prepareIndependentReview');
+      'controlAuthorities must provide exactly runChecks, bindIndependentReview, ' +
+      'prepareIndependentReview and requestIndependentReview');
   }
   return Object.freeze({
     runChecks: descriptors.runChecks.value,
     bindIndependentReview: descriptors.bindIndependentReview.value,
     prepareIndependentReview: descriptors.prepareIndependentReview.value,
+    requestIndependentReview: descriptors.requestIndependentReview.value,
   });
 }
 
@@ -1762,6 +1769,148 @@ function handleSse(req, res, config) {
   res.on('error', cleanup);
 }
 
+// ── one authenticated Codex review request ──────────────────────────────────
+// The canonical callable already owns everything that matters: eligibility,
+// the single governed admission slot, the per-run claim, provider policy, the
+// bounded review cycle and the honest reporting of what it could not confirm.
+// This route owns the HTTP transport and nothing else. It takes no lease,
+// starts no process, retries nothing, cancels nothing and writes no record.
+//
+// The reviewer word is a server constant. A body may name ONLY runId — the
+// shared runId-only parser refuses a second key — so a caller cannot ask for a
+// different reviewer, a packet, a subject, a command, a timeout, a lifecycle
+// proof or any spend authorization. Grok remains a canonical reviewer; this
+// first route is deliberately Codex-only and removes nothing.
+//
+// WHAT PENDING MEANS, EXACTLY. An open request here means this host is waiting
+// for the canonical request to produce an outcome. It is NOT proof that a
+// reviewer is running. There is no durable, reconnectable status behind it: if
+// this server process dies while the canonical call is in flight, the governed
+// hold is left unresolved and nothing here recovers it automatically.
+const REVIEW_REQUEST_REVIEWER = 'codex';
+const REVIEW_REQUEST_ACTION = 'request-independent-review';
+const REVIEW_REQUEST_AUTHORITY = 'aegis-run.cjs requestIndependentReview';
+const REVIEW_REQUEST_RUN_ID_RE = /^RUN-\d{8}-[0-9a-f]{8}$/;
+
+// Three separate questions, three separate closed vocabularies, read from the
+// canonical callable as it stands today. They are never merged: a review that
+// wrote a record says nothing about whether a process drained, and neither one
+// says whether the admission slot came back.
+const PUBLIC_REVIEW_REQUEST_REVIEWS = new Set([
+  'NOT_REQUESTED', 'RECORD_WRITTEN', 'REVIEW_REFUSED', 'REVIEW_UNCOMPLETED',
+]);
+const PUBLIC_REVIEW_PROCESS_SUMMARIES = Object.freeze({
+  NOT_LAUNCHED: 'No reviewer process was started by this request.',
+  DRAINED: 'The reviewer work this request started is recorded as finished.',
+  UNDRAINED: 'Reviewer work this request started is not recorded as finished.',
+  UNKNOWN: 'Whether reviewer work is still running is unknown.',
+});
+const PUBLIC_REVIEW_ADMISSION_SUMMARIES = Object.freeze({
+  NOT_ACQUIRED: 'This request never took the single governed admission slot.',
+  RELEASED: 'Every claim this request took was given back.',
+  HELD: 'The single governed admission slot is deliberately still held.',
+  UNCONFIRMED: 'At least one claim this request took could not be confirmed free.',
+});
+
+// Every sentence a browser can read is written HERE, keyed by the canonical
+// reason CODE. The canonical summary text never travels, because a category a
+// browser renders must not be one an upstream string can rewrite.
+const PUBLIC_REVIEW_REQUEST_REASONS = Object.freeze({
+  REQUEST_FIELDS_INVALID:
+    'The canonical request did not name exactly one run and one reviewer, so nothing was asked for.',
+  REVIEWER_UNSUPPORTED:
+    'Codex is not a reviewer the canonical request may run.',
+  REVIEW_NOT_PERMITTED:
+    'The canonical review preflight does not permit a review of this run right now.',
+  REVIEW_PREFLIGHT_FAILED:
+    'The canonical review preflight did not complete, so this run was never judged eligible and no review was started.',
+  REVIEWER_NOT_PENDING:
+    'The canonical preflight does not report Codex as owing a review of this exact checked version.',
+  ADMISSION_UNAVAILABLE:
+    'A build or review already holds the single governed admission slot, so no review was started.',
+  ADMISSION_UNCONFIRMED:
+    'The single governed admission slot could not be judged, so no review was started and the slot is not reported as free.',
+  RUN_CLAIM_UNAVAILABLE:
+    'Another action already holds this run, so no review was started.',
+  REVIEW_EVIDENCE_CHANGED:
+    'The canonical review evidence changed after admission was taken, so no review was started.',
+  REVIEW_RECORD_WRITTEN:
+    'A review record was written. It records what the reviewer said; it is not an approval and it moves no gate.',
+  REVIEW_REQUEST_REFUSED:
+    'The canonical reviewer refused this request. That is not an approval, and it does not establish whether a review record was published before the refusal.',
+  REVIEW_CALL_FAILED:
+    'The canonical review call did not complete, so what the reviewer did is unknown.',
+  // Host-owned, and never accepted FROM the callable: it is the answer to "the
+  // canonical result was unusable", which the callable itself cannot report.
+  REVIEW_RESULT_UNREADABLE:
+    'The canonical review request produced no answer this host recognises, so what the reviewer did — and whether the governed admission slot came back — are both unknown.',
+});
+
+function publicReviewRequest(runId, review, reviewProcess, admission, reasonCode) {
+  return {
+    runId,
+    reviewer: REVIEW_REQUEST_REVIEWER,
+    review,
+    reviewProcess,
+    reviewProcessSummary: PUBLIC_REVIEW_PROCESS_SUMMARIES[reviewProcess],
+    admission,
+    admissionSummary: PUBLIC_REVIEW_ADMISSION_SUMMARIES[admission],
+    reasonCode,
+    reasonSummary: PUBLIC_REVIEW_REQUEST_REASONS[reasonCode],
+  };
+}
+
+/**
+ * Build the public request DTO, or null when the canonical answer is not one
+ * this host recognises. Nothing is spread: the object is constructed from four
+ * closed words and the runId this host already validated, so a reason string,
+ * an adapter message, a prompt, a path or any transcript the answer might carry
+ * is dropped by construction rather than by filtering.
+ */
+function minimizeReviewRequest(runId, answer) {
+  if (!answer || typeof answer !== 'object' || Array.isArray(answer) ||
+      answer.action !== REVIEW_REQUEST_ACTION ||
+      answer.authority !== REVIEW_REQUEST_AUTHORITY) return null;
+  // A refusal taken before the callable read its own request carries null
+  // coordinates. Any other value has to be about the run and reviewer asked for.
+  if (!(answer.runId === null || answer.runId === runId) ||
+      !(answer.reviewer === null || answer.reviewer === REVIEW_REQUEST_REVIEWER)) return null;
+  if (!PUBLIC_REVIEW_REQUEST_REVIEWS.has(answer.review) ||
+      !Object.prototype.hasOwnProperty.call(PUBLIC_REVIEW_PROCESS_SUMMARIES, answer.reviewProcess) ||
+      !Object.prototype.hasOwnProperty.call(PUBLIC_REVIEW_ADMISSION_SUMMARIES, answer.admission) ||
+      !Object.prototype.hasOwnProperty.call(PUBLIC_REVIEW_REQUEST_REASONS, answer.reasonCode) ||
+      answer.reasonCode === 'REVIEW_RESULT_UNREADABLE') return null;
+  return publicReviewRequest(runId, answer.review, answer.reviewProcess,
+    answer.admission, answer.reasonCode);
+}
+
+// An unreadable or rejected canonical result is normalized, not turned into a
+// bare 500: the request WAS made, so silence would be less honest than saying
+// so. It never claims a process stopped and never reports admission as freed.
+function unreadableReviewRequest(runId) {
+  return publicReviewRequest(runId, 'UNKNOWN', 'UNKNOWN', 'UNCONFIRMED', 'REVIEW_RESULT_UNREADABLE');
+}
+
+async function requestCodexReview(runId, controlAuthorities) {
+  if (!REVIEW_REQUEST_RUN_ID_RE.test(runId)) {
+    throw new AegisRun.AegisControlError('INVALID_RUN_ID',
+      'runId is not a canonical AEGIS run identifier.', 400);
+  }
+  let answer;
+  try {
+    // Exactly one awaited canonical invocation, with exactly two coordinates:
+    // the runId validated above and the reviewer word fixed by this file.
+    answer = await controlAuthorities.requestIndependentReview(
+      { runId, reviewer: REVIEW_REQUEST_REVIEWER });
+  } catch {
+    // A rejection proves nothing about what the canonical call started or gave
+    // back, and its message can carry provider output or a path, so it is
+    // normalized rather than echoed or mapped.
+    return unreadableReviewRequest(runId);
+  }
+  return minimizeReviewRequest(runId, answer) || unreadableReviewRequest(runId);
+}
+
 async function handleApi(req, res, config, pathname, ctx, started, controlAuthorities, launchWorker) {
   const headers = ctx.setCookie ? { 'set-cookie': ctx.setCookie } : undefined;
   try {
@@ -1814,6 +1963,21 @@ async function handleApi(req, res, config, pathname, ctx, started, controlAuthor
     }
 
     const runId = parseRunIdBody(body);
+
+    // The only awaiting route on this table. The canonical call continues to
+    // its own outcome once accepted: a client that disconnects cancels nothing,
+    // frees nothing and starts nothing again — there is simply nobody left to
+    // answer, so the eventual write is skipped rather than attempted.
+    if (pathname === '/api/request-codex-review') {
+      let clientGone = false;
+      res.once('close', () => { clientGone = true; });
+      const requested = await requestCodexReview(runId, controlAuthorities);
+      if (clientGone || res.destroyed || res.writableEnded) { log(req, 499, started); return; }
+      sendJson(res, 200, requested, headers);
+      log(req, 200, started);
+      return;
+    }
+
     let result;
     if (pathname === '/api/start') result = startGovernedRun(runId, launchWorker);
     else if (pathname === '/api/pause') result = AegisRun.pauseRun(runId);
@@ -1958,4 +2122,7 @@ module.exports = {
   DEFAULT_CONTROL_AUTHORITIES, resolveControlAuthorities, CONTROL_AUTHORITY_NAMES,
   minimizeReviewPreflight,
   PUBLIC_REVIEW_PREFLIGHT_STATUSES, PUBLIC_REVIEW_PREFLIGHT_REASONS,
+  minimizeReviewRequest, REVIEW_REQUEST_REVIEWER,
+  PUBLIC_REVIEW_REQUEST_REASONS, PUBLIC_REVIEW_PROCESS_SUMMARIES,
+  PUBLIC_REVIEW_ADMISSION_SUMMARIES,
 };
