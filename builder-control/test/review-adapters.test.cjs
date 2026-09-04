@@ -4115,6 +4115,181 @@ test('RED: a signed record rejected in quarantine leaves only non-gated diagnost
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+// ── CALLABLE REVIEW ENTRY ─────────────────────────────────────────────────
+// This is the BACKEND step of dashboard-requested independent review, and only
+// that step. There is no HTTP endpoint and no dashboard button yet; nothing
+// below reaches a browser or a network. What is proved here is the three ways
+// a non-CLI caller differs from the terminal: importing the module must not
+// review anything, an absent or invalid canonical run coordinate must be
+// refused before a reviewer can be launched, and a bounded failure must be
+// returned to the calling host rather than exiting it. Every refusal below
+// stops inside the existing cmdRun orchestration, so no model is contacted.
+const ADAPTER_PATH = path.join(__dirname, '..', 'review-adapters.cjs');
+const BETA_PACKET_PATH = path.join(__dirname, '..', 'packets', 'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json');
+// Well-formed run ids that cannot resolve to a canonical run. Reaching a real
+// run coordinate from a test is precisely how a fixture turns into a paid
+// review, so these are the only coordinates the callable is ever handed here.
+const ABSENT_RUN_ID = 'RUN-20200101-00000000';
+const MALFORMED_RUN_ID = 'RUN-not-canonical';
+
+function reviewArtifactListing() {
+  return ['reviews', 'review-raw'].map((dir) => {
+    const target = path.join(__dirname, '..', dir);
+    return fs.existsSync(target) ? fs.readdirSync(target).sort() : [];
+  });
+}
+
+test('RED: importing the adapter exposes the callable entry and executes no review', () => {
+  const sandboxesBefore = reviewSandboxRoots();
+  const artifactsBefore = reviewArtifactListing();
+  const probe = spawnSync(process.execPath, ['-e',
+    `const adapter = require(${JSON.stringify(ADAPTER_PATH)});\n`
+    + "if (typeof adapter.requestCanonicalReview !== 'function') throw new Error('no callable review entry is exported');\n"
+    + "process.stdout.write('IMPORTED_WITHOUT_REVIEW');\n",
+  ], { encoding: 'utf8', cwd: path.join(__dirname, '..', '..') });
+  assert.strictEqual(probe.status, 0, probe.stderr);
+  assert.strictEqual(probe.stdout, 'IMPORTED_WITHOUT_REVIEW',
+    'importing the adapter produced output of its own');
+  assert.strictEqual(probe.stderr, '', `importing the adapter wrote to stderr: ${probe.stderr}`);
+  assert.deepStrictEqual(reviewArtifactListing(), artifactsBefore,
+    'importing the adapter created a review record or raw output');
+  assertNoNewReviewSandbox(sandboxesBefore, 'callable import');
+});
+
+test('RED: the callable entry refuses absent or invalid run coordinates without launching a model', async () => {
+  const { requestCanonicalReview } = require('../review-adapters.cjs');
+  const sandboxesBefore = reviewSandboxRoots();
+  const artifactsBefore = reviewArtifactListing();
+
+  // Refused on shape alone — cmdRun is never entered, so no packet is read.
+  const requestRefusals = [
+    [undefined, /review request object is required/],
+    [[{ runId: ABSENT_RUN_ID }], /review request object is required/],
+    [{}, /non-empty runId coordinate/],
+    [{ runId: '   ', reviewer: 'codex', packet: BETA_PACKET_PATH }, /non-empty runId coordinate/],
+    [{ runId: ABSENT_RUN_ID, packet: BETA_PACKET_PATH }, /non-empty reviewer coordinate/],
+    [{ runId: ABSENT_RUN_ID, reviewer: 'codex' }, /non-empty packet coordinate/],
+    // A misspelled coordinate must not be silently dropped into an unbound run.
+    [{ run_id: ABSENT_RUN_ID, runId: ABSENT_RUN_ID, reviewer: 'codex', packet: BETA_PACKET_PATH },
+      /unknown review request field\(s\): run_id/],
+    [{ runId: ABSENT_RUN_ID, reviewer: 'codex', packet: BETA_PACKET_PATH, onlyPaths: 'src/app.ts' },
+      /onlyPaths must be an array/],
+  ];
+  for (const [request, pattern] of requestRefusals) {
+    const outcome = await requestCanonicalReview(request);
+    assert.strictEqual(outcome.ok, false, `accepted ${JSON.stringify(request)}`);
+    assert.strictEqual(outcome.exitCode, 2, `wrong exit code for ${JSON.stringify(request)}`);
+    assert.strictEqual(outcome.outcome, 'REFUSED_REQUEST');
+    assert.match(outcome.reason, pattern);
+  }
+
+  // Well-formed requests whose run coordinate cannot resolve are refused by the
+  // canonical run resolution cmdRun already performs, at its existing BLOCK
+  // exit code — the callable adds no second answer to that question.
+  for (const runId of [ABSENT_RUN_ID, MALFORMED_RUN_ID]) {
+    const outcome = await requestCanonicalReview({
+      runId, reviewer: 'codex', packet: BETA_PACKET_PATH,
+    });
+    assert.strictEqual(outcome.ok, false, `${runId} was accepted as a canonical coordinate`);
+    assert.strictEqual(outcome.exitCode, 3, `${runId} did not reach the existing BLOCK outcome`);
+    assert.strictEqual(outcome.outcome, 'REFUSED');
+  }
+
+  assert.deepStrictEqual(reviewArtifactListing(), artifactsBefore,
+    'a refused callable request still wrote review evidence');
+  assertNoNewReviewSandbox(sandboxesBefore, 'callable coordinate refusal');
+});
+
+test('RED: a bounded callable failure returns to its host instead of terminating it', async () => {
+  const { requestCanonicalReview } = require('../review-adapters.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aegis-callable-request-'));
+  const malformedPacket = path.join(root, 'not-a-packet.json');
+  fs.writeFileSync(malformedPacket, '{ this is not a canonical packet');
+  const sandboxesBefore = reviewSandboxRoots();
+  try {
+    // A throw from deeper inside the orchestration becomes the same BLOCK
+    // outcome the CLI wrapper would have exited with, and execution continues
+    // here — the assertions after this call are themselves the proof.
+    const outcome = await requestCanonicalReview({
+      runId: ABSENT_RUN_ID, reviewer: 'codex', packet: malformedPacket,
+    });
+    assert.strictEqual(outcome.ok, false);
+    assert.strictEqual(outcome.exitCode, 3);
+    assert.strictEqual(outcome.outcome, 'REFUSED');
+    assert.ok(outcome.reason && outcome.reason.length > 0,
+      'a bounded callable failure carried no reason');
+    assertNoNewReviewSandbox(sandboxesBefore, 'callable bounded failure');
+
+    // Same-process assertions cannot see a process.exit that never ran, so the
+    // host-survival claim is proved in a child whose own exit code would be
+    // overwritten by any exit inside the callable.
+    const probe = spawnSync(process.execPath, ['-e',
+      `const adapter = require(${JSON.stringify(ADAPTER_PATH)});\n`
+      + `adapter.requestCanonicalReview({ runId: ${JSON.stringify(MALFORMED_RUN_ID)}, `
+      + `reviewer: 'codex', packet: ${JSON.stringify(BETA_PACKET_PATH)} })\n`
+      + "  .then((result) => { process.stdout.write('HOST_ALIVE exit=' + result.exitCode); process.exitCode = 7; })\n"
+      + "  .catch((error) => { process.stdout.write('HOST_ALIVE rejected=' + error.message); process.exitCode = 7; });\n",
+    ], { encoding: 'utf8', cwd: path.join(__dirname, '..', '..') });
+    assert.strictEqual(probe.status, 7,
+      `the callable terminated its host instead of returning (status ${probe.status}): ${probe.stderr}`);
+    assert.match(probe.stdout, /HOST_ALIVE (exit=3|rejected=)/,
+      'the callable neither returned nor rejected a bounded outcome to its host');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('RED: a dry run can never be reported to a caller as a written review record', async () => {
+  const { requestCanonicalReview } = require('../review-adapters.cjs');
+  const sandboxesBefore = reviewSandboxRoots();
+  const artifactsBefore = reviewArtifactListing();
+
+  // The hazard being closed: cmdRun's dry run stops after building the prompt
+  // and returns the PASS code with NO record written, while the callable maps
+  // every PASS to RECORD_WRITTEN. An operator reads the printed "no tool
+  // invoked" line; a caller reading an exit code sees a review that happened.
+  const dryRunRequests = [true, 1, 'yes', {}].map((dryRun) => ({
+    runId: ABSENT_RUN_ID, reviewer: 'codex', packet: BETA_PACKET_PATH, dryRun,
+  }));
+  for (const request of dryRunRequests) {
+    const outcome = await requestCanonicalReview(request);
+    assert.notStrictEqual(outcome.outcome, 'RECORD_WRITTEN',
+      `dryRun ${JSON.stringify(request.dryRun)} claimed a review record that was never written`);
+    assert.strictEqual(outcome.ok, false, `dryRun ${JSON.stringify(request.dryRun)} was reported as success`);
+    assert.strictEqual(outcome.exitCode, 2);
+    assert.strictEqual(outcome.outcome, 'REFUSED_REQUEST');
+    assert.match(outcome.reason, /dryRun is not available on the callable review entry/);
+  }
+
+  // Discriminating proof that the refusal is the cause, not the ambient failure
+  // of an unresolvable run coordinate: the SAME request without dryRun travels
+  // further and stops later, at cmdRun's existing BLOCK exit. A guard placed
+  // after cmdRun was entered could not produce these two different codes.
+  for (const dryRun of [undefined, false]) {
+    const request = { runId: ABSENT_RUN_ID, reviewer: 'codex', packet: BETA_PACKET_PATH };
+    if (dryRun !== undefined) request.dryRun = dryRun;
+    const outcome = await requestCanonicalReview(request);
+    assert.strictEqual(outcome.exitCode, 3,
+      `dryRun ${JSON.stringify(dryRun)} was refused as a dry run instead of reaching cmdRun`);
+    assert.strictEqual(outcome.outcome, 'REFUSED');
+  }
+
+  // The CLI half of the contract is unchanged: --dry-run still parses, and the
+  // branch it feeds still returns PASS without writing a record. That branch is
+  // exactly why the callable refusal above has to exist, so the refusal must
+  // not be "fixed" by deleting the operator's dry run.
+  const source = fs.readFileSync(path.join(__dirname, '..', 'review-adapters.cjs'), 'utf8');
+  assert.match(source, /--dry-run'\)\s*a\.dryRun = true;/,
+    'the CLI --dry-run flag no longer parses');
+  const branchStart = source.indexOf('if (args.dryRun) {');
+  assert.notStrictEqual(branchStart, -1, 'cmdRun no longer has a dry-run branch');
+  const dryRunBranch = source.slice(branchStart, source.indexOf('const timeoutSec', branchStart));
+  assert.match(dryRunBranch, /DRY RUN[\s\S]*return EXIT_PASS;/,
+    'cmdRun no longer has the dry-run branch this refusal exists to contain');
+
+  assert.deepStrictEqual(reviewArtifactListing(), artifactsBefore,
+    'a refused dry-run request still wrote review evidence');
+  assertNoNewReviewSandbox(sandboxesBefore, 'callable dry-run refusal');
+});
+
 Promise.all(pendingTests).then(() => {
   const failedCount = process.exitCode ? 'at least 1' : '0';
   console.log(`${passed} passed, ${skipped} skipped, ${failedCount} failed.`);

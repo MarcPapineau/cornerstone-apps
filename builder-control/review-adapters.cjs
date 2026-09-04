@@ -3645,6 +3645,95 @@ async function cmdRun(args) {
     { packetPath: args.packet, subdir: args.groupId ? 'groups' : null });
 }
 
+// ── callable review entry ───────────────────────────────────────────────────
+// A dashboard-requested review must reach the SAME orchestration the CLI runs,
+// not a second one that happens to resemble it. This entry therefore owns no
+// review logic: it validates the request shape, then hands cmdRun the exact
+// argument object parseArgs would have produced. Canonical run resolution,
+// subject and containment checks, launch authorization, billing evidence and
+// the bounded review-cycle stop all stay where they already are, so there is
+// nothing here to weaken by calling it from somewhere new.
+//
+// Three differences from the CLI, all deliberate:
+//   1. --run-id is OPTIONAL on the command line for legacy control-checkout
+//      reviews. It is REQUIRED here. A caller with no terminal has no way to
+//      say which isolated worktree it meant, and "whichever run matched" is
+//      exactly the ambiguity a non-interactive requester must never resolve.
+//   2. The CLI wrapper turns cmdRun's exit code into process.exit(). A callable
+//      host — the authenticated HTTP handler that comes NEXT, not here — must
+//      survive a refusal, so every bounded failure, including one thrown deeper
+//      in the orchestration, is RETURNED as an outcome carrying the same exit
+//      code the CLI would have exited with.
+//   3. --dry-run is SUPPORTED on the command line and REFUSED here. It returns
+//      the PASS code without writing a record, which an operator reads as the
+//      printed "no tool invoked" line but a caller could only read as a review
+//      that ran. The CLI flag is untouched; see the refusal below.
+//
+// This file still exposes no network surface and no browser-reachable action.
+// The HTTP endpoint and the dashboard button are a later stage; requiring this
+// module does not start a review, and neither does importing it.
+const CALLABLE_REVIEW_FIELDS = Object.freeze([
+  'runId', 'reviewer', 'packet', 'subjectSha', 'base', 'head', 'timeout',
+  'dryRun', 'dataClass', 'allowMetered', 'approvedBy', 'capUsd', 'onlyPaths',
+  'groupId', 'groupDigest', 'currentStateProofMap',
+]);
+
+function reviewCallOutcome(exitCode, reason) {
+  const code = Number.isInteger(exitCode) ? exitCode : EXIT_BLOCK;
+  return Object.freeze({
+    ok: code === EXIT_PASS,
+    exitCode: code,
+    outcome: code === EXIT_PASS ? 'RECORD_WRITTEN'
+      : code === EXIT_USAGE ? 'REFUSED_REQUEST' : 'REFUSED',
+    reason: reason === undefined || reason === null ? null : String(reason),
+  });
+}
+
+async function requestCanonicalReview(request) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    return reviewCallOutcome(EXIT_USAGE, 'a canonical review request object is required');
+  }
+  // An unrecognised key is refused rather than dropped. A caller that misspells
+  // runId would otherwise have its coordinate silently discarded, and the only
+  // thing standing between that and an unbound review is this check.
+  const unknown = Object.keys(request).filter((key) => !CALLABLE_REVIEW_FIELDS.includes(key));
+  if (unknown.length) {
+    return reviewCallOutcome(EXIT_USAGE, `unknown review request field(s): ${unknown.sort().join(', ')}`);
+  }
+  for (const field of ['runId', 'reviewer', 'packet']) {
+    if (typeof request[field] !== 'string' || !request[field].trim()) {
+      return reviewCallOutcome(EXIT_USAGE,
+        `a canonical review request requires a non-empty ${field} coordinate`);
+    }
+  }
+  if (request.onlyPaths !== undefined &&
+      (!Array.isArray(request.onlyPaths)
+        || request.onlyPaths.some((value) => typeof value !== 'string' || !value.trim()))) {
+    return reviewCallOutcome(EXIT_USAGE, 'onlyPaths must be an array of non-empty repository-relative paths');
+  }
+  // A dry run stops after building the prompt and returns cmdRun's PASS code
+  // WITHOUT writing a record. On the command line that is honest: the operator
+  // read the line saying no tool was invoked. A caller reading an exit code has
+  // no such line, and this entry's only success outcome is RECORD_WRITTEN — so
+  // a dry run reaching cmdRun from here could only be reported as a review that
+  // happened. The refusal is what keeps that outcome name true; the truthiness
+  // test is deliberately the same one cmdRun applies to args.dryRun.
+  if (request.dryRun) {
+    return reviewCallOutcome(EXIT_USAGE,
+      'dryRun is not available on the callable review entry: it writes no review record, '
+      + 'so it has no outcome this caller can act on — use the --dry-run CLI flag instead');
+  }
+  const args = { run: true };
+  for (const field of CALLABLE_REVIEW_FIELDS) {
+    if (request[field] !== undefined) args[field] = request[field];
+  }
+  try {
+    return reviewCallOutcome(await cmdRun(args));
+  } catch (error) {
+    return reviewCallOutcome(EXIT_BLOCK, error && error.message ? error.message : error);
+  }
+}
+
 function writeRecord(record, base, rawPath, opts = {}) {
   const reviewsRoot = opts.reviewsRoot || REVIEWS_DIR;
   const diagnosticsRoot = opts.diagnosticsRoot || path.join(RAW_DIR, 'invalid-review-records');
@@ -3798,4 +3887,4 @@ if (require.main === module) {
   })();
 }
 
-module.exports = { detect, extractJson, extractGrokStreamingReview, grokStreamEvents, grokReadReceiptCoverage, enforceGrokReadReceipts, authoritativeGrokSpend, grokSpendContract, reviewerProtocolText, buildRecord, codexPrompt, grokPrompt, eligiblePriorFindings, loadCurrentStateProofMap, isCurrentOpenReverificationTarget, CURRENT_STATE_CLASSIFICATIONS, liveReviewRecords, reviewCycleLaunchDecision, isUsableReview, validateReviewPayload, validateCodexInspectionProofs, codexCoveredPaths, stopWasAbnormal, validateCodexTerminalEnvelope, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, buildCodexInput, runTool, runContainedWithWatchdog, reapUndrainedReviewerGroup, processGroupAlive, prepareReviewSandbox, validateReviewManifestSnapshot, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, validateGrokExecutableIdentity, runGrokBillingAcp, validateGrokBillingEvidence, grokBillingPreflight, createInvocationIdentity, writeImmutableFile, writeRecord, runnablePacketChecks, resolveCanonicalCheckReceipt, resolveCanonicalRunContext, resolveReviewDataClass, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, MAX_REVIEW_OUTPUT_BYTES, MAX_CODEX_BUNDLE_BYTES, MAX_CODEX_INPUT_BYTES, MAX_CODEX_INPUT_CHARACTERS, REVIEW_KILL_GRACE_MS, REVIEW_REAPER_TIMEOUT_MS, GROK_BILLING_PREFLIGHT_TIMEOUT_MS, GROK_BILLING_MAX_STREAM_BYTES, GROK_EXPECTED_VERSION, GROK_EXPECTED_SHA256, GROK_REVIEW_SCHEMA, TOOLS };
+module.exports = { requestCanonicalReview, CALLABLE_REVIEW_FIELDS, detect, extractJson, extractGrokStreamingReview, grokStreamEvents, grokReadReceiptCoverage, enforceGrokReadReceipts, authoritativeGrokSpend, grokSpendContract, reviewerProtocolText, buildRecord, codexPrompt, grokPrompt, eligiblePriorFindings, loadCurrentStateProofMap, isCurrentOpenReverificationTarget, CURRENT_STATE_CLASSIFICATIONS, liveReviewRecords, reviewCycleLaunchDecision, isUsableReview, validateReviewPayload, validateCodexInspectionProofs, codexCoveredPaths, stopWasAbnormal, validateCodexTerminalEnvelope, looksUnfinished, canonGate, authorizeLaunch, buildToolArgv, evidenceBlock, buildCodexInput, runTool, runContainedWithWatchdog, reapUndrainedReviewerGroup, processGroupAlive, prepareReviewSandbox, validateReviewManifestSnapshot, cleanupReviewSandbox, safeReviewPath, resolveBoundedReviewPaths, reviewerEnvironment, containedReviewerCommand, validateGrokExecutableIdentity, runGrokBillingAcp, validateGrokBillingEvidence, grokBillingPreflight, createInvocationIdentity, writeImmutableFile, writeRecord, runnablePacketChecks, resolveCanonicalCheckReceipt, resolveCanonicalRunContext, resolveReviewDataClass, REVIEW_SANDBOX_PREFIX, MAX_REVIEW_FILES, MAX_REVIEW_BYTES, MAX_REVIEW_OUTPUT_BYTES, MAX_CODEX_BUNDLE_BYTES, MAX_CODEX_INPUT_BYTES, MAX_CODEX_INPUT_CHARACTERS, REVIEW_KILL_GRACE_MS, REVIEW_REAPER_TIMEOUT_MS, GROK_BILLING_PREFLIGHT_TIMEOUT_MS, GROK_BILLING_MAX_STREAM_BYTES, GROK_EXPECTED_VERSION, GROK_EXPECTED_SHA256, GROK_REVIEW_SCHEMA, TOOLS };
