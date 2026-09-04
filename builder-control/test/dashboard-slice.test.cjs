@@ -6750,12 +6750,27 @@ async function asyncTests() {
     assert.ok(/REVIEW_BOUND/.test(page.text('runs-list')), 'SSE did not repaint the review-bound state');
     assert.ok(/checkpoint is the next stage/.test(page.text('runs-list')),
       'REVIEW_BOUND does not explain the next truthful stage');
-    assert.ok(/checkpoint control is not exposed/.test(page.text('runs-list')),
-      'the functional-beta checkpoint boundary is missing');
     assert.ok(!nodes.some((n) => n.tagName === 'BUTTON' && /Verify independent review/.test(n.textContent)),
       'the CHECKS_PASSED-only action survived after SSE advanced the run');
-    assert.ok(!nodes.some((n) => n.tagName === 'BUTTON' && /checkpoint/i.test(n.textContent)),
-      'checkpoint control was exposed outside this packet');
+    // The bound REVIEW_BOUND run may now ask AEGIS to RECORD its checkpoint —
+    // and only that. The control that appears here writes no commit, starts no
+    // review, restores nothing and deploys nothing, and it reached no route
+    // simply by being offered.
+    const offered = nodes.find((n) => n.tagName === 'BUTTON' && /checkpoint/i.test(n.textContent));
+    assert.ok(offered && offered.textContent === 'Record checkpoint' && offered.disabled !== true,
+      'the bound REVIEW_BOUND run exposes no explicit checkpoint control');
+    assert.ok(/records where this reviewed run reached/.test(page.text('runs-list')),
+      'the checkpoint control does not say plainly what recording a checkpoint is');
+    assert.ok(/writes no commit, starts no review, restores no files and deploys nothing/
+      .test(page.text('runs-list')),
+    `the checkpoint control does not state what it cannot do: ${page.text('runs-list')}`);
+    assert.ok(/must already be committed through the approved narrow external path/
+      .test(page.text('runs-list')),
+    'the checkpoint control does not state that the reviewed changes are committed elsewhere first');
+    assert.ok(/AEGIS rechecks eligibility and may refuse/.test(page.text('runs-list')),
+      'the checkpoint control presents the browser as the authority rather than the server');
+    assert.strictEqual(calls.filter((c) => c.path === '/api/checkpoint').length, 0,
+      'offering the checkpoint control reached the canonical checkpoint route');
   });
 
   // ── "Check review readiness": an ask, never a review ──────────────────────
@@ -7622,6 +7637,605 @@ async function asyncTests() {
     // None of the above re-asked, re-fetched, polled or retried anything.
     assert.strictEqual(codexCalls(calls).length, 1,
       `repaints and restorations dispatched ${codexCalls(calls).length} canonical review requests`);
+  });
+
+  // ── "Record checkpoint": one explicit ask, one dated receipt ───────────────
+  // A checkpoint RECORDS where a reviewed run reached. It is the one remaining
+  // governed act this page can ask for, and the failure it must never produce is
+  // a page that reads as a delivery: every proof below holds one of five lines.
+  // It is offered only on the run AEGIS currently binds, in REVIEW_BOUND, and
+  // reaches no route until it is pressed. It sends the run id and nothing else,
+  // exactly once, even across a repaint. A recorded outcome is a compact dated
+  // receipt that says what it is and what it is not. An uncertain, unreadable,
+  // refused or lost answer is an honest outcome that never claims nothing
+  // changed unless AEGIS refused before recording. And nothing here ever
+  // commits, restores, deploys or retries on the page's own initiative.
+  const checkpointSettle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+
+  function checkpointStatus(runId, runState) {
+    return readinessStatus(runId, runState || 'REVIEW_BOUND');
+  }
+
+  function checkpointAnswer(over) {
+    return Object.assign({
+      runId: 'RUN-READY', action: 'checkpoint', outcome: 'RECORDED', state: 'CHECKPOINTED',
+      checkpointId: 'CP-20260904090000-ab12cd34', createdAt: '2026-09-04T09:00:00.000Z',
+      rollbackPoint: 'a'.repeat(40), tree: 'b'.repeat(40), digest: 'c'.repeat(64),
+      reasonCode: null, reasonSummary: null,
+      summary: 'A checkpoint was recorded for this run. It marks a known-good point and nothing else.',
+    }, over || {});
+  }
+
+  function checkpointPage(status, respond) {
+    const calls = [];
+    const page = bootPage(fixtureState(), { fetch: async (requestPath, options) => {
+      calls.push({ path: requestPath, options });
+      if (requestPath === '/api/status') return { ok: true, json: async () => status };
+      if (requestPath === '/api/checkpoint') return respond(options);
+      throw new Error('unexpected request ' + requestPath);
+    } });
+    return { page, calls };
+  }
+
+  function checkpointOfferNodes(page) {
+    return findByAttr(page.document.getElementById('runs-list'), 'data-checkpoint-offer');
+  }
+
+  function checkpointControl(page) {
+    return checkpointOfferNodes(page).find((node) => node.tagName === 'BUTTON') || null;
+  }
+
+  function checkpointResult(page) {
+    return findByAttr(page.document.getElementById('runs-list'), 'data-checkpoint-outcome')[0] || null;
+  }
+
+  function checkpointCalls(calls) {
+    return calls.filter((call) => call.path === '/api/checkpoint');
+  }
+
+  const checkpointRefused = () => {
+    throw new Error('the page asked for a checkpoint it was never told to ask for');
+  };
+
+  await atest('DOM: the checkpoint control is offered only on the bound REVIEW_BOUND run and reaches no route until it is pressed', async () => {
+    const status = checkpointStatus('RUN-READY');
+    const { page, calls } = checkpointPage(status, checkpointRefused);
+    await checkpointSettle();
+    const ask = checkpointControl(page);
+    assert.ok(ask && ask.disabled !== true,
+      'the canonically bound REVIEW_BOUND run exposes no checkpoint control');
+    assert.strictEqual(ask.textContent, 'Record checkpoint',
+      `the checkpoint control does not say plainly what it does: ${ask.textContent}`);
+    assert.strictEqual(ask.attrs['data-checkpoint-offer'], 'AVAILABLE',
+      'the offered checkpoint control does not record itself as available');
+    // The label is the operator's act, not the route's vocabulary.
+    assert.ok(!/API|POST|endpoint|DTO|runId/i.test(ask.textContent),
+      `the checkpoint label carries code jargon: ${ask.textContent}`);
+    // What it is, and what it is not — including the one prerequisite that lives
+    // outside this dashboard entirely.
+    const offerText = page.text('runs-list');
+    assert.ok(/records where this reviewed run reached/.test(offerText),
+      'the control does not say what recording a checkpoint is');
+    assert.ok(/writes no commit, starts no review, restores no files and deploys nothing/.test(offerText),
+      `the control does not state what it cannot do: ${offerText}`);
+    assert.ok(/must already be committed through the approved narrow external path/.test(offerText),
+      'the control does not state that the reviewed changes are committed elsewhere first');
+    assert.ok(/AEGIS rechecks eligibility and may refuse/.test(offerText),
+      'the control presents the browser reading as the authority rather than the server');
+    assert.strictEqual(checkpointResult(page), null,
+      'the card reported a checkpoint outcome before any request was made');
+    assert.strictEqual(checkpointCalls(calls).length, 0,
+      'the first paint reached the canonical checkpoint route with no operator press');
+
+    // A live repaint is not an operator, and never becomes one.
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(status) }));
+    await checkpointSettle();
+    assert.ok(checkpointControl(page), 'a live status push withdrew the checkpoint control');
+    assert.strictEqual(checkpointCalls(calls).length, 0,
+      'a live status push asked for a checkpoint on the operator\'s behalf');
+    // The new control is an addition: nothing that was on the card is gone.
+    for (const kept of ['Cancel', 'Pause']) {
+      assert.ok(runButtonLabels(page).includes(kept),
+        `the checkpoint control displaced ${kept}: ${runButtonLabels(page).join(', ')}`);
+    }
+
+    // No other canonical state may ask, whatever else the card offers.
+    for (const state of ['BUILT', 'CHECKS_PASSED', 'CHECKS_FAILED', 'BUILDING', 'CHECKPOINTED']) {
+      const other = checkpointPage(checkpointStatus('RUN-READY', state), checkpointRefused);
+      await checkpointSettle();
+      assert.strictEqual(checkpointControl(other.page), null,
+        `a ${state} run offered a checkpoint request`);
+      assert.strictEqual(checkpointOfferNodes(other.page).length, 0,
+        `a ${state} run left a checkpoint offer node on the card`);
+      assert.strictEqual(checkpointCalls(other.calls).length, 0,
+        `a ${state} run reached the canonical checkpoint route`);
+    }
+
+    // Neither may a REVIEW_BOUND run AEGIS is not currently binding: the row
+    // stays readable and says why it offers nothing.
+    for (const scenario of [
+      { label: 'an unbound history row',
+        binding: { state: 'UNAVAILABLE', runId: null, reason: 'no authoritative binding' } },
+      { label: 'a binding that names another run',
+        binding: { state: 'BOUND', runId: 'RUN-OTHER', updatedAt: '2026-09-04T09:00:00.000Z',
+          subjectState: 'UNLINKED', gateSubjectSha256: 'a'.repeat(64), reason: 'bound' } },
+    ]) {
+      const unboundStatus = Object.assign(checkpointStatus('RUN-READY'), { runsBinding: scenario.binding });
+      const other = checkpointPage(unboundStatus, checkpointRefused);
+      await checkpointSettle();
+      assert.strictEqual(checkpointControl(other.page), null,
+        `${scenario.label} offered a checkpoint request`);
+      assert.ok(/Only the run AEGIS currently binds can ask for its checkpoint/
+        .test(other.page.text('runs-list')),
+      `${scenario.label} does not say why it offers no checkpoint control`);
+      assert.strictEqual(checkpointCalls(other.calls).length, 0,
+        `${scenario.label} reached the canonical checkpoint route`);
+    }
+  });
+
+  await atest('DOM: one checkpoint request sends exactly the run id, exactly once, and states pending as an open question', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { page, calls } = checkpointPage(checkpointStatus('RUN-READY'),
+      async () => { await gate; return { ok: true, json: async () => checkpointAnswer() }; });
+    await checkpointSettle();
+    const ask = checkpointControl(page);
+
+    // Two presses, one canonical request.
+    const first = ask._listeners.click[0]();
+    const second = ask._listeners.click[0]();
+    await checkpointSettle();
+    const sent = checkpointCalls(calls);
+    assert.strictEqual(sent.length, 1,
+      `two presses produced ${sent.length} canonical checkpoint requests`);
+    assert.deepStrictEqual(JSON.parse(sent[0].options.body), { runId: 'RUN-READY' },
+      'the request carried a field beyond the exact runId authority boundary');
+    assert.strictEqual(sent[0].options.method, 'POST', 'the canonical POST route was not used');
+    assert.strictEqual(sent[0].options.credentials, 'same-origin',
+      'the request left the same-origin authenticated credential path');
+
+    // Pending is an open question about the request, never evidence of a record.
+    const pendingLine = checkpointResult(page);
+    assert.ok(pendingLine, 'the in-flight request printed nothing at all');
+    assert.strictEqual(pendingLine.attrs['data-checkpoint-outcome'], 'PENDING',
+      'an in-flight request did not record itself as pending');
+    assert.ok(/not proof that a checkpoint exists/.test(pendingLine.textContent),
+      `pending is presented as proof of a recorded checkpoint: ${pendingLine.textContent}`);
+    assert.ok(!/\bwas recorded\b|\bdeployed\b|\bcomplete\b|Checkpoint CP-/i.test(pendingLine.textContent),
+      `an unanswered request claims an outcome: ${pendingLine.textContent}`);
+    assert.strictEqual(ask.disabled, true, 'the control stayed pressable while its request was open');
+    assert.ok(/Requested \d{4}-\d{2}-\d{2}T[\d:.]+Z · no answer has come back here yet\./
+      .test(pendingLine.textContent),
+    `an open request is undated or claims a receipt it never got: ${pendingLine.textContent}`);
+
+    release();
+    await first;
+    await second;
+    await checkpointSettle();
+    assert.strictEqual(checkpointCalls(calls).length, 1,
+      'the settled request produced a second dispatch');
+    assert.strictEqual(checkpointResult(page).attrs['data-checkpoint-outcome'], 'RECORDED',
+      'the canonical answer did not replace the pending line');
+    // The one act this page can take is asking. It reaches no lifecycle route,
+    // and the canonical state on the card still comes from status/SSE alone.
+    assert.deepStrictEqual([...new Set(calls.map((call) => call.path))].sort(),
+      ['/api/checkpoint', '/api/status'],
+      'asking for a checkpoint reached a route beyond the canonical checkpoint endpoint');
+    assert.ok(/REVIEW_BOUND/.test(page.text('runs-list')) &&
+      !/CHECKPOINTED/.test(page.text('runs-list')),
+    'a checkpoint answer repainted the canonical run lifecycle from its own reply');
+  });
+
+  await atest('DOM: a recorded checkpoint is one compact dated receipt that claims no deployment and no current readiness', async () => {
+    const { page, calls } = checkpointPage(checkpointStatus('RUN-READY'),
+      () => ({ ok: true, json: async () => checkpointAnswer() }));
+    await checkpointSettle();
+    await checkpointControl(page)._listeners.click[0]();
+    await checkpointSettle();
+
+    const line = checkpointResult(page);
+    assert.ok(line, 'a recorded checkpoint printed nothing at all');
+    assert.strictEqual(line.attrs['data-checkpoint-outcome'], 'RECORDED');
+    assert.strictEqual(line.attrs['data-checkpoint-run'], 'RUN-READY',
+      'the receipt does not record which run it belongs to');
+    // The three coordinates an operator needs, from the answer and nowhere else.
+    assert.strictEqual(line.attrs['data-checkpoint-id'], 'CP-20260904090000-ab12cd34');
+    assert.strictEqual(line.attrs['data-checkpoint-commit'], 'a'.repeat(40));
+    assert.strictEqual(line.attrs['data-checkpoint-recorded-at'], '2026-09-04T09:00:00.000Z');
+    assert.ok(line.textContent.includes('Checkpoint CP-20260904090000-ab12cd34 · rollback commit ' +
+      'a'.repeat(40) + ' · recorded 2026-09-04T09:00:00.000Z.'),
+    `the receipt is not readable as id, commit and recorded time: ${line.textContent}`);
+    assert.ok(/a point to come back to and nothing else/.test(line.textContent),
+      'the receipt does not say in plain English what a checkpoint is');
+    assert.ok(/not a reading of what the gate needs now/.test(line.textContent),
+      'the receipt reads as current gate readiness rather than as a dated request');
+    // Dated by two real moments: when the request left, and when it was answered.
+    assert.ok(/Requested \d{4}-\d{2}-\d{2}T[\d:.]+Z · answer received \d{4}-\d{2}-\d{2}T[\d:.]+Z\./
+      .test(line.textContent), `the receipt is undated: ${line.textContent}`);
+    // Compact: four sentences and the two stamps, no decorative panel.
+    assert.ok(line.children.length <= 6,
+      `the receipt grew into a panel of ${line.children.length} lines`);
+    // Nothing the browser has no use for travels into view.
+    assert.ok(!line.textContent.includes('c'.repeat(64)) && !line.textContent.includes('b'.repeat(40)),
+      'the receipt published the canonical digest or tree beside the operator-readable coordinates');
+    // No outcome may read as a delivery. The page's own denials are removed
+    // first, so "nothing was deployed" is measured as the denial it is.
+    const claimed = line.textContent
+      .replace(/No files were restored and nothing was deployed\./gi, '')
+      .replace(/it is not a deployment or a release/gi, '');
+    for (const claim of [/\bdeployed\b/i, /\breleased\b/i, /\bshipped\b/i, /\bmerged\b/i,
+      /ready to merge/i, /gate (?:is )?(?:clear|cleared|moved)\b/i, /\bin production\b/i]) {
+      assert.ok(!claim.test(claimed), `the receipt claims ${claim}: ${line.textContent}`);
+    }
+
+    // A recorded receipt withdraws the offer instead of inviting a second record.
+    assert.strictEqual(checkpointControl(page), null,
+      'a run with a recorded checkpoint receipt was offered a second request');
+    const held = checkpointOfferNodes(page);
+    assert.strictEqual(held.length, 1, 'the answered card explains nothing about why it offers no request');
+    assert.strictEqual(held[0].attrs['data-checkpoint-offer'], 'RECORDED');
+    assert.strictEqual(checkpointCalls(calls).length, 1,
+      'the recorded outcome dispatched a second canonical request');
+  });
+
+  await atest('DOM: uncertain, unreadable, refused and lost checkpoint answers stay honest and are never retried', async () => {
+    // Only AEGIS refusing before it records anything may be reported as nothing
+    // recorded. Everything else is unknown, and unknown is stated as unknown.
+    const unknown = [
+      { label: 'the canonical claim could not be proven released',
+        body: checkpointAnswer({ outcome: 'UNCERTAIN', state: null, checkpointId: null,
+          createdAt: null, rollbackPoint: null, tree: null, digest: null,
+          reasonCode: 'CHECKPOINT_CLAIM_NOT_RELEASED' }),
+        outcome: 'UNCERTAIN',
+        expect: [/could not prove it released the claim/, /not idle/] },
+      { label: 'the canonical call did not complete',
+        body: checkpointAnswer({ outcome: 'UNCERTAIN', state: null, checkpointId: null,
+          createdAt: null, rollbackPoint: null, tree: null, digest: null,
+          reasonCode: 'CHECKPOINT_CALL_FAILED' }),
+        outcome: 'UNCERTAIN',
+        expect: [/did not complete, so what it recorded before it stopped is unknown/] },
+      { label: 'an uncertain answer with no reason this page can state',
+        body: checkpointAnswer({ outcome: 'UNCERTAIN', state: null, checkpointId: null,
+          createdAt: null, rollbackPoint: null, tree: null, digest: null, reasonCode: 'NEW_REASON' }),
+        outcome: 'UNCERTAIN',
+        expect: [/It gave no reason this page can state/], forbid: [/undefined|null|NEW_REASON/] },
+      { label: 'a checkpoint id that is not a canonical identifier',
+        body: checkpointAnswer({ checkpointId: 'CP-1' }), outcome: 'UNREADABLE' },
+      { label: 'a rollback point that is not a commit',
+        body: checkpointAnswer({ rollbackPoint: 'HEAD~1' }), outcome: 'UNREADABLE' },
+      { label: 'a recorded time that is not a canonical timestamp',
+        body: checkpointAnswer({ createdAt: 'yesterday' }), outcome: 'UNREADABLE' },
+      { label: 'a recorded outcome that names no checkpointed state',
+        body: checkpointAnswer({ state: 'REVIEW_BOUND' }), outcome: 'UNREADABLE' },
+      { label: 'an answer about a different run',
+        body: checkpointAnswer({ runId: 'RUN-OTHER' }), outcome: 'UNREADABLE' },
+      { label: 'an answer about a different action',
+        body: checkpointAnswer({ action: 'rollback' }), outcome: 'UNREADABLE' },
+      { label: 'an unrecognised outcome word',
+        body: checkpointAnswer({ outcome: 'ROLLED_BACK' }), outcome: 'UNREADABLE' },
+      { label: 'an inherited property name as the outcome word',
+        body: checkpointAnswer({ outcome: 'constructor' }), outcome: 'UNREADABLE' },
+      { label: 'an array instead of a record', body: [], outcome: 'UNREADABLE' },
+      { label: 'no answer body at all', body: null, outcome: 'UNREADABLE' },
+    ];
+    for (const scenario of unknown) {
+      const { page, calls } = checkpointPage(checkpointStatus('RUN-READY'),
+        () => ({ ok: true, json: async () => scenario.body }));
+      await checkpointSettle();
+      await checkpointControl(page)._listeners.click[0]();
+      await checkpointSettle();
+      const line = checkpointResult(page);
+      assert.ok(line, `${scenario.label} printed nothing at all`);
+      assert.strictEqual(line.attrs['data-checkpoint-outcome'], scenario.outcome,
+        `${scenario.label} recorded the wrong outcome`);
+      assert.ok(/Whether a checkpoint was recorded is unknown/.test(line.textContent),
+        `${scenario.label} did not state the honest unknown: ${line.textContent}`);
+      for (const expected of scenario.expect || []) {
+        assert.ok(expected.test(line.textContent),
+          `${scenario.label} is missing ${expected}: ${line.textContent}`);
+      }
+      for (const banned of scenario.forbid || []) {
+        assert.ok(!banned.test(line.textContent),
+          `${scenario.label} says ${banned}: ${line.textContent}`);
+      }
+      // Unknown is never "nothing happened", and never a receipt.
+      for (const claim of [/nothing changed/i, /nothing happened/i, /no checkpoint was recorded/i,
+        /A checkpoint was recorded for this run/, /Checkpoint CP-/]) {
+        assert.ok(!claim.test(line.textContent),
+          `${scenario.label} claims ${claim}: ${line.textContent}`);
+      }
+      assert.ok(!line.attrs['data-checkpoint-id'] && !line.attrs['data-checkpoint-commit'],
+        `${scenario.label} published receipt coordinates it never validated`);
+      assert.ok(/Requested \d{4}-\d{2}-\d{2}T[\d:.]+Z · answer received \d{4}-\d{2}-\d{2}T[\d:.]+Z\./
+        .test(line.textContent), `${scenario.label} left the outcome undated: ${line.textContent}`);
+      assert.strictEqual(checkpointCalls(calls).length, 1,
+        `${scenario.label} was retried automatically`);
+      // An outcome that may already have written a record does not invite a
+      // second one, and nothing asks again on its own.
+      assert.strictEqual(checkpointControl(page), null,
+        `${scenario.label} offered a second request while what was recorded is unknown`);
+      assert.strictEqual(checkpointOfferNodes(page)[0].attrs['data-checkpoint-offer'], 'UNKNOWN',
+        `${scenario.label} does not say why no second request is offered`);
+      assert.ok(/CHECKS_PASSED|REVIEW_BOUND/.test(page.text('runs-list')) &&
+        !/CHECKPOINTED/.test(page.text('runs-list')),
+      `${scenario.label} moved the run from its canonical state`);
+    }
+
+    // A refusal AEGIS raises before recording is the one honest "nothing was
+    // recorded" — stated in this page's words, never in the canonical message,
+    // and it leaves the control available to an operator who fixes the cause.
+    const refusal = checkpointPage(checkpointStatus('RUN-READY'),
+      () => ({ ok: false, status: 409, json: async () => ({ error: {
+        code: 'CHECKPOINT_DIRTY_TREE',
+        message: 'uncommitted changes in /Users/fixture/worktree/builder-control/dashboard/index.html',
+      } }) }));
+    await checkpointSettle();
+    await checkpointControl(refusal.page)._listeners.click[0]();
+    await checkpointSettle();
+    const refused = checkpointResult(refusal.page);
+    assert.strictEqual(refused.attrs['data-checkpoint-outcome'], 'REFUSED',
+      'a canonical refusal was not reported as a refusal');
+    assert.ok(/No checkpoint was recorded, nothing was committed and nothing was changed/
+      .test(refused.textContent),
+    `the refusal does not state what it means: ${refused.textContent}`);
+    assert.ok(/The reviewed changes are not committed/.test(refused.textContent) &&
+      /approved narrow external path/.test(refused.textContent),
+    `the refusal does not explain the one thing the operator must do elsewhere: ${refused.textContent}`);
+    assert.ok(!/\/Users\/fixture|uncommitted changes in|409|CHECKPOINT_DIRTY_TREE/
+      .test(refused.textContent),
+    `the refusal printed raw canonical text or a status line: ${refused.textContent}`);
+    assert.strictEqual(checkpointCalls(refusal.calls).length, 1,
+      'a refusal was retried automatically');
+    const reoffered = checkpointControl(refusal.page);
+    assert.ok(reoffered && reoffered.disabled !== true,
+      'a refusal that recorded nothing left no way for an operator to ask again');
+    assert.strictEqual(checkpointCalls(refusal.calls).length, 1,
+      're-offering the control dispatched a request by itself');
+
+    // A refusal this page does not recognise still came back: it is an answer
+    // that could not be read, never a proven absence of a record.
+    const unrecognised = checkpointPage(checkpointStatus('RUN-READY'),
+      () => ({ ok: false, status: 500, json: async () => ({ error: {
+        code: 'INTERNAL_ERROR', message: 'internal error' } }) }));
+    await checkpointSettle();
+    await checkpointControl(unrecognised.page)._listeners.click[0]();
+    await checkpointSettle();
+    const opaque = checkpointResult(unrecognised.page);
+    assert.strictEqual(opaque.attrs['data-checkpoint-outcome'], 'UNREADABLE',
+      'an unrecognised canonical refusal was reported as a settled outcome');
+    assert.ok(/Whether a checkpoint was recorded is unknown/.test(opaque.textContent),
+      `an unrecognised refusal did not stay unknown: ${opaque.textContent}`);
+    assert.ok(!/internal error|INTERNAL_ERROR|500|request failed with status/.test(opaque.textContent),
+      `an unrecognised refusal printed raw transport text: ${opaque.textContent}`);
+    assert.strictEqual(checkpointCalls(unrecognised.calls).length, 1,
+      'an unrecognised refusal was retried automatically');
+
+    // A lost answer proves nothing about what the request reached.
+    const lost = checkpointPage(checkpointStatus('RUN-READY'),
+      () => { throw new Error('network error'); });
+    await checkpointSettle();
+    await checkpointControl(lost.page)._listeners.click[0]();
+    await checkpointSettle();
+    const dropped = checkpointResult(lost.page);
+    assert.strictEqual(dropped.attrs['data-checkpoint-outcome'], 'NO_ANSWER',
+      'a dropped connection was reported as an outcome of the request');
+    assert.ok(/no answer came back/.test(dropped.textContent) &&
+      /Whether a checkpoint was recorded is unknown/.test(dropped.textContent),
+    `a dropped connection did not stay unknown: ${dropped.textContent}`);
+    assert.ok(/Nothing was retried/.test(dropped.textContent),
+      'the lost answer does not state that nothing was retried');
+    assert.ok(!/network error/.test(dropped.textContent),
+      `the transport's own words were printed as if they explained the run: ${dropped.textContent}`);
+    assert.strictEqual(checkpointCalls(lost.calls).length, 1,
+      `a lost answer produced ${checkpointCalls(lost.calls).length} requests — it must never be retried`);
+  });
+
+  await atest('DOM: a delayed checkpoint answer reaches the card on the page, is kept by run, and survives the run advancing', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const status = checkpointStatus('RUN-READY');
+    const { page, calls } = checkpointPage(status,
+      async () => { await gate; return { ok: true, json: async () => checkpointAnswer() }; });
+    await checkpointSettle();
+    const pending = checkpointControl(page)._listeners.click[0]();
+    await checkpointSettle();
+    assert.strictEqual(checkpointResult(page).attrs['data-checkpoint-outcome'], 'PENDING',
+      'the request was never reported as open');
+    const pendingText = checkpointResult(page).textContent;
+
+    // The repaint that destroys the card the request was made from. The open
+    // request survives it, because a repaint is not an answer — and no second
+    // request may be offered while the first is unresolved.
+    const repainted = JSON.parse(JSON.stringify(status));
+    repainted.generatedAt = '2026-09-04T09:00:02.000Z';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(repainted) }));
+    await checkpointSettle();
+    const afterRepaint = checkpointResult(page);
+    assert.ok(afterRepaint, 'a routine repaint discarded a request that was still open');
+    assert.strictEqual(afterRepaint.attrs['data-checkpoint-outcome'], 'PENDING',
+      'the repainted card resolved an open request it had no answer for');
+    assert.strictEqual(afterRepaint.textContent, pendingText,
+      `the repaint rewrote the pending request instead of restating it: ${afterRepaint.textContent}`);
+    assert.strictEqual(checkpointControl(page), null,
+      'a repaint offered a second checkpoint request while one was open');
+    assert.strictEqual(checkpointOfferNodes(page)[0].attrs['data-checkpoint-offer'], 'IN_FLIGHT',
+      'the repainted card does not record the open request as in flight');
+    assert.strictEqual(checkpointCalls(calls).length, 1,
+      `the repaint path dispatched ${checkpointCalls(calls).length} requests`);
+
+    // A different run can neither take the open slot nor be given this answer.
+    const moved = JSON.parse(JSON.stringify(status));
+    moved.generatedAt = '2026-09-04T09:00:03.000Z';
+    moved.runs[0].runId = 'RUN-SECOND';
+    moved.runsBinding.runId = 'RUN-SECOND';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(moved) }));
+    await checkpointSettle();
+    assert.strictEqual(checkpointControl(page), null,
+      'a different run was offered a checkpoint while another run\'s request was open');
+    assert.ok(/for another run is already waiting/.test(page.text('runs-list')),
+      'the second run does not say the open request belongs to a different run');
+
+    release();
+    await pending;
+    await checkpointSettle();
+    assert.strictEqual(checkpointCalls(calls).length, 1, 'settling the request dispatched another');
+    assert.strictEqual(checkpointResult(page), null,
+      'the first run\'s receipt landed on a different run\'s card');
+    assert.ok(!/Checkpoint CP-20260904090000-ab12cd34/.test(page.text('runs-list')),
+      'a receipt was printed on the run that never asked for it');
+
+    // The run that did ask gets it back, restated rather than re-decided.
+    const back = JSON.parse(JSON.stringify(status));
+    back.generatedAt = '2026-09-04T09:00:04.000Z';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(back) }));
+    await checkpointSettle();
+    const restored = checkpointResult(page);
+    assert.ok(restored, 'returning to the run that asked restored nothing');
+    assert.strictEqual(restored.attrs['data-checkpoint-outcome'], 'RECORDED',
+      'the operator was left looking at a pending line its own answer never replaced');
+    assert.strictEqual(restored.attrs['data-checkpoint-run'], 'RUN-READY',
+      'the restored receipt does not name the run it belongs to');
+    const receiptText = restored.textContent;
+    assert.ok(/Requested \d{4}-\d{2}-\d{2}T[\d:.]+Z · answer received \d{4}-\d{2}-\d{2}T[\d:.]+Z\./
+      .test(receiptText), `the restored receipt is undated: ${receiptText}`);
+
+    // The run advancing to its checkpointed state does not unmake the dated
+    // answer the operator was given for the request they made.
+    const advanced = JSON.parse(JSON.stringify(status));
+    advanced.generatedAt = '2026-09-04T09:00:05.000Z';
+    advanced.runs[0].state = 'CHECKPOINTED';
+    advanced.runs[0].checkpoint = 'CP-20260904090000-ab12cd34';
+    advanced.runs[0].rollbackPoint = 'a'.repeat(40);
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(advanced) }));
+    await checkpointSettle();
+    const kept = checkpointResult(page);
+    assert.ok(kept && kept.textContent === receiptText,
+      'the receipt vanished or was rewritten as soon as the run advanced');
+    assert.strictEqual(checkpointControl(page), null,
+      'a run that has left REVIEW_BOUND was offered a checkpoint request');
+
+    // None of the above re-asked, re-fetched, polled or retried anything.
+    assert.strictEqual(checkpointCalls(calls).length, 1,
+      `repaints and restorations dispatched ${checkpointCalls(calls).length} canonical checkpoint requests`);
+  });
+
+  // A settled request must leave the card the operator is LOOKING AT accurate.
+  // The card that asked may already have been replaced by a repaint, so an
+  // offer redrawn through the closure that started the request refreshes a node
+  // no reader can see — and every card still on the page keeps saying a request
+  // is waiting for an outcome that has already come back. Both halves of that
+  // are proved here: the run that asked, and a different bound run that never
+  // did.
+  await atest('DOM: a checkpoint answer arriving after a repaint refreshes the offer on the card that is showing, not the one that asked', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const status = checkpointStatus('RUN-READY');
+    const { page, calls } = checkpointPage(status, async () => {
+      await gate;
+      // A refusal AEGIS raises BEFORE it records anything: the one outcome that
+      // may honestly leave the control available again.
+      return { ok: false, status: 409, json: async () => ({ error: {
+        code: 'CHECKPOINT_DIRTY_TREE',
+        message: 'uncommitted changes in /Users/fixture/worktree/builder-control/dashboard/index.html',
+      } }) };
+    });
+    await checkpointSettle();
+    const pending = checkpointControl(page)._listeners.click[0]();
+    await checkpointSettle();
+
+    // The repaint that destroys the card the request was made from, replacing it
+    // with a fresh card for the same run.
+    const repainted = JSON.parse(JSON.stringify(status));
+    repainted.generatedAt = '2026-09-04T09:00:02.000Z';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(repainted) }));
+    await checkpointSettle();
+    assert.strictEqual(checkpointOfferNodes(page)[0].attrs['data-checkpoint-offer'], 'IN_FLIGHT',
+      'the repainted card does not record the open request as in flight');
+
+    release();
+    await pending;
+    await checkpointSettle();
+
+    // The refusal is on the card that is on the page, dated, in this page's own
+    // words — not stranded on the detached node the request was made from.
+    const refused = checkpointResult(page);
+    assert.ok(refused, 'the refusal never reached the card that replaced the one that asked');
+    assert.strictEqual(refused.attrs['data-checkpoint-outcome'], 'REFUSED',
+      'a canonical refusal that arrived after a repaint was not reported as a refusal');
+    assert.strictEqual(refused.attrs['data-checkpoint-run'], 'RUN-READY',
+      'the refusal does not name the run it belongs to');
+    assert.ok(/No checkpoint was recorded, nothing was committed and nothing was changed/
+      .test(refused.textContent),
+    `the refusal does not state what it means: ${refused.textContent}`);
+    assert.ok(/Requested \d{4}-\d{2}-\d{2}T[\d:.]+Z · answer received \d{4}-\d{2}-\d{2}T[\d:.]+Z\./
+      .test(refused.textContent), `the refusal is undated: ${refused.textContent}`);
+
+    // And the offer the operator can actually see is a usable control again —
+    // no card left reading as still waiting for an answer that has landed.
+    const offers = checkpointOfferNodes(page);
+    assert.ok(!offers.some((node) => node.attrs['data-checkpoint-offer'] === 'IN_FLIGHT'),
+      'a settled request left a card still saying a checkpoint request is waiting for an outcome');
+    const reoffered = checkpointControl(page);
+    assert.ok(reoffered && reoffered.disabled !== true,
+      'the refusal refreshed the detached card that asked and left the visible one with no way to ask again');
+    assert.strictEqual(reoffered.textContent, 'Record checkpoint',
+      `the re-offered control is stuck on the label of a request that has settled: ${reoffered.textContent}`);
+    assert.strictEqual(reoffered.attrs['data-checkpoint-offer'], 'AVAILABLE',
+      'the re-offered control does not record itself as available');
+
+    // Refreshing the offer is a redraw, never an ask: the operator presses it or
+    // nothing happens, and nothing was retried on the page's own initiative.
+    assert.strictEqual(checkpointCalls(calls).length, 1,
+      `the repaint-and-settle path dispatched ${checkpointCalls(calls).length} canonical checkpoint requests`);
+  });
+
+  await atest('DOM: settling a request while a different bound run is showing gives that run neither the answer nor a stale waiting offer', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const status = checkpointStatus('RUN-READY');
+    const { page, calls } = checkpointPage(status,
+      async () => { await gate; return { ok: true, json: async () => checkpointAnswer() }; });
+    await checkpointSettle();
+    const pending = checkpointControl(page)._listeners.click[0]();
+    await checkpointSettle();
+
+    // AEGIS binds a different run while the first request is still open. That
+    // run withholds its own control only because the page-wide guard is held.
+    const moved = JSON.parse(JSON.stringify(status));
+    moved.generatedAt = '2026-09-04T09:00:03.000Z';
+    moved.runs[0].runId = 'RUN-SECOND';
+    moved.runsBinding.runId = 'RUN-SECOND';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(moved) }));
+    await checkpointSettle();
+    assert.strictEqual(checkpointOfferNodes(page)[0].attrs['data-checkpoint-offer'], 'IN_FLIGHT',
+      'the newly bound run does not record the other run\'s open request as in flight');
+
+    release();
+    await pending;
+    await checkpointSettle();
+
+    // The receipt belongs to the run that asked and to no other: the run on the
+    // page never asked, so it is given nothing.
+    assert.strictEqual(checkpointResult(page), null,
+      'the first run\'s receipt landed on a run that never asked for it');
+    assert.ok(!/Checkpoint CP-20260904090000-ab12cd34/.test(page.text('runs-list')),
+      'a receipt was printed on the run that never asked for it');
+
+    // ...and it is not left reading as waiting for an outcome that has arrived.
+    assert.ok(!/already waiting for an outcome/.test(page.text('runs-list')),
+      `a settled request left a newly bound run waiting on it: ${page.text('runs-list')}`);
+    assert.ok(!checkpointOfferNodes(page)
+      .some((node) => node.attrs['data-checkpoint-offer'] === 'IN_FLIGHT'),
+    'the guard was released but the visible offer still records a request in flight');
+    const offered = checkpointControl(page);
+    assert.ok(offered && offered.disabled !== true,
+      'the run now bound was left with no checkpoint control after the other run\'s request settled');
+    assert.strictEqual(offered.attrs['data-checkpoint-offer'], 'AVAILABLE',
+      'the freed control does not record itself as available');
+
+    // Freeing the guard offers a control; it never presses it.
+    assert.strictEqual(checkpointCalls(calls).length, 1,
+      `settling one request dispatched ${checkpointCalls(calls).length} canonical checkpoint requests`);
   });
 
   await atest('DOM: ROOT-subject mismatch cannot hide run-scoped review verification and canonical refusal stays truthful', async () => {

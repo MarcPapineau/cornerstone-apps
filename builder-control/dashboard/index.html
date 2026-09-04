@@ -4202,7 +4202,7 @@
         deckActions.push(reviewBindBoundary);
       }
     } else if (boundRun && boundRun.state === 'REVIEW_BOUND') {
-      deckActions = ['Independent review evidence is bound. The next governed stage is a checkpoint; checkpoint control is intentionally outside this functional beta.'];
+      deckActions = ['Independent review evidence is bound. The next governed stage is a checkpoint: this run can ask AEGIS to record one from its run card below. Recording a checkpoint marks a point to come back to; it commits nothing, restores nothing and deploys nothing, and AEGIS decides whether it may.'];
     } else if (boundRun && boundRun.state === 'CHECKPOINTED') {
       deckActions = ['No owner action is required. This run reached its recorded safe checkpoint.'];
     } else if (boundRun && ['BUILD_FAILED','CHECKS_FAILED','REVIEW_FAILED'].indexOf(boundRun.state) !== -1) {
@@ -6145,6 +6145,157 @@
     });
   }
 
+  // ── one explicitly requested canonical checkpoint ───────────────────────────
+  // A checkpoint RECORDS where this run reached, so there is a point to come
+  // back to. It is not a commit, not a review, not a restore and not a
+  // deployment: the exact reviewed changes must already be committed through the
+  // approved narrow external path, and AEGIS refuses this request when they are
+  // not — nothing on this page commits on its way.
+  //
+  // AEGIS decides eligibility, not the browser. The control is offered only on
+  // the one canonically bound REVIEW_BOUND run, and the server rechecks every
+  // prerequisite behind it. Exactly one coordinate travels: the run id.
+  //
+  // Every sentence below is written HERE and selected by a closed word the
+  // answer carried, so an upstream string can never rewrite what a reader is
+  // told, and an answer carrying no such word is unreadable rather than
+  // successful. Nothing here retries, escalates or asks a second time on its own.
+  var CHECKPOINT_ACTION = 'checkpoint';
+  var CHECKPOINT_ID_RE = /^CP-\d{14}-[0-9a-f]{8}$/;
+  var CHECKPOINT_COMMIT_RE = /^[0-9a-f]{40,64}$/;
+  var CHECKPOINT_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+
+  var CHECKPOINT_OFFER_LINES = [
+    'A checkpoint records where this reviewed run reached, so there is a recoverable point to come back to. Asking is an explicit act, and AEGIS rechecks eligibility and may refuse.',
+    'It records only: it writes no commit, starts no review, restores no files and deploys nothing. The exact reviewed changes must already be committed through the approved narrow external path, or AEGIS refuses.',
+  ];
+  var CHECKPOINT_PENDING_LINES = [
+    'Requested. AEGIS is deciding whether a checkpoint can be recorded for this run.',
+    'Pending means no answer has come back here yet. It is not proof that a checkpoint exists.',
+  ];
+  var CHECKPOINT_RECORDED_LINE = 'A checkpoint was recorded for this run: a point to come back to and nothing else. No files were restored and nothing was deployed.';
+  var CHECKPOINT_DATED = 'This describes that dated request. It is not a reading of what the gate needs now, and it is not a deployment or a release.';
+  var CHECKPOINT_REFUSED_LINE = 'AEGIS refused to record a checkpoint for this run. No checkpoint was recorded, nothing was committed and nothing was changed.';
+  var CHECKPOINT_UNCERTAIN_LINE = 'AEGIS was asked once, and the answer could not be read as a recorded checkpoint.';
+  var CHECKPOINT_UNREADABLE = 'The request was sent, but its answer is not one this page can read.';
+  var CHECKPOINT_NO_ANSWER = 'The request left this dashboard and no answer came back. Nothing was retried.';
+  var CHECKPOINT_UNKNOWN_STATE = 'Whether a checkpoint was recorded is unknown: treat this run as neither checkpointed nor unchanged until the canonical run record is read. Nothing was committed, restored or deployed by this request.';
+  var CHECKPOINT_NO_REASON = 'It gave no reason this page can state.';
+  var CHECKPOINT_HELD_IN_PAGE = 'This answer is held by this open page and stays on the run it was made for. Reloading or closing the page loses it, and nothing here asks again.';
+
+  // Why AEGIS refused. Each refusal is raised by the canonical authority before
+  // it records anything, which is why these — and only these — may be reported
+  // as "nothing was recorded". The canonical message itself never travels.
+  var CHECKPOINT_REFUSAL_REASONS = {
+    INVALID_RUN_ID: 'That is not a canonical AEGIS run identifier.',
+    RUN_NOT_FOUND: 'AEGIS has no record of this run.',
+    INVALID_CHECKPOINT: 'This run has not reached the state a checkpoint is recorded from; independent review binds first.',
+    CHECKPOINT_UNPROVEN: 'A checkpoint requires deterministic checks that actually ran and passed on this run.',
+    CHECKPOINT_WATCHDOG_REFUSED: 'The canonical watchdog refuses a checkpoint on this run because a required stage was skipped.',
+    CHECKPOINT_EVIDENCE_INVALID: 'The review, the checks, the packet and the subject do not form one exact evidence chain.',
+    CHECKPOINT_DIRTY_TREE: 'The reviewed changes are not committed. This control writes no commit: the exact reviewed subject is committed through the approved narrow external path first.',
+    CHECKPOINT_NO_ROLLBACK_POINT: 'No commit could be resolved as a point to come back to.',
+    CHECKPOINT_HEAD_UNRELATED: 'The current commit does not contain the reviewed changes.',
+    CHECKPOINT_SUBJECT_MISMATCH: 'The committed version is not exactly the checked and reviewed subject.',
+    CHECKPOINT_TREE_INVALID: 'The tree of the current commit could not be resolved.',
+  };
+
+  // Why the answer is unknown. None of these says nothing happened.
+  var CHECKPOINT_UNCERTAIN_REASONS = {
+    CHECKPOINT_CLAIM_NOT_RELEASED: 'AEGIS reports that a checkpoint record was written for this run but could not prove it released the claim it took, so this run is not idle and is not safely checkpointed until that claim is inspected.',
+    CHECKPOINT_CALL_FAILED: 'The canonical checkpoint call did not complete, so what it recorded before it stopped is unknown.',
+    CHECKPOINT_RESULT_UNREADABLE: 'The canonical checkpoint call produced no answer AEGIS recognises, so what it recorded is unknown.',
+  };
+
+  // One open request across the whole page, held OUTSIDE every run card for the
+  // same reason the Codex guard is: a repaint rebuilds each card, so a guard
+  // held inside one would be reset by the very repaint it exists to survive. It
+  // holds the run id the request was sent for — never a bare boolean — so no
+  // other run can inherit this request's pending state or its answer.
+  var checkpointRequestInFlight = null;
+  // What an explicit checkpoint request reported, kept per RUN: page memory and
+  // nothing more, held for as long as this tab stays open, never stored, never
+  // re-fetched, never polled, and gone on reload. Null-prototype, so a run named
+  // after an inherited property reads as absent rather than as somebody else's
+  // receipt.
+  var checkpointObservations = Object.create(null);
+  // The node currently displaying that memory for a run, replaced every time the
+  // card is rebuilt, so a late answer is drawn on the card that is on the page
+  // now rather than on the one the operator happened to click.
+  var checkpointResultHosts = Object.create(null);
+  // The redraw for the OFFER currently on the page for a run — the same per-run
+  // current-host pattern as the result hosts above, for the same reason. The
+  // card a request was made from may already have been replaced by a repaint,
+  // so redrawing the offer through the closure that started the request would
+  // refresh a detached node no reader can see while the card actually on screen
+  // stays frozen on what it said when the request opened. Registered only while
+  // a card really offers the control, and dropped the moment a rebuilt card
+  // does not.
+  var checkpointOfferHosts = Object.create(null);
+
+  // Settling a request changes what EVERY rendered offer should say, not only
+  // the asking run's: the in-flight guard is page-wide, so a different bound
+  // run's card is withholding its control solely because this request was open.
+  // All of them are redrawn from shared state, none from a stale closure.
+  function refreshCheckpointOffers(){
+    Object.keys(checkpointOfferHosts).forEach(function(runId){
+      checkpointOfferHosts[runId]();
+    });
+  }
+
+  function checkpointObservationFor(runId){
+    return typeof runId === 'string' && runId &&
+      Object.prototype.hasOwnProperty.call(checkpointObservations, runId)
+      ? checkpointObservations[runId] : null;
+  }
+
+  // Read at the instant the thing it names actually happens — the request
+  // leaving, the answer arriving — never at render time, so a line redrawn by a
+  // later repaint still dates the request it describes.
+  function checkpointStamp(){ return new Date().toISOString(); }
+
+  function checkpointObservationDates(observation){
+    return observation.receivedAt
+      ? 'Requested ' + observation.requestedAt + ' · answer received ' + observation.receivedAt + '.'
+      : 'Requested ' + observation.requestedAt + ' · no answer has come back here yet.';
+  }
+
+  // The receipt, or null when any coordinate fails its format check. Half-valid
+  // coordinates are an unreadable answer, never a recorded checkpoint.
+  function checkpointReceipt(answer){
+    if (answer.state !== 'CHECKPOINTED') return null;
+    var checkpointId = typeof answer.checkpointId === 'string' &&
+      CHECKPOINT_ID_RE.test(answer.checkpointId) ? answer.checkpointId : null;
+    var commit = typeof answer.rollbackPoint === 'string' &&
+      CHECKPOINT_COMMIT_RE.test(answer.rollbackPoint) ? answer.rollbackPoint : null;
+    var recordedAt = typeof answer.createdAt === 'string' &&
+      CHECKPOINT_TIME_RE.test(answer.createdAt) ? answer.createdAt : null;
+    if (!checkpointId || !commit || !recordedAt) return null;
+    return { checkpointId: checkpointId, commit: commit, recordedAt: recordedAt };
+  }
+
+  // Draws page memory for one run. Every sentence was chosen when the answer was
+  // read and is replayed verbatim, so a repaint restates the observation rather
+  // than re-deciding it.
+  function renderCheckpointObservation(host, runId){
+    host.textContent = '';
+    var observation = checkpointObservationFor(runId);
+    if (!observation) return;
+    var block = el('div', observation.cls ? 'api-msg ' + observation.cls : 'api-msg');
+    block.setAttribute('data-checkpoint-outcome', observation.outcome);
+    // The run this outcome belongs to travels with it, so a receipt can never be
+    // read as belonging to whichever card happens to be on screen.
+    block.setAttribute('data-checkpoint-run', runId);
+    if (observation.receipt) {
+      block.setAttribute('data-checkpoint-id', observation.receipt.checkpointId);
+      block.setAttribute('data-checkpoint-commit', observation.receipt.commit);
+      block.setAttribute('data-checkpoint-recorded-at', observation.receipt.recordedAt);
+    }
+    observation.sentences.forEach(function(sentence){ block.appendChild(el('div', null, sentence)); });
+    block.appendChild(el('div', null, checkpointObservationDates(observation)));
+    host.appendChild(block);
+  }
+
   function runActionRow(run, isBoundCurrent){
     var row = el('div', 'btn-row');
 
@@ -6164,6 +6315,22 @@
     if (codexRunKey) {
       codexResultHosts[codexRunKey] = codexMsg;
       renderCodexObservation(codexMsg, codexRunKey);
+    }
+
+    // The same run-keyed page memory, for the one act on this page that can
+    // cause a canonical checkpoint to be recorded. It is built here, before any
+    // state branch, so a receipt survives both a repaint and the run advancing
+    // out of the state where a request could be made.
+    var checkpointRunKey = typeof run.runId === 'string' && run.runId ? run.runId : null;
+    var checkpointMsg = el('div', 'meta');
+    var checkpointMsgPlaced = false;
+    if (checkpointRunKey) {
+      checkpointResultHosts[checkpointRunKey] = checkpointMsg;
+      renderCheckpointObservation(checkpointMsg, checkpointRunKey);
+      // This card has offered nothing yet. Any offer registered for this run
+      // belongs to the node being replaced, so it is dropped here and
+      // re-registered below only if this card offers the control again.
+      delete checkpointOfferHosts[checkpointRunKey];
     }
 
     if (run.state === 'INTAKE_RECORDED') {
@@ -6414,7 +6581,170 @@
 
     if (run.state === 'REVIEW_BOUND') {
       row.appendChild(el('div', 'meta',
-        'Independent review evidence is bound. A governed checkpoint is the next stage; checkpoint control is not exposed in this functional beta.'));
+        'Independent review evidence is bound. A governed checkpoint is the next stage.'));
+
+      // Only the run AEGIS currently binds may ask for its own checkpoint. Every
+      // other REVIEW_BOUND row in history is read-only here: it says so, and
+      // offers nothing.
+      if (!isBoundCurrent) {
+        row.appendChild(el('div', 'meta',
+          'Only the run AEGIS currently binds can ask for its checkpoint, so no checkpoint control is offered on this row.'));
+      } else {
+        // The offer and the result live in two nodes, so withdrawing the offer —
+        // the moment a request is open, answered or the run advances — cannot
+        // erase what an already-sent request reported.
+        // Both carry .meta so the existing narrow-viewport rule (.btn-row>.meta)
+        // gives them a full row rather than squeezing a sentence and a control
+        // into a flex gap.
+        var checkpointOffer = el('div', 'meta checkpoint-request');
+
+        // Page memory is written first and the DOM is drawn from it, never the
+        // other way round: the node this request started from may already have
+        // been replaced by a repaint, so the result is drawn on whichever node is
+        // showing this run now. That is what makes a delayed answer visible.
+        var showCheckpointResult = function(outcome, cls, sentences, receipt, requestedAt, receivedAt){
+          if (!checkpointRunKey) return;
+          checkpointObservations[checkpointRunKey] = { outcome: outcome, cls: cls,
+            sentences: sentences, receipt: receipt,
+            requestedAt: requestedAt, receivedAt: receivedAt };
+          renderCheckpointObservation(
+            checkpointResultHosts[checkpointRunKey] || checkpointMsg, checkpointRunKey);
+        };
+
+        // A fixed-field DTO, read field by field as safe text. The answer must be
+        // about this run and this action, its outcome must be one of the two
+        // words this page recognises, and a recorded outcome must carry a receipt
+        // whose every coordinate passes its own format check. Anything else is an
+        // honest unknown, never a quiet success.
+        var showCheckpointAnswer = function(answer, requestedAt){
+          // Stamped on arrival, before the answer is judged, so an unreadable
+          // answer is dated by when it came back rather than left undated.
+          var receivedAt = checkpointStamp();
+          var known = !!answer && typeof answer === 'object' && !Array.isArray(answer) &&
+            answer.runId === run.runId && answer.action === CHECKPOINT_ACTION;
+          if (known && answer.outcome === 'RECORDED') {
+            var receipt = checkpointReceipt(answer);
+            if (receipt) {
+              showCheckpointResult('RECORDED', 'ok',
+                ['Checkpoint ' + receipt.checkpointId + ' · rollback commit ' + receipt.commit +
+                  ' · recorded ' + receipt.recordedAt + '.',
+                CHECKPOINT_RECORDED_LINE, CHECKPOINT_DATED, CHECKPOINT_HELD_IN_PAGE],
+                receipt, requestedAt, receivedAt);
+              return;
+            }
+          } else if (known && answer.outcome === 'UNCERTAIN') {
+            showCheckpointResult('UNCERTAIN', 'err',
+              [CHECKPOINT_UNCERTAIN_LINE,
+                'Why: ' + (typeof answer.reasonCode === 'string' &&
+                  Object.prototype.hasOwnProperty.call(CHECKPOINT_UNCERTAIN_REASONS, answer.reasonCode)
+                  ? CHECKPOINT_UNCERTAIN_REASONS[answer.reasonCode] : CHECKPOINT_NO_REASON),
+              CHECKPOINT_UNKNOWN_STATE, CHECKPOINT_HELD_IN_PAGE],
+              null, requestedAt, receivedAt);
+            return;
+          }
+          showCheckpointResult('UNREADABLE', 'err',
+            [CHECKPOINT_UNREADABLE, CHECKPOINT_UNKNOWN_STATE, CHECKPOINT_HELD_IN_PAGE],
+            null, requestedAt, receivedAt);
+        };
+
+        // Rebuilt from the shared guard and this run's page memory, so the offer
+        // can never outlive what is actually true: one open request at a time,
+        // and no second ask once an answer exists that may already have written a
+        // record. Only a refusal — which AEGIS raises before recording anything —
+        // leaves the control available again, and only an operator can press it.
+        var syncCheckpointOffer = function(){
+          checkpointOffer.textContent = '';
+          CHECKPOINT_OFFER_LINES.forEach(function(line){
+            checkpointOffer.appendChild(el('div', 'meta', line));
+          });
+          var note = function(state, text){
+            var line = el('div', 'meta', text);
+            line.setAttribute('data-checkpoint-offer', state);
+            checkpointOffer.appendChild(line);
+          };
+          if (checkpointRequestInFlight !== null) {
+            note('IN_FLIGHT', checkpointRequestInFlight === run.runId
+              ? 'A checkpoint request for this run is already waiting for an outcome, so no second request is offered.'
+              : 'A checkpoint request for another run is already waiting for an outcome, so no second request is offered.');
+            return;
+          }
+          var observed = checkpointObservationFor(checkpointRunKey);
+          if (observed && observed.outcome === 'RECORDED') {
+            note('RECORDED', 'This page already has a recorded checkpoint receipt for this run, so it offers no second request.');
+            return;
+          }
+          if (observed && observed.outcome !== 'REFUSED') {
+            note('UNKNOWN', 'What the last request recorded is unknown, so this page offers no second request. Read the canonical run record before asking again.');
+            return;
+          }
+          var checkpointBtn = el('button', 'action primary', 'Record checkpoint');
+          checkpointBtn.type = 'button';
+          checkpointBtn.setAttribute('data-checkpoint-offer', 'AVAILABLE');
+          checkpointBtn.addEventListener('click', async function(){
+            // Read the shared guard, never this button's own disabled flag: a
+            // repainted card owns a brand new button that has never been pressed.
+            if (checkpointRequestInFlight !== null) return;
+            checkpointRequestInFlight = run.runId;
+            checkpointBtn.disabled = true;
+            checkpointBtn.textContent = 'Checkpoint requested…';
+            // Stamped as the request leaves, and carried through to whatever comes
+            // back, so both lines date the same request.
+            var requestedAt = checkpointStamp();
+            showCheckpointResult('PENDING', null,
+              CHECKPOINT_PENDING_LINES.concat([CHECKPOINT_HELD_IN_PAGE]),
+              null, requestedAt, null);
+            try {
+              // Exactly one coordinate travels: the run this card is about. No
+              // commit, packet, subject, force flag or rollback target is
+              // sendable from here, and nothing is sent twice.
+              showCheckpointAnswer(await callApi('/api/checkpoint', { runId: run.runId }),
+                requestedAt);
+            } catch (e) {
+              // Three different failures, told apart by what is actually known.
+              // A refusal AEGIS raises before it records anything is the only one
+              // that may be reported as "nothing was recorded"; its code selects a
+              // sentence written here, and the canonical message — generated from
+              // paths, run state and watchdog problems — never travels. A refusal
+              // this page does not recognise still came back, so it is an answer
+              // that could not be read. A failure carrying no code at all never
+              // arrived. None of the three is ever retried automatically.
+              var failureCode = e && typeof e.code === 'string' ? e.code : null;
+              if (failureCode &&
+                  Object.prototype.hasOwnProperty.call(CHECKPOINT_REFUSAL_REASONS, failureCode)) {
+                showCheckpointResult('REFUSED', 'err',
+                  [CHECKPOINT_REFUSED_LINE, 'Why: ' + CHECKPOINT_REFUSAL_REASONS[failureCode],
+                    CHECKPOINT_DATED, CHECKPOINT_HELD_IN_PAGE],
+                  null, requestedAt, checkpointStamp());
+              } else if (failureCode) {
+                showCheckpointResult('UNREADABLE', 'err',
+                  [CHECKPOINT_UNREADABLE, CHECKPOINT_UNKNOWN_STATE, CHECKPOINT_HELD_IN_PAGE],
+                  null, requestedAt, checkpointStamp());
+              } else {
+                showCheckpointResult('NO_ANSWER', 'err',
+                  [CHECKPOINT_NO_ANSWER, CHECKPOINT_UNKNOWN_STATE, CHECKPOINT_HELD_IN_PAGE],
+                  null, requestedAt, checkpointStamp());
+              }
+            } finally {
+              if (checkpointRequestInFlight === run.runId) checkpointRequestInFlight = null;
+              // Redraw every offer that is on the page now from what is now
+              // known — never this closure's own captured node, which a repaint
+              // may already have replaced. A settled request must leave an
+              // accurate control on the card the operator is looking at, and
+              // must not leave another bound run reading as still waiting.
+              refreshCheckpointOffers();
+            }
+          });
+          checkpointOffer.appendChild(checkpointBtn);
+        };
+        // This card is the one showing the offer for this run from here on, so
+        // its redraw is the one a settling request must reach.
+        if (checkpointRunKey) checkpointOfferHosts[checkpointRunKey] = syncCheckpointOffer;
+        syncCheckpointOffer();
+
+        row.appendChild(checkpointOffer);
+        row.appendChild(checkpointMsg);
+        checkpointMsgPlaced = true;
+      }
     }
 
     var CANCELABLE = ['CREATED','INTAKE_RECORDED','ROUTED','WORKTREE_READY','BUILT','CHECKS_PASSED','REVIEW_BOUND','REVIEW_FAILED','CORRECTING','BUILD_FAILED','CHECKS_FAILED'];
@@ -6466,6 +6796,11 @@
     // outcome vanished the moment the run advanced would be the same silence
     // this control exists to end.
     if (!codexMsgPlaced && codexObservationFor(codexRunKey)) row.appendChild(codexMsg);
+    // The same for a checkpoint receipt: the run advancing to its checkpointed
+    // state, or to any later one, does not unmake the dated answer the operator
+    // was given, and a receipt that vanished the moment the run moved on would
+    // be the same silence this control exists to end.
+    if (!checkpointMsgPlaced && checkpointObservationFor(checkpointRunKey)) row.appendChild(checkpointMsg);
 
     return row;
   }
