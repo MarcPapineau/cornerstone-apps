@@ -11033,7 +11033,7 @@ test('DOM: one journal entry per exact run id, and records that disagree stay un
   assert.match(agreed[0].textContent, /Records filed under this exact run id: 2\./);
 });
 
-test('DOM: a BUILT or CHECKS_PASSED journal entry claims no availability, category or milestone', () => {
+test('DOM: a BUILT or CHECKS_PASSED journal entry is never promoted into availability or a milestone', () => {
   const runs = [
     journalRun({ runId: 'RUN-20260903-aaaaaaaa', state: 'BUILT', objective: 'Ship the founder dashboard',
       updatedAt: '2026-09-03T11:00:00.000Z' }),
@@ -11048,8 +11048,22 @@ test('DOM: a BUILT or CHECKS_PASSED journal entry claims no availability, catego
     assert.doesNotMatch(row.textContent,
       /\bis available\b|\bnow available\b|\bavailable to use\b|\bshipped\b|\bdeployed\b|\bin production\b|\bmilestone reached\b/i,
       'a recorded build state was promoted into an availability or milestone claim');
-    assert.match(row.textContent, /Availability, category and milestone: NOT RECORDED/,
-      'the entry does not state that availability, category and milestone are unrecorded');
+    // A build state proves a build finished. It proves nothing about whether the
+    // change can be used, and nothing about a milestone.
+    assert.strictEqual(row.attrs['data-journal-availability'], 'UNVERIFIED',
+      'a recorded build state was read as proof that the change is available');
+    assert.match(row.textContent, /Available now: UNVERIFIED — no validated checkpoint is recorded for this run/,
+      'the entry does not state in words that availability is unverified');
+    assert.strictEqual(row.attrs['data-journal-milestone'], 'NONE',
+      'an entry with no checkpoint, receipt or release evidence was marked a milestone');
+    assert.match(row.textContent, /Not a milestone in the record: no validated checkpoint is recorded/,
+      'the entry does not say why it is not a milestone');
+    assert.strictEqual(row.attrs['data-journal-category'], 'unclassified',
+      'a category was inferred from wording that matches no published term');
+    assert.match(row.textContent, /Change type as requested: Unclassified — the recorded wording matches no term/,
+      'the entry does not state that its change type is unclassified, and why');
+    assert.match(row.textContent, /Release or publication receipt: NONE/,
+      'the entry does not state that no release evidence exists at all');
   }
   // Newest first, in the page's own founder vocabulary — not a second one.
   assert.match(rows[0].textContent, /The build finished and its automated checks passed\./);
@@ -11179,6 +11193,348 @@ test('the build journal reads recorded evidence only: no clock, no request, no s
     'the journal is painted from more than one place, or never painted at all');
   assert.ok(/renderBuildJournal\(host, journalReading\(view, emptyRunsAvailable\)\)/.test(code),
     'the journal is not handed the deck\'s own view and empty-ledger judgement');
+});
+
+// ── the 24-hour improvement journal: type, milestone, available now ────────
+// Three founder facts were added to each entry, and each of them is a separate
+// way for this page to start lying. The proofs below hold the one rule they all
+// rest on: a fact is stated only from the canonical source named for it, and is
+// labelled unclassified or unverified in every other case.
+//
+//   · change type   — read ONLY from the wording of the recorded objective, by
+//                     whole-word match against a fixed published lexicon. No
+//                     match, two matches, no objective or records that disagree
+//                     all mean unclassified. There is no ranking and no nearest
+//                     category, because a ranking is how a guess becomes a fact;
+//   · milestone     — set ONLY by a VALIDATED checkpoint receipt or by a ledger
+//                     receipt recorded PASS whose packet id matches AND whose
+//                     recorded time falls inside that run record's own window;
+//   · available now — stated ONLY from a validated checkpoint, and even then it
+//                     says the record holds no release evidence.
+const JOURNAL_PACKET = 'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA';
+const JOURNAL_ROLLBACK = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+
+function journalDatedRun(over) {
+  return journalRun(Object.assign({
+    createdAt: '2026-09-03T09:00:00.000Z',
+    updatedAt: '2026-09-03T11:00:00.000Z',
+    packetId: JOURNAL_PACKET,
+  }, over || {}));
+}
+
+function journalCheckpointRun(over) {
+  return journalDatedRun(Object.assign({
+    state: 'CHECKPOINTED', checkpoint: 'CKPT-20260903-01',
+    rollbackPoint: JOURNAL_ROLLBACK, checkpointState: 'VALIDATED',
+  }, over || {}));
+}
+
+function journalReceipt(over) {
+  return Object.assign({
+    entryId: 'E-JOURNAL-1', ts: '2026-09-03T10:00:00.000Z',
+    gate: 'aegis-check-receipt', status: 'PASS', packetId: JOURNAL_PACKET,
+  }, over || {});
+}
+
+function journalOneRow(runs, events) {
+  const section = journalSection(bootPage(journalFixture(runs,
+    events === undefined ? undefined : { events: { state: 'OK', events } })));
+  const rows = journalRows(section, 'recent');
+  assert.strictEqual(rows.length, 1, 'the fixture did not render exactly one recent journal entry');
+  return rows[0];
+}
+
+function journalLine(row, name) {
+  const found = findByAttr(row, 'data-journal-line')
+    .find((node) => node.attrs['data-journal-line'] === name);
+  assert.ok(found, `the journal entry states no ${name} line at all`);
+  return found.textContent;
+}
+
+test('DOM: the change type is a whole-word reading of the recorded request, and nothing else', () => {
+  const cases = [
+    ['Restructure the evidence rail', 'structure', 'Structure', /"restructure"/],
+    ['Speed up the founder deck', 'speed', 'Speed', /"speed"/],
+    ['Repair the broken receipt binding', 'error-repair', 'Error repair', /"repair", "broken"/],
+    ['Optimise the ledger read path', 'optimization', 'Optimization', /"optimise"/],
+    ['Add a harness for the governed worker', 'tooling', 'Tooling', /"harness"/],
+    ['Tighten the spacing on the deck', 'visual', 'Visual', /"spacing"/],
+  ];
+  for (const [objective, id, label, matched] of cases) {
+    const row = journalOneRow([journalDatedRun({ objective })]);
+    assert.strictEqual(row.attrs['data-journal-category'], id,
+      `"${objective}" was not categorised from its own recorded wording`);
+    assert.match(journalLine(row, 'category'),
+      new RegExp(`Change type as requested: ${label} — the recorded objective uses`),
+      `"${objective}" does not name the category in words beside its evidence`);
+    assert.match(journalLine(row, 'category'), matched,
+      `"${objective}" does not print the exact recorded term it was categorised from`);
+  }
+
+  // Everything the recorded wording does not prove is unclassified, and each
+  // refusal says which refusal it is.
+  const unmatched = journalOneRow([journalDatedRun({ objective: 'Record the founder objective' })]);
+  assert.strictEqual(unmatched.attrs['data-journal-category'], 'unclassified');
+  assert.match(journalLine(unmatched, 'category'), /matches no term in the published list/);
+
+  const ambiguous = journalOneRow([journalDatedRun({ objective: 'Fix the layout' })]);
+  assert.strictEqual(ambiguous.attrs['data-journal-category'], 'unclassified',
+    'wording that matches two categories was resolved into one of them');
+  assert.match(journalLine(ambiguous, 'category'),
+    /matches more than one type \(error repair, visual\)/);
+
+  // A substring is not a word: "prefixed" is not a fix and must not read as one.
+  const substring = journalOneRow([journalDatedRun({ objective: 'Prefixed identifiers stay stable' })]);
+  assert.strictEqual(substring.attrs['data-journal-category'], 'unclassified',
+    'a category was matched on a substring inside an unrelated word');
+
+  const noObjective = journalOneRow([journalDatedRun({ objective: null })]);
+  assert.strictEqual(noObjective.attrs['data-journal-category'], 'unclassified');
+  assert.match(journalLine(noObjective, 'category'), /this record carries no objective/);
+  assert.doesNotMatch(noObjective.textContent, /undefined|null|NaN/,
+    'a missing objective reached the page as a machine value');
+
+  // Records that disagree describe no single request, so they describe no type.
+  const conflicted = journalOneRow([
+    journalDatedRun({ objective: 'Fix the crash', state: 'BUILT' }),
+    journalDatedRun({ objective: 'Fix the crash', state: 'BUILD_FAILED' }),
+  ]);
+  assert.strictEqual(conflicted.attrs['data-journal-category'], 'unclassified',
+    'a category was read from records that do not agree about what was requested');
+  assert.match(journalLine(conflicted, 'category'), /do not agree, so there is no one recorded request/);
+});
+
+test('DOM: a milestone is emphasised only from a validated checkpoint or a bound ledger receipt', () => {
+  // 1. A validated checkpoint: the strongest evidence this record can carry.
+  const checkpointed = journalOneRow([journalCheckpointRun({ objective: 'Restructure the evidence rail' })]);
+  assert.strictEqual(checkpointed.attrs['data-journal-milestone'], 'RECORDED');
+  assert.match(journalLine(checkpointed, 'milestone'),
+    /MILESTONE — this entry is backed by a checkpoint receipt the canonical projector validated\./);
+  const flag = findByAttr(checkpointed, 'data-journal-tag')
+    .find((node) => node.attrs['data-journal-tag'] === 'milestone');
+  assert.ok(flag, 'an emphasised milestone carries no MILESTONE word, only a colour');
+  assert.strictEqual(flag.textContent, 'Milestone');
+  assert.ok(flag.classList.contains('is-milestone'));
+  // The exact receipt travels with it, verbatim.
+  assert.match(checkpointed.textContent,
+    new RegExp(`Milestone evidence — checkpoint receipt CKPT-20260903-01 · rollback commit ${JOURNAL_ROLLBACK} · recorded state VALIDATED\\.`),
+    'the emphasised entry did not preserve its exact checkpoint receipt');
+
+  // 2. A ledger receipt: PASS, same packet, recorded inside this run record's
+  //    own created-to-updated window — and the packet-not-run caveat is printed.
+  const bound = journalOneRow([journalDatedRun()], [journalReceipt()]);
+  assert.strictEqual(bound.attrs['data-journal-milestone'], 'RECORDED');
+  assert.match(journalLine(bound, 'milestone'),
+    /backed by a ledger receipt recorded PASS inside this run record's own window/);
+  assert.match(bound.textContent,
+    new RegExp(`Milestone evidence — ledger receipt E-JOURNAL-1 · gate aegis-check-receipt · status PASS · recorded 2026-09-03T10:00:00\\.000Z · packet ${JOURNAL_PACKET}\\.`),
+    'the bound receipt lost its exact recorded identifiers or timestamp');
+  assert.match(bound.textContent, /bound to this entry by packet id and by falling inside this run record's own recorded window — it is not a run-id match/,
+    'the entry hides that the ledger names packets rather than runs');
+
+  // 3. Every way a receipt can fail to be evidence for THIS entry.
+  const refusals = [
+    [journalReceipt({ ts: '2026-09-03T08:00:00.000Z' }), 'a receipt recorded before this run record existed'],
+    [journalReceipt({ ts: '2026-09-03T11:30:00.000Z' }), 'a receipt recorded after this run record was last written'],
+    [journalReceipt({ status: 'BLOCKED' }), 'a receipt that records no PASS'],
+    [journalReceipt({ packetId: 'PKT-SOMETHING-ELSE' }), 'a receipt for another packet'],
+    [journalReceipt({ ts: 'yesterday-ish' }), 'a receipt with an unreadable time'],
+  ];
+  for (const [event, why] of refusals) {
+    const row = journalOneRow([journalDatedRun()], [event]);
+    assert.strictEqual(row.attrs['data-journal-milestone'], 'NONE', `${why} was accepted as a milestone`);
+    assert.match(journalLine(row, 'milestone'),
+      /no recorded PASS receipt names this run's packet inside the run record's own window/);
+  }
+
+  // The live status shape carries receipts with no packet id at all. That must
+  // read as evidence that cannot be bound, never as a milestone.
+  const unbindable = journalOneRow([journalDatedRun()],
+    [{ entryId: 'E9', ts: '2026-09-03T10:00:00.000Z', gate: 'aegis-run', status: 'PASS' }]);
+  assert.strictEqual(unbindable.attrs['data-journal-milestone'], 'NONE');
+  assert.match(journalLine(unbindable, 'milestone'),
+    /the recorded receipts on this page carry no packet id, so none of them can be bound to this run/);
+
+  // A run record with no window of its own cannot contain a receipt.
+  const undatedRun = journalOneRow([journalDatedRun({ createdAt: null })], [journalReceipt()]);
+  assert.strictEqual(undatedRun.attrs['data-journal-milestone'], 'NONE');
+  assert.match(journalLine(undatedRun, 'milestone'),
+    /carries no readable created-to-updated window/);
+
+  // A checkpoint that did not validate is worse than none, and is never emphasis.
+  const invalid = journalOneRow([journalCheckpointRun({ checkpointState: 'INVALID' })]);
+  assert.strictEqual(invalid.attrs['data-journal-milestone'], 'NONE');
+  assert.match(journalLine(invalid, 'milestone'), /a checkpoint receipt exists for this run and did not validate/);
+
+  // A rolled-back run keeps its checkpoint receipt and loses its emphasis.
+  const rolledBack = journalOneRow([journalCheckpointRun({ state: 'ROLLED_BACK' })]);
+  assert.strictEqual(rolledBack.attrs['data-journal-milestone'], 'NONE',
+    'a run the record ends at ROLLED_BACK was still highlighted as a milestone');
+  assert.match(journalLine(rolledBack, 'milestone'), /the record ends this run at ROLLED_BACK/);
+
+  // Records that disagree are never a milestone, whatever is attached to them.
+  const conflicted = journalOneRow([
+    journalCheckpointRun({ state: 'CHECKPOINTED' }),
+    journalCheckpointRun({ state: 'BUILD_FAILED' }),
+  ]);
+  assert.strictEqual(conflicted.attrs['data-journal-milestone'], 'NONE');
+  assert.match(journalLine(conflicted, 'milestone'), /do not agree, so nothing here is established/);
+});
+
+test('DOM: "available now" is stated only from a validated checkpoint and never claims a release', () => {
+  const available = journalOneRow([journalCheckpointRun()]);
+  assert.strictEqual(available.attrs['data-journal-availability'], 'IN_THE_RECORD');
+  assert.match(journalLine(available, 'availability'),
+    new RegExp(`Available now: IN THE RECORD — checkpoint CKPT-20260903-01 validated and names rollback commit ${JOURNAL_ROLLBACK}`),
+    'the availability sentence does not name the exact evidence it rests on');
+  assert.match(journalLine(available, 'availability'),
+    /No release or publication receipt exists here, so it does not prove anyone else can use it yet\./,
+    'a validated checkpoint was allowed to read as a delivery');
+  assert.doesNotMatch(available.textContent,
+    /\bis available\b|\bnow available\b|\bavailable to use\b|\bshipped\b|\bdeployed\b|\bin production\b/i,
+    'the strongest recorded evidence was still promoted into a delivery claim');
+
+  const rolledBack = journalOneRow([journalCheckpointRun({ state: 'ROLLED_BACK' })]);
+  assert.strictEqual(rolledBack.attrs['data-journal-availability'], 'WITHDRAWN');
+  assert.match(journalLine(rolledBack, 'availability'), /Available now: NO — the record ends this run at ROLLED_BACK\./);
+
+  const unverified = journalOneRow([journalDatedRun({ state: 'CHECKS_PASSED' })]);
+  assert.strictEqual(unverified.attrs['data-journal-availability'], 'UNVERIFIED');
+  assert.match(journalLine(unverified, 'availability'),
+    /Available now: UNVERIFIED — no validated checkpoint is recorded for this run and no release receipt exists/);
+
+  // The three facts are independent readings: a milestone does not grant
+  // availability, and availability is not granted by a passing build.
+  const receiptOnly = journalOneRow([journalDatedRun()], [journalReceipt()]);
+  assert.strictEqual(receiptOnly.attrs['data-journal-milestone'], 'RECORDED');
+  assert.strictEqual(receiptOnly.attrs['data-journal-availability'], 'UNVERIFIED',
+    'a bound ledger receipt was promoted into proof that the change is available');
+});
+
+test('DOM: every journal entry preserves its exact raw evidence and timestamps behind the disclosure', () => {
+  const row = journalOneRow([journalCheckpointRun({ objective: 'Restructure the evidence rail' })],
+    [journalReceipt()]);
+  const detail = (row.children || []).find((node) => node.tagName === 'DETAILS');
+  assert.ok(detail, 'the entry keeps no evidence disclosure at all');
+  assert.strictEqual(detail.firstElementChild.tagName, 'SUMMARY',
+    'the exact evidence is not behind a native keyboard-operable disclosure');
+  const evidence = detail.textContent;
+  assert.match(evidence, /Exact recorded timestamps: created 2026-09-03T09:00:00\.000Z · updated 2026-09-03T11:00:00\.000Z/,
+    'the entry rewrote or dropped the run record\'s own recorded timestamps');
+  assert.match(evidence, new RegExp(`Packet id on this run record: ${JOURNAL_PACKET}`));
+  assert.match(evidence, /Change type: Structure — the recorded objective uses "restructure"\. Terms matched in the recorded objective: restructure\./,
+    'the exact matched category terms are not preserved beside the plain-English type');
+  assert.match(evidence, /Release or publication receipt: NONE/,
+    'the absence of release evidence is not recorded on the entry');
+  assert.match(evidence, /Run id: RUN-20260903-aaaaaaaa/);
+  assert.match(evidence, /How to read this entry: the change type is read only from the wording/,
+    'the entry no longer says which of its facts are read from what');
+
+  // A record with nothing recorded prints absence, never a machine value.
+  const bare = journalOneRow([journalRun({ createdAt: null, packetId: null, updatedAt: '2026-09-03T11:00:00.000Z' })]);
+  assert.match(bare.textContent, /Exact recorded timestamps: created UNAVAILABLE · updated 2026-09-03T11:00:00\.000Z/);
+  assert.match(bare.textContent, /Packet id on this run record: UNAVAILABLE/);
+  assert.doesNotMatch(bare.textContent, /undefined|null|NaN|Invalid Date/,
+    'a missing evidence field reached the page as a machine value');
+});
+
+test('the milestone emphasis is a shape and a word before it is a colour, and it never animates', () => {
+  const start = code.indexOf('.journal-badges{');
+  const end = code.indexOf('\n\n', start);
+  assert.ok(start !== -1 && end > start, 'the journal emphasis CSS block was not found');
+  const css = code.slice(start, end);
+  assert.ok(/\.journal-entry\[data-journal-milestone="RECORDED"\]\{[^}]*border-left:3px solid var\(--cyan\)/.test(css),
+    'an emphasised milestone is distinguished by colour alone, with no border of its own');
+  assert.ok(/\.journal-tag\.is-milestone\{/.test(css), 'the MILESTONE flag has no treatment of its own');
+  assert.ok(!/@keyframes/.test(css) && !/\banimation\s*:/.test(css) && !/\btransition\s*:/.test(css),
+    'the journal emphasis animates — an entry may not move to look important');
+  for (const banned of [/-webkit-line-clamp/, /text-overflow/, /overflow\s*:\s*hidden/,
+    /white-space\s*:\s*nowrap/, /max-height/]) {
+    assert.ok(!banned.test(css), `the journal emphasis uses ${banned} to hide recorded text`);
+  }
+  // Phone width: the three badges wrap under the recorded time and every added
+  // sentence wraps rather than dragging a 390px viewport sideways.
+  assert.ok(/\.journal-empty,\.journal-line,\.journal-tag\{overflow-wrap:anywhere\}/.test(PHONE),
+    'the added journal sentences and tags do not wrap at phone width');
+  assert.ok(/\.journal-badges\{width:100%\}/.test(PHONE),
+    'the state chip, change type and milestone flag compete for one phone line');
+});
+
+test('the three added journal facts are each resolved from one named canonical source', () => {
+  const journal = code.slice(code.indexOf('var JOURNAL_WINDOW_MS'),
+    code.indexOf('function renderFounderSummary'));
+  assert.ok(journal.length > 0, 'the build journal source boundary was not found');
+  // Change type: a fixed published lexicon, whole-word matched against the ONE
+  // recorded objective. No scoring, no ranking, no nearest match.
+  assert.ok(/var JOURNAL_CATEGORIES = \[/.test(journal), 'the category lexicon is not one declared list');
+  const categories = require('vm').runInNewContext('(' + journal.slice(
+    journal.indexOf('var JOURNAL_CATEGORIES = [') + 'var JOURNAL_CATEGORIES = '.length,
+    journal.indexOf('];', journal.indexOf('var JOURNAL_CATEGORIES = [')) + 1) + ')');
+  // Array.from rebuilds the ids in this realm: the literal is parsed in a separate
+  // vm context, so an array it produced itself can never compare deep-strict-equal.
+  assert.deepStrictEqual(Array.from(categories, (category) => category.id),
+    ['structure', 'speed', 'error-repair', 'optimization', 'tooling', 'visual', 'unclassified'],
+    'the published category list is not the six canonical types plus unclassified');
+  for (const category of categories) {
+    if (category.id === 'unclassified') {
+      assert.ok(Array.isArray(category.terms) && !category.terms.length,
+        'the unclassified fallback publishes terms, so recorded wording could match it instead of falling back to it');
+      continue;
+    }
+    assert.ok(Array.isArray(category.terms) && category.terms.length,
+      `category ${category.id} carries no published terms`);
+    assert.ok(category.terms.every((term) => /^[a-z0-9]+$/.test(term)),
+      `category ${category.id} carries a term that whole-word matching cannot compare`);
+  }
+  assert.ok(/var JOURNAL_UNCLASSIFIED = JOURNAL_CATEGORIES\[/.test(journal),
+    'the unclassified label is declared a second time instead of read from the one published list');
+  const seen = new Set();
+  for (const category of categories) {
+    for (const term of category.terms) {
+      assert.ok(!seen.has(term), `"${term}" is claimed by two categories, so a match is not deterministic`);
+      seen.add(term);
+    }
+  }
+  assert.ok(/hits\.length > 1/.test(journal), 'two matching categories do not fall back to unclassified');
+  // The three refusals are structural, not stylistic: no objective, no matched
+  // term and two matched categories each return the unclassified label rather
+  // than the nearest, first or most specific type.
+  assert.strictEqual((journal.match(/label: JOURNAL_UNCLASSIFIED/g) || []).length, 4,
+    'the category resolver has more or fewer unclassified exits than the four documented refusals');
+  assert.ok(/words\.indexOf\(term\) !== -1/.test(journal),
+    'category terms are matched as substrings rather than as whole recorded words');
+
+  // Milestone: a VALIDATED checkpoint, or a PASS receipt bound by packet id AND
+  // contained by the run record's own window. Nothing else may set it.
+  assert.ok(/record\.checkpointState !== 'VALIDATED'/.test(journal),
+    'a checkpoint that the canonical projector did not validate can set the milestone flag');
+  assert.ok(/rollbackCommitRecorded\(record\)/.test(journal),
+    'the milestone does not reuse the page\'s own rollback-commit predicate');
+  assert.ok(/eventPacket !== packet \|\| event\.status !== 'PASS'/.test(journal),
+    'a receipt for another packet, or one that records no PASS, can set the milestone flag');
+  assert.ok(/at < openedAt \|\| at > wroteAt/.test(journal),
+    'a receipt outside the run record\'s own recorded window can set the milestone flag');
+  assert.ok(/state: 'RECORDED', evidence: evidence/.test(journal),
+    'the milestone state is not tied to the evidence list it was resolved from');
+
+  // Availability: a validated checkpoint and nothing else, and never a release.
+  assert.ok(/JOURNAL_RELEASE_FACT/.test(journal), 'the absence of release evidence is not stated anywhere');
+  assert.ok(!/RELEASED|PUBLISHED|LIVE_FOR_USERS/.test(journal),
+    'the journal invented a release or publication state the canonical record does not carry');
+  // Still no clock, no request, no second state source in any of the new code.
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.random', 'fetch(', 'innerHTML', 'AEGIS_STATE', 'document.querySelector']) {
+    assert.ok(!journal.includes(banned),
+      `the build journal uses ${banned} — it may only read the projection the deck was handed`);
+  }
+  // The event plane is handed in from the same two seams every other instrument
+  // is painted from; the journal never opens a source of its own.
+  assert.ok(/var events = \(view && Array\.isArray\(view\.events\)\) \? view\.events : \[\]/.test(journal),
+    'the journal does not read the recorded event plane it was handed');
+  assert.strictEqual((code.match(/events: \(S\.events && S\.events\.state === 'OK' && Array\.isArray\(S\.events\.events\)\)/g) || []).length, 1,
+    'the saved snapshot does not hand its recorded receipts to the deck exactly once');
+  assert.strictEqual((code.match(/events: Array\.isArray\(status\.events\) \? status\.events : \[\]/g) || []).length, 1,
+    'the live push does not hand its recorded receipts to the deck exactly once');
 });
 
 async function atest(name, fn) {

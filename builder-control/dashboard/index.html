@@ -546,6 +546,23 @@
   .journal-empty,.journal-note{font-size:11px;line-height:1.45;color:var(--text-2);overflow-wrap:anywhere}
   .journal-empty{margin:0}
   .journal-note{margin:8px 0 0}
+  /* ── journal change type, milestone and availability ──
+     Three more facts per entry, and each is emphasised only where the canonical
+     record proves it. The milestone treatment is a border, a background tint AND
+     the word MILESTONE, so an emphasised entry is never distinguished by colour
+     alone and never by colour at all for a screen reader. Nothing here animates,
+     transitions, clamps or truncates: the sentence that explains why an entry is
+     — or is not — a milestone wraps and stays readable at every width. */
+  .journal-badges{display:flex;flex-wrap:wrap;gap:5px;align-items:center;min-width:0}
+  .journal-tag{font:650 10px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;
+    color:var(--text-1);border:1px solid var(--line);border-radius:3px;padding:3px 6px;
+    overflow-wrap:anywhere}
+  .journal-tag.is-milestone{color:#d8f5ff;border-color:var(--cyan);background:var(--cyan-soft)}
+  .journal-entry[data-journal-milestone="RECORDED"]{border-color:var(--cyan);
+    border-left:3px solid var(--cyan);background:rgba(20,38,52,.72)}
+  .journal-line{margin-top:4px;font-size:12px;line-height:1.45;color:var(--text-1);
+    overflow-wrap:anywhere}
+  .journal-line.is-milestone{color:var(--text-0)}
 
   /* ── handoff indicator ──
      One compact strip, rendered only when canonical run state reports that the
@@ -1051,7 +1068,11 @@
     .journal-tabs>.hud-control{flex:1 1 auto}
     .journal-detail>summary{min-height:44px;display:flex;align-items:center}
     .journal-when,.journal-what,.journal-outcome,.journal-asof,.journal-note,
-    .journal-empty{overflow-wrap:anywhere}
+    .journal-empty,.journal-line,.journal-tag{overflow-wrap:anywhere}
+    /* The state chip, the change type and the milestone flag are three separate
+       words at phone width, not one line that overflows: they wrap under the
+       recorded time instead of pushing the card sideways. */
+    .journal-badges{width:100%}
     /* The recent-decision log is the longest technical block on the deck, so at
        phone width it reads after the health, decision and checkpoint
        instruments rather than ahead of them. Demoted, never removed. */
@@ -4144,15 +4165,18 @@
   //     the window hides evidence from a list and never deletes it;
   //   · one entry per EXACT run id. Records filed under one id that disagree
   //     stay UNVERIFIED and unmerged — a duplicate never becomes a success;
-  //   · the objective is printed as the change that was REQUESTED. Whether it
-  //     is available to use, which category it belongs to and whether it is a
-  //     milestone are not recorded anywhere in this projection, so they are
-  //     stated as NOT RECORDED. BUILT and CHECKS_PASSED are build facts, and
-  //     this journal will not promote either into an availability claim.
+  //   · the objective is printed as the change that was REQUESTED, and the three
+  //     founder facts beside it — change type, milestone, available now — are
+  //     each resolved from ONE named canonical source and are labelled
+  //     unclassified or unverified whenever that source proves nothing. BUILT and
+  //     CHECKS_PASSED are build facts, and this journal will not promote either
+  //     into an availability or a milestone claim.
   var JOURNAL_WINDOW_MS = 24 * 60 * 60 * 1000;
-  var JOURNAL_METADATA_NOTE = 'Availability, category and milestone: NOT RECORDED. This entry ' +
-    'carries no such metadata, and AEGIS does not infer it from the recorded state, from the wording ' +
-    'of the objective or from how many entries there are.';
+  var JOURNAL_METADATA_NOTE = 'How to read this entry: the change type is read only from the wording of ' +
+    'the objective that was recorded when the change was requested, so it describes the REQUEST and never ' +
+    'the result; the milestone flag is set only by a validated checkpoint receipt or by a ledger receipt ' +
+    'bound to this entry; availability is stated only from a validated checkpoint. Anything the record ' +
+    'does not prove stays unclassified or unverified, and AEGIS infers none of it.';
 
   // The one clock this journal is allowed to read: the recorded generatedAt of
   // the evidence on screen. Its provenance sentence is the page's existing
@@ -4239,7 +4263,212 @@
     return distinct;
   }
 
-  function journalEntry(group, win){
+  // ── what kind of change was requested ─────────────────────────────────────
+  // The only canonical text describing a change is the objective its requester
+  // filed, so the change type is a reading of the REQUEST and is labelled as
+  // exactly that. The lexicon is fixed and written out here, matching is
+  // whole-word and case-insensitive over that one recorded string, and it is
+  // deliberately unforgiving:
+  //   · no term matched                    → unclassified;
+  //   · terms from two categories matched  → unclassified, and both are named;
+  //   · no objective, or records that disagree → unclassified.
+  // There is no scoring, no ranking and no nearest category, because a ranking
+  // is exactly how a guess starts reading as a recorded fact.
+  var JOURNAL_CATEGORIES = [
+    { id: 'structure', label: 'Structure',
+      terms: ['structure','structural','restructure','restructured','refactor','refactored','refactoring',
+        'architecture','modularise','modularize','reorganise','reorganize'] },
+    { id: 'speed', label: 'Speed',
+      terms: ['speed','faster','latency','throughput','slow','slower','responsiveness'] },
+    { id: 'error-repair', label: 'Error repair',
+      terms: ['fix','fixes','fixed','bug','bugs','error','errors','repair','repairs','regression',
+        'regressions','crash','crashes','broken','defect','defects'] },
+    { id: 'optimization', label: 'Optimization',
+      terms: ['optimise','optimize','optimised','optimized','optimisation','optimization','efficiency',
+        'streamline','streamlined'] },
+    { id: 'tooling', label: 'Tooling',
+      terms: ['tooling','tool','tools','cli','script','scripts','harness','lint','linting','pipeline',
+        'test','tests'] },
+    { id: 'visual', label: 'Visual',
+      terms: ['visual','visually','ui','layout','styling','css','typography','spacing','colour','color'] },
+    // The fallback is published in this same list so there is one category source
+    // and no second place a label can drift from. It carries no terms, so nothing
+    // can ever match it — it is only ever fallen back to.
+    { id: 'unclassified', label: 'Unclassified', terms: [] }
+  ];
+  var JOURNAL_UNCLASSIFIED = JOURNAL_CATEGORIES[JOURNAL_CATEGORIES.length - 1].label;
+
+  function journalWords(text){
+    return String(text).toLowerCase().split(/[^a-z0-9]+/).filter(function(word){ return word !== ''; });
+  }
+
+  // A recorded string is printed exactly as it was recorded; anything else is
+  // named as absent rather than rendered as a machine value.
+  function journalRawValue(value){
+    return typeof value === 'string' && value ? value : 'UNAVAILABLE';
+  }
+
+  function journalCategory(conflict, objective){
+    if (conflict){
+      return { id: 'unclassified', label: JOURNAL_UNCLASSIFIED, terms: [],
+        why: 'the records filed under this run id do not agree, so there is no one recorded request to read.' };
+    }
+    if (typeof objective !== 'string' || !objective){
+      return { id: 'unclassified', label: JOURNAL_UNCLASSIFIED, terms: [],
+        why: 'this record carries no objective, so there is no recorded wording to read.' };
+    }
+    var words = journalWords(objective);
+    var hits = [];
+    JOURNAL_CATEGORIES.forEach(function(category){
+      var matched = category.terms.filter(function(term){ return words.indexOf(term) !== -1; });
+      if (matched.length) hits.push({ id: category.id, label: category.label, terms: matched });
+    });
+    if (!hits.length){
+      return { id: 'unclassified', label: JOURNAL_UNCLASSIFIED, terms: [],
+        why: 'the recorded wording matches no term in the published list, and AEGIS will not guess one.' };
+    }
+    if (hits.length > 1){
+      var all = [];
+      hits.forEach(function(hit){ hit.terms.forEach(function(term){ all.push(term); }); });
+      return { id: 'unclassified', label: JOURNAL_UNCLASSIFIED, terms: all,
+        why: 'the recorded wording matches more than one type (' +
+          hits.map(function(hit){ return hit.label.toLowerCase(); }).join(', ') +
+          '), so no single type is proven.' };
+    }
+    return { id: hits[0].id, label: hits[0].label, terms: hits[0].terms,
+      why: 'the recorded objective uses ' +
+        hits[0].terms.map(function(term){ return '"' + term + '"'; }).join(', ') + '.' };
+  }
+
+  // ── milestone evidence ────────────────────────────────────────────────────
+  // An entry is emphasised as a milestone ONLY where canonical evidence is bound
+  // to that exact entry. Three sources are allowed and there is no fourth:
+  //   · a checkpoint receipt the canonical projector marked VALIDATED, together
+  //     with the rollback commit it names;
+  //   · a ledger receipt recorded PASS whose packet id equals this run record's
+  //     packet id AND whose recorded time falls inside this run record's own
+  //     created-to-updated window. The ledger names packets, not runs, so that
+  //     containment is what binds a receipt to THIS entry — and the caveat is
+  //     printed on the entry rather than quietly dropped;
+  //   · release evidence, which this canonical record does not carry at all, so
+  //     it is reported absent instead of being treated as satisfied.
+  // A run the record ends at ROLLED_BACK or ABANDONED, and an entry whose records
+  // disagree, are never milestones whatever else is attached to them.
+  var JOURNAL_RELEASE_FACT = 'Release or publication receipt: NONE — the canonical run and event record ' +
+    'carries no release evidence of any kind, so no entry here can be marked as released.';
+
+  function journalCheckpointProof(record){
+    if (!record || record.checkpointState !== 'VALIDATED') return null;
+    if (typeof record.checkpoint !== 'string' || !record.checkpoint) return null;
+    if (!rollbackCommitRecorded(record)) return null;
+    return { kind: 'CHECKPOINT', plain: 'a checkpoint receipt the canonical projector validated',
+      exact: 'Milestone evidence — checkpoint receipt ' + record.checkpoint + ' · rollback commit ' +
+        record.rollbackPoint + ' · recorded state VALIDATED.' };
+  }
+
+  function journalCheckpointMiss(record){
+    if (record && record.checkpointState === 'INVALID'){
+      return 'a checkpoint receipt exists for this run and did not validate';
+    }
+    return 'no validated checkpoint is recorded for this run';
+  }
+
+  // Receipts are read from the event plane the page was already handed. A live
+  // /api/status push carries receipts without packet ids, which is why a receipt
+  // can only ever ADD evidence here and is never required for an entry to exist.
+  function journalReceiptProof(record, events, win){
+    var packet = record && typeof record.packetId === 'string' && record.packetId ? record.packetId : null;
+    if (!packet){
+      return { evidence: [], why: 'this run record names no packet id, so no ledger receipt can be bound to it' };
+    }
+    var openedAt = Date.parse(record && typeof record.createdAt === 'string' ? record.createdAt : '');
+    var wroteAt = Date.parse(record && typeof record.updatedAt === 'string' ? record.updatedAt : '');
+    if (!Number.isFinite(openedAt) || !Number.isFinite(wroteAt) || wroteAt < openedAt){
+      return { evidence: [], why: 'this run record carries no readable created-to-updated window, so a ' +
+        'ledger receipt cannot be placed inside it' };
+    }
+    var carriesPacket = false;
+    var evidence = [];
+    (Array.isArray(events) ? events : []).forEach(function(event){
+      if (!event || typeof event !== 'object') return;
+      var eventPacket = typeof event.packetId === 'string' && event.packetId ? event.packetId : null;
+      if (eventPacket) carriesPacket = true;
+      if (eventPacket !== packet || event.status !== 'PASS') return;
+      var at = Date.parse(typeof event.ts === 'string' ? event.ts : '');
+      if (!Number.isFinite(at)) return;
+      if (win.state === 'RECORDED' && at > win.asOfMs) return;
+      if (at < openedAt || at > wroteAt) return;
+      evidence.push({ kind: 'RECEIPT',
+        plain: 'a ledger receipt recorded PASS inside this run record\'s own window',
+        exact: 'Milestone evidence — ledger receipt ' + (event.entryId || 'UNAVAILABLE') + ' · gate ' +
+          (event.gate || 'UNAVAILABLE') + ' · status PASS · recorded ' + event.ts + ' · packet ' + eventPacket +
+          '. The ledger names packets, not runs, so this receipt is bound to this entry by packet id and by ' +
+          'falling inside this run record\'s own recorded window — it is not a run-id match.' });
+    });
+    if (evidence.length) return { evidence: evidence, why: null };
+    if (!carriesPacket){
+      return { evidence: [], why: 'the recorded receipts on this page carry no packet id, so none of them ' +
+        'can be bound to this run' };
+    }
+    return { evidence: [], why: 'no recorded PASS receipt names this run\'s packet inside the run record\'s ' +
+      'own window' };
+  }
+
+  function journalMilestone(conflict, record, events, win){
+    if (conflict){
+      return { state: 'NONE', evidence: [],
+        text: 'Not a milestone in the record: the records filed under this run id do not agree, so nothing ' +
+          'here is established. ' + JOURNAL_RELEASE_FACT };
+    }
+    if (record && (record.state === 'ROLLED_BACK' || record.state === 'ABANDONED')){
+      return { state: 'NONE', evidence: [],
+        text: 'Not a milestone in the record: the record ends this run at ' + record.state + '. ' +
+          JOURNAL_RELEASE_FACT };
+    }
+    var evidence = [];
+    var checkpoint = journalCheckpointProof(record);
+    if (checkpoint) evidence.push(checkpoint);
+    var receipts = journalReceiptProof(record, events, win);
+    receipts.evidence.forEach(function(item){ evidence.push(item); });
+    if (!evidence.length){
+      return { state: 'NONE', evidence: [],
+        text: 'Not a milestone in the record: ' + journalCheckpointMiss(record) + ', and ' + receipts.why +
+          '. ' + JOURNAL_RELEASE_FACT };
+    }
+    return { state: 'RECORDED', evidence: evidence,
+      text: 'MILESTONE — this entry is backed by ' +
+        evidence.map(function(item){ return item.plain; }).join(' and ') +
+        '. Open the recorded evidence below for the exact receipt.' };
+  }
+
+  // Whether the change can be used now. Only a validated checkpoint proves this
+  // record reached a safe recorded point, and even that is not a release: this
+  // canon records no publication, so the sentence says so rather than letting a
+  // checkpoint read as a delivery.
+  function journalAvailability(conflict, record){
+    if (conflict){
+      return { state: 'UNVERIFIED',
+        text: 'Available now: UNVERIFIED — the records filed under this run id do not agree, so the record ' +
+          'establishes nothing about whether this change can be used.' };
+    }
+    if (record && (record.state === 'ROLLED_BACK' || record.state === 'ABANDONED')){
+      return { state: 'WITHDRAWN',
+        text: 'Available now: NO — the record ends this run at ' + record.state + '.' };
+    }
+    var checkpoint = journalCheckpointProof(record);
+    if (checkpoint){
+      return { state: 'IN_THE_RECORD',
+        text: 'Available now: IN THE RECORD — checkpoint ' + record.checkpoint + ' validated and names ' +
+          'rollback commit ' + record.rollbackPoint + ', so the record proves this change reached a safe ' +
+          'recorded point. No release or publication receipt exists here, so it does not prove anyone ' +
+          'else can use it yet.' };
+    }
+    return { state: 'UNVERIFIED',
+      text: 'Available now: UNVERIFIED — ' + journalCheckpointMiss(record) + ' and no release receipt ' +
+        'exists, so the record does not prove this change is usable now.' };
+  }
+
+  function journalEntry(group, win, events){
     var records = journalDistinct(group.records);
     var latest = null, latestMs = null, tied = false;
     records.forEach(function(record){
@@ -4261,6 +4490,7 @@
     // are kept. Merging them would be exactly how a duplicate becomes a success.
     var conflict = records.length > 1 && (states.length > 1 || objectives.length > 1 || tied);
     var time = journalTime(latest, win);
+    var objective = typeof latest.objective === 'string' && latest.objective ? latest.objective : null;
     return {
       runId: group.runId,
       record: latest,
@@ -4271,7 +4501,13 @@
       recent: time.state === 'RECENT',
       state: conflict ? 'UNVERIFIED'
         : (typeof latest.state === 'string' && latest.state ? latest.state : 'UNKNOWN'),
-      objective: typeof latest.objective === 'string' && latest.objective ? latest.objective : null,
+      objective: objective,
+      // Three separate readings of three separate canonical sources. None of
+      // them may borrow another's answer: an entry can be a milestone and still
+      // be unavailable, and it can be available and still be unclassified.
+      category: journalCategory(conflict, objective),
+      milestone: journalMilestone(conflict, latest, events, win),
+      availability: journalAvailability(conflict, latest),
       outcome: conflict
         ? 'UNVERIFIED — ' + records.length + ' records are filed under this exact run id and they do not ' +
           'agree, so what this run did is not established here. AEGIS keeps both and merges neither.'
@@ -4307,7 +4543,11 @@
         reason: 'Build journal UNAVAILABLE — ' + why + '. An empty journal here would not be evidence ' +
           'that nothing was built.' };
     }
-    var entries = journalGroups(runs).map(function(group){ return journalEntry(group, win); });
+    // The recorded receipts exactly as the deck was handed them. No second read
+    // of any source: an event plane that did not arrive is an empty list, which
+    // can only ever withhold milestone evidence and never invent it.
+    var events = (view && Array.isArray(view.events)) ? view.events : [];
+    var entries = journalGroups(runs).map(function(group){ return journalEntry(group, win, events); });
     return { window: win, state: 'OK', reason: null,
       recent: entries.filter(function(entry){ return entry.recent; }).sort(journalNewestFirst),
       older: entries.filter(function(entry){ return !entry.recent; }).sort(journalNewestFirst) };
@@ -4318,13 +4558,43 @@
     li.setAttribute('data-journal-entry', entry.runId || 'UNAVAILABLE');
     li.setAttribute('data-journal-time', entry.time.state);
     li.setAttribute('data-journal-state', entry.state);
+    // The three founder facts are on the row as machine tokens as well as in
+    // words, so the emphasis below is driven by the resolution itself and can
+    // never be applied to an entry whose sentence does not say the same thing.
+    li.setAttribute('data-journal-category', entry.category.id);
+    li.setAttribute('data-journal-milestone', entry.milestone.state);
+    li.setAttribute('data-journal-availability', entry.availability.state);
     var head = el('div','journal-entry-head');
     head.appendChild(el('div','journal-when', entry.time.text));
-    head.appendChild(chip(entry.state));
+    var badges = el('div','journal-badges');
+    badges.appendChild(chip(entry.state));
+    var typeTag = el('span','journal-tag','Change type: ' + entry.category.label);
+    typeTag.setAttribute('data-journal-tag','category');
+    badges.appendChild(typeTag);
+    // The flag is a word before it is a colour, and it appears only where the
+    // resolution above found canonical evidence bound to this exact entry.
+    if (entry.milestone.state === 'RECORDED'){
+      var milestoneTag = el('span','journal-tag is-milestone','Milestone');
+      milestoneTag.setAttribute('data-journal-tag','milestone');
+      badges.appendChild(milestoneTag);
+    }
+    head.appendChild(badges);
     li.appendChild(head);
     li.appendChild(el('div','journal-what','Requested change: ' +
       (entry.objective || 'UNAVAILABLE — this record carries no objective.')));
-    li.appendChild(el('div','journal-outcome','What the record says: ' + entry.outcome));
+    li.appendChild(el('div','journal-outcome','What the record proves finished: ' + entry.outcome));
+    var availability = el('div','journal-line', entry.availability.text);
+    availability.setAttribute('data-journal-line','availability');
+    li.appendChild(availability);
+    var category = el('div','journal-line',
+      'Change type as requested: ' + entry.category.label + ' — ' + entry.category.why);
+    category.setAttribute('data-journal-line','category');
+    li.appendChild(category);
+    var milestone = el('div',
+      entry.milestone.state === 'RECORDED' ? 'journal-line is-milestone' : 'journal-line',
+      entry.milestone.text);
+    milestone.setAttribute('data-journal-line','milestone');
+    li.appendChild(milestone);
     // The exact receipts, collapsed rather than dropped: a native disclosure is
     // keyboard-operable and screen-reader-operable without a control of its own.
     var detail = el('details','journal-detail');
@@ -4334,6 +4604,21 @@
     fact('Run id: ' + (entry.runId ||
       'UNAVAILABLE — this record names no run id, so it is grouped with nothing.'));
     fact('Recorded lifecycle state: ' + ((entry.record && entry.record.state) || 'UNAVAILABLE'));
+    // The exact recorded times and identifiers, verbatim: the entry above reads
+    // in plain English, and this is the evidence that sentence was read from.
+    fact('Exact recorded timestamps: created ' + journalRawValue(entry.record && entry.record.createdAt) +
+      ' · updated ' + journalRawValue(entry.record && entry.record.updatedAt));
+    fact('Packet id on this run record: ' + journalRawValue(entry.record && entry.record.packetId));
+    fact('Change type: ' + entry.category.label + ' — ' + entry.category.why +
+      ' Terms matched in the recorded objective: ' +
+      (entry.category.terms.length ? entry.category.terms.join(', ') + '.' : 'none.'));
+    fact(entry.availability.text);
+    if (entry.milestone.evidence.length){
+      entry.milestone.evidence.forEach(function(item){ fact(item.exact); });
+      fact(JOURNAL_RELEASE_FACT);
+    } else {
+      fact(entry.milestone.text);
+    }
     fact('Records filed under this exact run id: ' + entry.recordCount +
       (entry.conflict ? ' — they disagree, and each one is preserved below.' : '.'));
     if (entry.conflict){
@@ -4409,9 +4694,11 @@
     panes.forEach(function(pane){ section.appendChild(lists[pane.name]); });
     showWindow('recent');
     section.appendChild(el('p','journal-note',
-      'Every line is the change that was requested and what the record says happened to it. None of them ' +
-      'says a change is ready for you to use: availability, category and milestone are not recorded yet, ' +
-      'and this page will not infer them.'));
+      'Every entry is the change that was requested, what the record proves finished, and whether the ' +
+      'record proves it can be used now. Change type is read from the recorded request wording alone and ' +
+      'is Unclassified whenever that wording proves nothing. Only an entry backed by a validated ' +
+      'checkpoint receipt or by a ledger receipt bound to it is highlighted as a milestone. ' +
+      JOURNAL_RELEASE_FACT));
     host.appendChild(section);
     return section;
   }
@@ -5217,6 +5504,11 @@
       binding: (S.runs && S.runs.current) || null,
       cost: S.cost || null,
       integration: S.integration || null,
+      // The SAME recorded receipts the event panel is painted from, read here
+      // only as milestone evidence. An event plane that is not OK is handed over
+      // as an empty list, which can withhold a milestone and never invent one.
+      events: (S.events && S.events.state === 'OK' && Array.isArray(S.events.events))
+        ? S.events.events : [],
       generatedAt: S.generatedAt || null,
       source: eng.source,
       origin: 'the generated snapshot state.js (' + (S.generatedAt || 'UNKNOWN') + ')'
@@ -7515,6 +7807,10 @@
         // not open a second source and it never estimates a missing figure.
         cost: status.cost || null,
         integration: status.integration || null,
+        // The same recorded receipts renderEvents is given below, handed to the
+        // deck so the build journal can read milestone evidence from the ONE
+        // event plane this push carried and from no other source.
+        events: Array.isArray(status.events) ? status.events : [],
         generatedAt: status.generatedAt || null,
         source: '/api/status',
         origin: 'a live /api/status push (' + (status.generatedAt || 'UNKNOWN') + ')'
