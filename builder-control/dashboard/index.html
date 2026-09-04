@@ -1218,9 +1218,24 @@
      highlight anywhere in this block, so reduced motion still has nothing here
      to suppress. Below 1100px this block does not apply at all. */
   @media (min-width:1100px){
-    /* Chrome: one crisp rule under the header instead of a soft edge. */
-    .command-header{border-bottom-color:#26586f;
-      box-shadow:0 12px 30px rgba(0,0,0,.42),inset 0 -1px 0 rgba(57,198,255,.24)}
+    /* ── command rail ──
+       Chrome: one crisp rule under the header instead of a soft edge, and one
+       seated plate under the whole band so the bar reads as a single command
+       rail rather than three unrelated clusters floating on the page
+       background. The view switch, both header controls and every canonical
+       context cell get the identical seated treatment the instrument plates
+       below already use, so the rail belongs to the same instrument.
+
+       Paint only. Nothing here moves, resizes, adds or removes a control, no
+       rule carries a canonical state token, and no selector keys off a run or
+       operational state — so the rail can repeat no reading and state none. */
+    .command-header{background:#080f17;border-bottom-color:#2b6280;
+      box-shadow:0 12px 30px rgba(0,0,0,.5),inset 0 -1px 0 rgba(57,198,255,.3)}
+    .brand-sub{color:#8faac0}
+    .view-nav{border-color:#2b5b78;background:#070e16;box-shadow:inset 0 1px 3px rgba(0,0,0,.5)}
+    .view-tab[aria-pressed="true"]{background:#123f5c;color:#e2f7ff}
+    .hud-control{border-color:#2d4e66;background:#0a1622;box-shadow:inset 0 1px 0 rgba(154,196,226,.08)}
+    .context-cell{border-color:#26455b;background:#0a1622}
 
     /* Panel depth. A seated plate: top-lit inner hairline, shaded inner base and
        one soft drop shadow. Panels that carry a shipped signal — .live-panel,
@@ -1269,8 +1284,8 @@
        only border width this layer touches, and the core is a fixed-diameter
        border-box circle, so even that reflows nothing. */
     .aegis-core{border-width:2px;background:#0d2232;
-      box-shadow:0 0 0 9px rgba(51,185,239,.04),0 0 46px rgba(51,185,239,.18),
-      inset 0 1px 0 rgba(154,196,226,.1),inset 0 -20px 34px rgba(0,0,0,.5)}
+      box-shadow:0 0 0 10px rgba(51,185,239,.05),0 0 52px rgba(51,185,239,.2),
+      inset 0 1px 0 rgba(154,196,226,.12),inset 0 -22px 40px rgba(0,0,0,.55)}
     .aegis-core::before{border-color:rgba(51,185,239,.34)}
     .core-mark{color:#e2f7ff}
     .core-legend{border-top-color:#22516c}
@@ -1307,6 +1322,13 @@
     #founder-summary .command-card.is-now{border-color:rgba(74,163,255,.62);box-shadow:inset 4px 0 0 var(--active)}
     #founder-summary .command-card.is-blocked{border-color:rgba(229,72,77,.5);box-shadow:inset 4px 0 0 var(--fail)}
     #founder-summary .command-card.is-clear{border-color:rgba(63,185,138,.5);box-shadow:inset 4px 0 0 var(--pass)}
+    /* The three decision answers keep the shipped inset state bar as their only
+       signal. The four supporting cards give up one step of edge contrast so the
+       answers are found first — border colour only, no background, no state
+       token, and no card hidden, reordered, clamped harder or renamed. */
+    #founder-summary .command-card.is-crew,#founder-summary .command-card.is-routing,
+    #founder-summary .command-card.is-live-evidence,#founder-summary .command-card.is-progress,
+    #founder-summary .command-card.is-elapsed{border-color:#233c50}
     .operator-brief{border-color:#31586f;background:#0e1e2a;box-shadow:inset 0 1px 0 rgba(154,196,226,.07)}
     .handoff{border-color:#31586f;background:#0e1c27}
 
@@ -1369,16 +1391,26 @@
      styles from 681px to 1099px are left exactly as they shipped. */
   @media (min-width:1100px){
     /* Chrome pays first. Both controls and all three canonical context cells
-       stay exactly where the markup has them; only their padding shrinks. */
-    .command-header{min-height:0;gap:8px 14px;padding:8px 16px}
+       stay exactly where the markup has them; only their padding, their tracking
+       and the height they share change. */
+    .command-header{min-height:0;gap:8px 16px;padding:7px 18px}
     /* The header is shorter here, but below 1600px it still wraps its state row,
        so the reserved landing band shrinks with it rather than being dropped. */
     html{scroll-padding-top:104px}
-    .brand-lockup{min-width:0;gap:10px}
-    .brand-name{font-size:16px}
-    .view-tab{padding:5px 13px}
-    .hud-control{padding:5px 8px}
-    .context-cell{padding:5px 9px}
+    .brand-lockup{min-width:0;gap:10px;padding-left:12px}
+    .brand-name{font-size:16px;line-height:1.1;letter-spacing:.22em}
+    .brand-sub{margin-top:2px;letter-spacing:.24em}
+    /* One control height across the whole rail. The view switch, both header
+       controls and both canonical context cells sat at three different heights
+       in one band; they are set to a single 28px control height here, so the
+       rail reads as one row of instruments rather than a row of oddments.
+       Height and spacing only: every control keeps its own box, its own label
+       and its own focus ring, and none is removed, merged or reordered. */
+    .view-nav{padding:3px;gap:4px}
+    .view-tab{min-height:28px;padding:6px 15px;letter-spacing:.13em}
+    .hud-control{min-height:28px;padding:6px 10px;letter-spacing:.07em}
+    .header-state{gap:7px 8px}
+    .context-cell{min-height:28px;padding:5px 10px}
 
     /* The five operational answers stay five cells in one band at every wide
        width. The written label and the canonical state word share the first row
@@ -1397,13 +1429,25 @@
 
     /* Mission brief: tighter rules and a clamp on the four supporting cards and
        the two explanatory brief rows only. */
-    #founder-summary>.body{padding:11px 13px}
-    #founder-summary .mission-head{padding-bottom:7px}
-    #founder-summary .mission-title{font-size:18px;margin-top:3px}
-    #founder-summary .mission-meta{margin-top:4px}
-    #founder-summary .command-grid{gap:6px;margin-top:9px}
-    #founder-summary .command-card{padding:7px 10px}
-    #founder-summary .command-value{margin-top:3px;font-size:13px}
+    #founder-summary>.body{padding:12px 14px}
+    #founder-summary .mission-head{padding-bottom:8px}
+    /* Four visibly separate tiers instead of four sizes of the same small text:
+       the kicker, the objective headline, the gate/lifecycle line, and then the
+       answers. Type scale and spacing only — the chip, the full-objective
+       disclosure and every canonical word stay exactly where they are. */
+    #founder-summary .mission-kicker{letter-spacing:.2em}
+    #founder-summary .mission-title{font-size:19px;line-height:122%;margin-top:4px;letter-spacing:-0.015em}
+    #founder-summary .mission-meta{margin-top:5px}
+    #founder-summary .command-grid{gap:6px;margin-top:10px}
+    #founder-summary .command-card{padding:8px 11px}
+    #founder-summary .command-label{letter-spacing:.15em}
+    #founder-summary .command-value{margin-top:4px;font-size:13px}
+    /* The three decision answers are the tier the owner reads first, so they
+       carry the larger of the two answer sizes. Size only: they are not
+       clamped here, nothing is promoted past them and no card is dropped. */
+    #founder-summary .command-card.is-now .command-value,
+    #founder-summary .command-card.is-blocked .command-value,
+    #founder-summary .command-card.is-clear .command-value{font-size:14px;line-height:138%}
     #founder-summary .command-card.is-crew .command-value,
     #founder-summary .command-card.is-routing .command-value,
     #founder-summary .command-card.is-live-evidence .command-value,
@@ -1421,22 +1465,41 @@
        the fixed 510px/430px reserves, the ring, the core diameter and the node
        padding are what shrink. */
     .strategic-core{min-height:0}
-    .strategic-core>.body{padding:12px}
-    .core-stage{min-height:0;gap:10px}
-    .core-stage::before{width:232px;height:232px}
-    .core-stage::after{width:182px;height:182px}
+    .strategic-core>.body{padding:12px 14px}
+    /* Columns breathe, rows tighten. The stage keeps the same overall reserve —
+       the extra column gap is paid for out of the row gap — but the two flanking
+       stacks now stand clear of the control plane at the centre, and the
+       graticule has room to read as one instrument field rather than a ring
+       drawn behind six cards. The stage is not re-columned: it is still the
+       three canonical columns with all six modules around the core. */
+    .core-stage{min-height:0;gap:9px 16px}
+    .core-stage::before{width:250px;height:250px}
+    .core-stage::after{width:196px;height:196px}
+    /* Orbital seating. The middle row passes the widest part of the core, so its
+       two modules stand off by the width the circle takes there; the four corner
+       modules keep their full column. Margin only, the same number on both
+       sides, so the stage stays symmetrical about its own centre. No module is
+       resized by a state, reordered, clamped harder or removed, and neither
+       offset is keyed to anything a run reported. */
+    .core-node.is-review{margin-right:12px}
+    .core-node.is-gate{margin-left:12px}
     .core-node{min-height:0;padding:9px 11px 10px}
-    .core-node h3{padding-bottom:4px}
+    .core-node h3{padding-bottom:4px;letter-spacing:.14em}
     .core-node .hud-value{margin-top:5px;font-size:12.5px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
     /* The module's ruled state footer is kept here, tightened: the separation is
        what makes the module scannable, so it is paid for out of the two rules
        above rather than dropped on the screen that most needs it. */
     .core-node .hud-state{margin-top:6px;padding-top:5px}
     .aegis-core{width:148px;height:148px;padding:0 11px}
-    .core-mark{font-size:15px}
-    .core-sub{margin-top:5px}
-    .core-status{margin-top:7px}
-    .core-legend{margin-top:10px;padding-top:8px;gap:14px}
+    /* The control plane's own three tiers, set one step apart from each other:
+       the mark, what the core is reading, and the canonical state word the
+       renderer writes into it. Type and spacing only — the diameter above is
+       unchanged, so the compact wide fit and the rim weight it carries are
+       exactly the ones the layers around this one already hold. */
+    .core-mark{font-size:16px;letter-spacing:.14em}
+    .core-sub{margin-top:6px;letter-spacing:.18em}
+    .core-status{margin-top:8px}
+    .core-legend{margin-top:9px;padding-top:7px;gap:16px}
 
     /* The complete nine-station handoff path stays nine stations on one row: no
        track is re-columned here, so no station is pushed onto a second screen. */

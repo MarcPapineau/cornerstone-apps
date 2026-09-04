@@ -1421,7 +1421,10 @@ test('the wide Command View compacts the first screen without hiding, repainting
 
 test('the wide Command View fits the whole HUD, all nine stations and the build route, and clamps only supporting prose', () => {
   // The two fixed reserves are what pushed the path and the route off-screen.
-  assert.ok(/\.strategic-core\{min-height:0\}/.test(WIDE) && /\.core-stage\{min-height:0;gap:10px\}/.test(WIDE),
+  // The proof is the reserve, not the gap: min-height:0 is what returns the
+  // fixed 510px/430px band to the instruments, and the stage's own gap is a
+  // composition value the fidelity slice below sets and holds its own proof for.
+  assert.ok(/\.strategic-core\{min-height:0\}/.test(WIDE) && /\.core-stage\{min-height:0;gap:/.test(WIDE),
     'the HUD keeps the fixed 510px/430px reserve that spends the first screen on empty panel');
   assert.ok(/\.aegis-core\{width:148px;height:148px/.test(WIDE),
     'the AEGIS Core keeps a diameter that alone sets the middle HUD row taller than the fold');
@@ -1626,7 +1629,7 @@ test('the wide HUD treatment repaints only, so the compact wide fit and every na
     'the AEGIS Core no longer has a fixed diameter, so its rim weight now reflows the HUD stage');
 
   // The fit itself is still the density layer's, untouched.
-  assert.ok(/\.strategic-core\{min-height:0\}/.test(WIDE) && /\.core-stage\{min-height:0;gap:10px\}/.test(WIDE) &&
+  assert.ok(/\.strategic-core\{min-height:0\}/.test(WIDE) && /\.core-stage\{min-height:0;gap:/.test(WIDE) &&
     /\.command-shell\{padding:10px 14px 14px;gap:12px\}/.test(WIDE),
     'the treatment packet rebuilt the compact wide-screen fit instead of painting over it');
 
@@ -1925,6 +1928,225 @@ test('the nine-station handoff track reads as one connected path with a legible 
     'a station carries a rail without the written mark the rail only repeats');
 });
 
+// ── first-screen command-view fidelity (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
+// The failure guarded here is the cheapest way to make a first screen look like
+// a command centre: buy the composition with something that isn't composition.
+// A visual-fidelity pass is where a card quietly stops being drawn to make the
+// stack look calmer, where a header control loses its hit area or its focus
+// ring to make a bar look tidy, where a "premium" surface arrives as an asset,
+// a gradient or an animation, and where the phone layout is sacrificed for the
+// desktop reference nobody is looking at 390px on.
+//
+// So every proof below pairs "closer to the reference" with "the same truthful
+// states, the same controls, and the same page below 1100px". The slice is
+// stylesheet text in the two wide layers that already hold their own proofs —
+// paint in the treatment layer, spacing and type in the density layer — so it
+// touches no renderer, reads no state and can state nothing.
+
+// Every declaration this slice adds is one of these. None of them can add,
+// remove, reorder or re-source a value; they change size, rhythm and weight.
+const FIDELITY_COMPOSITION = new Set(['padding', 'padding-top', 'padding-left', 'margin',
+  'margin-top', 'margin-left', 'margin-right', 'gap', 'min-height', 'min-width', 'width',
+  'height', 'font-size', 'line-height', 'letter-spacing']);
+
+test('the first-screen fidelity slice composes with spacing, type and paint only, and adds no authority', () => {
+  // It lives entirely inside the two wide layers. Nothing below 1100px is in
+  // scope, so a phone cannot inherit a desktop composition value by accident.
+  assert.ok(WIDE.length > 0 && HUD.length > 0, 'the wide Command View layers were not located');
+
+  // The command rail: paint in the treatment layer, geometry in the density
+  // layer, and no rule in either that could carry a reading.
+  const rail = hudRules().filter((rule) => rule.selectors.some((selector) =>
+    ['.command-header', '.view-nav', '.hud-control', '.context-cell', '.brand-sub',
+      '.view-tab[aria-pressed="true"]'].includes(selector)));
+  assert.ok(rail.length >= 5, 'the command rail was not seated as one instrument band');
+  for (const rule of rail) {
+    const target = rule.selectors.join(',');
+    for (const { prop } of hudDeclarations(rule.body)) {
+      assert.ok(HUD_PAINT_ONLY.has(prop),
+        `the command rail declares ${prop} on ${target}, which moves or resizes chrome instead of painting it`);
+    }
+    assert.ok(!/var\(--(pass|fail|warn|blocked|active|stale|unknown|cyan)\)/.test(rule.body),
+      `${target} paints the command rail with a canonical state colour, so chrome would read as a reading`);
+    for (const selector of rule.selectors) {
+      assert.ok(!/\[data-run-status=|\[data-ops-state=/.test(selector),
+        `${selector} makes the command rail change with a state it never reported`);
+    }
+  }
+  // One control height across the rail, and it is a floor, never a cap: a
+  // shorter control is what makes a bar look tidy and a keyboard target vanish.
+  const railHeights = new Map();
+  for (const rule of wideRules()) {
+    for (const { prop, value } of hudDeclarations(rule.body)) {
+      if (prop !== 'min-height') continue;
+      for (const selector of rule.selectors) railHeights.set(selector, value);
+    }
+  }
+  for (const selector of ['.view-tab', '.hud-control', '.context-cell']) {
+    assert.strictEqual(railHeights.get(selector), '28px',
+      `${selector} does not sit on the shared command-rail control height`);
+  }
+  assert.ok(!/(?:^|;)\s*(?:max-height|height)\s*:/.test(WIDE.slice(WIDE.indexOf('.view-nav{'),
+    WIDE.indexOf('.header-state{'))),
+    'a command-rail control is capped rather than floored, which can clip its own label');
+
+  // Composition, not deletion. Every declaration the slice adds in the density
+  // layer is spacing, size or type; the layer's own proofs already ban
+  // display:none, colour, shadow and !important here.
+  for (const selector of ['.command-header', '.brand-lockup', '.brand-name', '.brand-sub',
+    '.view-nav', '.view-tab', '.hud-control', '.header-state', '.context-cell',
+    '.core-stage', '.core-node.is-review', '.core-node.is-gate', '.core-mark', '.core-sub',
+    '.core-status', '.core-legend']) {
+    const rule = wideRules().find((entry) => entry.selectors.includes(selector));
+    assert.ok(rule, `${selector} lost its wide Command View composition rule`);
+    for (const { prop } of hudDeclarations(rule.body)) {
+      assert.ok(FIDELITY_COMPOSITION.has(prop),
+        `${selector} declares ${prop}, which is neither spacing, size nor type`);
+    }
+  }
+
+  // No asset, no artwork, no motion, no script and no second data source enters
+  // with the polish.
+  for (const layer of [['density', WIDE], ['treatment', HUD]]) {
+    for (const banned of ['url(', 'gradient(', 'image-set(', 'filter', 'backdrop-filter',
+      '@keyframes', 'animation', 'transform', 'will-change', 'setInterval', 'setTimeout',
+      'requestAnimationFrame', 'Date.now', 'fetch(', 'AEGIS_STATE', '/api/']) {
+      assert.ok(!layer[1].includes(banned),
+        `the ${layer[0]} layer of the fidelity slice uses ${banned}`);
+    }
+  }
+});
+
+test('the fidelity slice keeps the AEGIS Core the centre and seats the six modules symmetrically around it', () => {
+  // The core is composed, never enlarged: its diameter is still the fixed one
+  // every layer around it is fitted to, so the polish cannot be paid for by
+  // pushing an instrument off the screen the density layer exists to complete.
+  assert.ok(/\.aegis-core\{width:148px;height:148px/.test(WIDE),
+    'the AEGIS Core changed diameter, so the compact wide fit and the rim weight are no longer the ones that were proven');
+  assert.ok(/\.core-mark\{font-size:\d+px;letter-spacing:/.test(WIDE) &&
+    /\.core-sub\{margin-top:\d+px;letter-spacing:/.test(WIDE) &&
+    /\.core-status\{margin-top:\d+px\}/.test(WIDE),
+    'the control plane is still one undifferentiated stack of mark, reading and state');
+
+  // The graticule is geometry on the stage's own decorative pseudo-elements and
+  // stays clear of the core: two concentric rings, both wider than the core, so
+  // neither can be mistaken for the rim that carries the run state.
+  const outer = /\.core-stage::before\{width:(\d+)px;height:(\d+)px\}/.exec(WIDE);
+  const inner = /\.core-stage::after\{width:(\d+)px;height:(\d+)px\}/.exec(WIDE);
+  const core = /\.aegis-core\{width:(\d+)px/.exec(WIDE);
+  assert.ok(outer && inner && core, 'the wide HUD graticule or the core diameter was rebuilt away');
+  assert.strictEqual(outer[1], outer[2], 'the outer graticule ring is not a circle');
+  assert.strictEqual(inner[1], inner[2], 'the inner graticule ring is not a circle');
+  assert.ok(Number(outer[1]) > Number(inner[1]) && Number(inner[1]) > Number(core[1]),
+    'the graticule no longer stands clear of the core, so a ring can be read as the core rim that carries run state');
+
+  // Orbital seating is symmetric margin and nothing else: the same offset on
+  // both flanks, on the two modules the core is widest beside, and keyed to
+  // module identity rather than to anything a run reported.
+  const review = /\.core-node\.is-review\{margin-right:(\d+)px\}/.exec(WIDE);
+  const gate = /\.core-node\.is-gate\{margin-left:(\d+)px\}/.exec(WIDE);
+  assert.ok(review && gate, 'the middle-row modules are not seated around the core');
+  assert.strictEqual(review[1], gate[1],
+    'the two middle-row modules stand off the core by different amounts, so the stage is no longer symmetrical about its centre');
+  for (const rule of wideRules()) {
+    if (!rule.selectors.some((selector) => /^\.core-node/.test(selector))) continue;
+    for (const selector of rule.selectors) {
+      assert.ok(!/\[data-run-status=|\[data-ops-state=|\.is-current|\.is-from/.test(selector),
+        `${selector} seats an evidence module according to a state it never reported`);
+    }
+  }
+  // The stage is still the three canonical columns with all six modules and the
+  // core in it, and the density layer still refuses to re-column it.
+  assert.ok(!wideSelectorsDeclaring(/grid-template-columns/).has('.core-stage'),
+    'the fidelity slice re-columned the HUD stage, which splits the cockpit across two screens');
+  const source = htmlSrc();
+  for (const id of ['hud-mission', 'hud-crew', 'hud-review', 'hud-gate', 'hud-evidence',
+    'hud-checkpoint', 'hud-core-status']) {
+    assert.ok(source.includes('id="' + id + '"'), `${id} was composed away instead of being seated`);
+    assert.ok(new RegExp("hudText\\('" + id + "'").test(code),
+      `${id} lost the renderer that writes its canonical value`);
+  }
+});
+
+test('the fidelity slice sharpens the mission brief hierarchy without promoting or hiding an answer', () => {
+  // Four tiers, by type: kicker, objective headline, gate/lifecycle line, then
+  // the answers. Every one of them is still rendered from the same field.
+  assert.ok(/#founder-summary \.mission-kicker\{letter-spacing:/.test(WIDE) &&
+    /#founder-summary \.mission-title\{font-size:\d+px;line-height:/.test(WIDE) &&
+    /#founder-summary \.mission-meta\{margin-top:\d+px\}/.test(WIDE),
+    'the mission brief still reads as four sizes of the same small text');
+  assert.ok(/el\('div','mission-meta','Gate readiness: ' \+ controlState\.state \+/.test(code) &&
+    /mission\.appendChild\(chip\(controlState\.state\)\)/.test(code) &&
+    /objectiveDetail\.appendChild\(el\('p','mission-objective-full',deckObjective\)\)/.test(code),
+    'a canonical mission fact was restyled away rather than re-tiered');
+
+  // The three decision answers read first, and they earn it with size — never
+  // by clamping, hiding or reordering the four supporting cards.
+  const decision = /#founder-summary \.command-card\.is-now \.command-value,\s*#founder-summary \.command-card\.is-blocked \.command-value,\s*#founder-summary \.command-card\.is-clear \.command-value\{font-size:([\d.]+)px/.exec(WIDE);
+  assert.ok(decision, 'the three decision answers carry no tier of their own');
+  const base = /#founder-summary \.command-value\{margin-top:\d+px;font-size:([\d.]+)px\}/.exec(WIDE);
+  assert.ok(base, 'the shared answer size was rebuilt away');
+  assert.ok(Number(decision[1]) > Number(base[1]),
+    'the decision answers are set no larger than the supporting cards they must be read before');
+  const clamped = wideSelectorsDeclaring(/-webkit-line-clamp/);
+  for (const selector of clamped) {
+    assert.ok(!/\.is-now|\.is-blocked|\.is-clear/.test(selector),
+      `${selector} clamps a decision answer to make room for the tier above it`);
+  }
+  // The supporting cards are quieter, not gone: edge colour only, no background
+  // bound to a card state, and every card still in the DOM with its own label.
+  const supporting = hudRules().find((rule) =>
+    rule.selectors.includes('#founder-summary .command-card.is-crew'));
+  assert.ok(supporting, 'the supporting mission cards were not given a quieter edge');
+  for (const { prop } of hudDeclarations(supporting.body)) {
+    assert.strictEqual(prop, 'border-color',
+      `the supporting mission cards declare ${prop}, which is more than one step of edge contrast`);
+  }
+  assert.ok(/#founder-summary \.command-card\.is-now\{border-color:[^;]+;box-shadow:inset \d+px 0 0 var\(--active\)\}/.test(HUD) &&
+    /#founder-summary \.command-card\.is-blocked\{[^}]*box-shadow:inset \d+px 0 0 var\(--fail\)\}/.test(HUD) &&
+    /#founder-summary \.command-card\.is-clear\{[^}]*box-shadow:inset \d+px 0 0 var\(--pass\)\}/.test(HUD),
+    'a decision card lost the shipped inset state bar that is its only signal');
+});
+
+test('the fidelity slice changes nothing below 1100px and removes no control, label or hit area', () => {
+  // The phone cockpit, the tablet stack and the shipped base geometry are
+  // exactly the styles they were: a desktop reference is not a reason to move
+  // a 390px layout that nobody in the reference is looking at.
+  assert.ok(/\.command-header\{min-height:72px;padding:12px 20px/.test(code) &&
+    /\.core-stage\{position:relative;min-height:430px;display:grid;grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/.test(code) &&
+    /\.aegis-core\{position:relative;z-index:2;grid-column:2;grid-row:2;justify-self:center;width:188px;height:188px/.test(code) &&
+    /\.core-node\{position:relative;z-index:1;min-height:92px;padding:12px 13px 13px/.test(code),
+    'the shipped base chrome or HUD geometry was rebuilt by the fidelity slice');
+  assert.ok(/\.command-shell\{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"\}/.test(code) &&
+    /\.core-stage\{grid-template-columns:1fr 150px 1fr\}\.aegis-core\{width:145px;height:145px\}/.test(code),
+    'the 681–1099px tablet stack was changed by the fidelity slice');
+  assert.ok(/\.command-header\{display:flex;position:static/.test(PHONE) &&
+    /\.core-stage\{display:flex;flex-direction:column;min-height:0\}/.test(PHONE) &&
+    /\.header-state\{display:contents\}/.test(PHONE) &&
+    /\.ops-strip-cells\{grid-template-columns:1fr\}/.test(PHONE),
+    'the phone cockpit was changed by the fidelity slice');
+  // The phone keeps its finger-sized targets, and the desktop rail's 28px floor
+  // cannot reach them: it is declared above 1100px and the phone rule is both
+  // later in the stylesheet and larger.
+  assert.ok(/\.view-tab,\.hud-control,[^}]*\{min-height:44px\}/.test(PHONE),
+    'the phone lost the 44px hit area on its view switch or its header controls');
+  assert.ok(code.indexOf('@media (max-width:680px)') < code.lastIndexOf('@media (min-width:1100px)'),
+    'the wide composition layer is declared before the phone rules it must never outrank');
+
+  // Every control the rail seats is still a real control with a real label and
+  // a visible keyboard focus ring.
+  const source = htmlSrc();
+  for (const id of ['view-command', 'view-detail', 'toggle-motion', 'ctx-entity', 'ctx-generated',
+    'ctx-verdict', 'motion-state']) {
+    assert.ok(source.includes('id="' + id + '"'), `${id} was removed from the command rail`);
+  }
+  assert.ok(/\.view-tab:focus-visible,\.hud-control:focus-visible\{outline:2px solid var\(--focus\)/.test(code),
+    'the command rail controls lost their visible keyboard focus ring');
+  assert.ok(/\.hud-control:disabled,\.hud-control\[aria-disabled="true"\]\{border-style:dashed/.test(code),
+    'an inert command-rail control is no longer distinguishable by shape');
+  assert.ok(/\.view-tab\[aria-pressed="true"\]\{background:#123149;color:#d8f5ff;box-shadow:inset 0 -2px 0 var\(--cyan\)\}/.test(code),
+    'the view switch lost the shipped pressed state its repaint only deepens');
+});
 
 // ── Detail View tactical evidence surface (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
 // The failure guarded here is a Detail View that looks like an instrument and
