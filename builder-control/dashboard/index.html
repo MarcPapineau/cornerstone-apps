@@ -920,6 +920,27 @@
   .evidence-list>li{margin-top:3px;font:11px/1.5 var(--mono);color:var(--text-1);overflow-wrap:anywhere}
   .evidence-panel .chip{margin-top:7px}
 
+  /* ── recovery deck ──
+     One compact answer block per safe-cancel question, each with its exact
+     recorded evidence inside a native <details> disclosure. Nothing here is
+     colour-only: every answer carries a state chip whose label is text, and no
+     answer is signalled by its border alone. Every value wraps rather than
+     scrolls, because one canonical run id, worker state or checkpoint commit is
+     long enough to push a 390px viewport sideways on its own. */
+  #recovery-deck>.body{padding:14px}
+  .rd-scope{margin:0;font-size:12px;line-height:1.45;color:var(--text-2);overflow-wrap:anywhere}
+  #rd-answers{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:10px;margin-top:10px}
+  .rd-answer{min-width:0;padding:9px 10px;border:1px solid #29485f;border-radius:4px;
+    background:rgba(8,19,29,.94)}
+  .rd-answer>h3{margin:0;font:650 10px/1.3 var(--mono);letter-spacing:.11em;text-transform:uppercase;
+    color:#8faac0}
+  .rd-value{margin:7px 0 0;font-size:12px;line-height:1.45;color:var(--text-0);overflow-wrap:anywhere}
+  .rd-answer .chip{margin-top:7px}
+  .rd-exact{margin-top:7px}
+  .rd-exact>summary{font:11px/1.45 var(--mono);color:var(--text-1);cursor:pointer;overflow-wrap:anywhere}
+  .rd-exact>summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  .rd-fact{margin-top:5px;font:11px/1.45 var(--mono);color:var(--text-2);overflow-wrap:anywhere}
+
   /* ── changes & receipts inspector ──
      One compact answer block per question, each with its exact recorded
      evidence inside a native <details> disclosure. Nothing here is colour-only:
@@ -1140,6 +1161,13 @@
     .kv dt,.api-msg,.truth-card .meta,.hud-value,.hud-state{overflow-wrap:anywhere}
     .kv{grid-template-columns:minmax(0,1fr);gap:2px}
     .kv dt{margin-top:7px}
+    /* The recovery deck stacks one answer per phone row and its exact-evidence
+       disclosures are as tappable as every other disclosure above, so the five
+       safe-cancel answers stay readable at 390px. Nothing is demoted or
+       dropped. */
+    #rd-answers{grid-template-columns:1fr}
+    .rd-exact>summary{min-height:44px;display:flex;align-items:center}
+    .rd-scope,.rd-value,.rd-fact{overflow-wrap:anywhere}
     /* The changes & receipts inspector stacks one answer per phone row, its run
        picker is finger-sized, and its exact-evidence disclosures are as tappable
        as every other disclosure above. Nothing is demoted or dropped. */
@@ -1752,6 +1780,31 @@
     <section id="topology-overview" aria-labelledby="topology-overview-h">
       <h2 id="topology-overview-h">Build route</h2>
       <div id="topology-live-body"><p class="empty">Loading exact gate route…</p></div>
+    </section>
+
+    <!-- Recovery deck.
+
+         The one place a founder reads the five safe-cancel questions together:
+         what can be safely stopped right now, what survives stopping it,
+         whether Retry is valid, when this same run has to be continued outside
+         the dashboard instead, and the one next action.
+
+         It renders ONLY resolutions renderFounderSummary has already made — the
+         server's own cancellation-authority projection, the shared abandonable
+         state list the Cancel control is offered from, retryAvailability(), the
+         checkpoint renderer, the supervision timeout sentence and the deck's own
+         next action. It reaches no endpoint, holds no timer, writes no state and
+         adds no control: Start, Cancel and Retry stay in the rails that own
+         them, and rollback is not exposed anywhere on this page. Exact state
+         codes, the run id, the termination and timeout receipts and the
+         checkpoint identifiers live inside the native <details> disclosures
+         below each answer. -->
+    <section id="recovery-deck" aria-labelledby="recovery-deck-h">
+      <h2 id="recovery-deck-h">Recovery <span class="rail-note">safe-cancel evidence for the bound run · reading only</span></h2>
+      <div class="body">
+        <p class="rd-scope" id="rd-scope">Loading recorded recovery evidence…</p>
+        <div id="rd-answers"></div>
+      </div>
     </section>
 
     <!-- Changes & receipts inspector.
@@ -3589,6 +3642,327 @@
       publishActivity('Retry failed for ' + run.runId + ': ' + e.message,
         { code: 'RETRY_REFUSED', runId: run.runId });
     }
+  }
+
+  // ── safe-cancel & recovery deck ───────────────────────────────────
+  // The five questions an owner arrives with the moment a governed run has to
+  // be interrupted: what can be safely stopped right now, what survives
+  // stopping it, whether Retry is valid, when this same run has to be continued
+  // outside the dashboard instead, and the one next action.
+  //
+  // It resolves none of them itself. Cancellation authority is the server's own
+  // build.cancelAvailable projection, the abandonable states are the ONE list
+  // the run-card Cancel control is offered from, retry validity is the verdict
+  // the retryAvailability authority already reached, the safe point is the
+  // evidenceCheckpointPanel resolution and the timeout sentence belongs to the
+  // supervisionFacts reading; only the next action is the deck's own. Every one
+  // of those verdicts is handed to this block by its caller — naming an
+  // authority here documents where a reading came from, it does not invoke one,
+  // and nothing below reaches back out to call them. This surface holds no
+  // timer, reaches no endpoint, writes no state and adds no control: Start,
+  // Cancel and Retry stay exactly where they are.
+  //
+  // Three refusals are deliberate, because each is a place a recovery surface
+  // would otherwise reassure a reader past the evidence:
+  //   · a cancellation REQUEST is not a stop. Nothing here reads as stopped
+  //     until the canonical worker attempt is recorded TERMINATED;
+  //   · rollback is not a control on this page, so a recorded safe point is
+  //     stated as recorded evidence and never as something to press;
+  //   · what a builder left in its isolated worktree is not delivered to this
+  //     page, so it is Not recorded here — neither proven kept nor proven lost.
+  var RD_NOT_RECORDED = 'Not recorded';
+  var RD_BOUNDARY = 'This deck restates recovery evidence already delivered to this page. It stops, ' +
+    'retries, records and decides nothing, and no rollback control exists here.';
+  var RD_RECEIPT_RULE = 'AEGIS reports a process stopped only when its worker attempt is recorded ' +
+    'TERMINATED. An accepted cancellation request is not that receipt.';
+  var RD_WORKTREE = 'What the builder left in its isolated worktree is not delivered to this page, so ' +
+    'it is ' + RD_NOT_RECORDED + ' here — neither proven kept nor proven lost.';
+  var RD_CLI_BOUNDARY = 'This page may never choose an executable, a command, a provider, a model or a ' +
+    'timeout, so a continuation that needs one of those is a CLI action.';
+
+  // The canonical states aegis-run's transition authority allows to reach
+  // ABANDONED from the control surface.
+  var CANCEL_ABANDON_STATES = ['CREATED','INTAKE_RECORDED','ROUTED','WORKTREE_READY','BUILT',
+    'CHECKS_PASSED','REVIEW_BOUND','REVIEW_FAILED','CORRECTING','BUILD_FAILED','CHECKS_FAILED'];
+
+  // The ONE reading of what Cancel is offered for, shared with the run-card
+  // control in the switchboard block below so the deck and the button cannot
+  // disagree. `worker` is the server's entire public cancellation authority
+  // projection — a BUILDING run whose worker is recorded RUNNING and still
+  // holds an authenticated, attempt-bound control mailbox — and `lifecycle` is
+  // the transition authority's own abandonable state list. Neither is ever
+  // inferred from a PID, an active-looking status or elapsed time.
+  function cancelOffer(run){
+    var worker = !!(run && run.state === 'BUILDING' && run.build &&
+      run.build.cancelAvailable === true);
+    var lifecycle = !!(run && CANCEL_ABANDON_STATES.indexOf(run.state) !== -1);
+    return { worker: worker, lifecycle: lifecycle, offered: worker || lifecycle };
+  }
+
+  // The canonical cancellation receipt, read from the public worker projection
+  // alone. TERMINATED is the only value that proves a process stopped. The two
+  // recorded unsafe-recovery codes prove the opposite — that termination was
+  // NOT observed — and the absence of all three proves nothing either way.
+  function cancellationReceipt(run){
+    var build = (run && run.build) || null;
+    if (!build) return 'NONE';
+    if (build.status === 'TERMINATED') return 'TERMINATED';
+    if (build.status === 'TERMINATION_UNVERIFIED' ||
+        build.recoveryCode === 'TERMINATION_UNVERIFIED') return 'TERMINATION_UNVERIFIED';
+    if (build.status === 'ORPHANED' || build.recoveryCode === 'ORPHANED') return 'ORPHANED';
+    return 'NONE';
+  }
+
+  function rdStopFacts(run){
+    var build = (run && run.build) || null;
+    return [
+      'Run id: ' + ((run && run.runId) || RD_NOT_RECORDED),
+      'Canonical run state: ' + ((run && run.state) || RD_NOT_RECORDED),
+      'Recorded worker status: ' + ((build && build.status) || RD_NOT_RECORDED),
+      'Recorded worker cancellation capability: ' + (build
+        ? (build.cancelAvailable === true ? 'RECORDED' : 'NOT RECORDED')
+        : RD_NOT_RECORDED),
+      'Recorded termination receipt: ' + cancellationReceipt(run),
+      'Recorded worker end time: ' + ((build && build.endedAt) || RD_NOT_RECORDED)
+    ];
+  }
+
+  function rdStopAnswer(run, offer, receipt){
+    var title = 'What can be safely stopped now';
+    var facts = rdStopFacts(run);
+    if (!run){
+      return { id: 'stop', title: title, chip: 'UNAVAILABLE', state: 'NO_RUN',
+        value: 'No canonical run is bound to this page, so there is nothing to stop.', facts: facts };
+    }
+    facts.push(RD_RECEIPT_RULE);
+    // A record can still be closed while a process is unaccounted for. Saying so
+    // is the whole point: closing the record is not evidence the worker stopped.
+    var recordOnly = offer.lifecycle
+      ? ' Cancel can still close the run record as abandoned, which closes the record and proves ' +
+        'nothing about the process.'
+      : '';
+    if (receipt === 'TERMINATION_UNVERIFIED'){
+      return { id: 'stop', title: title, chip: 'BLOCKED', state: 'TERMINATION_UNVERIFIED',
+        value: 'A cancellation was signalled for this run and no termination receipt is recorded, so ' +
+          'AEGIS cannot say the process stopped.' + recordOnly, facts: facts };
+    }
+    if (receipt === 'ORPHANED'){
+      return { id: 'stop', title: title, chip: 'BLOCKED', state: 'ORPHANED',
+        value: 'This run\'s worker attempt is recorded ORPHANED, so its termination was never observed ' +
+          'and AEGIS cannot say the process stopped.' + recordOnly, facts: facts };
+    }
+    if (receipt === 'TERMINATED'){
+      return { id: 'stop', title: title, chip: 'RECORDED', state: 'STOPPED',
+        value: 'Nothing is left to stop. This run\'s worker attempt is recorded TERMINATED, which is ' +
+          'the canonical receipt that the process stopped.', facts: facts };
+    }
+    if (offer.worker){
+      return { id: 'stop', title: title, chip: 'AVAILABLE', state: 'WORKER_CANCELABLE',
+        value: 'The governed worker for this run can be asked to stop, because an authenticated ' +
+          'cancellation capability is recorded for its current attempt. It is stopped when the ' +
+          'termination receipt is recorded, not when the request is accepted.', facts: facts };
+    }
+    if (run.state === 'BUILDING'){
+      return { id: 'stop', title: title, chip: 'UNAVAILABLE', state: 'NO_CANCEL_CAPABILITY',
+        value: 'This run is recorded BUILDING, but no authenticated worker cancellation capability is ' +
+          'recorded for its current attempt, so this page cannot stop its process.', facts: facts };
+    }
+    if (offer.lifecycle){
+      return { id: 'stop', title: title, chip: 'INCOMPLETE', state: 'RECORD_ONLY',
+        value: 'No worker process is recorded running for this run, so Cancel here closes the run ' +
+          'record as abandoned. It stops no process, because none is recorded running.', facts: facts };
+    }
+    return { id: 'stop', title: title, chip: 'NOT_REQUIRED', state: 'NOT_CANCELABLE',
+      value: 'Nothing on this page can be stopped for this run: its recorded state ' + run.state +
+        ' is not one AEGIS cancels, and no worker process is recorded running.', facts: facts };
+  }
+
+  // What survives stopping, read through the page's ONE checkpoint renderer, so
+  // this answer cannot reach a second verdict about the same receipt. None of
+  // the five sentences names a command, a branch or a restore step: rollback is
+  // a governed action this page does not expose, and a missing or blocked
+  // recovery route is a closed door rather than a next step.
+  var RD_PRESERVED = {
+    RECORDED: 'This run has a recorded safe checkpoint, so stopping it leaves a recorded safe state ' +
+      'behind. What is already recorded stays recorded.',
+    ROLLBACK_UNAVAILABLE: 'This run reached a checkpoint, but no rollback commit is recorded with it, ' +
+      'so stopping it leaves no recorded way back. What is already recorded stays recorded.',
+    BLOCKED: 'This run\'s checkpoint receipt did not validate, so no safe state and no way back can be ' +
+      'named for it. What is already recorded stays recorded.',
+    NOT_RECORDED: 'No checkpoint is recorded for this run, so stopping it leaves no recorded safe state ' +
+      'to return to. What is already recorded stays recorded.',
+    UNAVAILABLE: 'No checkpoint evidence reached this page, so whether a recorded safe state exists is ' +
+      'UNAVAILABLE. What is already recorded stays recorded.'
+  };
+
+  function rdPreservedAnswer(run, checkpointPanel){
+    var panel = checkpointPanel || { chip: 'UNAVAILABLE', state: 'UNAVAILABLE', value: null, meta: [] };
+    var facts = ['Checkpoint receipt: ' + ((run && run.checkpoint) || RD_NOT_RECORDED)]
+      .concat(panel.meta || []);
+    if (panel.value) facts.push(panel.value);
+    facts.push(RD_WORKTREE);
+    return { id: 'preserved', title: 'What is preserved if you stop',
+      chip: panel.chip || 'UNAVAILABLE', state: panel.state || 'UNAVAILABLE',
+      value: RD_PRESERVED[panel.state] || RD_PRESERVED.UNAVAILABLE, facts: facts };
+  }
+
+  // Retry validity is the verdict the retryAvailability authority already
+  // reached, restated from what the deck handed in rather than re-derived by a
+  // call from here. Where that authority wrote a refusal sentence it is printed
+  // verbatim; the two states it leaves silent get a sentence that only names
+  // the canonical field it read.
+  var RD_RETRY = {
+    AVAILABLE: 'Retry is valid. The recorded failure state allows one more bounded correction cycle, ' +
+      'and no recorded timeout or spent correction budget refuses it.',
+    UNSAFE: 'Retry is refused. This run\'s worker attempt is recorded retry-safe NO, so AEGIS will not ' +
+      're-enter the bounded correction route.',
+    NOT_APPLICABLE: 'Retry is not offered. The recorded state is not one of the failed states a bounded ' +
+      'correction cycle can be re-entered from.'
+  };
+  var RD_RETRY_CHIP = { AVAILABLE: 'AVAILABLE', CORRECTION_LIMIT: 'BLOCKED',
+    CLI_TIMEOUT_CONTINUATION: 'BLOCKED', UNSAFE: 'BLOCKED', NOT_APPLICABLE: 'NOT_REQUIRED' };
+
+  function rdRetryAnswer(run, retry){
+    var build = (run && run.build) || null;
+    var used = run && Number.isInteger(run.corrections) ? run.corrections : null;
+    var max = run && Number.isInteger(run.maxCorrections) ? run.maxCorrections : null;
+    var facts = [
+      'Retry authority state: ' + retry.state,
+      // An absent counter is missing evidence. It is never read as capacity
+      // remaining and never read as capacity spent.
+      'Recorded correction cycles: ' + (used === null || max === null
+        ? 'UNVERIFIED — this run record carries no correction counters, which is missing evidence, ' +
+          'not proof of remaining capacity.'
+        : used + ' used of ' + max + ' allowed.'),
+      'Recovery: ' + (build ? recoveryFacts(build) : RD_NOT_RECORDED)
+    ];
+    if (!run){
+      return { id: 'retry', title: 'Is Retry valid', chip: 'UNAVAILABLE', state: 'NO_RUN',
+        value: 'No canonical run is bound to this page, so Retry is not offered.', facts: facts };
+    }
+    return { id: 'retry', title: 'Is Retry valid', chip: RD_RETRY_CHIP[retry.state] || 'UNAVAILABLE',
+      state: retry.state,
+      value: retry.reason || RD_RETRY[retry.state] ||
+        'Retry validity is UNAVAILABLE — no recorded retry authority reached this page.',
+      facts: facts };
+  }
+
+  function rdContinueAnswer(run, retry, supervision, receipt){
+    var title = 'When it must continue outside the dashboard';
+    var facts = [
+      (supervision && supervision.timeout) || ('Timeout: ' + RD_NOT_RECORDED),
+      'Retry authority state: ' + retry.state,
+      'Recorded termination receipt: ' + receipt,
+      RD_CLI_BOUNDARY
+    ];
+    if (!run){
+      return { id: 'continue', title: title, chip: 'NOT_REQUIRED', state: 'NO_RUN',
+        value: 'No canonical run is bound to this page, so no run has to be continued anywhere.',
+        facts: facts };
+    }
+    // The retry authority already names the one case where a recorded timeout
+    // forces continuation off this page. Its sentence is printed as it stands.
+    if (retry.state === 'CLI_TIMEOUT_CONTINUATION'){
+      return { id: 'continue', title: title, chip: 'BLOCKED', state: 'CLI_CONTINUATION',
+        value: 'Now. ' + retry.reason, facts: facts };
+    }
+    if (receipt === 'TERMINATION_UNVERIFIED' || receipt === 'ORPHANED'){
+      return { id: 'continue', title: title, chip: 'BLOCKED', state: 'UNVERIFIED_TERMINATION',
+        value: 'Now, for the worker attempt. No termination receipt is recorded for it and this page ' +
+          'cannot obtain one, so whether that process actually stopped can only be established outside ' +
+          'this dashboard.', facts: facts };
+    }
+    if ((run.build && run.build.timedOut === true) ||
+        (supervision && supervision.state === 'TIMED_OUT')){
+      return { id: 'continue', title: title, chip: 'WARNING', state: 'TIMEOUT_RECORDED',
+        value: 'A builder timeout is recorded for this run, so continuing this same run is a CLI ' +
+          'action. ' + RD_CLI_BOUNDARY, facts: facts };
+    }
+    if (retry.state === 'CORRECTION_LIMIT'){
+      return { id: 'continue', title: title, chip: 'BLOCKED', state: 'NO_DASHBOARD_ROUTE',
+        value: 'No bounded route remains on this page. ' + retry.reason, facts: facts };
+    }
+    if (retry.state === 'UNSAFE'){
+      return { id: 'continue', title: title, chip: 'BLOCKED', state: 'NO_DASHBOARD_ROUTE',
+        value: 'No bounded route remains on this page: this run\'s worker attempt is recorded ' +
+          'retry-safe NO, so no correction cycle may be re-entered here.', facts: facts };
+    }
+    return { id: 'continue', title: title, chip: 'NOT_REQUIRED', state: 'NOT_REQUIRED',
+      value: 'Not now. No recorded timeout and no spent correction budget requires this run to leave ' +
+        'the dashboard.', facts: facts };
+  }
+
+  function rdNextAnswer(nextAction){
+    var text = typeof nextAction === 'string' && nextAction.trim() ? nextAction : null;
+    return { id: 'next', title: 'The single next action',
+      chip: text ? 'RECORDED' : 'UNAVAILABLE', state: text ? 'RECORDED' : 'UNAVAILABLE',
+      value: text || 'No next action is recorded yet.',
+      facts: ['This is the next action the deck already resolved, restated here. It is not a second ' +
+        'next step, and this deck exposes no control to carry it out.'] };
+  }
+
+  // Exact state codes, the run id, the termination and timeout receipts and the
+  // checkpoint identifiers live behind one native disclosure per answer, so the
+  // visible deck stays five short sentences and every canonical value is one
+  // keyboard press away rather than absent.
+  function rdAnswerNode(answer, memory){
+    var article = el('article','rd-answer');
+    article.setAttribute('data-rd-answer', answer.id);
+    article.setAttribute('data-rd-state', answer.state);
+    article.appendChild(el('h3',null,answer.title));
+    article.appendChild(el('p','rd-value',answer.value));
+    article.appendChild(chip(answer.chip));
+    var exact = el('details','rd-exact');
+    var summary = el('summary',null,'Recorded evidence');
+    exact.appendChild(summary);
+    (answer.facts || []).forEach(function(fact){ exact.appendChild(el('div','rd-fact',fact)); });
+    // A live status push repaints this host, so a disclosure the operator opened
+    // stays open and the keyboard stays on the summary it was already on.
+    exact.open = !!(memory && memory.open[answer.id]);
+    article.appendChild(exact);
+    if (memory && memory.focused === answer.id && summary.focus) summary.focus();
+    return article;
+  }
+
+  function rdDisclosureMemory(host){
+    var memory = { open: {}, focused: null };
+    var answers = (host && host.children) || [];
+    for (var i = 0; i < answers.length; i++){
+      var id = answers[i].getAttribute && answers[i].getAttribute('data-rd-answer');
+      if (!id) continue;
+      var parts = answers[i].children || [];
+      for (var j = 0; j < parts.length; j++){
+        if (parts[j].className !== 'rd-exact') continue;
+        if (parts[j].open === true) memory.open[id] = true;
+        if (parts[j].firstElementChild &&
+          parts[j].firstElementChild === document.activeElement) memory.focused = id;
+      }
+    }
+    return memory;
+  }
+
+  function renderRecoveryDeck(ctx){
+    var scope = $('rd-scope');
+    var host = $('rd-answers');
+    if (!scope || !host) return;
+    var context = ctx || {};
+    var run = context.run || null;
+    var retry = context.retry || { state: 'UNAVAILABLE', allowed: false, reason: null };
+    var receipt = cancellationReceipt(run);
+    var memory = rdDisclosureMemory(host);
+    host.textContent = '';
+    scope.setAttribute('data-rd-scope', run ? 'BOUND_RUN' : 'NO_RUN');
+    scope.textContent = (run
+      ? 'Reading recovery evidence for the run this page is bound to right now.'
+      : 'No canonical run is bound to this page, so every answer below states what is not recorded ' +
+        'rather than what could be stopped.') + ' ' + RD_BOUNDARY;
+    [
+      rdStopAnswer(run, cancelOffer(run), receipt),
+      rdPreservedAnswer(run, context.checkpoint),
+      rdRetryAnswer(run, retry),
+      rdContinueAnswer(run, retry, context.supervision, receipt),
+      rdNextAnswer(context.nextAction)
+    ].forEach(function(answer){ host.appendChild(rdAnswerNode(answer, memory)); });
   }
 
   // ── V2 failure-state storyboard ───────────────────────────────────
@@ -5918,6 +6292,18 @@
       exactSubjectBound: exactSubjectBound,
       emptyRunsAvailable: emptyRunsAvailable
     });
+
+    // The recovery deck repaints from the SAME resolutions, for the same
+    // reason: what can be stopped, what survives it, whether Retry is valid and
+    // what to do next must be the deck's own answers, restated — never a second
+    // recovery opinion beside them.
+    renderRecoveryDeck({
+      run: boundRun,
+      supervision: supervision,
+      retry: deckRetry,
+      checkpoint: evidenceCheckpointPanel(boundRun, safeCheckpoint),
+      nextAction: deckActions[0]
+    });
   }
 
   function operatorAnswer(question){
@@ -6834,6 +7220,11 @@
     opsStripCells: opsStripCells,
     requestRunRetry: requestRunRetry,
     retryAvailability: retryAvailability,
+    // One authority decides what Cancel is offered for. The run-card control
+    // lives in the switchboard block below and must read this same offer, or
+    // the recovery deck and the button beside it could describe two different
+    // sets of runs as stoppable.
+    cancelOffer: cancelOffer,
     availableEmptyRuns: availableEmptyRuns,
     renderStateSource: renderStateSource,
     // The switchboard must not own a second opinion about what counts as live
@@ -7018,11 +7409,6 @@
   var STATE_GLYPH = { INTAKE_RECORDED:'●', ROUTED:'◐', WORKTREE_READY:'◐', BUILDING:'◐',
     BUILT:'●', CHECKS_PASSED:'●', CHECKS_FAILED:'✕', BUILD_FAILED:'✕', REVIEW_FAILED:'✕', CORRECTING:'▲',
     CHECKPOINTED:'◆', ROLLED_BACK:'■', ABANDONED:'■' };
-
-  function hasCancellationCapability(run){
-    return !!(run && run.state === 'BUILDING' && run.build &&
-      run.build.cancelAvailable === true);
-  }
 
   function buildEvidence(build){
     var host = el('div', 'build-evidence');
@@ -7816,8 +8202,13 @@
       }
     }
 
-    var CANCELABLE = ['CREATED','INTAKE_RECORDED','ROUTED','WORKTREE_READY','BUILT','CHECKS_PASSED','REVIEW_BOUND','REVIEW_FAILED','CORRECTING','BUILD_FAILED','CHECKS_FAILED'];
-    if (CANCELABLE.indexOf(run.state) !== -1 || hasCancellationCapability(run)) {
+    // One authority decides what Cancel is offered for, shared with the recovery
+    // deck that describes it. Without it the browser cannot know what the
+    // canonical run state allows, so it offers nothing rather than guessing.
+    var cancelState = window.AEGIS_DASHBOARD && window.AEGIS_DASHBOARD.cancelOffer
+      ? window.AEGIS_DASHBOARD.cancelOffer(run)
+      : { worker: false, lifecycle: false, offered: false };
+    if (cancelState.offered) {
       var cancelBtn = el('button', 'action warn', 'Cancel');
       cancelBtn.type = 'button';
       cancelBtn.addEventListener('click', async function(){

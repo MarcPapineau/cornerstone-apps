@@ -11886,6 +11886,508 @@ test('the changes & receipts inspector is keyboard operable and legible at 390px
     'the inspector controls have no visible keyboard focus');
 });
 
+// ── SAFE-CANCEL & RECOVERY DECK ───────────────────────────────────────────
+// One founder-readable deck over the moment a governed run has to be
+// interrupted: what can be safely stopped right now, what survives stopping it,
+// whether Retry is valid, when this same run has to be continued outside the
+// dashboard instead, and the one next action.
+//
+// The failure these proofs guard against is a recovery surface that reassures.
+// A cancellation REQUEST reading as a stopped process, an absent correction
+// counter reading as remaining capacity, a recorded timeout quietly offering
+// Retry, an unvalidated checkpoint reading as a safe state, or a rollback that
+// looks like something the owner could press would each render calmly and be
+// false. So every proof asks the same two questions of every answer: is the
+// recorded fact printed exactly, and is the ABSENT fact named as absent.
+const RD_RUN_ID = 'RUN-20260904-9999cccc';
+const RD_COMMIT = 'e'.repeat(40);
+
+function rdBuild(over) {
+  return Object.assign({
+    mode: 'async', status: 'RUNNING', workerPid: 4242, cancelAvailable: true,
+    startedAt: '2026-09-04T12:05:00.000Z', heartbeatAt: '2026-09-04T12:29:00.000Z',
+    endedAt: null, exit: null, timedOut: false, retrySafe: null, recoveryCode: null,
+    failure: null, failover: null,
+    activity: { code: 'RUNNING', phase: 'RUNNING', active: true, summary: 'Builder is running' },
+  }, over || {});
+}
+
+// A stopped worker attempt: no capability, no live process, nothing running.
+function rdStoppedBuild(over) {
+  return rdBuild(Object.assign({
+    status: 'EXITED', cancelAvailable: false, exit: 0, endedAt: '2026-09-04T12:31:00.000Z',
+    activity: { code: 'EXITED', phase: 'STOPPED', active: false, summary: 'Builder exited' },
+  }, over || {}));
+}
+
+function rdTimeoutSupervision() {
+  return {
+    progressState: 'RECORDED', progressKind: 'STDOUT',
+    progressSummary: 'Builder is emitting model and tool stream activity',
+    lastProgressAt: '2026-09-04T12:20:00.000Z', progressReason: null,
+    activityState: 'UNAVAILABLE', activitySummary: null, activityAt: null,
+    activityReason: 'no bounded builder activity is recorded.',
+    noProgressLimitSec: 300, wallClockLimitSec: 900,
+    timeoutReason: 'NO_PROGRESS_TIMEOUT',
+    timeoutSummary: 'Stopped because no real builder progress was observed inside the fixed no-progress limit',
+  };
+}
+
+function rdRun(over) {
+  return Object.assign({
+    runId: RD_RUN_ID, state: 'BUILDING',
+    objective: 'Give the founder one honest recovery path',
+    packetId: 'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA',
+    createdAt: '2026-09-04T12:00:00.000Z', updatedAt: '2026-09-04T12:30:00.000Z',
+    corrections: 0, maxCorrections: 3,
+    checkpoint: null, checkpointState: null, rollbackPoint: null,
+    build: rdBuild(),
+  }, over || {});
+}
+
+function rdPage(run) { return bootPage(failureFixture(run)); }
+
+function rdAnswers(page) {
+  return findByAttr(page.document.getElementById('rd-answers'), 'data-rd-answer');
+}
+
+function rdAnswer(page, id) {
+  const node = rdAnswers(page).find((answer) => answer.attrs['data-rd-answer'] === id);
+  assert.ok(node, `the recovery deck rendered no "${id}" answer`);
+  return node;
+}
+
+function rdState(page, id) { return rdAnswer(page, id).getAttribute('data-rd-state'); }
+
+function rdValue(page, id) {
+  const value = allNodes(rdAnswer(page, id)).find((node) => String(node.className) === 'rd-value');
+  assert.ok(value, `the "${id}" answer rendered no founder-readable value`);
+  return value.textContent;
+}
+
+function rdDisclosure(page, id) {
+  const exact = allNodes(rdAnswer(page, id)).find((node) => String(node.className) === 'rd-exact');
+  assert.ok(exact, `the "${id}" answer rendered no exact-evidence disclosure`);
+  return exact;
+}
+
+function rdDeckNextStep(page) {
+  const step = findByAttr(page.document.getElementById('founder-body'), 'data-operator-field')
+    .find((node) => node.attrs['data-operator-field'] === 'next-step');
+  return step ? step.textContent : '';
+}
+
+const RECOVERY = code.slice(code.indexOf('// ── safe-cancel & recovery deck'),
+  code.indexOf('// ── V2 failure-state storyboard'));
+
+test('DOM: the recovery deck answers the five safe-cancel questions for the bound run, in that order', () => {
+  const page = rdPage(rdRun());
+  assert.deepStrictEqual(rdAnswers(page).map((node) => node.attrs['data-rd-answer']),
+    ['stop', 'preserved', 'retry', 'continue', 'next'],
+    'the deck does not answer what can be stopped, what survives, whether Retry is valid, when this run leaves the dashboard, and the next action in that order');
+  assert.deepStrictEqual(rdAnswers(page).map((node) => node.children[0].textContent),
+    ['What can be safely stopped now', 'What is preserved if you stop', 'Is Retry valid',
+      'When it must continue outside the dashboard', 'The single next action'],
+    'the five answers are not titled as the owner\'s own questions');
+  const scope = page.document.getElementById('rd-scope');
+  assert.strictEqual(scope.getAttribute('data-rd-scope'), 'BOUND_RUN');
+  assert.match(scope.textContent, /Reading recovery evidence for the run this page is bound to right now\./);
+  assert.match(scope.textContent, /It stops, retries, records and decides nothing, and no rollback control exists here\./,
+    'the deck does not state its own reading-only boundary');
+  // The next action is the deck's, restated — never a second recovery opinion.
+  assert.ok(rdValue(page, 'next').length > 0 && rdDeckNextStep(page).includes(rdValue(page, 'next')),
+    'the recovery deck reached its own next action instead of restating the deck\'s');
+});
+
+test('DOM: a running worker with recorded cancellation capability can be asked to stop, and is never called stopped', () => {
+  const page = rdPage(rdRun());
+  assert.strictEqual(rdState(page, 'stop'), 'WORKER_CANCELABLE');
+  assert.match(rdValue(page, 'stop'),
+    /an authenticated cancellation capability is recorded for its current attempt/);
+  assert.match(rdValue(page, 'stop'),
+    /stopped when the termination receipt is recorded, not when the request is accepted/,
+    'an accepted cancellation request was allowed to read as a stopped process');
+  assert.ok(!/Nothing is left to stop/.test(rdValue(page, 'stop')),
+    'a still-running worker was reported as already stopped');
+  assert.match(rdDisclosure(page, 'stop').textContent,
+    /Recorded worker cancellation capability: RECORDED/);
+  assert.match(rdDisclosure(page, 'stop').textContent, /Recorded termination receipt: NONE/);
+  // A BUILDING run is not an abandonable lifecycle state, so nothing offers to
+  // close its record either.
+  assert.ok(!/close the run record/.test(rdValue(page, 'stop')));
+});
+
+test('DOM: a BUILDING run with no recorded cancellation capability is not stoppable from this page', () => {
+  const page = rdPage(rdRun({ build: rdBuild({ cancelAvailable: false }) }));
+  assert.strictEqual(rdState(page, 'stop'), 'NO_CANCEL_CAPABILITY');
+  assert.match(rdValue(page, 'stop'), /this page cannot stop its process/);
+  assert.match(rdDisclosure(page, 'stop').textContent,
+    /Recorded worker cancellation capability: NOT RECORDED/);
+  assert.ok(!/can be asked to stop/.test(rdValue(page, 'stop')),
+    'a run with no recorded capability was offered as stoppable');
+});
+
+test('DOM: a signalled cancellation with no termination receipt never reads as a stopped process', () => {
+  const page = rdPage(rdRun({
+    build: rdBuild({ status: 'TERMINATION_UNVERIFIED', cancelAvailable: false,
+      retrySafe: false, recoveryCode: 'TERMINATION_UNVERIFIED' }),
+  }));
+  assert.strictEqual(rdState(page, 'stop'), 'TERMINATION_UNVERIFIED');
+  assert.match(rdValue(page, 'stop'), /AEGIS cannot say the process stopped/);
+  assert.ok(!/Nothing is left to stop/.test(rdValue(page, 'stop')),
+    'a cancellation with no receipt was reported as a completed stop');
+  assert.match(rdDisclosure(page, 'stop').textContent,
+    /Recorded termination receipt: TERMINATION_UNVERIFIED/);
+  assert.match(rdDisclosure(page, 'stop').textContent,
+    /AEGIS reports a process stopped only when its worker attempt is recorded TERMINATED\./);
+  // And the same run is named as one this page cannot finish accounting for.
+  assert.strictEqual(rdState(page, 'continue'), 'UNVERIFIED_TERMINATION');
+  assert.match(rdValue(page, 'continue'),
+    /can only be established outside this dashboard/);
+});
+
+test('DOM: a record that can still be closed is never confused with a process that stopped', () => {
+  const page = rdPage(rdRun({
+    state: 'BUILD_FAILED',
+    build: rdBuild({ status: 'FAILED', cancelAvailable: false, exit: 1, retrySafe: false,
+      recoveryCode: 'TERMINATION_UNVERIFIED' }),
+  }));
+  assert.strictEqual(rdState(page, 'stop'), 'TERMINATION_UNVERIFIED');
+  assert.match(rdValue(page, 'stop'),
+    /Cancel can still close the run record as abandoned, which closes the record and proves nothing about the process\./);
+  assert.match(rdValue(page, 'stop'), /AEGIS cannot say the process stopped/);
+});
+
+test('DOM: an orphaned worker attempt is an unobserved termination, not a stop', () => {
+  const page = rdPage(rdRun({
+    build: rdBuild({ status: 'ORPHANED', cancelAvailable: false, retrySafe: false,
+      recoveryCode: 'ORPHANED' }),
+  }));
+  assert.strictEqual(rdState(page, 'stop'), 'ORPHANED');
+  assert.match(rdValue(page, 'stop'), /its termination was never observed/);
+  assert.ok(!/Nothing is left to stop/.test(rdValue(page, 'stop')));
+  assert.match(rdDisclosure(page, 'stop').textContent, /Recorded termination receipt: ORPHANED/);
+  assert.strictEqual(rdState(page, 'continue'), 'UNVERIFIED_TERMINATION');
+});
+
+test('DOM: only a recorded TERMINATED attempt lets the deck say the process stopped', () => {
+  const page = rdPage(rdRun({
+    state: 'ABANDONED',
+    build: rdBuild({ status: 'TERMINATED', cancelAvailable: false,
+      endedAt: '2026-09-04T12:31:00.000Z' }),
+  }));
+  assert.strictEqual(rdState(page, 'stop'), 'STOPPED');
+  assert.match(rdValue(page, 'stop'),
+    /Nothing is left to stop\. This run's worker attempt is recorded TERMINATED, which is the canonical receipt that the process stopped\./);
+  const exact = rdDisclosure(page, 'stop').textContent;
+  assert.match(exact, /Recorded termination receipt: TERMINATED/);
+  assert.match(exact, /Recorded worker end time: 2026-09-04T12:31:00\.000Z/);
+});
+
+test('DOM: cancelling a run with no running worker closes the record and is said to stop nothing', () => {
+  const page = rdPage(rdRun({ state: 'BUILT', build: rdStoppedBuild() }));
+  assert.strictEqual(rdState(page, 'stop'), 'RECORD_ONLY');
+  assert.match(rdValue(page, 'stop'),
+    /Cancel here closes the run record as abandoned\. It stops no process, because none is recorded running\./);
+
+  // A state the transition authority does not abandon offers nothing at all,
+  // and says which recorded state that is.
+  const closed = rdPage(rdRun({ state: 'CHECKPOINTED', build: rdStoppedBuild(),
+    checkpoint: 'CHK-20260904-9', checkpointState: 'VALIDATED', rollbackPoint: RD_COMMIT }));
+  assert.strictEqual(rdState(closed, 'stop'), 'NOT_CANCELABLE');
+  assert.match(rdValue(closed, 'stop'),
+    /its recorded state CHECKPOINTED is not one AEGIS cancels, and no worker process is recorded running/);
+});
+
+test('DOM: a validated checkpoint is preserved evidence, never an exposed rollback control', () => {
+  const page = rdPage(rdRun({ state: 'CHECKPOINTED', build: rdStoppedBuild(),
+    checkpoint: 'CHK-20260904-9', checkpointState: 'VALIDATED', rollbackPoint: RD_COMMIT }));
+  assert.strictEqual(rdState(page, 'preserved'), 'RECORDED');
+  assert.match(rdValue(page, 'preserved'),
+    /^This run has a recorded safe checkpoint, so stopping it leaves a recorded safe state behind\./);
+  const exact = rdDisclosure(page, 'preserved').textContent;
+  assert.match(exact, /Checkpoint receipt: CHK-20260904-9/);
+  assert.ok(exact.includes(RD_COMMIT), 'the recorded rollback commit was dropped instead of disclosed');
+  assert.match(exact, /Restoring it is a governed action AEGIS does not expose here\./,
+    'the deck implies rollback is something this page can perform');
+  assert.match(exact,
+    /What the builder left in its isolated worktree is not delivered to this page/,
+    'unrecorded worktree contents were treated as proven kept or proven lost');
+});
+
+test('DOM: an unvalidated or absent checkpoint is a closed door, never a preserved safe state', () => {
+  const invalid = rdPage(rdRun({ state: 'BUILD_FAILED', build: rdStoppedBuild({ exit: 1, status: 'FAILED' }),
+    checkpoint: null, checkpointState: 'INVALID',
+    checkpointReason: 'the checkpoint receipt did not match its recorded subject' }));
+  assert.strictEqual(rdState(invalid, 'preserved'), 'BLOCKED');
+  assert.match(rdValue(invalid, 'preserved'),
+    /checkpoint receipt did not validate, so no safe state and no way back can be named for it/);
+  assert.match(rdDisclosure(invalid, 'preserved').textContent,
+    /Recovery route: BLOCKED/);
+
+  const none = rdPage(rdRun({ state: 'BUILD_FAILED', build: rdStoppedBuild({ exit: 1, status: 'FAILED' }) }));
+  assert.strictEqual(rdState(none, 'preserved'), 'NOT_RECORDED');
+  assert.match(rdValue(none, 'preserved'),
+    /No checkpoint is recorded for this run, so stopping it leaves no recorded safe state to return to\./);
+  assert.ok(!/rollback commit [0-9a-f]/.test(rdValue(none, 'preserved')),
+    'an identifier was printed for a checkpoint that does not exist');
+});
+
+test('DOM: Retry is valid only where the canonical retry authority says so', () => {
+  const failed = rdPage(rdRun({ state: 'BUILD_FAILED',
+    build: rdStoppedBuild({ status: 'FAILED', exit: 1 }) }));
+  assert.strictEqual(rdState(failed, 'retry'), 'AVAILABLE');
+  assert.match(rdValue(failed, 'retry'), /^Retry is valid\./);
+  assert.match(rdDisclosure(failed, 'retry').textContent, /Recorded correction cycles: 0 used of 3 allowed\./);
+  assert.strictEqual(rdState(failed, 'continue'), 'NOT_REQUIRED');
+  assert.match(rdValue(failed, 'continue'),
+    /No recorded timeout and no spent correction budget requires this run to leave the dashboard\./);
+
+  // A running build has no failure to correct, so Retry is not offered at all.
+  const building = rdPage(rdRun());
+  assert.strictEqual(rdState(building, 'retry'), 'NOT_APPLICABLE');
+  assert.match(rdValue(building, 'retry'), /^Retry is not offered\./);
+
+  // A recorded unsafe attempt refuses Retry and leaves no bounded route here.
+  const unsafe = rdPage(rdRun({ state: 'BUILD_FAILED',
+    build: rdStoppedBuild({ status: 'FAILED', exit: 1, retrySafe: false }) }));
+  assert.strictEqual(rdState(unsafe, 'retry'), 'UNSAFE');
+  assert.match(rdValue(unsafe, 'retry'), /recorded retry-safe NO, so AEGIS will not re-enter the bounded correction route/);
+  assert.strictEqual(rdState(unsafe, 'continue'), 'NO_DASHBOARD_ROUTE');
+});
+
+test('DOM: an exhausted correction budget refuses Retry and names no dashboard route left', () => {
+  const page = rdPage(rdRun({ state: 'REVIEW_FAILED', corrections: 3, maxCorrections: 3,
+    build: rdStoppedBuild() }));
+  assert.strictEqual(rdState(page, 'retry'), 'CORRECTION_LIMIT');
+  assert.match(rdValue(page, 'retry'),
+    /All 3 bounded correction cycle\(s\) are already used, so AEGIS refuses another retry\./);
+  assert.strictEqual(rdState(page, 'continue'), 'NO_DASHBOARD_ROUTE');
+  assert.match(rdValue(page, 'continue'), /^No bounded route remains on this page\./);
+  assert.match(rdDisclosure(page, 'retry').textContent, /Recorded correction cycles: 3 used of 3 allowed\./);
+});
+
+test('DOM: absent correction counters read UNVERIFIED, never as spent capacity', () => {
+  const page = rdPage(rdRun({ state: 'BUILD_FAILED', corrections: null, maxCorrections: null,
+    build: rdStoppedBuild({ status: 'FAILED', exit: 1 }) }));
+  assert.strictEqual(rdState(page, 'retry'), 'AVAILABLE',
+    'missing correction counters were treated as proof the budget is spent');
+  assert.match(rdDisclosure(page, 'retry').textContent,
+    /Recorded correction cycles: UNVERIFIED — this run record carries no correction counters, which is missing evidence, not proof of remaining capacity\./);
+});
+
+test('DOM: a recorded builder timeout refuses Retry here and sends the same run to the CLI', () => {
+  const page = rdPage(rdRun({ state: 'BUILD_FAILED',
+    build: rdStoppedBuild({ status: 'FAILED', exit: 124, timedOut: true,
+      supervision: rdTimeoutSupervision() }) }));
+  assert.strictEqual(rdState(page, 'retry'), 'CLI_TIMEOUT_CONTINUATION');
+  assert.match(rdValue(page, 'retry'), /Retry here would repeat the same bounded attempt and spend a correction cycle\./);
+  assert.strictEqual(rdState(page, 'continue'), 'CLI_CONTINUATION');
+  assert.match(rdValue(page, 'continue'),
+    /^Now\. The builder timed out\./);
+  assert.match(rdValue(page, 'continue'),
+    /Continue this run from the AEGIS CLI, which is the only place a command and a timeout may be chosen\./);
+  const exact = rdDisclosure(page, 'continue').textContent;
+  assert.match(exact, /Timeout: NO_PROGRESS_TIMEOUT/);
+  assert.match(exact, /This page may never choose an executable, a command, a provider, a model or a timeout/);
+
+  // A run still recorded as building with a fired watchdog is named the same
+  // way, from the supervision resolution alone.
+  const stalled = rdPage(rdRun({ build: rdBuild({ cancelAvailable: false, timedOut: true,
+    supervision: rdTimeoutSupervision() }) }));
+  assert.strictEqual(rdState(stalled, 'continue'), 'TIMEOUT_RECORDED');
+  assert.match(rdValue(stalled, 'continue'),
+    /A builder timeout is recorded for this run, so continuing this same run is a CLI action\./);
+});
+
+test('DOM: an unbound recovery deck states what is not recorded and invents no stop, retry or safe state', () => {
+  const page = bootPage(fixtureState());
+  const scope = page.document.getElementById('rd-scope');
+  assert.strictEqual(scope.getAttribute('data-rd-scope'), 'NO_RUN');
+  assert.match(scope.textContent, /No canonical run is bound to this page/);
+  assert.strictEqual(rdState(page, 'stop'), 'NO_RUN');
+  assert.match(rdValue(page, 'stop'), /there is nothing to stop\./);
+  assert.strictEqual(rdState(page, 'retry'), 'NO_RUN');
+  assert.match(rdValue(page, 'retry'), /so Retry is not offered\./);
+  assert.strictEqual(rdState(page, 'continue'), 'NO_RUN');
+  assert.match(rdValue(page, 'continue'), /so no run has to be continued anywhere\./);
+  assert.strictEqual(rdState(page, 'preserved'), 'UNAVAILABLE');
+  assert.match(rdValue(page, 'preserved'), /whether a recorded safe state exists is UNAVAILABLE/);
+  const disclosed = rdAnswers(page)
+    .map((answer) => rdDisclosure(page, answer.attrs['data-rd-answer']).textContent).join(' ');
+  assert.ok(!/RUN-\d/.test(disclosed), 'the unbound deck named a run nobody bound');
+  assert.match(rdDisclosure(page, 'stop').textContent, /Run id: Not recorded/);
+});
+
+test('DOM: exact state codes, run id, receipts and checkpoint identifiers stay behind the disclosures', () => {
+  const page = rdPage(rdRun({ state: 'BUILD_FAILED', corrections: 1, maxCorrections: 3,
+    checkpoint: 'CHK-20260904-9', checkpointState: 'VALIDATED', rollbackPoint: RD_COMMIT,
+    build: rdStoppedBuild({ status: 'FAILED', exit: 1, timedOut: true,
+      supervision: rdTimeoutSupervision() }) }));
+  const exact = [RD_RUN_ID, 'CHK-20260904-9', RD_COMMIT, 'NO_PROGRESS_TIMEOUT', 'BUILD_FAILED',
+    '2026-09-04T12:31:00.000Z'];
+  for (const answer of rdAnswers(page)) {
+    const id = answer.attrs['data-rd-answer'];
+    const summary = allNodes(answer)
+      .filter((node) => String(node.className) === 'rd-value' || /^chip\b/.test(String(node.className)))
+      .map((node) => node.textContent).join(' ');
+    for (const value of exact) {
+      assert.ok(!summary.includes(value), `the compact answer "${id}" prints the exact value ${value}`);
+    }
+    // Compact means one readable sentence pair. The next action is exempt: it is
+    // the deck's own sentence, and shortening it here would make two surfaces
+    // state the same governed action differently.
+    if (id !== 'next') {
+      assert.ok(rdValue(page, id).length <= 340,
+        `the "${id}" summary is too long to read at a glance`);
+    }
+    // Visible summary is exactly: title, answer, state chip, one disclosure.
+    assert.strictEqual(answer.children.length, 4,
+      `the "${id}" answer grew extra visible rows around its disclosure`);
+    assert.strictEqual(String(answer.children[3].className), 'rd-exact',
+      'the exact evidence is not the last, disclosed part of the answer');
+    assert.strictEqual(answer.children[3].open, false,
+      'an exact-evidence disclosure is forced open, so the deck is no longer compact');
+    assert.strictEqual(answer.children[3].children[0].tagName, 'SUMMARY',
+      'the exact evidence is not behind a native, keyboard-operable disclosure');
+  }
+  // Every one of those exact facts is still on the page, one keyboard press away.
+  const disclosed = rdAnswers(page)
+    .map((answer) => rdDisclosure(page, answer.attrs['data-rd-answer']).textContent).join(' ');
+  for (const value of exact) {
+    assert.ok(disclosed.includes(value), `the exact recorded value ${value} was dropped instead of disclosed`);
+  }
+  // Status is never colour alone: each answer carries its state as a word.
+  for (const answer of rdAnswers(page)) {
+    const badge = answer.children[2];
+    assert.match(String(badge.className), /^chip\b/, 'an answer state is signalled without a chip');
+    assert.strictEqual(badge.children.length, 2,
+      'an answer state chip carries no glyph beside its written label');
+    assert.ok(badge.children[1].textContent.length > 0, 'an answer state chip has no written label');
+  }
+});
+
+test('DOM: a live status repaint keeps the opened receipt and the keyboard where they were', () => {
+  const page = rdPage(rdRun());
+  rdDisclosure(page, 'retry').open = true;
+  rdDisclosure(page, 'retry').children[0].focus();
+
+  renderMinimizedStatus(page, {
+    generatedAt: '2026-09-04T13:05:00.000Z',
+    engineering: crEngineering(),
+    runs: [rdRun()],
+    runsBinding: { state: 'BOUND', runId: RD_RUN_ID, evidenceState: 'OK',
+      updatedAt: '2026-09-04T12:30:00.000Z', reason: 'the exact current run is bound' },
+    runsState: 'OK',
+    cost: { state: 'UNAVAILABLE', reason: 'no transcripts' },
+    integration: { connectors: [] }, reviewers: [], events: [],
+  });
+
+  assert.strictEqual(rdDisclosure(page, 'retry').open, true,
+    'a live push closed the receipt the operator had opened');
+  assert.strictEqual(page.document.activeElement, rdDisclosure(page, 'retry').children[0],
+    'a live push moved the keyboard off the disclosure the operator was on');
+  assert.strictEqual(rdDisclosure(page, 'stop').open, false,
+    'a live push opened a disclosure the operator never opened');
+  assert.strictEqual(rdState(page, 'stop'), 'WORKER_CANCELABLE',
+    'the repaint did not read the pushed canonical run');
+});
+
+test('the recovery deck adds no authority, timer, endpoint, control, writer or provider claim', () => {
+  assert.ok(RECOVERY.length > 2000, 'the recovery deck source block was not located');
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.random', 'fetch(', 'XMLHttpRequest', 'EventSource', 'innerHTML', 'localStorage',
+    'AEGIS_STATE', 'document.querySelector', 'callApi', '/api/']) {
+    assert.ok(!RECOVERY.includes(banned),
+      `the recovery deck uses ${banned} — it may only read the canonical resolutions it was handed`);
+  }
+  // It adds no control: Start, Cancel and Retry stay where they already are.
+  assert.ok(!/addEventListener|el\('button'/.test(RECOVERY),
+    'the recovery deck added a control of its own instead of describing the existing ones');
+  // Rollback is never presented as something this page exposes.
+  assert.ok(!/ROLLED_BACK|rollbackRun|requestRollback/.test(RECOVERY),
+    'the recovery deck reached for a rollback route this page does not expose');
+  // No invented provider, model or failover claim.
+  assert.ok(!/claude|gpt|grok|codex|openai|anthropic|failover/i.test(RECOVERY),
+    'the recovery deck hardcoded a provider, model or failover status');
+  // It re-derives none of the verdicts it prints; it is handed every one.
+  for (const derived of ['retryAvailability(', 'checkpointEvidenceState(', 'supervisionFacts(',
+    'evidenceCheckpointPanel(', 'blockingStatus(', 'operationalState(']) {
+    assert.ok(!RECOVERY.includes(derived),
+      `the recovery deck calls ${derived} instead of restating the resolution it was handed`);
+  }
+  // It never writes to a canonical record.
+  assert.ok(!/\b(?:run|build|retry|panel|answer|context|supervision)\.[A-Za-z]+\s*=[^=]/.test(RECOVERY),
+    'the recovery deck assigns to a canonical record instead of reading it');
+  // The deck hands it the same facts every other instrument was painted from.
+  assert.strictEqual((code.match(/renderRecoveryDeck\(/g) || []).length, 2,
+    'the recovery deck is called from somewhere other than its definition and the deck repaint');
+  const call = code.slice(code.indexOf('renderRecoveryDeck({'));
+  const handed = call.slice(0, call.indexOf('});'));
+  for (const field of ['run: boundRun,', 'supervision: supervision,', 'retry: deckRetry,',
+    'checkpoint: evidenceCheckpointPanel(boundRun, safeCheckpoint),', 'nextAction: deckActions[0]']) {
+    assert.ok(handed.includes(field), `the recovery deck is not handed the deck's own ${field}`);
+  }
+});
+
+test('one authority decides what Cancel is offered for, and the run card reads it', () => {
+  assert.strictEqual((code.match(/var CANCEL_ABANDON_STATES = /g) || []).length, 1,
+    'the abandonable-state list exists in more than one place');
+  assert.strictEqual((code.match(/function cancelOffer\(/g) || []).length, 1,
+    'cancellation availability is resolved by more than one function');
+  assert.ok(!/hasCancellationCapability/.test(code),
+    'a second cancellation-capability reading survives beside the shared one');
+  assert.ok(!/var CANCELABLE = /.test(code),
+    'a second cancelable-state list survives beside the shared one');
+  assert.ok(/cancelOffer:\s*cancelOffer/.test(code),
+    'the shared cancel offer is not exported to the switchboard layer');
+  const runCard = code.slice(code.indexOf('function runActionRow'), code.indexOf('function renderRuns'));
+  assert.ok(/window\.AEGIS_DASHBOARD\.cancelOffer\(run\)/.test(runCard),
+    'the run card keeps its own opinion about which runs may be cancelled');
+  assert.ok(/\{ worker: false, lifecycle: false, offered: false \}/.test(runCard),
+    'the run card does not fail closed when the shared cancel authority is unavailable');
+  // Cancellation authority is the server's projection, never a browser guess.
+  assert.ok(/run\.build\.cancelAvailable === true/.test(RECOVERY),
+    'the deck infers cancellation capability instead of reading the canonical projection');
+  assert.ok(!/workerPid|heartbeatAt|startedAt/.test(RECOVERY.slice(RECOVERY.indexOf('function cancelOffer'),
+    RECOVERY.indexOf('function rdStopFacts'))),
+    'cancellation authority was inferred from a pid, a heartbeat or elapsed time');
+});
+
+test('the recovery deck is keyboard operable, motion-free and legible at 390px', () => {
+  const source = htmlSrc();
+  assert.ok(/<section id="recovery-deck" aria-labelledby="recovery-deck-h">/.test(source),
+    'the recovery deck is not a labelled first-screen region');
+  assert.ok(source.indexOf('id="topology-overview"') < source.indexOf('id="recovery-deck"') &&
+    source.indexOf('id="recovery-deck"') < source.indexOf('id="changes-receipts"'),
+    'the recovery deck is not in the founder\'s reading order between the build route and the receipts inspector');
+  assert.ok(source.indexOf('id="recovery-deck"') < source.indexOf('class="evidence-deck"'),
+    'the Command View recovery deck was buried in the deep evidence deck');
+  // 390px: one answer per row, finger-sized disclosures, every canonical value
+  // wraps instead of pushing the viewport sideways.
+  assert.ok(/#rd-answers\{grid-template-columns:1fr\}/.test(PHONE),
+    'the recovery deck still shares a phone row between answers');
+  assert.ok(/\.rd-exact>summary\{min-height:44px/.test(PHONE),
+    'the exact-evidence disclosure is not finger-sized on a phone');
+  const wrapped = phoneSelectorsDeclaring(/overflow-wrap:anywhere/);
+  assert.ok(wrapped.has('.rd-scope') && wrapped.has('.rd-value') && wrapped.has('.rd-fact'),
+    'recovery values can still push a 390px viewport sideways');
+  for (const rule of [/\.rd-scope\{[^}]*overflow-wrap:anywhere/, /\.rd-value\{[^}]*overflow-wrap:anywhere/,
+    /\.rd-fact\{[^}]*overflow-wrap:anywhere/]) {
+    assert.ok(rule.test(code), `a dense recovery value does not wrap at every width: ${rule}`);
+  }
+  assert.ok(/\.rd-exact>summary:focus-visible\{outline:2px solid var\(--focus\)/.test(code),
+    'the recovery deck disclosures have no visible keyboard focus');
+  // Nothing on a recovery surface may move: a failed or stopped run must never
+  // borrow a working shape.
+  // Slice the stylesheet out of `source`, not `code`: `code` has CSS comments
+  // stripped, so the delimiters below only exist in the comment-preserving read.
+  const css = source.slice(source.indexOf('/* ── recovery deck ──'),
+    source.indexOf('/* ── changes & receipts inspector ──'));
+  assert.ok(css.length > 400, 'the recovery deck stylesheet block was not located');
+  assert.ok(!/animation|transition|@keyframes/.test(css), 'the recovery deck animates');
+});
+
 async function atest(name, fn) {
   try { await fn(); passed++; console.log(`ok   ${name}`); }
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }
