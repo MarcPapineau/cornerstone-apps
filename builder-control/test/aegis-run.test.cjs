@@ -68,6 +68,10 @@ function outerSnapshotEvidence() {
 const OUTER_SNAPSHOT = outerSnapshotEvidence();
 const HOST_ONLY = process.argv.slice(2).includes('--host-only');
 const HOST_PROOF_ONLY = process.argv.slice(2).includes('--host-proof-only');
+// A fixed-purpose selector for the global-claim admission proofs only. It adds
+// no framework and no pattern matching: the selected case names are a frozen
+// literal list below, and every one of them must still run.
+const REVIEW_ADMISSION_ONLY = process.argv.slice(2).includes('--review-admission-only');
 
 function assertIsolatedRepositoryMarker() {
   const marker = process.env.AEGIS_TEST_ISOLATED_REPOSITORY;
@@ -122,7 +126,7 @@ function runInDisposableExactRepository() {
       checkedTestCommand('publish canonical untracked subject intent', 'git',
         ['add', '-N', '--', relative], { cwd: repo });
     }
-    const frozenReviewFixtures = HOST_ONLY ? [] : [
+    const frozenReviewFixtures = HOST_ONLY || REVIEW_ADMISSION_ONLY ? [] : [
       'builder-control/review-raw/20260828220306-grok.txt',
       'builder-control/review-raw/20260829021134-grok.txt',
     ];
@@ -149,6 +153,7 @@ function runInDisposableExactRepository() {
       path.join(repo, 'builder-control', 'test', 'aegis-run.test.cjs'),
       ...(HOST_ONLY ? ['--host-only'] : []),
       ...(HOST_PROOF_ONLY ? ['--host-proof-only'] : []),
+      ...(REVIEW_ADMISSION_ONLY ? ['--review-admission-only'] : []),
     ], {
       cwd: repo,
       env: { ...process.env, AEGIS_TEST_ISOLATED_REPOSITORY: isolatedRoot },
@@ -269,7 +274,31 @@ const STATE = require('../aegis-state.cjs');
 let passed = 0;
 let skipped = 0;
 const skip = (reason) => ({ skipped: String(reason || 'not applicable') });
+// The exact cases --review-admission-only selects: the existing canonical
+// global-claim recovery proofs, plus the new review-hold admission proofs.
+// This is a subset, never a gate — it claims nothing about the rest of the
+// suite and must never be reported as full coverage.
+const REVIEW_ADMISSION_CASES = Object.freeze([
+  'global worker admission refuses a second run before BUILDING mutation',
+  'launch claim: a reused numeric PID with a different process lifetime is reclaimed without signalling it',
+  'launch claim: a positively absent crashed owner is reclaimed without signalling',
+  'global lease transfer defeats a stale launcher decision and stale generations cannot release',
+  'global admission recovers an empty directory left by interrupted release',
+  'launch claim: live owner with unavailable identity observation fails closed and is preserved',
+  'launch claim: an incomplete sibling publication cannot wedge the canonical claim',
+  'launch claim: two stale-claim reclaimers cannot unlink the newly acquired owner',
+  'review admission: one atomic REVIEW_HOLD generation excludes a second review and a builder',
+  'review admission: a dead or reused caller never frees a review hold',
+  'review admission: generic, stale and unproven release all preserve the held bytes',
+  'review admission: another live process cannot release a hold it does not own',
+  'review admission: proven lifecycle evidence releases the slot back to the builders',
+]);
+const selectedReviewAdmissionCases = new Set();
 function executeTest(n, fn) {
+  if (REVIEW_ADMISSION_ONLY) {
+    if (!REVIEW_ADMISSION_CASES.includes(n)) return;
+    selectedReviewAdmissionCases.add(n);
+  }
   try {
     const result = fn();
     if (result && result.skipped) {
@@ -1922,7 +1951,7 @@ function createCanonicalReviewWorktreeFixture() {
   // The host-containment suite replays two frozen, non-subject Grok receipts.
   // Mirror them into this disposable worktree exactly as a real governed run
   // does; they remain outside filesAllowed and cannot change the subject hash.
-  const reviewWorktreeFixtures = HOST_ONLY || OUTER_SNAPSHOT ? [] : [
+  const reviewWorktreeFixtures = HOST_ONLY || REVIEW_ADMISSION_ONLY || OUTER_SNAPSHOT ? [] : [
     'builder-control/review-raw/20260828220306-grok.txt',
     'builder-control/review-raw/20260829021134-grok.txt',
   ];
@@ -5299,6 +5328,267 @@ hostContainmentTest('global admission recovers an empty directory left by interr
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
+// ── single-review admission on the same canonical global claim ──────────────
+const DRAINED_PROOF = `{ state: 'LAUNCHED_DRAINED', launched: true, drainageProven: true,
+  provenance: 'runtool-watchdog-drainage-evidence',
+  detail: 'a reviewer process group was launched and this invocation proved it drained' }`;
+const NOT_LAUNCHED_PROOF = `{ state: 'NOT_LAUNCHED', launched: false, drainageProven: null,
+  provenance: 'callable-entry-before-launch',
+  detail: 'no reviewer process was launched during this invocation' }`;
+
+hostContainmentTest('review admission: one atomic REVIEW_HOLD generation excludes a second review and a builder', () => {
+  const { r, TMP } = withSeededRun('WORKTREE_READY', {
+    worktree: { path: fs.realpathSync(os.tmpdir()) },
+  }, `
+    const fs = require('fs'); const path = require('path');
+    const lock = R.globalWorkerLockPath();
+    const hold = R.acquireGlobalReviewHold(runId, 0);
+    const owners = fs.readdirSync(lock);
+    const stored = JSON.parse(fs.readFileSync(path.join(lock, owners[0]), 'utf8'));
+    const attempt = (take) => { try { take(); return { threw: false }; }
+      catch (error) { return { threw: true, code: error.code, httpStatus: error.httpStatus }; } };
+    const second = attempt(() => R.acquireGlobalReviewHold(runId, 0));
+    const builder = attempt(() => R.acquireGlobalWorkerClaim(0));
+    console.log(JSON.stringify({ owners, holder: stored.holder, storedRunId: stored.runId,
+      boundToRun: stored.runId === runId,
+      boundToAttempt: typeof stored.attemptId === 'string' && stored.attemptId.length === 36,
+      boundToCaller: stored.pid === process.pid &&
+        R.sameProcessIdentity(stored.processIdentity, R.processIdentity(process.pid)),
+      publishedGeneration: stored.claimId === hold.claimId, second, builder }));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.strictEqual(out.owners.length, 1, 'the review hold published more than one owner record');
+  assert.strictEqual(out.holder, 'REVIEW_HOLD');
+  assert.strictEqual(out.boundToRun, true, 'the hold is not bound to exactly one run');
+  assert.strictEqual(out.boundToAttempt, true, 'the hold carries no unique attempt');
+  assert.strictEqual(out.boundToCaller, true, 'the hold is not bound to the calling process lifetime');
+  assert.strictEqual(out.publishedGeneration, true,
+    'the published generation differs from the one the caller holds');
+  assert.deepStrictEqual(out.second, { threw: true, code: 'LAUNCH_IN_PROGRESS', httpStatus: 409 },
+    'a second review overlapped the first');
+  assert.deepStrictEqual(out.builder, { threw: true, code: 'LAUNCH_IN_PROGRESS', httpStatus: 409 },
+    'a builder overlapped a review');
+
+  // The hold is a review hold in its first published byte: there is no
+  // reclaimable LAUNCHER generation that is later promoted, and no second lock.
+  const src = fs.readFileSync(CLI, 'utf8');
+  const acquireAt = src.indexOf('function acquireGlobalReviewHold');
+  const acquire = src.slice(acquireAt, src.indexOf('\n}\n', acquireAt));
+  assert.match(acquire, /holder: REVIEW_HOLD_HOLDER/,
+    'the review holder must be part of the single atomic publication');
+  assert.doesNotMatch(acquire, /LAUNCHER/,
+    'the review hold must never exist as a launcher generation first');
+  assert.strictEqual((acquire.match(/acquireLaunchClaim\(/g) || []).length, 1,
+    'the review hold must reuse exactly one existing publication path');
+  assert.strictEqual((src.match(/\.global-worker\.launch\.lock/g) || []).length, 1,
+    'admission gained a second global lock path');
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+hostContainmentTest('review admission: a dead or reused caller never frees a review hold', () => {
+  const { r, TMP } = withSeededRun('WORKTREE_READY', {
+    worktree: { path: fs.realpathSync(os.tmpdir()) },
+  }, `
+    const fs = require('fs'); const path = require('path');
+    const lock = R.globalWorkerLockPath();
+    const identity = R.processIdentity(process.pid);
+    const deadPid = 2147483647;
+    const claimId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const results = [];
+    for (const [label, owner] of [
+      ['dead caller', { pid: deadPid, processIdentity: { pid: deadPid, processGroupId: deadPid,
+        startMarker: 'prior-lifetime', executable: '/dead/aegis-review', source: 'ps' } }],
+      ['reused pid', { pid: process.pid,
+        processIdentity: { ...identity, startMarker: identity.startMarker + '-prior-lifetime' } }],
+    ]) {
+      fs.mkdirSync(lock, { mode: 0o700 });
+      const ownerPath = path.join(lock, claimId + '.json');
+      const bytes = JSON.stringify({ claimId, scope: 'review of run ' + runId,
+        lease: 'GLOBAL_SINGLE_WORKER', holder: 'REVIEW_HOLD', runId,
+        attemptId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', ...owner,
+        claimedAt: new Date().toISOString() });
+      fs.writeFileSync(ownerPath, bytes, { mode: 0o600 });
+      const attempt = (take) => { try { take(); return { threw: false }; }
+        catch (error) { return { threw: true, code: error.code }; } };
+      results.push({ label,
+        review: attempt(() => R.acquireGlobalReviewHold(runId, 0)),
+        builder: attempt(() => R.acquireGlobalWorkerClaim(0)),
+        owners: fs.readdirSync(lock).length,
+        preserved: fs.readFileSync(ownerPath, 'utf8') === bytes });
+      fs.rmSync(lock, { recursive: true, force: true });
+    }
+    console.log(JSON.stringify(results));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const results = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.strictEqual(results.length, 2);
+  for (const observed of results) {
+    assert.deepStrictEqual(observed, {
+      label: observed.label,
+      review: { threw: true, code: 'LAUNCH_IN_PROGRESS' },
+      builder: { threw: true, code: 'LAUNCH_IN_PROGRESS' },
+      owners: 1,
+      preserved: true,
+    }, `a ${observed.label} freed an unresolved review hold`);
+  }
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+hostContainmentTest('review admission: generic, stale and unproven release all preserve the held bytes', () => {
+  const { r, TMP } = withSeededRun('WORKTREE_READY', {
+    worktree: { path: fs.realpathSync(os.tmpdir()) },
+  }, `
+    const fs = require('fs');
+    const hold = R.acquireGlobalReviewHold(runId, 0);
+    const bytes = fs.readFileSync(hold.ownerPath, 'utf8');
+    const drained = ${DRAINED_PROOF};
+    const drainedLater = ${DRAINED_PROOF};
+    const refused = {
+      generic: R.releaseRunLaunchClaim(hold),
+      // The generic release must have no argument that frees a review hold.
+      // Anything extra is ignored, so a caller cannot reach the bytes without
+      // going through the dedicated lifecycle validation.
+      genericProvenFlag: R.releaseRunLaunchClaim(hold, true),
+      genericExtraArguments: R.releaseRunLaunchClaim(hold, true, drainedLater, 'RELEASED'),
+      // A reconstructed copy that relabels itself a launcher is still measured
+      // against the holder the acquirer wrote to disk.
+      genericReconstructedLauncher: R.releaseRunLaunchClaim({ ...hold, holder: 'LAUNCHER' }, true),
+      genericWorkerLease: R.releaseGlobalWorkerLease(hold),
+      staleGeneration: R.releaseGlobalReviewHold(
+        { ...hold, claimId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' }, drained),
+      staleAttempt: R.releaseGlobalReviewHold(
+        { ...hold, attemptId: 'ffffffff-ffff-4fff-8fff-ffffffffffff' }, drained),
+      missingProof: R.releaseGlobalReviewHold(hold, null),
+      undrained: R.releaseGlobalReviewHold(hold, { state: 'LAUNCHED_UNDRAINED', launched: true,
+        drainageProven: false, provenance: 'runtool-launch-attempted',
+        detail: 'a reviewer process group was launched and this invocation did not prove it drained' }),
+      unknown: R.releaseGlobalReviewHold(hold, { state: 'UNKNOWN', launched: null,
+        drainageProven: null, provenance: 'unavailable',
+        detail: 'reviewer process provenance is unavailable for this invocation' }),
+      billingLaunchAttempted: R.releaseGlobalReviewHold(hold, { state: 'LAUNCHED_UNDRAINED',
+        launched: true, drainageProven: false,
+        provenance: 'grok-billing-preflight-launch-attempted',
+        detail: 'a billing preflight process group was launched and was not proved drained' }),
+      incoherentFields: R.releaseGlobalReviewHold(hold, { ...drained, drainageProven: false }),
+      incoherentProvenance: R.releaseGlobalReviewHold(hold,
+        { ...drained, provenance: 'runtool-launch-attempted' }),
+      notLaunchedAfterLaunch: R.releaseGlobalReviewHold(hold, { state: 'NOT_LAUNCHED',
+        launched: false, drainageProven: null, provenance: 'runtool-launch-attempted',
+        detail: 'no reviewer process was launched during this invocation' }),
+      unknownProvenance: R.releaseGlobalReviewHold(hold,
+        { ...drained, provenance: 'browser-request-field' }),
+      extraFields: R.releaseGlobalReviewHold(hold, { ...drained, exitCode: 0, verdict: 'PASS' }),
+      outcomeShape: R.releaseGlobalReviewHold(hold,
+        { ok: true, exitCode: 0, outcome: 'RECORD_WRITTEN', reason: null, verdict: 'PASS' }),
+      textProof: R.releaseGlobalReviewHold(hold, 'LAUNCHED_DRAINED'),
+      // A state naming an inherited Object.prototype member is malformed, not
+      // recognized. It must refuse, not throw on the provenance lookup.
+      inheritedStateConstructor: R.releaseGlobalReviewHold(hold, { ...drained, state: 'constructor' }),
+      inheritedStateToString: R.releaseGlobalReviewHold(hold, { ...drained, state: 'toString' }),
+    };
+    const stillHeld = (() => { try { R.acquireGlobalWorkerClaim(0); return false; }
+      catch (error) { return error.code === 'LAUNCH_IN_PROGRESS'; } })();
+    console.log(JSON.stringify({ refused, stillHeld,
+      preserved: fs.readFileSync(hold.ownerPath, 'utf8') === bytes }));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  for (const key of ['generic', 'genericProvenFlag', 'genericExtraArguments',
+    'genericReconstructedLauncher']) {
+    assert.strictEqual(out.refused[key], false, `the generic release freed a review hold: ${key}`);
+  }
+  assert.strictEqual(out.refused.genericWorkerLease, false,
+    'the worker-lease release freed a review hold');
+  for (const key of ['staleGeneration', 'staleAttempt']) {
+    assert.deepStrictEqual(out.refused[key], { released: false, reason: 'STALE_GENERATION' }, key);
+  }
+  for (const key of ['missingProof', 'undrained', 'unknown', 'billingLaunchAttempted',
+    'incoherentFields', 'incoherentProvenance', 'notLaunchedAfterLaunch', 'unknownProvenance',
+    'extraFields', 'outcomeShape', 'textProof', 'inheritedStateConstructor',
+    'inheritedStateToString']) {
+    assert.deepStrictEqual(out.refused[key], { released: false, reason: 'REVIEW_LIFECYCLE_UNPROVEN' }, key);
+  }
+  assert.strictEqual(out.preserved, true, 'a refused release mutated the held owner bytes');
+  assert.strictEqual(out.stillHeld, true, 'the slot was freed by a refused release');
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+hostContainmentTest('review admission: another live process cannot release a hold it does not own', () => {
+  const { r, TMP, env, runId } = withSeededRun('WORKTREE_READY', {
+    worktree: { path: fs.realpathSync(os.tmpdir()) },
+  }, `
+    const fs = require('fs');
+    // This process takes the hold and then EXITS without releasing it, which
+    // is exactly the caller death that must not free the slot.
+    const hold = R.acquireGlobalReviewHold(runId, 0);
+    console.log(JSON.stringify({ ownerPath: hold.ownerPath,
+      bytes: fs.readFileSync(hold.ownerPath, 'utf8') }));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const held = JSON.parse(r.stdout.trim().split('\n').pop());
+  const survivor = spawnSync(process.execPath, ['-e', `
+    const R = require(${JSON.stringify(CLI)});
+    const fs = require('fs');
+    const existing = R.readRunLaunchClaim(R.globalWorkerLockPath());
+    const hold = { ...existing.claim, lockPath: R.globalWorkerLockPath(), ownerPath: existing.ownerPath };
+    const attempt = (take) => { try { take(); return { threw: false }; }
+      catch (error) { return { threw: true, code: error.code }; } };
+    console.log(JSON.stringify({
+      holder: hold.holder,
+      proven: R.releaseGlobalReviewHold(hold, ${DRAINED_PROOF}),
+      generic: R.releaseRunLaunchClaim(hold),
+      review: attempt(() => R.acquireGlobalReviewHold(${JSON.stringify(runId)}, 0)),
+      builder: attempt(() => R.acquireGlobalWorkerClaim(0)),
+      bytes: fs.readFileSync(existing.ownerPath, 'utf8') }));
+  `], { cwd: ROOT, env, encoding: 'utf8' });
+  assert.strictEqual(survivor.status, 0, survivor.stderr);
+  const out = JSON.parse(survivor.stdout.trim().split('\n').pop());
+  assert.strictEqual(out.holder, 'REVIEW_HOLD', 'the dead caller left no review hold behind');
+  assert.deepStrictEqual(out.proven, { released: false, reason: 'CALLER_NOT_LIVE_OWNER' },
+    'a different live process released a hold it never took');
+  assert.strictEqual(out.generic, false);
+  assert.deepStrictEqual(out.review, { threw: true, code: 'LAUNCH_IN_PROGRESS' });
+  assert.deepStrictEqual(out.builder, { threw: true, code: 'LAUNCH_IN_PROGRESS' });
+  assert.strictEqual(out.bytes, held.bytes, 'the surviving hold was rewritten');
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+hostContainmentTest('review admission: proven lifecycle evidence releases the slot back to the builders', () => {
+  const { r, TMP } = withSeededRun('WORKTREE_READY', {
+    worktree: { path: fs.realpathSync(os.tmpdir()) },
+  }, `
+    const fs = require('fs');
+    const lock = R.globalWorkerLockPath();
+    const first = R.acquireGlobalReviewHold(runId, 0);
+    const releasedNotLaunched = R.releaseGlobalReviewHold(first, ${NOT_LAUNCHED_PROOF});
+    const freedForBuilder = (() => {
+      const claim = R.acquireGlobalWorkerClaim(0);
+      const holder = claim.holder;
+      return { holder, released: R.releaseRunLaunchClaim(claim) };
+    })();
+    const second = R.acquireGlobalReviewHold(runId, 0);
+    const newGeneration = second.claimId !== first.claimId && second.attemptId !== first.attemptId;
+    const staleFirstAgain = R.releaseGlobalReviewHold(first, ${NOT_LAUNCHED_PROOF});
+    const releasedDrained = R.releaseGlobalReviewHold(second, ${DRAINED_PROOF});
+    console.log(JSON.stringify({ releasedNotLaunched, freedForBuilder, newGeneration,
+      staleFirstAgain, releasedDrained, lockExists: fs.existsSync(lock) }));
+  `);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.deepStrictEqual(out.releasedNotLaunched, { released: true, reason: 'RELEASED' },
+    'a proven unlaunched review could not release its own hold');
+  assert.deepStrictEqual(out.freedForBuilder, { holder: 'LAUNCHER', released: true },
+    'the released slot did not return to ordinary builder admission');
+  assert.strictEqual(out.newGeneration, true, 'the second hold reused the first generation');
+  assert.deepStrictEqual(out.staleFirstAgain, { released: false, reason: 'STALE_GENERATION' },
+    'a spent generation released a live hold');
+  assert.deepStrictEqual(out.releasedDrained, { released: true, reason: 'RELEASED' },
+    'proven drainage could not release the hold');
+  assert.strictEqual(out.lockExists, false, 'the proven release left the global claim behind');
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
 test('launch claim: live owner with unavailable identity observation fails closed and is preserved', () => {
   const worktree = fs.realpathSync(os.tmpdir());
   const { r, runsDir, ledger, runId, TMP } = withSeededRun('WORKTREE_READY',
@@ -5318,29 +5608,57 @@ test('launch claim: live owner with unavailable identity observation fails close
       out = { threw: false }; }
     catch (e) { out = { threw: true, code: e.code, httpStatus: e.httpStatus }; }
     finally { try { _sleeper.kill('SIGKILL'); } catch {} }
-    console.log(JSON.stringify({ out, ownerExists: fs.existsSync(owner), stored: JSON.parse(fs.readFileSync(owner, 'utf8')) }));
+    console.log(JSON.stringify({ out, ownerExists: fs.existsSync(owner),
+      identityProbesRefused: globalThis.__identityProbesRefused,
+      existenceProbesObserved: globalThis.__existenceProbesObserved,
+      stored: JSON.parse(fs.readFileSync(owner, 'utf8')) }));
   `, `
     const _fs = require('fs');
+    const _path = require('path');
     const _childProcess = require('child_process');
     const _sleeper = _childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'],
       { stdio: 'ignore' });
+    // This fixture must make identity observation unavailable while the owner
+    // process stays positively alive. It previously matched command === 'ps',
+    // but the runtime spawns the pinned inspector it resolved (/bin/ps or
+    // /usr/bin/ps), never the bare name, so nothing was intercepted: the real
+    // identity came back, disagreed with the forged record, and the claim was
+    // reclaimed as a reused PID. Match the canonical inspector by basename, and
+    // count the interceptions so a fixture that silently stops intercepting can
+    // never pass as this proof again.
+    globalThis.__identityProbesRefused = 0;
+    globalThis.__existenceProbesObserved = 0;
     const _originalReadFileSync = _fs.readFileSync;
     _fs.readFileSync = function(file, ...args) {
       if (String(file) === '/proc/' + _sleeper.pid + '/stat') {
+        globalThis.__identityProbesRefused++;
         const error = new Error('identity intentionally unavailable'); error.code = 'EACCES'; throw error;
       }
       return _originalReadFileSync.call(this, file, ...args);
     };
     const _originalSpawnSync = _childProcess.spawnSync;
     _childProcess.spawnSync = function(command, args, options) {
-      if (command === 'ps' && Array.isArray(args) && args[1] === String(_sleeper.pid) &&
-          args[3] !== 'pid=') return { status: 1, stdout: '', stderr: '' };
+      const inspector = _path.basename(String(command)) === 'ps';
+      const sleeperProbe = inspector && Array.isArray(args) &&
+        args[0] === '-p' && args[1] === String(_sleeper.pid);
+      // Identity fields only. The existence probe (-o pid=) is deliberately
+      // left to the real inspector, so the owner reads as alive and the claim
+      // must be preserved rather than reclaimed.
+      if (sleeperProbe && args[3] !== 'pid=') {
+        globalThis.__identityProbesRefused++;
+        return { status: 1, stdout: '', stderr: '' };
+      }
+      if (sleeperProbe) globalThis.__existenceProbesObserved++;
       return _originalSpawnSync.call(this, command, args, options);
     };
   `);
   assert.strictEqual(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout.trim().split('\n').pop());
   assert.deepStrictEqual(out.out, { threw: true, code: 'LAUNCH_IN_PROGRESS', httpStatus: 409 });
+  assert.ok(out.identityProbesRefused > 0,
+    'the fixture never intercepted an identity probe, so it proved nothing about unavailability');
+  assert.ok(out.existenceProbesObserved > 0 || process.platform === 'linux',
+    'the fixture never let a real existence probe through, so liveness was not observed');
   assert.strictEqual(out.ownerExists, true, 'unavailable identity observation removed the claim');
   assert.strictEqual(out.stored.claimId, 'fixture-unavailable-owner');
   const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
@@ -6495,5 +6813,15 @@ test('timeout continuation: is CLI/internal only and is never exposed through da
   assert.match(src, /t === '--continue-timeout'/, 'the operator entry point must be the CLI');
 });
 
+if (REVIEW_ADMISSION_ONLY) {
+  // A selector that silently dropped a renamed case would report a smaller
+  // green subset, which is exactly the false comfort this switch must not buy.
+  const missing = REVIEW_ADMISSION_CASES.filter((name) => !selectedReviewAdmissionCases.has(name));
+  if (missing.length) {
+    console.error(`FAIL review-admission selector: unmatched case names ${JSON.stringify(missing)}`);
+    process.exitCode = 1;
+  }
+  console.log(`review-admission subset: ${REVIEW_ADMISSION_CASES.length} selected cases.`);
+}
 const failed = process.exitCode ? 'at least 1' : '0';
 console.log(`${passed} passed, ${skipped} skipped, ${failed} failed.`);

@@ -903,6 +903,25 @@ function saveRun(run) {
 function runLockPath(runId) { return `${runPath(runId)}.launch.lock`; }
 function globalWorkerLockPath() { return path.join(RUNS_DIR, '.global-worker.launch.lock'); }
 
+/**
+ * A third holder on the SAME canonical global claim — not a second lock. A
+ * dashboard review occupies the one admission slot builders already contend
+ * for, so a review can never overlap a builder, and two reviews can never
+ * overlap each other.
+ *
+ * It differs from the builder holders in exactly one way, and deliberately:
+ * a review hold is NEVER reclaimable. A launcher or a worker lease can be
+ * recovered from proven owner death because the thing they guard — a build
+ * process group — is observable, so absence is evidence. A review's reviewer
+ * process is not owned by this claim, so a dead or PID-reused caller proves
+ * nothing about whether a reviewer is still running. Freeing the slot on that
+ * evidence would be a guess, and the guess admits an overlapping reviewer.
+ * The hold therefore survives caller death and is released only through
+ * releaseGlobalReviewHold below. Automatic cleanup of an abandoned hold is
+ * deliberately NOT implemented here.
+ */
+const REVIEW_HOLD_HOLDER = 'REVIEW_HOLD';
+
 function readRunLaunchClaim(lockPath) {
   let stat;
   try { stat = fs.lstatSync(lockPath); } catch (e) {
@@ -930,7 +949,12 @@ function readRunLaunchClaim(lockPath) {
         !Number.isInteger(claim.pid) || claim.pid <= 1 || !claim.processIdentity ||
         (claim.holder === 'WORKER_LEASE' &&
           (!RUN_ID_RE.test(claim.runId || '') || typeof claim.attemptId !== 'string' ||
-           !Number.isInteger(claim.processGroupId) || claim.processGroupId <= 1))) {
+           !Number.isInteger(claim.processGroupId) || claim.processGroupId <= 1)) ||
+        // A review hold that cannot name its run and its unique attempt is
+        // malformed. It stays blocked rather than becoming releasable.
+        (claim.holder === REVIEW_HOLD_HOLDER &&
+          (!RUN_ID_RE.test(claim.runId || '') || typeof claim.attemptId !== 'string' ||
+           !claim.attemptId))) {
       return Object.freeze({ blocked: true, reason: 'UNREADABLE_CLAIM' });
     }
     owners.push({ claim, ownerPath });
@@ -938,9 +962,12 @@ function readRunLaunchClaim(lockPath) {
   if (owners.length === 1) return Object.freeze(owners[0]);
   // Transfer publishes a new immutable generation before removing the exact
   // launcher generation. Only that unambiguous two-record relationship is
-  // resolvable; every other multi-owner shape fails closed.
+  // resolvable; every other multi-owner shape fails closed. A transfer source
+  // is always a LAUNCHER, so a review hold can never be the record this reader
+  // silently retires.
   const worker = owners.find(({ claim }) => claim.holder === 'WORKER_LEASE');
-  const launcher = owners.find(({ claim }) => worker && claim.claimId === worker.claim.transferFrom);
+  const launcher = owners.find(({ claim }) => worker && claim.holder === 'LAUNCHER' &&
+    claim.claimId === worker.claim.transferFrom);
   if (!worker || !launcher || worker === launcher ||
       owners.filter(({ claim }) => claim.holder === 'WORKER_LEASE').length !== 1) {
     return Object.freeze({ blocked: true, reason: 'AMBIGUOUS_CLAIM' });
@@ -1019,8 +1046,11 @@ function acquireLaunchClaim(lockPath, scope, waitMs = 0, metadata = {}) {
     throw new AegisControlError('CLAIM_IDENTITY_UNAVAILABLE',
       `cannot prove the process lifetime claiming ${scope}`, 409);
   }
-  const claim = { claimId, scope, ...metadata, holder: 'LAUNCHER', pid: process.pid,
-    processIdentity: claimantIdentity, claimedAt: nowIso() };
+  // The holder is decided BEFORE the single atomic publication below, so a
+  // review hold exists as a review hold from its first published byte. There
+  // is no interval in which it is a reclaimable LAUNCHER awaiting promotion.
+  const claim = { claimId, scope, ...metadata, holder: metadata.holder || 'LAUNCHER',
+    pid: process.pid, processIdentity: claimantIdentity, claimedAt: nowIso() };
   cleanupOrphanClaimPublications(lockPath);
   const deadline = Date.now() + waitMs;
   for (;;) {
@@ -1051,7 +1081,13 @@ function acquireLaunchClaim(lockPath, scope, waitMs = 0, metadata = {}) {
       let reclaimable = existence === 'absent' ||
         (existence === 'present' && observedOwner &&
           !sameProcessIdentity(existing.claim.processIdentity, observedOwner));
-      if (existing.claim.holder === 'WORKER_LEASE') {
+      if (existing.claim.holder === REVIEW_HOLD_HOLDER) {
+        // Owner death and PID reuse are exactly the conditions that free the
+        // builder holders. They free nothing here: this claim guards a
+        // reviewer this process never owned, so its absence is unobservable
+        // and the slot stays occupied until proven release.
+        reclaimable = false;
+      } else if (existing.claim.holder === 'WORKER_LEASE') {
         // A dead supervisor is not a drained build: its child and descendants
         // remain in the worker-owned process group after the leader exits.
         // Admission is recoverable only when BOTH the exact owner lifetime is
@@ -1095,7 +1131,18 @@ function acquireGlobalWorkerClaim(waitMs = 0) {
     { lease: 'GLOBAL_SINGLE_WORKER' });
 }
 
-function releaseRunLaunchClaim(claim) {
+/**
+ * PRIVATE, and deliberately not exported. This is the deletion mechanism and
+ * nothing more: it frees the bytes only when the on-disk owner record is still
+ * exactly the generation the caller presents, and it decides no authority of
+ * its own. Matching a record is shape agreement, not authentication of who is
+ * entitled to release — every caller must have established that first. The
+ * holder comparison against the on-disk record stays here, so a reconstructed
+ * claim that relabels itself (a forged 'LAUNCHER' copy of a review hold) still
+ * fails against the bytes the acquirer actually wrote.
+ */
+function deleteExactGenerationClaim(claim) {
+  if (!claim || typeof claim.ownerPath !== 'string') return false;
   let current = null;
   try { current = JSON.parse(fs.readFileSync(claim.ownerPath, 'utf8')); } catch {}
   if (current && current.claimId === claim.claimId && current.pid === claim.pid &&
@@ -1108,6 +1155,24 @@ function releaseRunLaunchClaim(claim) {
     return true;
   }
   return false;
+}
+
+/**
+ * The generic release is the builder path and stays exactly as it was for a
+ * launcher or worker lease. It refuses a review hold unconditionally: matching
+ * the owner record is enough to free a launcher, but a review hold also
+ * requires the lifecycle proof only releaseGlobalReviewHold can check.
+ *
+ * There is no override parameter, by design. The previous boolean escape hatch
+ * was a public argument, so anything holding a review hold object could free it
+ * without ever reaching the dedicated validation. Extra arguments are now
+ * ignored — this function reads its first argument and nothing else — and the
+ * one path that may delete a review hold is releaseGlobalReviewHold, which
+ * calls the private helper above only after its own checks pass.
+ */
+function releaseRunLaunchClaim(claim) {
+  if (claim && claim.holder === REVIEW_HOLD_HOLDER) return false;
+  return deleteExactGenerationClaim(claim);
 }
 
 function transferGlobalWorkerClaim(claim, runId, attemptId, workerPid, workerIdentity) {
@@ -1192,6 +1257,119 @@ function releaseGlobalWorkerLease(lease) {
   const members = processGroupMembers(lease.processGroupId);
   if (!Array.isArray(members) || members.some((pid) => pid !== lease.pid)) return false;
   return releaseRunLaunchClaim(lease);
+}
+
+// ── single-review admission ─────────────────────────────────────────────────
+// Two primitives only: take the one canonical global admission slot as a
+// review, and give it back with proof. They launch nothing, queue nothing,
+// choose no reviewer and write no receipt; a future canonical orchestration
+// calls them around a review it already had authority to run.
+
+/**
+ * Take the canonical global admission slot for a review of exactly one run.
+ * Refused while any builder launcher, worker lease or other review hold owns
+ * it, which is the whole point: one slot, three holder kinds, no overlap.
+ */
+function acquireGlobalReviewHold(runId, waitMs = 0) {
+  if (!RUN_ID_RE.test(runId || '')) {
+    throw new AegisControlError('REVIEW_HOLD_RUN_INVALID',
+      'a review hold must name exactly one canonical run', 400);
+  }
+  // The claimId minted inside publication IS the generation of this hold, and
+  // attemptId distinguishes two holds the same process takes for the same run.
+  return acquireLaunchClaim(globalWorkerLockPath(), `review of run ${runId}`, waitMs,
+    { lease: 'GLOBAL_SINGLE_WORKER', holder: REVIEW_HOLD_HOLDER, runId,
+      attemptId: crypto.randomUUID() });
+}
+
+/**
+ * The ONLY evidence that can free a review hold: the processLifecycle object
+ * requestCanonicalReview returned to this invocation (review-adapters.cjs).
+ * That contract reports reviewer AND billing-preflight process activity
+ * cumulatively — the most uncertain activity wins — so a single affirmative
+ * stamp here covers every process group that invocation could have started.
+ *
+ * Only two states permit release:
+ *   NOT_LAUNCHED       nothing was ever spawned, from the one provenance that
+ *                      can honestly say so (before any launch).
+ *   LAUNCHED_DRAINED   that invocation positively proved drainage.
+ * LAUNCHED_UNDRAINED and UNKNOWN retain the hold, and so does any stamp whose
+ * typed fields disagree with its own state, whose provenance is unknown or
+ * incoherent with the state, or which carries fields the contract never emits.
+ *
+ * What is NOT evidence, and is never inspected here: an exit code, the review
+ * outcome or verdict, a written record, a historical receipt, caller death,
+ * and anything shaped by a browser request. This function reads five fixed
+ * typed fields of one object and nothing else.
+ */
+const REVIEW_RELEASE_PROOF_FIELDS = Object.freeze(
+  ['state', 'launched', 'drainageProven', 'provenance', 'detail']);
+const REVIEW_RELEASE_PROOF_PROVENANCE = Object.freeze({
+  NOT_LAUNCHED: Object.freeze(['callable-entry-before-launch']),
+  LAUNCHED_DRAINED: Object.freeze([
+    'runtool-watchdog-drainage-evidence',
+    'runtool-bounded-reaper-drainage',
+    'grok-billing-preflight-drainage-evidence',
+  ]),
+});
+
+function reviewLifecycleProofPermitsRelease(proof) {
+  if (!proof || typeof proof !== 'object' || Array.isArray(proof)) return false;
+  const keys = Object.keys(proof);
+  if (keys.length !== REVIEW_RELEASE_PROOF_FIELDS.length ||
+      REVIEW_RELEASE_PROOF_FIELDS.some((field) => !keys.includes(field))) return false;
+  // The state must name an OWN recognized entry. A plain property read here
+  // reaches Object.prototype, so a proof stating 'constructor' or 'toString'
+  // resolved to a function and threw on .includes — a malformed proof turning
+  // a retained hold into an exception in the caller. A refusal is the only
+  // honest answer to a proof this function does not recognize, and the held
+  // bytes must survive it.
+  if (typeof proof.state !== 'string' ||
+      !Object.prototype.hasOwnProperty.call(REVIEW_RELEASE_PROOF_PROVENANCE, proof.state)) {
+    return false;
+  }
+  const allowed = REVIEW_RELEASE_PROOF_PROVENANCE[proof.state];
+  if (!Array.isArray(allowed) || !allowed.includes(proof.provenance)) return false;
+  if (typeof proof.detail !== 'string' || !proof.detail) return false;
+  return proof.state === 'NOT_LAUNCHED'
+    ? proof.launched === false && proof.drainageProven === null
+    : proof.launched === true && proof.drainageProven === true;
+}
+
+/**
+ * Release a review hold. Every one of these must hold, or the bytes stay:
+ *   · the caller presents a review hold on the canonical global claim;
+ *   · the caller is the same LIVE process lifetime that took it — a reused PID
+ *     is a different process and releases nothing;
+ *   · the on-disk owner is still exactly this generation and attempt;
+ *   · this invocation's reviewer lifecycle evidence is affirmative.
+ * Refusal is reported, never thrown, so an uncertain caller cannot turn a
+ * retained hold into a control-flow accident.
+ */
+function releaseGlobalReviewHold(hold, reviewProcessLifecycle) {
+  const refuse = (reason) => Object.freeze({ released: false, reason });
+  if (!hold || hold.holder !== REVIEW_HOLD_HOLDER ||
+      hold.lockPath !== globalWorkerLockPath() || typeof hold.ownerPath !== 'string') {
+    return refuse('NOT_A_REVIEW_HOLD');
+  }
+  if (hold.pid !== process.pid ||
+      !sameProcessIdentity(hold.processIdentity, processIdentity(process.pid))) {
+    return refuse('CALLER_NOT_LIVE_OWNER');
+  }
+  if (!reviewLifecycleProofPermitsRelease(reviewProcessLifecycle)) {
+    return refuse('REVIEW_LIFECYCLE_UNPROVEN');
+  }
+  const existing = readRunLaunchClaim(globalWorkerLockPath());
+  const current = existing && !existing.blocked ? existing.claim : null;
+  if (!current || current.holder !== REVIEW_HOLD_HOLDER ||
+      current.claimId !== hold.claimId || current.runId !== hold.runId ||
+      current.attemptId !== hold.attemptId || current.pid !== hold.pid ||
+      !sameProcessIdentity(current.processIdentity, hold.processIdentity)) {
+    return refuse('STALE_GENERATION');
+  }
+  return deleteExactGenerationClaim(hold)
+    ? Object.freeze({ released: true, reason: 'RELEASED' })
+    : refuse('STALE_GENERATION');
 }
 
 function assertGlobalWorkerAvailable(runId) {
@@ -6568,4 +6746,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, prepareIndependentReview, bindIndependentReview, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, prepareIndependentReview, bindIndependentReview, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, acquireGlobalReviewHold, releaseGlobalReviewHold, reviewLifecycleProofPermitsRelease, REVIEW_HOLD_HOLDER, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
