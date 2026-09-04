@@ -12610,6 +12610,254 @@ test('the recovery deck is keyboard operable, motion-free and legible at 390px',
   assert.ok(!/animation|transition|@keyframes/.test(css), 'the recovery deck animates');
 });
 
+// ── command ribbon & sharpened mission brief ───────────────────────────────
+// The failure guarded here is the one the reference HUD does not have: a first
+// screen whose top is a document. Where the evidence came from, which run it is
+// about, and the five operational answers each took a full-width band of their
+// own, the gate reading took a third row under the run it belongs to, and the
+// mission brief spent two clamped rows explaining itself before it got to the
+// one next action — so the control plane started below the fold.
+//
+// The correction is composition, and every proof below pairs "more compact"
+// with "the same truth is still here". Nothing may be deleted, shortened,
+// re-sourced or made unreachable: a sentence that leaves the first screen has
+// to be one keyboard press away, whole, in a native disclosure.
+
+function ribbonRun(page) {
+  const host = page.document.getElementById('ops-strip-run');
+  const chips = {};
+  findByAttr(host, 'data-ops-run-chip').forEach((node) => {
+    chips[node.attrs['data-ops-run-chip']] = node;
+  });
+  const fields = {};
+  findByAttr(host, 'data-ops-run-field').forEach((node) => {
+    fields[node.attrs['data-ops-run-field']] = node;
+  });
+  return { host, chips, fields };
+}
+
+function briefSupportingNode(page) {
+  const nodes = findByAttr(page.document.getElementById('founder-body'), 'data-brief-detail');
+  assert.strictEqual(nodes.length, 1,
+    `expected exactly one supporting-answer disclosure, found ${nodes.length}`);
+  return nodes[0];
+}
+
+test('the command ribbon reads provenance and the bound run as one band, in the shipped order', () => {
+  const source = htmlSrc();
+  assert.strictEqual((source.match(/class="ops-ribbon"/g) || []).length, 1,
+    'a second command ribbon would let two bands claim the same provenance and the same run');
+  // Source order is the reading order for a screen reader and for the phone
+  // stack, and it is unchanged: the heading, then where the evidence came from,
+  // then which run it is about, then the five answers about that run.
+  const strip = source.indexOf('id="ops-strip"');
+  const ribbon = source.indexOf('class="ops-ribbon"');
+  const prov = source.indexOf('id="state-provenance"');
+  const identity = source.indexOf('id="ops-strip-run"');
+  const cells = source.indexOf('id="ops-strip-cells"');
+  assert.ok(strip < source.indexOf('id="ops-strip-h"') && source.indexOf('id="ops-strip-h"') < ribbon &&
+    ribbon < prov && prov < identity && identity < cells,
+    'the ribbon changed the order in which provenance, the bound run and the five answers are read');
+  // Two segments side by side above 1100px, and an ordinary block below it, so
+  // the phone and tablet stacks are exactly the ones that already shipped.
+  assert.ok(/\.ops-ribbon\{min-width:0\}/.test(code),
+    'the ribbon container carries no shipped base layout, so a long value can widen the page');
+  assert.ok(/\.ops-ribbon\{display:grid;grid-template-columns:minmax\(0,20fr\) minmax\(0,29fr\)/.test(WIDE),
+    'the wide command ribbon is not one band: provenance and the bound run still stack');
+  assert.ok(!/\.ops-ribbon\{/.test(PHONE),
+    'the ribbon reached below 1100px and changed the shipped phone stack');
+  // A container, never an editor: it may not hide, clamp, cap or animate either
+  // segment, and both segments are still in the DOM with their own ids.
+  for (const rule of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (!/\.ops-ribbon\b/.test(rule[1])) continue;
+    assert.ok(!/display:none|visibility:|-webkit-line-clamp|max-height|text-overflow/.test(rule[2]),
+      `${rule[1].trim()} hides, caps or truncates a ribbon segment instead of composing it`);
+    assert.ok(!/\banimation\s*:/.test(rule[2]) && !/(?:^|;)transition:(?!none)/.test(rule[2]),
+      `${rule[1].trim()} animates the ribbon — it is an instrument, not decoration`);
+  }
+  for (const id of ['state-provenance', 'ops-strip-run', 'ops-strip-cells']) {
+    assert.ok(source.includes('id="' + id + '"'), `${id} was composed away instead of being seated`);
+  }
+});
+
+test('DOM: gate readiness rides the identity row and keeps its own label, chip and written word', () => {
+  const page = rdPage(rdRun());
+  const line = ribbonRun(page);
+  // One band and one sentence: the row, then the reason. The gate no longer
+  // costs a third stacked row under the run it describes.
+  assert.strictEqual(line.host.children.length, 2,
+    'the bound-run identity is not one row plus its reason sentence');
+  assert.strictEqual(String(line.host.children[0].className), 'ops-run-line');
+  assert.strictEqual(String(line.host.children[1].className), 'ops-run-why');
+  // Both readings are on that row, each still under its own written heading.
+  const row = line.host.children[0].textContent;
+  for (const label of ['CURRENT RUN', 'BUILD ACTIVITY', 'GATE READINESS']) {
+    assert.ok(row.includes(label), `the identity row lost the ${label} heading: ${row}`);
+  }
+  assert.ok(row.includes(RD_RUN_ID), 'the identity row no longer names the canonically bound run');
+  // Two separate chips, each a glyph plus a written state word, so neither
+  // reading is legible by colour alone and neither can rewrite the other. The
+  // gate chip is the control-plane reading the host already records; the build
+  // chip is the lifecycle reading, and it is not the same node.
+  for (const id of ['build', 'gate']) {
+    const node = line.chips[id];
+    assert.ok(node, `the identity row has no ${id} chip`);
+    assert.strictEqual(node.children.length, 2,
+      `the ${id} chip carries no glyph beside its written state`);
+    assert.ok(node.children[0].textContent.trim().length > 0, `the ${id} chip glyph is empty`);
+    assert.match(node.children[1].textContent, /^[A-Z_]+$/,
+      `the ${id} chip does not write out its canonical state`);
+  }
+  assert.notStrictEqual(line.chips.build, line.chips.gate,
+    'the two readings were merged back into one chip on the compacted row');
+  assert.strictEqual(line.chips.gate.children[1].textContent, line.host.attrs['data-ops-run'],
+    'the gate chip on the identity row is not the control-plane reading the line records');
+  assert.strictEqual(line.chips.build.children[1].textContent, 'RUNNING',
+    'a recorded running worker lost its lifecycle reading when the row was compacted');
+  assert.ok(allNodes(line.host.children[0]).some((node) => node.attrs['data-ops-run-chip'] === 'gate'),
+    'the gate chip was moved off the identity row instead of onto it');
+  // The sentence that stops a recorded run from being read as live work is
+  // still written whole, outside every disclosure, and still unclamped.
+  assert.match(line.fields.why.textContent, /This is the run AEGIS is working on right now\./,
+    `the identity reason sentence was shortened by the ribbon: ${line.fields.why.textContent}`);
+  assert.strictEqual(line.fields.why.tagName, 'P',
+    'the identity reason was folded into the row instead of staying its own sentence');
+  assert.ok(/\.ops-run-gate\{display:inline-flex/.test(code) &&
+    /\.ops-run-gate>\.chip\{margin:0;white-space:normal\}/.test(code),
+    'the gate reading has no shipped layout on the identity row, so its chip cannot wrap there');
+  // The renderer is still handed the same two resolutions and reaches for
+  // nothing else: composition may not become a third reading.
+  const renderer = code.slice(code.indexOf('function renderOpsRun'), code.indexOf('function deckDisclosure'));
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.random', 'fetch(', 'innerHTML', 'AEGIS_STATE', 'addEventListener']) {
+    assert.ok(!renderer.includes(banned),
+      `the identity renderer uses ${banned} — it may only paint the resolution it was handed`);
+  }
+  assert.ok(/chip\(identity\.build\)/.test(renderer) && /chip\(identity\.state\)/.test(renderer),
+    'the identity row stopped painting both the build and the gate reading');
+});
+
+test('DOM: the two explanatory brief answers read behind one collapsed, keyboard-operable disclosure', () => {
+  const page = bootPage(fixtureState());
+  const supporting = briefSupportingNode(page);
+  assert.strictEqual(supporting.tagName, 'DETAILS',
+    'the supporting answers are not a native disclosure, so they are not keyboard-operable');
+  assert.strictEqual(supporting.open, false,
+    'the supporting answers are disclosed by default, which is the density this replaced');
+  const summary = supporting.firstElementChild;
+  assert.strictEqual(summary.tagName, 'SUMMARY', 'the disclosure has no summary to operate');
+  assert.strictEqual(summary.textContent, 'Completed so far and still to verify',
+    'the disclosure does not say which answers it holds');
+  // Exactly the two explanatory answers are inside it.
+  assert.deepStrictEqual(findByAttr(supporting, 'data-operator-brief')
+    .map((node) => node.attrs['data-operator-brief']), ['finished', 'verify'],
+  'the disclosure holds something other than the two explanatory answers');
+  // The objective, the state summary, the current action, the one next action
+  // and attention all stay outside it and visible.
+  for (const answer of ['now', 'next', 'needs-marc']) {
+    assert.ok(!findByAttr(supporting, 'data-operator-brief')
+      .some((node) => node.attrs['data-operator-brief'] === answer),
+    `the ${answer} answer was collapsed with the explanation it is not`);
+  }
+  const founder = page.document.getElementById('founder-body');
+  assert.ok(!findByAttr(supporting, 'data-operator-field').length,
+    'a command card was moved into the brief disclosure');
+  assert.deepStrictEqual(allNodes(supporting).filter((node) => node.tagName === 'BUTTON'), [],
+    'a governed control was moved inside the brief disclosure');
+  const missionTitle = allNodes(founder).find((node) => String(node.className) === 'mission-title');
+  const missionMeta = allNodes(founder).find((node) => String(node.className) === 'mission-meta');
+  assert.ok(missionTitle && missionTitle.textContent.length > 0,
+    'the objective headline left the top of the brief');
+  assert.match(missionMeta.textContent, /Gate readiness: [A-Z_]+ · Run lifecycle: [A-Z_]+/,
+    'the compact state summary left the top of the brief');
+  // Still exactly the five canonical answers, in the canonical order, and the
+  // two that moved say exactly what they said before.
+  assert.deepStrictEqual(briefRows(page).map((node) => node.attrs['data-operator-brief']),
+    ['finished', 'verify', 'now', 'next', 'needs-marc'],
+    'the disclosure changed which answers exist, or the order they are read in');
+  assert.strictEqual(briefField(page, 'finished').value,
+    'Nothing has been built yet — no run has started.',
+    'the completed-so-far sentence was rewritten or shortened by the disclosure');
+  assert.strictEqual(briefField(page, 'verify').value, 'Nothing is waiting to be verified.',
+    'the still-to-verify sentence was rewritten or shortened by the disclosure');
+  // It is a second disclosure, not a second copy of the first: the deck's own
+  // worker-and-evidence disclosure is still the only one of its kind.
+  assert.strictEqual(deckDisclosureNode(page).getAttribute('data-operator-disclosure'),
+    'worker-evidence', 'the brief disclosure was mistaken for the deck disclosure');
+  assert.strictEqual((code.match(/setAttribute\('data-brief-detail','supporting'\)/g) || []).length, 1,
+    'the supporting disclosure is created in more than one place');
+});
+
+test('DOM: a live repaint keeps the brief disclosure open and the keyboard where the owner left it', () => {
+  const page = bootPage(briefBuildingFixture());
+  briefSupportingNode(page).open = true;
+  briefSupportingNode(page).firstElementChild.focus();
+
+  renderMinimizedStatus(page, briefBuildingStatus());
+
+  const after = briefSupportingNode(page);
+  assert.strictEqual(after.open, true,
+    'a live status push shut the answers the owner had opened');
+  assert.strictEqual(page.document.activeElement, after.firstElementChild,
+    'a live status push moved the keyboard off the disclosure the owner was on');
+  assert.strictEqual(deckDisclosureNode(page).open, false,
+    'the repaint opened a disclosure the owner never opened');
+  // And it repainted from the pushed canonical status rather than replaying the
+  // answers it already had.
+  assert.match(briefField(page, 'now').value, /Editing the command deck\./,
+    'the repaint did not read the pushed canonical run');
+  assert.ok(/briefSupporting\.open = briefDetailOpen;/.test(code),
+    'the disclosure no longer restores the open state the repaint is replacing');
+  assert.ok(/priorBriefDetail && priorBriefDetail\.open/.test(code) &&
+    /document\.activeElement === priorBriefDetail\.firstElementChild/.test(code),
+    'the open state and keyboard position are read from something other than the live DOM');
+  assert.strictEqual((code.match(/function briefDetail\(/g) || []).length, 1,
+    'the supporting disclosure is located by more than one function');
+  const reader = code.slice(code.indexOf('function briefDetail('),
+    code.indexOf('// ── build journal'));
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'fetch(', 'innerHTML', 'localStorage', 'sessionStorage', 'AEGIS_STATE', '/api/']) {
+    assert.ok(!reader.includes(banned),
+      `the disclosure reader uses ${banned} — it may only read the DOM it is about to replace`);
+  }
+});
+
+test('the sharpened brief hides nothing: the moved sentences are unclamped, tappable and motion-free', () => {
+  // The two answers used to be clamped to two lines on a wide screen. They are
+  // not clamped anywhere now: the disclosure holds them whole.
+  for (const selector of wideSelectorsDeclaring(/-webkit-line-clamp/)) {
+    assert.ok(!/"finished"|"verify"/.test(selector),
+      `${selector} still truncates an answer the disclosure now holds in full`);
+  }
+  assert.ok(!/brief-value\{[^}]*line-clamp/.test(PHONE) && !/brief-supporting[^{]*\{[^}]*line-clamp/.test(code),
+    'a canonical operator answer is clamped instead of read in full');
+  // Keyboard and touch: a visible focus ring at every width, and a finger-sized
+  // target on a phone, exactly like every other disclosure on this page.
+  assert.ok(/\.brief-supporting>summary\{cursor:pointer/.test(code),
+    'the supporting disclosure has no shipped summary treatment');
+  assert.ok(/\.brief-supporting>summary:focus-visible\{outline:2px solid var\(--focus\)/.test(code),
+    'the supporting disclosure has no visible keyboard focus');
+  assert.ok(phoneSelectorsDeclaring(/min-height:44px/).has('.brief-supporting>summary'),
+    'the supporting disclosure is not a finger-sized target at phone width');
+  // The phone keeps action before explanation: the disclosure is ordered after
+  // the current action, attention and the one next action.
+  assert.ok(/\.brief-supporting\{display:flex;flex-direction:column;order:4\}/.test(PHONE),
+    'the phone brief no longer orders the explanation after the decision answers');
+  const order = {};
+  for (const row of PHONE.matchAll(/\.brief-row\[data-operator-brief="([\w-]+)"\]\{order:(\d+)\}/g)) {
+    order[row[1]] = Number(row[2]);
+  }
+  assert.ok(order.finished < order.verify,
+    'the two answers inside the disclosure lost the order they are read in');
+  assert.ok(order.now < order['needs-marc'] && order['needs-marc'] < order.next && order.next <= 4,
+    `the phone brief reads explanation before action: ${JSON.stringify(order)}`);
+  // Nothing on the brief moves, and the disclosure added no motion of its own.
+  const css = code.slice(code.indexOf('.operator-brief{'), code.indexOf('.handoff{display:flex'));
+  assert.ok(/\.brief-supporting\{/.test(css), 'the supporting disclosure has no stylesheet block');
+  assert.ok(!/@keyframes|\banimation\s*:|(?:^|;)transition:(?!none)/.test(css),
+    'the sharpened brief introduced motion');
+});
+
 async function atest(name, fn) {
   try { await fn(); passed++; console.log(`ok   ${name}`); }
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }

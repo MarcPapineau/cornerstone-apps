@@ -443,13 +443,21 @@
      sideways on its own. */
   .ops-run{min-width:0;padding:9px 0 0}
   .ops-run-line{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+  /* The two ribbon segments. Below 1100px this is an ordinary block, so the
+     provenance line and the identity line stack exactly as they shipped. */
+  .ops-ribbon{min-width:0}
   .ops-run-label{font:650 10px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:#8faac0}
   .ops-run-id{min-width:0;font-size:12px;line-height:1.45;color:var(--text-0);
     overflow-wrap:anywhere;word-break:break-word}
   .ops-run-canonical{min-width:0;font:650 10px/1.45 var(--mono);letter-spacing:.08em;
     color:var(--text-2);overflow-wrap:anywhere;word-break:break-word}
   .ops-run-line>.chip{margin:0;white-space:normal}
-  .ops-run-gate{margin-top:6px}
+  /* Gate readiness rides the identity row instead of taking a stacked row of
+     its own beneath the reason sentence. It keeps its own written label, its
+     own chip, its own glyph and its own canonical word: only the row it sits
+     on changed. It wraps with the rest of the line at any width. */
+  .ops-run-gate{display:inline-flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}
+  .ops-run-gate>.chip{margin:0;white-space:normal}
   .ops-run-why{min-width:0;margin:6px 0 0;font-size:12px;line-height:1.45;color:var(--text-2);
     overflow-wrap:anywhere}
 
@@ -516,6 +524,16 @@
   .brief-value{margin-top:3px;font-size:14px;line-height:1.45;color:var(--text-0);overflow-wrap:anywhere}
   .brief-row.is-blocked .brief-label{color:var(--fail)}
   .brief-row.is-clear .brief-label{color:var(--pass)}
+  /* The two explanatory answers — what is completed so far and what is still to
+     verify — read behind one native, keyboard-operable disclosure so the
+     objective, the state summary and the one next action own the top of the
+     brief. It is a disclosure, never a truncation: both sentences are rendered
+     whole inside it, they are never clamped at any width, and they are the same
+     canonical fields the deck resolved. Nothing here moves. */
+  .brief-supporting{margin-top:9px}
+  .brief-supporting>summary{cursor:pointer;color:#9ab2c8;
+    font:650 11px/135% var(--mono);letter-spacing:.1em}
+  .brief-supporting>summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 
   /* ── build journal ──
      A compact dated list of the recorded build updates the same canonical run
@@ -1115,6 +1133,11 @@
     .brief-row[data-operator-brief="now"]{order:1}
     .brief-row[data-operator-brief="needs-marc"]{order:2}
     .brief-row[data-operator-brief="next"]{order:3}
+    /* The two explanatory answers keep the reading order they shipped with —
+       action before explanation — now inside the disclosure that holds them,
+       which is itself ordered last. Nothing is dropped or demoted below the
+       decision answers that was not already below them. */
+    .brief-supporting{display:flex;flex-direction:column;order:4}
     .brief-row[data-operator-brief="finished"]{order:4}
     .brief-row[data-operator-brief="verify"]{order:5}
     /* The build journal stacks rather than shrinks: its as-of line, its window
@@ -1139,10 +1162,10 @@
        each disclosure that holds demoted evidence. */
     .view-tab,.hud-control,.ask-actions .action,button.action,.panel-summary,
     .control-boundary>summary,.composer-options>summary,.founder-details>summary,
-    .command-details>summary,
+    .command-details>summary,.brief-supporting>summary,
     .mission-objective-detail>summary,.output-evidence summary,#raw-state>summary{min-height:44px}
     .control-boundary>summary,.composer-options>summary,.founder-details>summary,
-    .command-details>summary,
+    .command-details>summary,.brief-supporting>summary,
     .mission-objective-detail>summary,.output-evidence summary{display:flex;align-items:center}
     .btn-row{gap:10px}
     .btn-row>button.action{flex:1 1 auto;padding:11px 14px}
@@ -1380,8 +1403,9 @@
      the renderers still write the whole canonical sentence into every clamped
      element, so it stays in the DOM for assistive technology and is read
      unabridged in Detail View. Clamping is applied only to supporting prose —
-     crew, routing rationale, live evidence, builder-progress detail, elapsed,
-     the two explanatory brief rows and the station's own role line. The
+     crew, routing rationale, live evidence, builder-progress detail, elapsed
+     and the station's own role line. The two explanatory brief answers are no
+     longer clamped at all: they read whole behind their own disclosure. The
      operator answers (current action, next step, blocker, last safe checkpoint,
      and the brief's right-now / next-action / attention rows) are never clamped here.
 
@@ -1417,6 +1441,15 @@
        and the resolved sentence reads under them, so the strip costs one band
        instead of two rows of full-height cards. */
     .ops-strip>.ops-strip-title{min-height:0;padding:5px 2px}
+    /* The command ribbon: where the evidence came from, and which run it is
+       about, read as one band instead of two stacked full-width blocks. Layout
+       only — both segments keep every word, neither is clamped, and below
+       1100px they stack exactly as they shipped. */
+    .ops-ribbon{display:grid;grid-template-columns:minmax(0,20fr) minmax(0,29fr);gap:4px 20px;
+      align-items:start;padding:6px 0 0}
+    .ops-ribbon>.ops-run{padding-top:0}
+    .ops-ribbon>#state-provenance{margin:0}
+    .ops-run-why{margin-top:4px}
     .ops-strip-cells{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;padding:7px 0 0}
     .ops-cell{display:flex;flex-wrap:wrap;align-items:center;column-gap:8px;padding:6px 9px}
     .ops-label{flex:1 1 auto;min-width:0}
@@ -1456,8 +1489,11 @@
     .operator-brief{margin-top:9px;padding:9px 11px}
     .brief-row{margin-top:7px}
     .brief-value{margin-top:2px;font-size:13px}
-    .brief-row[data-operator-brief="finished"] .brief-value,
-    .brief-row[data-operator-brief="verify"] .brief-value{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+    /* The two explanatory answers cost one summary row here instead of two
+       clamped ones. The clamp is gone with them: inside the disclosure each
+       sentence is read whole, so this width now shows more of the record than
+       it did, not less. */
+    .brief-supporting{margin-top:7px}
     .founder-details{margin-top:9px}
 
     /* Strategic Systems HUD: the whole instrument on one screen. The stage keeps
@@ -1684,6 +1720,13 @@
 <section class="ops-strip" id="ops-strip" aria-labelledby="ops-strip-h">
   <h2 class="ops-strip-title" id="ops-strip-h"><span>Operational status</span>
     <span class="rail-note">canonical status only · no timer of its own</span></h2>
+  <!-- The command ribbon. Two segments that used to cost two stacked bands
+       above the HUD — where the evidence came from, and which run it is about —
+       are read side by side on a wide screen and stack exactly as they shipped
+       below 1100px. It is a container and nothing else: neither segment is
+       clamped, hidden, moved out of source order or re-sourced, and no sentence
+       is shortened by being placed here. -->
+  <div class="ops-ribbon">
   <!-- The ONE provenance line, painted only by renderStateSource(). It stands
        ahead of every run fact on the page — this strip's bound run, the mission
        brief, the deck — because it says where all of them came from: saved
@@ -1700,6 +1743,7 @@
        renderFounderSummary pass, from resolutions that pass has already made. -->
   <div class="ops-run" id="ops-strip-run">
     <p class="empty">Loading the canonically bound current run…</p>
+  </div>
   </div>
   <div class="ops-strip-cells" id="ops-strip-cells">
     <p class="empty">Loading canonical operational status…</p>
@@ -4994,16 +5038,20 @@
     var buildChip = chip(identity.build);
     buildChip.setAttribute('data-ops-run-chip','build');
     line.appendChild(buildChip);
-    host.appendChild(line);
-    var why = el('p','ops-run-why',identity.text);
-    why.setAttribute('data-ops-run-field','why');
-    host.appendChild(why);
-    var gate = el('div','ops-run-line ops-run-gate');
+    // Both labelled readings share the identity row, so the ribbon costs one
+    // band instead of 3. Nothing is merged: BUILD ACTIVITY and GATE
+    // READINESS keep their own labels and their own chips, and the reason
+    // sentence below is still written in full and never clamped.
+    var gate = el('span','ops-run-gate');
     gate.appendChild(el('span','ops-run-label','GATE READINESS'));
     var gateChip = chip(identity.state);
     gateChip.setAttribute('data-ops-run-chip','gate');
     gate.appendChild(gateChip);
-    host.appendChild(gate);
+    line.appendChild(gate);
+    host.appendChild(line);
+    var why = el('p','ops-run-why',identity.text);
+    why.setAttribute('data-ops-run-field','why');
+    host.appendChild(why);
   }
 
   // The deck's one secondary disclosure, read out of the host that is about to
@@ -5013,6 +5061,22 @@
     for (var i = 0; i < kids.length; i++){
       if (kids[i].getAttribute &&
         kids[i].getAttribute('data-operator-disclosure') === 'worker-evidence') return kids[i];
+    }
+    return null;
+  }
+
+  // The brief's own supporting disclosure, read out of the same host before it
+  // is repainted. It holds no state either: the live DOM is the record, and it
+  // looks only where the brief renderer puts it — inside the one operator brief.
+  function briefDetail(node){
+    var kids = (node && node.children) || [];
+    for (var i = 0; i < kids.length; i++){
+      if (!kids[i].getAttribute || kids[i].getAttribute('data-operator-brief') !== 'summary') continue;
+      var parts = kids[i].children || [];
+      for (var j = 0; j < parts.length; j++){
+        if (parts[j].getAttribute &&
+          parts[j].getAttribute('data-brief-detail') === 'supporting') return parts[j];
+      }
     }
     return null;
   }
@@ -5586,6 +5650,13 @@
     var disclosureOpen = !!(priorDisclosure && priorDisclosure.open);
     var disclosureFocused = !!(priorDisclosure &&
       document.activeElement === priorDisclosure.firstElementChild);
+    // The brief's own supporting disclosure carries the same two facts across a
+    // repaint, for the same reason: a live push may not close what the owner
+    // opened or move the keyboard off where they left it.
+    var priorBriefDetail = briefDetail(host);
+    var briefDetailOpen = !!(priorBriefDetail && priorBriefDetail.open);
+    var briefDetailFocused = !!(priorBriefDetail &&
+      document.activeElement === priorBriefDetail.firstElementChild);
     host.textContent = '';
     if (topologyHost) topologyHost.textContent = '';
     if (integrationHost) integrationHost.textContent = '';
@@ -5816,12 +5887,22 @@
     var brief = el('div','operator-brief');
     brief.setAttribute('data-operator-brief','summary');
     brief.appendChild(el('div','operator-brief-title','Operator brief'));
-    function briefRow(label, field, value, cls){
+    // The two explanatory answers read behind one native disclosure, so the top
+    // of Command View is the objective, the state summary and the one next
+    // action. Nothing is shortened to buy that space: both sentences are the
+    // same canonical fields, written whole, one keyboard press away, and the
+    // wide layer no longer clamps them to two lines.
+    var briefSupporting = el('details','brief-supporting');
+    briefSupporting.setAttribute('data-brief-detail','supporting');
+    var briefSupportingSummary = el('summary',null,'Completed so far and still to verify');
+    briefSupporting.appendChild(briefSupportingSummary);
+    briefSupporting.open = briefDetailOpen;
+    function briefRow(label, field, value, cls, into){
       var row = el('div','brief-row' + (cls ? ' ' + cls : ''));
       row.setAttribute('data-operator-brief', field);
       row.appendChild(el('div','brief-label',label));
       row.appendChild(el('div','brief-value',value));
-      brief.appendChild(row);
+      (into || brief).appendChild(row);
     }
     var briefBlocker = briefText(operatorBlocker);
     // Attention is not a new signal. It is the deck's own blocker/decision
@@ -5835,9 +5916,11 @@
         ? 'No blocker is currently recorded, which is not evidence that owner approvals are settled. Recorded blocker status: ' + briefBlocker
         : briefBlocker);
     briefRow('Completed so far', 'finished', briefText(deckFinished) ||
-      'UNAVAILABLE — no canonical run evidence records what finished.');
+      'UNAVAILABLE — no canonical run evidence records what finished.', '', briefSupporting);
     briefRow('Still to verify', 'verify', briefText(deckVerification) ||
-      'UNAVAILABLE — no canonical evidence records whether this code version was verified.');
+      'UNAVAILABLE — no canonical evidence records whether this code version was verified.',
+    '', briefSupporting);
+    brief.appendChild(briefSupporting);
     briefRow('Right now', 'now', briefText(currentAction) ||
       'UNAVAILABLE — no current action is recorded in canonical run evidence.');
     briefRow('Next action', 'next', briefText(deckActions.join(' ')) ||
@@ -5845,6 +5928,9 @@
     briefRow('Attention', 'needs-marc', briefDecision,
       briefBlocker && blockerClear ? 'is-clear' : (briefBlocker ? 'is-blocked' : ''));
     host.appendChild(brief);
+    // A live status push may not shut the disclosure the owner opened, or take
+    // the keyboard off the summary they are standing on.
+    if (briefDetailFocused && briefSupportingSummary.focus) briefSupportingSummary.focus();
 
     var provenHandoff = renderHandoff(host, boundRun, currentAction);
 
