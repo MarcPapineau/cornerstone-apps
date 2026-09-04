@@ -11537,6 +11537,355 @@ test('the three added journal facts are each resolved from one named canonical s
     'the live push does not hand its recorded receipts to the deck exactly once');
 });
 
+// ── CHANGES & RECEIPTS INSPECTOR ──────────────────────────────────────────
+// One founder-readable inspector over ONE canonical run: what scope was
+// requested, what change is recorded, which focused check receipt exists, what
+// the evidence proves is available now, and what is still unverified.
+//
+// The failure these proofs guard against is not a crash. It is an inspector
+// that fills a gap: attributing the page's gate-subject paths to a run nobody
+// bound them to, reading an earlier run's silence as "nothing changed", or
+// showing a compact summary that quietly drops the receipt it rests on. So each
+// proof asks the same two questions of every answer — is the recorded fact
+// printed exactly, and is the ABSENT fact named as absent rather than inferred.
+const CR_SUBJECT = 'a'.repeat(64);
+const CR_OTHER_SUBJECT = 'b'.repeat(64);
+const CR_PACKET = 'PKT-20260826-ASYNC-WORKER-OPERATOR-BETA';
+const CR_CURRENT_ID = 'RUN-20260904-1111aaaa';
+const CR_EARLIER_ID = 'RUN-20260903-2222bbbb';
+const CR_PATHS = ['builder-control/dashboard/index.html', 'builder-control/test/dashboard-slice.test.cjs'];
+
+function crRun(over) {
+  return Object.assign({
+    runId: CR_CURRENT_ID, state: 'CHECKPOINTED',
+    objective: 'Give the founder one place to read changes and receipts',
+    packetId: CR_PACKET,
+    createdAt: '2026-09-04T12:00:00.000Z', updatedAt: '2026-09-04T12:30:00.000Z',
+    subjectSha256: CR_SUBJECT,
+    checks: { passed: 6, total: 6, outcome: 'PASS', snapshotOutcome: 'PASS',
+      hostContainmentState: 'PASSED' },
+    checkpoint: 'CHK-20260904-1', checkpointState: 'VALIDATED', rollbackPoint: 'f'.repeat(40),
+  }, over || {});
+}
+
+function crEngineering(over) {
+  return Object.assign({
+    state: 'OK', verdict: 'READY_FOR_PR', lane: 'FULL', highRisk: false,
+    laneWhy: [], riskReasons: [],
+    subjectSha256: CR_SUBJECT, subjectPaths: CR_PATHS.slice(), excludedAsEvidence: [],
+    problems: [], observed: [], unverified: ['codex: runtime behaviour was not exercised'],
+    reviewerCompleteness: { complete: true, rows: [], subjectSha256: CR_SUBJECT },
+    stages: [], source: 'builder-control/engineering-os.cjs',
+  }, over || {});
+}
+
+function crBinding(over) {
+  return Object.assign({
+    state: 'BOUND', runId: CR_CURRENT_ID, evidenceState: 'OK', subjectState: 'BOUND',
+    subjectSha256: CR_SUBJECT, runSubjectSha256: CR_SUBJECT, gateSubjectSha256: CR_SUBJECT,
+    updatedAt: '2026-09-04T12:30:00.000Z', reason: 'the exact current run is bound',
+  }, over || {});
+}
+
+// Oldest first, exactly as the canonical projector orders runs.
+function crFixture(over) {
+  const options = over || {};
+  const runs = options.runs || [
+    crRun({ runId: CR_EARLIER_ID, state: 'BUILT', objective: 'Record an earlier governed build',
+      createdAt: '2026-09-03T09:00:00.000Z', updatedAt: '2026-09-03T09:40:00.000Z',
+      subjectSha256: CR_OTHER_SUBJECT, checks: null,
+      checkpoint: null, checkpointState: null, rollbackPoint: null }),
+    crRun(),
+  ];
+  return fixtureState({
+    generatedAt: '2026-09-04T13:00:00.000Z',
+    engineering: options.engineering || crEngineering(),
+    events: { state: 'OK', events: options.events || [] },
+    runs: { state: 'OK', runs, current: options.binding || crBinding() },
+  });
+}
+
+function crRunButtons(page) {
+  return findByAttr(page.document.getElementById('cr-picker-runs'), 'data-cr-run');
+}
+
+function crRunButton(page, runId) {
+  const button = crRunButtons(page).find((node) => node.attrs['data-cr-run'] === runId);
+  assert.ok(button, `the run picker offers no control for ${runId}`);
+  return button;
+}
+
+function crAnswers(page) {
+  return findByAttr(page.document.getElementById('cr-answers'), 'data-cr-answer');
+}
+
+function crAnswer(page, id) {
+  const node = crAnswers(page).find((answer) => answer.attrs['data-cr-answer'] === id);
+  assert.ok(node, `the inspector rendered no "${id}" answer`);
+  return node;
+}
+
+function crValue(page, id) {
+  const value = allNodes(crAnswer(page, id)).find((node) => String(node.className) === 'cr-value');
+  assert.ok(value, `the "${id}" answer rendered no founder-readable value`);
+  return value.textContent;
+}
+
+function crDisclosure(page, id) {
+  const exact = allNodes(crAnswer(page, id)).find((node) => String(node.className) === 'cr-exact');
+  assert.ok(exact, `the "${id}" answer rendered no exact-evidence disclosure`);
+  return exact;
+}
+
+const INSPECTOR = code.slice(code.indexOf('// ── changes & receipts inspector'),
+  code.indexOf('// ── operational status strip'));
+
+test('DOM: the inspector answers the five founder questions for the bound current run, in that order', () => {
+  const page = bootPage(crFixture());
+  assert.deepStrictEqual(crAnswers(page).map((node) => node.attrs['data-cr-answer']),
+    ['scope', 'changed', 'checks', 'available', 'unverified'],
+    'the inspector does not answer requested scope, recorded change, check receipt, availability and gaps in that order');
+  assert.deepStrictEqual(crAnswers(page).map((node) => node.children[0].textContent),
+    ['What was allowed', 'What changed', 'Which check receipt is recorded', 'What is available now',
+      'What is still unverified'],
+    'the five answers are not titled in the founder\'s own words');
+
+  // Requested scope and recorded change are two different facts, and the packet's
+  // allowed-file list is not on this page: saying so is the whole point.
+  assert.match(crValue(page, 'scope'), /names a recorded packet/);
+  assert.match(crValue(page, 'scope'), /allowed scope itself is Not recorded here/);
+  assert.match(crValue(page, 'changed'),
+    /^2 file\(s\) are recorded as changed in the exact code version this run is bound to\./,
+    'a proven exact-subject binding did not produce a recorded change count');
+  assert.match(crValue(page, 'checks'), /Every declared deterministic check passed/,
+    'the recorded check receipt is not read from the page\'s own checks resolution');
+  assert.match(crValue(page, 'available'), /Available now: IN THE RECORD/,
+    'a validated checkpoint is not read as recorded availability');
+  assert.match(crValue(page, 'unverified'), /are not established by the evidence on this page/);
+  assert.match(crValue(page, 'unverified'), /none of them is a recorded failure, and none of them is a pass/,
+    'an unverified gap was allowed to read as a failure or as a pass');
+});
+
+test('DOM: the inspector never attributes the page\'s gate-subject paths to a run nobody bound them to', () => {
+  const page = bootPage(crFixture());
+  crRunButton(page, CR_EARLIER_ID)._listeners.click[0]();
+  assert.strictEqual(crRunButton(page, CR_EARLIER_ID).getAttribute('aria-pressed'), 'true',
+    'choosing an earlier recorded run did not select it');
+  assert.strictEqual(crRunButton(page, CR_CURRENT_ID).getAttribute('aria-pressed'), 'false',
+    'two runs are selected at once, so the answers below name no single subject');
+  assert.match(crValue(page, 'changed'),
+    /^Not recorded — a changed-file list is delivered to this page only for the run it is bound to/,
+    'an earlier run borrowed the bound run\'s changed-file list');
+  const inspector = page.document.getElementById('cr-answers').textContent;
+  for (const changed of CR_PATHS) {
+    assert.ok(!inspector.includes(changed),
+      `the recorded path ${changed} was attributed to a run that is not bound to it`);
+  }
+  // Silence is not a clean run: the same answer must not read as "changed nothing".
+  assert.doesNotMatch(crValue(page, 'changed'), /no files|nothing changed|0 file/i,
+    'missing changed-file evidence was rendered as a change with no files');
+  // And the scope question still answers from the earlier run's OWN record.
+  assert.match(crDisclosure(page, 'scope').textContent, new RegExp(CR_EARLIER_ID),
+    'the answers still describe the previously selected run after the picker moved');
+  assert.match(crValue(page, 'available'), /Available now: UNVERIFIED/,
+    'a run with no validated checkpoint was reported as available');
+});
+
+test('DOM: an unproven exact-subject binding reads UNVERIFIED, and keeps the recorded paths as gate-subject evidence', () => {
+  const page = bootPage(crFixture({
+    binding: crBinding({ subjectState: 'MISMATCHED', subjectSha256: CR_OTHER_SUBJECT,
+      runSubjectSha256: CR_OTHER_SUBJECT }),
+  }));
+  assert.strictEqual(crAnswer(page, 'changed').getAttribute('data-cr-state'), 'UNVERIFIED',
+    'an unproven code-version binding was recorded as a proven change');
+  assert.match(crValue(page, 'changed'), /^Unverified — 2 file\(s\) are recorded as changed in the gate subject/);
+  assert.match(crValue(page, 'changed'), /not proven to be this run's change/);
+  // Preserved as evidence, never deleted and never promoted.
+  const exact = crDisclosure(page, 'changed').textContent;
+  for (const changed of CR_PATHS) {
+    assert.ok(exact.includes(changed), `the gate-subject path ${changed} was dropped instead of labelled`);
+  }
+  assert.match(exact, /Recorded changed paths of the gate subject/,
+    'the preserved paths are not labelled as the gate subject\'s');
+  assert.match(crValue(page, 'unverified'), /are not established by the evidence on this page/);
+});
+
+test('DOM: exact run ids, packet ids, subject hashes, recorded paths and receipt times stay behind the disclosures', () => {
+  const page = bootPage(crFixture());
+  const exact = [CR_CURRENT_ID, CR_PACKET, CR_SUBJECT.slice(0, 12), CR_PATHS[0],
+    '2026-09-04T12:00:00.000Z', '2026-09-04T12:30:00.000Z'];
+  for (const answer of crAnswers(page)) {
+    const summary = allNodes(answer)
+      .filter((node) => ['cr-value', 'chip'].includes(String(node.className)))
+      .map((node) => node.textContent).join(' ');
+    for (const value of exact) {
+      assert.ok(!summary.includes(value),
+        `the compact answer "${answer.attrs['data-cr-answer']}" prints the exact value ${value}`);
+    }
+    // Compact means one readable sentence pair, not a receipt dump.
+    assert.ok(crValue(page, answer.attrs['data-cr-answer']).length <= 340,
+      `the "${answer.attrs['data-cr-answer']}" summary is too long to read at a glance`);
+    // Visible summary is exactly: title, answer, state chip, one disclosure.
+    assert.strictEqual(answer.children.length, 4,
+      `the "${answer.attrs['data-cr-answer']}" answer grew extra visible rows around its disclosure`);
+    assert.strictEqual(String(answer.children[3].className), 'cr-exact',
+      'the exact evidence is not the last, disclosed part of the answer');
+    assert.strictEqual(answer.children[3].open, false,
+      'an exact-evidence disclosure is forced open, so the summary is no longer compact');
+    assert.strictEqual(answer.children[3].children[0].tagName, 'SUMMARY',
+      'the exact evidence is not behind a native, keyboard-operable disclosure');
+  }
+  // Every one of those exact facts is still on the page, one keyboard press away.
+  const disclosed = crAnswers(page).map((answer) => crDisclosure(page, answer.attrs['data-cr-answer']).textContent).join(' ');
+  for (const value of exact) {
+    assert.ok(disclosed.includes(value), `the exact recorded value ${value} was dropped instead of disclosed`);
+  }
+  assert.match(crDisclosure(page, 'checks').textContent, /Recorded run times: created 2026-09-04T12:00:00\.000Z/);
+  assert.match(crDisclosure(page, 'checks').textContent,
+    /Exact check command names are not delivered to this page/,
+    'the inspector implies it knows which check commands ran');
+});
+
+test('DOM: a recorded ledger receipt is bound by packet and window, and says so; an unbindable one says why', () => {
+  const receipt = { entryId: 'E-CR-1', ts: '2026-09-04T12:20:00.000Z', gate: 'aegis-check-receipt',
+    status: 'PASS', packetId: CR_PACKET };
+  const page = bootPage(crFixture({ events: [receipt] }));
+  const disclosed = crDisclosure(page, 'checks').textContent;
+  assert.ok(disclosed.includes('E-CR-1') && disclosed.includes('2026-09-04T12:20:00.000Z'),
+    'the recorded ledger receipt and its canonical timestamp are not disclosed');
+  assert.match(disclosed, /it is not a run-id match/,
+    'a packet-bound receipt is presented as if the ledger named this run');
+
+  // A receipt for another packet is not this run's receipt, and the absence is
+  // explained rather than left blank.
+  const foreign = bootPage(crFixture({
+    events: [Object.assign({}, receipt, { packetId: 'PKT-SOMETHING-ELSE' })],
+  }));
+  const foreignText = crDisclosure(foreign, 'checks').textContent;
+  assert.ok(!foreignText.includes('E-CR-1'), 'a receipt recorded for another packet was bound to this run');
+  assert.match(foreignText, /Ledger receipts bound to this run: none — no recorded PASS receipt names this run's packet/);
+});
+
+test('DOM: the inspector tells an empty run ledger apart from one it could not read', () => {
+  const empty = bootPage(fixtureState());
+  const emptyScope = empty.document.getElementById('cr-scope');
+  assert.strictEqual(emptyScope.getAttribute('data-cr-scope'), 'NO_RUNS');
+  assert.match(emptyScope.textContent, /No canonical run is recorded yet, so there is nothing to inspect here\./);
+  assert.strictEqual(crAnswers(empty).length, 0, 'answers were rendered for a run that does not exist');
+
+  const unreadable = bootPage(fixtureState({
+    runs: { state: 'UNAVAILABLE', runs: [],
+      current: { state: 'UNAVAILABLE', runId: null, evidenceState: 'UNAVAILABLE',
+        reason: '1 run record(s) could not be read or validated.' } },
+  }));
+  const unreadableScope = unreadable.document.getElementById('cr-scope');
+  assert.strictEqual(unreadableScope.getAttribute('data-cr-scope'), 'UNAVAILABLE');
+  assert.match(unreadableScope.textContent,
+    /Run evidence UNAVAILABLE — 1 run record\(s\) could not be read or validated\./);
+  assert.match(unreadableScope.textContent, /An empty list is not proof that no run exists\./,
+    'an unreadable run ledger was reported as an empty one');
+});
+
+test('DOM: a live status repaint keeps the chosen run, the opened receipt and the keyboard where they were', () => {
+  const page = bootPage(crFixture());
+  crRunButton(page, CR_EARLIER_ID)._listeners.click[0]();
+  crRunButton(page, CR_EARLIER_ID).focus();
+  crDisclosure(page, 'checks').open = true;
+
+  renderMinimizedStatus(page, {
+    generatedAt: '2026-09-04T13:05:00.000Z',
+    engineering: crEngineering(),
+    runs: crFixture().runs.runs,
+    runsBinding: crBinding(),
+    runsState: 'OK',
+    cost: { state: 'UNAVAILABLE', reason: 'no transcripts' },
+    integration: { connectors: [] }, reviewers: [], events: [],
+  });
+
+  assert.strictEqual(crRunButton(page, CR_EARLIER_ID).getAttribute('aria-pressed'), 'true',
+    'a live push moved the inspector off the run the operator chose');
+  assert.strictEqual(page.document.activeElement, crRunButton(page, CR_EARLIER_ID),
+    'a live push moved the keyboard off the run control the operator was on');
+  assert.strictEqual(crDisclosure(page, 'checks').open, true,
+    'a live push closed the receipt the operator had opened');
+  assert.strictEqual(crDisclosure(page, 'scope').open, false,
+    'a live push opened a disclosure the operator never opened');
+});
+
+test('the changes & receipts inspector adds no authority, timer, request, writer or second source of truth', () => {
+  assert.ok(INSPECTOR.length > 2000, 'the inspector source block was not located');
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.random', 'fetch(', 'XMLHttpRequest', 'EventSource', 'innerHTML', 'localStorage',
+    'AEGIS_STATE', 'document.querySelector', 'callApi']) {
+    assert.ok(!INSPECTOR.includes(banned),
+      `the inspector uses ${banned} — it may only read the canonical resolutions it was handed`);
+  }
+  // It never writes to canonical evidence, and it holds exactly one page-local
+  // reading position that is not a run, a verdict or a lifecycle claim.
+  assert.ok(!/\b(?:run|record|binding|option\.run|e)\.[A-Za-z]+\s*=[^=]/.test(INSPECTOR),
+    'the inspector assigns to a canonical record instead of reading it');
+  assert.strictEqual((INSPECTOR.match(/crSelectedRunId = /g) || []).length, 3,
+    'the inspector remembers more than the one reading position it is allowed to own');
+  // Every answer restates a resolution this page already owns.
+  for (const seam of ['evidenceChecksPanel(run)', 'journalAvailability(false, run)',
+    'journalReceiptProof(run, events, win)', 'journalWindow(view && view.generatedAt)',
+    'missionHeadline(option.run.objective)', 'shortSubject(run && run.subjectSha256)']) {
+    assert.ok(INSPECTOR.includes(seam), `the inspector re-derives ${seam} instead of reusing the page's own resolution`);
+  }
+  // The deck hands it the same facts the evidence rail is handed, once.
+  assert.strictEqual((code.match(/renderChangesReceipts\(/g) || []).length, 3,
+    'the inspector is called from somewhere other than the deck repaint and its own picker');
+  const call = code.slice(code.indexOf('renderChangesReceipts(view, {'));
+  const handed = call.slice(0, call.indexOf('});'));
+  for (const field of ['engineering: e,', 'binding: bind,', 'runs: runs,',
+    'exactSubjectBound: exactSubjectBound,', 'emptyRunsAvailable: emptyRunsAvailable']) {
+    assert.ok(handed.includes(field), `the inspector is not handed the deck's own ${field}`);
+  }
+  // No new lifecycle, verdict, provider, release or availability vocabulary.
+  assert.ok(!/RELEASED|PUBLISHED|DEPLOYED|SHIPPED/.test(INSPECTOR),
+    'the inspector invented a release claim the canonical record does not carry');
+  assert.ok(!/claude|gpt|grok|codex|openai|anthropic/i.test(INSPECTOR),
+    'the inspector hardcoded a provider or model status');
+});
+
+test('the changes & receipts inspector is keyboard operable and legible at 390px', () => {
+  const source = htmlSrc();
+  assert.ok(/<section id="changes-receipts" aria-labelledby="changes-receipts-h">/.test(source),
+    'the inspector is not a labelled first-screen region');
+  assert.ok(source.indexOf('id="topology-overview"') < source.indexOf('id="changes-receipts"') &&
+    source.indexOf('id="changes-receipts"') < source.indexOf('id="inspector"'),
+    'the inspector is not in the founder\'s reading order between the build route and the drill-down inspector');
+  assert.ok(source.indexOf('id="changes-receipts"') < source.indexOf('class="evidence-deck"'),
+    'the Command View inspector was buried in the deep evidence deck');
+  assert.ok(/role="group" aria-labelledby="cr-picker-h"/.test(source),
+    'the run picker is not an accessibly labelled group');
+  // Real buttons, real pressed state — not a click handler on a div.
+  assert.ok(/var button = el\('button','cr-run'\);/.test(INSPECTOR) &&
+    /button\.type = 'button';/.test(INSPECTOR),
+    'the run picker is not built from real buttons');
+  assert.ok(/button\.setAttribute\('aria-pressed', isSelected \? 'true' : 'false'\);/.test(INSPECTOR),
+    'the selected run is not exposed to assistive technology');
+  assert.ok(/· selected/.test(INSPECTOR) && /· current run/.test(INSPECTOR),
+    'selection and binding are signalled by colour alone');
+  // 390px: one answer per row, finger-sized controls, and every canonical value
+  // wraps instead of pushing the viewport sideways.
+  assert.ok(/#cr-answers\{grid-template-columns:1fr\}/.test(PHONE),
+    'the inspector still shares a phone row between answers');
+  assert.ok(/button\.cr-run\{min-height:44px\}/.test(PHONE), 'the run picker is not finger-sized on a phone');
+  assert.ok(/\.cr-exact>summary\{min-height:44px/.test(PHONE),
+    'the exact-evidence disclosure is not finger-sized on a phone');
+  const wrapped = phoneSelectorsDeclaring(/overflow-wrap:anywhere/);
+  assert.ok(wrapped.has('.cr-scope') && wrapped.has('.cr-value') && wrapped.has('.cr-fact'),
+    'inspector values can still push a 390px viewport sideways');
+  for (const rule of [/\.cr-value\{[^}]*overflow-wrap:anywhere/, /\.cr-fact\{[^}]*overflow-wrap:anywhere/,
+    /\.cr-list>li\{[^}]*overflow-wrap:anywhere/, /button\.cr-run\{[^}]*overflow-wrap:anywhere/]) {
+    assert.ok(rule.test(code), `a dense inspector value does not wrap at every width: ${rule}`);
+  }
+  assert.ok(/button\.cr-run:focus-visible\{outline:2px solid var\(--focus\)/.test(code) &&
+    /\.cr-exact>summary:focus-visible\{outline:2px solid var\(--focus\)/.test(code),
+    'the inspector controls have no visible keyboard focus');
+});
+
 async function atest(name, fn) {
   try { await fn(); passed++; console.log(`ok   ${name}`); }
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }
