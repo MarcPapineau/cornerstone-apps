@@ -469,8 +469,18 @@
   #founder-summary{border-color:#24516b;background:#101b26}
   #founder-summary>h2{color:var(--cyan);border-bottom-color:#24516b}
   #founder-summary>.body{padding:16px}
-  .mission-head{display:flex;border-bottom-color:#24445a;align-items:flex-start}
-  .mission-head>.chip{margin-top:1px}
+  /* The mission brief lives in a 300px rail. A status chip sharing the title's
+     row took roughly half of it, so even a short objective wrapped and clamped
+     early and the head grew taller than the text it carried. The title, its
+     full-objective disclosure and the gate/lifecycle line now take the whole
+     row and the same labelled chip wraps to its own compact status row beneath
+     them. DOM order, the chip and every word either carries are unchanged; the
+     phone rule below still overrides the basis so a phone keeps chip and text
+     on one row. */
+  .mission-head{display:flex;flex-wrap:wrap;row-gap:calc(var(--sp)*2);
+    border-bottom-color:#24445a;align-items:flex-start}
+  .mission-head>div{flex:1 1 auto;width:100%;min-width:0}
+  .mission-head>.chip{margin-top:0}
   .mission-kicker{color:var(--cyan)}
   .mission-title{font-size:clamp(20px,1.65vw,27px)}
   .mission-meta{font-size:12px}
@@ -883,6 +893,10 @@
     .core-path-track{grid-template-columns:repeat(4,minmax(0,1fr))}
     .evidence-deck{grid-template-columns:repeat(2,minmax(0,1fr))}.event-panel{grid-column:span 2}
     .ops-strip-cells{grid-template-columns:repeat(2,minmax(0,1fr))}
+    /* The rail is the whole page here, so the title was never squeezed and the
+       chip costs no title width on its row: the tablet stack keeps the mission
+       head exactly as it shipped. The phone rule below restates this basis. */
+    #founder-summary .mission-head>div{flex:1 1 200px}
   }
   @media (max-width:680px){
     /* The header is chrome the operator has already read. Kept sticky it would

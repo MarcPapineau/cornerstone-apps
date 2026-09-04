@@ -1376,6 +1376,48 @@ test('the wide Command View fits the whole HUD, all nine stations and the build 
     'the phone cockpit was changed by the wide-screen density packet');
 });
 
+// ── mission brief: the rail's width belongs to the objective ───────────────
+// The failure guarded here is the 300px left rail splitting its mission head
+// between a title and a status chip: at 1292px the objective got roughly half
+// the rail, so even a short one wrapped and clamped early and the head grew
+// taller than the words in it. The correction is one wrapped flex row — the
+// title block takes the whole row and the same labelled chip falls to a compact
+// status row under it. Nothing is added, removed, promoted or rewritten, so
+// these proofs are about width and about what survives the move.
+test('the mission brief gives the objective the whole rail and drops the status chip to its own row', () => {
+  assert.ok(/\.mission-head\{display:flex;flex-wrap:wrap;[^}]*align-items:flex-start\}/.test(code),
+    'the mission head cannot wrap, so the status chip still shares the objective row');
+  assert.ok(/\.mission-head>div\{[^}]*width:100%[^}]*min-width:0\}/.test(code),
+    'the mission title block does not claim the full rail width');
+  // A separate row, never a row painted over the title: no absolute placement,
+  // no negative pull-up, no clamp and no removal may enter here.
+  const head = code.slice(code.indexOf('.mission-head{display:flex;flex-wrap:wrap'));
+  const headRules = head.slice(0, head.indexOf('.mission-kicker'));
+  assert.ok(!/position:absolute|margin-top:-|line-clamp|display:none/.test(headRules),
+    'the mission status row overlaps, clips or hides part of the mission head');
+  // Every canonical fact the head carried still renders, from the same fields.
+  assert.ok(/mission\.appendChild\(chip\(controlState\.state\)\)/.test(code),
+    'the labelled gate-readiness chip was dropped instead of moved to its own row');
+  assert.ok(/el\('div','mission-meta','Gate readiness: ' \+ controlState\.state \+/.test(code) &&
+    /objectiveDetail\.appendChild\(el\('p','mission-objective-full',deckObjective\)\)/.test(code),
+    'the gate/lifecycle pair or the exact full objective left the mission head');
+  // The single-column tablet stack already gives the rail the whole page, so the
+  // chip costs no title width there and that band keeps what it shipped with.
+  const compact = code.slice(code.indexOf('@media (max-width:1050px)'),
+    code.indexOf('@media (max-width:680px)'));
+  assert.ok(/#founder-summary \.mission-head>div\{flex:1 1 200px\}/.test(compact),
+    'the 681–1050px tablet stack lost the basis that keeps its chip beside the mission text');
+  // The phone keeps chip and text on one row: it overrides the flex basis, and
+  // a 200px basis outranks the width the shared rule above sets.
+  assert.ok(/#founder-summary \.mission-head\{flex-direction:row;flex-wrap:wrap/.test(PHONE) &&
+    /#founder-summary \.mission-head>div\{flex:1 1 200px;min-width:0\}/.test(PHONE),
+    'the phone mission head lost the override that keeps its chip beside the text');
+  // And the ordinary laptop still bounds the headline at two lines — now two
+  // lines of the full rail — with the exact objective behind its disclosure.
+  assert.ok(/#founder-summary \.mission-title\{[^}]*-webkit-line-clamp:2/.test(code),
+    'the ordinary-laptop mission headline lost its two-line bound');
+});
+
 // ── wide-screen Strategic Systems HUD treatment (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
 // The failure guarded here is a command centre that looks like one by inventing
 // signal: a halo that implies a run is emitting light, a rail that colours a
