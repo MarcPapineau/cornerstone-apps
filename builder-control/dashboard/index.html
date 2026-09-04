@@ -2199,7 +2199,7 @@
       what: function(f){
         return 'AEGIS accepted the outside review paperwork already on file for ' + activityRun(f) + '.';
       },
-      who: 'AEGIS checked paperwork that already existed. This page did not order, pay for or carry out any review.',
+      who: 'AEGIS checked paperwork that already existed. Verifying it ordered no review, carried out no review and paid for nothing.',
       moved: 'Not yet — the run moves only when AEGIS writes the change into the run history.',
       next: 'Wait for AEGIS to record the review evidence as attached. This page updates on its own.'
     },
@@ -4177,10 +4177,15 @@
     // table is absent, READY_FOR_PR is the only positive evidence that existing
     // evidence appears eligible for server verification. Only the server can
     // recompute the subject, run the canonical gate and bind it to the run.
-    // This page never launches or pays for a review.
-    var reviewBindBoundary = 'Independent reviews run outside this dashboard. ' +
-      'It only verifies and binds review evidence that already exists for this exact ' +
-      'code version; it does not launch or pay for reviews.';
+    // The boundary this states is the BIND action's, not the whole page's.
+    // Verifying evidence and requesting a review are two different acts, and
+    // only the second one can cause or cost anything: saying the dashboard
+    // cannot ask for a review would contradict the run card, where an explicit
+    // Codex request appears whenever AEGIS says one is still owed.
+    var reviewBindBoundary = 'Verifying is not the same as getting a review: it only checks ' +
+      'review evidence that already exists for this exact code version, so it starts no new ' +
+      'review and pays for nothing. Requesting a review is a separate, explicit act on the run ' +
+      'card, offered only when AEGIS says one is still owed.';
     var reviewEvidenceReady = false;
     if (boundRun && boundRun.state === 'BUILT'){
       deckActions = ['Run deterministic checks on this completed build.'];
@@ -4189,7 +4194,7 @@
       if (reviewEvidenceReady){
         deckActions.push('Review evidence for this exact code version appears ready for server verification. ' +
           'Ask AEGIS to verify it; only the server can approve and bind it. ' +
-          'This dashboard does not launch or pay for reviews.');
+          'Verifying starts no new review and pays for nothing.');
       } else {
         if (!deckActions.length){
           deckActions.push('Independent-review evidence is not yet complete or its status is unavailable.');
@@ -6010,8 +6015,156 @@
   var READINESS_NO_REASON = 'It gave no reason this page can state.';
   var READINESS_UNREADABLE = 'Review readiness is unavailable, so nothing is known about what review is needed. Nothing was launched, bound or changed.';
 
+  // ── one explicitly requested canonical Codex review ─────────────────────────
+  // Asking what review is needed and asking FOR one are two different acts, and
+  // only the second one can spend anything. This control is therefore never
+  // offered on first paint: it appears only after the canonical preflight has
+  // just answered, for this exact run, that a review is permitted AND that
+  // Codex is one of the reviewers still owing one. The browser's reading of
+  // that answer is a courtesy gate, not the authority — the server rechecks
+  // eligibility, owns the single governed admission slot and may refuse.
+  //
+  // Grok remains a canonical reviewer and nothing here removes it. This button
+  // deliberately requests Codex only, because the canonical route behind it
+  // takes exactly one reviewer word and that word is fixed by the server.
+  //
+  // Nothing on this page retries, escalates or launches a second request on its
+  // own. Every sentence below is written HERE and selected by a closed word the
+  // answer carried, so an upstream string can never rewrite the category a
+  // reader sees, and an answer carrying no such word is unreadable rather than
+  // successful.
+  var CODEX_REVIEWER = 'codex';
+  // What the REVIEW RECORD says. This is not a verdict on the code and it is
+  // never an approval: RECORD_WRITTEN means a record exists, nothing more.
+  var CODEX_RECORD_OUTCOMES = {
+    NOT_REQUESTED: 'No review record was written, because no reviewer was ever asked.',
+    RECORD_WRITTEN: 'A review record was written. It records what the reviewer said. It is not an approval, it is not a pass, and it moves no gate.',
+    REVIEW_REFUSED: 'The reviewer refused this request. That is not an approval, and whether any record was published before the refusal is not established.',
+    REVIEW_UNCOMPLETED: 'No completed review record came back from this request.',
+    UNKNOWN: 'What the reviewer did is unknown.',
+  };
+  // Whether reviewer PROCESSES stopped. Stopped is not passed, and a drained
+  // process says nothing at all about what any record contains.
+  var CODEX_PROCESS_OUTCOMES = {
+    NOT_LAUNCHED: 'No reviewer process was started by this request.',
+    DRAINED: 'The reviewer work this request started is recorded as stopped. Stopped means the processes ended, not that a review passed.',
+    UNDRAINED: 'Reviewer work this request started is not recorded as finished.',
+    UNKNOWN: 'Whether reviewer work is still running is unknown.',
+  };
+  // Whether the single governed ADMISSION slot came back. A held or unconfirmed
+  // slot is a live constraint on the whole system, not a detail of this card.
+  var CODEX_ADMISSION_OUTCOMES = {
+    NOT_ACQUIRED: 'The single governed admission slot was never taken by this request.',
+    RELEASED: 'Every claim this request took was given back.',
+    HELD: 'The single governed admission slot is deliberately still held, so nothing else can take it.',
+    UNCONFIRMED: 'At least one claim this request took could not be confirmed free, so the slot is not reported as available.',
+  };
+  var CODEX_PENDING_LINES = [
+    'Requested. AEGIS is waiting for this request to produce an outcome.',
+    'Pending means no answer has come back here yet. It is not proof that a reviewer is running.',
+  ];
+  var CODEX_NO_REASON = 'It gave no reason this page can state.';
+  var CODEX_UNREADABLE = 'The request was sent, but its answer is not one this page can read. What the reviewer did — and whether the governed admission slot came back — are both unknown.';
+  var CODEX_NO_ANSWER = 'The request left this dashboard and no answer came back. Whether a review was started, whether anything is still running, and whether the governed admission slot came back are all unknown. Nothing was retried.';
+  var CODEX_DATED = 'This describes one request at the moment it was made. It is not a reading of what the review gate needs now.';
+  var CODEX_HELD_IN_PAGE = 'This answer is held by this open page and stays on the run it was made for. Reloading or closing the page loses it, and nothing here asks again.';
+
+  // The in-flight guard lives HERE, outside every run card, because a repaint
+  // rebuilds each card and a guard held inside one would be reset by the very
+  // repaint it exists to survive. It holds the run id the open request was sent
+  // for — never a bare boolean — so a card for a different run can neither
+  // inherit this request's pending state nor be answered by its result. The
+  // canonical route admits one governed review at a time, so a single open
+  // request across the whole page is the truthful shape.
+  var codexRequestInFlight = null;
+
+  // What an explicit Codex request reported, kept per RUN for the same reason
+  // the guard is: the request is asynchronous and every status push rebuilds
+  // every card, so the node a click started from is routinely detached before
+  // its answer arrives. Written only to that node, the outcome of the one act
+  // on this page that can cause a review would land where no reader can see it
+  // — the operator would ask, and never learn what happened.
+  //
+  // This is page memory and nothing more. It is a plain map held for as long as
+  // this tab stays open: never written to storage, never re-fetched, never
+  // polled and gone on reload — so it can restore what was already observed,
+  // and can never manufacture an observation that was not. Null-prototype, so a
+  // run named after an inherited property reads as absent rather than as
+  // somebody else's outcome.
+  var codexObservations = Object.create(null);
+  // The node currently displaying that memory for a run, replaced every time
+  // the card is rebuilt, so a late answer is drawn on the card that is on the
+  // page now rather than on the one the operator happened to click.
+  var codexResultHosts = Object.create(null);
+
+  function codexObservationFor(runId){
+    return typeof runId === 'string' && runId &&
+      Object.prototype.hasOwnProperty.call(codexObservations, runId)
+      ? codexObservations[runId] : null;
+  }
+
+  // Both stamps are read at the instant the thing they name actually happens —
+  // the request leaving, the answer arriving — never at render time, so a line
+  // redrawn by a later repaint still dates the request it describes.
+  function codexStamp(){ return new Date().toISOString(); }
+
+  function codexObservationDates(observation){
+    return observation.receivedAt
+      ? 'Requested ' + observation.requestedAt + ' · answer received ' + observation.receivedAt + '.'
+      : 'Requested ' + observation.requestedAt + ' · no answer has come back here yet.';
+  }
+
+  // Draws page memory for one run. Every sentence was chosen when the answer
+  // was read and is replayed verbatim, so a repaint restates the observation
+  // rather than re-deciding it.
+  function renderCodexObservation(host, runId){
+    host.textContent = '';
+    var observation = codexObservationFor(runId);
+    if (!observation) return;
+    var block = el('div', observation.cls ? 'api-msg ' + observation.cls : 'api-msg');
+    // Three questions, three attributes, never merged into one verdict.
+    block.setAttribute('data-codex-request', observation.words.request);
+    block.setAttribute('data-codex-process', observation.words.process);
+    block.setAttribute('data-codex-admission', observation.words.admission);
+    // The run this outcome belongs to travels with it, so an outcome can never
+    // be read as belonging to whichever card happens to be on screen.
+    block.setAttribute('data-codex-run', runId);
+    observation.sentences.forEach(function(sentence){ block.appendChild(el('div', null, sentence)); });
+    block.appendChild(el('div', null, codexObservationDates(observation)));
+    host.appendChild(block);
+  }
+
+  // The browser-side eligibility reading, taken from the answer the operator
+  // just received and nothing else. Own-property and exact-word checks only:
+  // an absent, malformed or inherited pendingReviewers entry is "not eligible",
+  // never "probably fine".
+  function codexReviewPending(answer){
+    if (!answer || answer.status !== 'REVIEW_PERMITTED' || !Array.isArray(answer.pendingReviewers)) return false;
+    return answer.pendingReviewers.some(function(row){
+      return !!row && typeof row === 'object' && !Array.isArray(row) && row.reviewer === CODEX_REVIEWER;
+    });
+  }
+
   function runActionRow(run, isBoundCurrent){
     var row = el('div', 'btn-row');
+
+    // Whatever an explicit Codex request has already reported for THIS run,
+    // redrawn from page memory every time the card is built. It is bound to the
+    // run id rather than to the button that asked, so it reappears on the
+    // rebuilt card after a repaint, is restored when this run is painted again,
+    // and can never surface on a run that did not ask for it.
+    //
+    // It does not depend on a new request being offerable. Whether AEGIS would
+    // permit another request is a question about the future; what an operator
+    // already caused is a question about the past, and withdrawing the offer
+    // must not erase the answer.
+    var codexRunKey = typeof run.runId === 'string' && run.runId ? run.runId : null;
+    var codexMsg = el('div', 'meta');
+    var codexMsgPlaced = false;
+    if (codexRunKey) {
+      codexResultHosts[codexRunKey] = codexMsg;
+      renderCodexObservation(codexMsg, codexRunKey);
+    }
 
     if (run.state === 'INTAKE_RECORDED') {
       var startBtn = el('button', 'action primary', 'Start governed builder');
@@ -6059,7 +6212,7 @@
     // stale, incomplete, rejected or otherwise ineligible.
     if (run.state === 'CHECKS_PASSED' && isBoundCurrent) {
       row.appendChild(el('div', 'meta',
-        'Independent reviews run outside this functional-beta dashboard. This action only verifies and binds review evidence that already exists for this exact code version; it does not launch or pay for a review.'));
+        'This action only verifies and binds review evidence that already exists for this exact code version: it starts no new review and pays for nothing. Requesting a review is a separate, explicit act, offered below only when AEGIS says one is still owed.'));
       var reviewBtn = el('button', 'action primary', 'Verify independent review');
       reviewBtn.type = 'button';
       reviewBtn.addEventListener('click', async function(){
@@ -6069,9 +6222,9 @@
           var result = await callApi('/api/review-bind', { runId: run.runId });
           appendActivity(result.state === 'REVIEW_FAILED'
             ? 'Independent review refused this exact checked version for ' + run.runId +
-              '; Retry can start a bounded correction. No review was launched by this dashboard.'
+              '; Retry can start a bounded correction. Verifying started no review.'
             : 'Review evidence verified for ' + run.runId + ': ' + result.state +
-              '; waiting for live lifecycle evidence. No review was launched by this dashboard.',
+              '; waiting for live lifecycle evidence. Verifying started no review.',
           { code: result.state === 'REVIEW_FAILED' ? 'REVIEW_REFUSED_BY_REVIEWER' : 'REVIEW_EVIDENCE_ACCEPTED',
             runId: run.runId });
         } catch (e) {
@@ -6089,6 +6242,119 @@
       // nothing and spends nothing: the only thing it can change on this page is
       // the sentence below the button, and only on an explicit click.
       var readinessMsg = el('div', 'meta');
+
+      // The explicit Codex request lives in its own two nodes: an offer that is
+      // rebuilt from each fresh readiness answer, and a result that is written
+      // only by a click. They are separate so that withdrawing the offer — the
+      // moment readiness stops permitting a Codex review — cannot erase what an
+      // already-sent request reported.
+      // Both carry .meta so the existing narrow-viewport rule (.btn-row>.meta)
+      // gives them a full row of their own rather than squeezing a sentence and
+      // a control into a flex gap.
+      var codexOffer = el('div', 'meta codex-request');
+
+      // Page memory is written first and the DOM is drawn from it, never the
+      // other way round: the node this request started from may already have
+      // been replaced by a repaint, so the result is drawn on whichever node is
+      // showing this run now. That is what makes a delayed answer visible.
+      var showCodexResult = function(words, cls, sentences, requestedAt, receivedAt){
+        if (!codexRunKey) return;
+        codexObservations[codexRunKey] = { words: words, cls: cls, sentences: sentences,
+          requestedAt: requestedAt, receivedAt: receivedAt };
+        renderCodexObservation(codexResultHosts[codexRunKey] || codexMsg, codexRunKey);
+      };
+
+      // A fixed-field DTO, read field by field as safe text. Every one of the
+      // three closed words must be recognised and the answer must be about this
+      // run and this reviewer; anything else is unreadable, which is an honest
+      // absence and never a success.
+      var showCodexAnswer = function(answer, requestedAt){
+        // Stamped on arrival, before the answer is judged, so an unreadable
+        // answer is dated by when it came back rather than left undated.
+        var receivedAt = codexStamp();
+        var readable = !!answer && typeof answer === 'object' && !Array.isArray(answer) &&
+          answer.runId === run.runId && answer.reviewer === CODEX_REVIEWER &&
+          typeof answer.review === 'string' &&
+          Object.prototype.hasOwnProperty.call(CODEX_RECORD_OUTCOMES, answer.review) &&
+          typeof answer.reviewProcess === 'string' &&
+          Object.prototype.hasOwnProperty.call(CODEX_PROCESS_OUTCOMES, answer.reviewProcess) &&
+          typeof answer.admission === 'string' &&
+          Object.prototype.hasOwnProperty.call(CODEX_ADMISSION_OUTCOMES, answer.admission);
+        if (!readable) {
+          showCodexResult({ request: 'UNREADABLE', process: 'UNKNOWN', admission: 'UNCONFIRMED' },
+            'err', [CODEX_UNREADABLE, CODEX_HELD_IN_PAGE], requestedAt, receivedAt);
+          return;
+        }
+        showCodexResult({ request: answer.review, process: answer.reviewProcess,
+          admission: answer.admission },
+        answer.review === 'RECORD_WRITTEN' ? null : 'err',
+        ['Review record: ' + CODEX_RECORD_OUTCOMES[answer.review],
+          'Reviewer processes: ' + CODEX_PROCESS_OUTCOMES[answer.reviewProcess],
+          'Admission slot: ' + CODEX_ADMISSION_OUTCOMES[answer.admission],
+          'Why: ' + (typeof answer.reasonSummary === 'string' && answer.reasonSummary
+            ? answer.reasonSummary : CODEX_NO_REASON),
+          CODEX_DATED, CODEX_HELD_IN_PAGE], requestedAt, receivedAt);
+      };
+
+      // Rebuilt from the readiness answer the operator just received, and
+      // emptied by any answer that does not permit a Codex review — so the
+      // control cannot outlive the exact reading that justified it.
+      var syncCodexOffer = function(answer){
+        codexOffer.textContent = '';
+        if (!codexReviewPending(answer)) return;
+        codexOffer.appendChild(el('div', 'meta',
+          'Codex still owes a review of this exact checked version. Requesting one is a separate, explicit act: it asks AEGIS to run one canonical Codex review of this run now. AEGIS rechecks eligibility and may refuse.'));
+        if (codexRequestInFlight !== null) {
+          // The guard is honoured on the OFFER as well as the click, so a
+          // repaint followed by a fresh readiness ask cannot present a second
+          // request as available while the first is still unresolved.
+          var waiting = el('div', 'meta', codexRequestInFlight === run.runId
+            ? 'A Codex review request for this run is already waiting for an outcome, so no second request is offered.'
+            : 'A Codex review request for another run is already waiting for an outcome, so no second request is offered.');
+          waiting.setAttribute('data-codex-offer', 'IN_FLIGHT');
+          codexOffer.appendChild(waiting);
+          return;
+        }
+        var codexBtn = el('button', 'action primary', 'Request Codex review');
+        codexBtn.type = 'button';
+        codexBtn.setAttribute('data-codex-offer', 'AVAILABLE');
+        codexBtn.addEventListener('click', async function(){
+          // Read the shared guard, never this button's own disabled flag: a
+          // repainted card owns a brand new button that has never been pressed.
+          if (codexRequestInFlight !== null) return;
+          codexRequestInFlight = run.runId;
+          codexBtn.disabled = true;
+          codexBtn.textContent = 'Codex review requested…';
+          // Stamped as the request leaves, and carried through to whatever
+          // comes back, so both lines date the same request.
+          var requestedAt = codexStamp();
+          showCodexResult({ request: 'PENDING', process: 'UNKNOWN', admission: 'UNCONFIRMED' },
+            null, CODEX_PENDING_LINES.concat([CODEX_HELD_IN_PAGE]), requestedAt, null);
+          try {
+            // Exactly one coordinate travels: the run this card is about. No
+            // reviewer, packet, model, command or spend authorization is
+            // sendable from here, and nothing is sent twice.
+            showCodexAnswer(await callApi('/api/request-codex-review', { runId: run.runId }),
+              requestedAt);
+          } catch (e) {
+            // Losing the answer proves nothing about what the request started.
+            // It is reported as unknown and is NEVER retried automatically.
+            //
+            // The transport's own words are deliberately dropped rather than
+            // printed: a status line or a socket error describes the trip, not
+            // the review, and beside three plain-English unknowns it reads as
+            // the reason a review did not happen. The fixed sentence says the
+            // only thing that is actually known.
+            void e;
+            showCodexResult({ request: 'NO_ANSWER', process: 'UNKNOWN', admission: 'UNCONFIRMED' },
+              'err', [CODEX_NO_ANSWER, CODEX_HELD_IN_PAGE], requestedAt, codexStamp());
+          } finally {
+            if (codexRequestInFlight === run.runId) codexRequestInFlight = null;
+          }
+        });
+        codexOffer.appendChild(codexBtn);
+      };
+
       var readinessPending = false;
       var showReadiness = function(state, cls, text){
         readinessMsg.textContent = '';
@@ -6123,8 +6389,14 @@
             showReadiness(status, status === 'NO_ADDITIONAL_REVIEW_NEEDED' ? 'ok' : null,
               READINESS_OUTCOMES[status]);
           }
+          // The one place the explicit Codex request can be offered: a readable
+          // answer, about this run, that permits a review and names Codex as
+          // still owing one. Every other outcome — including an unreadable one —
+          // withdraws the offer instead of leaving a stale button behind.
+          syncCodexOffer(status ? answer : null);
         } catch (e) {
           showReadiness('UNAVAILABLE', 'err', READINESS_UNREADABLE + ' ' + e.message);
+          syncCodexOffer(null);
         } finally {
           readinessPending = false;
           readinessBtn.disabled = false;
@@ -6135,6 +6407,9 @@
       row.appendChild(el('div', 'meta',
         'Asking is read-only: it reports what review this exact checked version still needs, and launches, binds and pays for nothing.'));
       row.appendChild(readinessMsg);
+      row.appendChild(codexOffer);
+      row.appendChild(codexMsg);
+      codexMsgPlaced = true;
     }
 
     if (run.state === 'REVIEW_BOUND') {
@@ -6184,6 +6459,13 @@
       row.appendChild(retryBtn);
       if (retryState.reason) row.appendChild(el('div', 'meta', retryState.reason));
     }
+
+    // A run that has already reported a request outcome keeps it visible after
+    // it leaves the state where a new request could be offered. The run moving
+    // on does not unmake what the operator asked for, and a request whose
+    // outcome vanished the moment the run advanced would be the same silence
+    // this control exists to end.
+    if (!codexMsgPlaced && codexObservationFor(codexRunKey)) row.appendChild(codexMsg);
 
     return row;
   }

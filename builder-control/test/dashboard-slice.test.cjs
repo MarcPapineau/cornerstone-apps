@@ -6717,10 +6717,17 @@ async function asyncTests() {
     let nodes = allNodes(page.document.getElementById('runs-list'));
     const review = nodes.find((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review');
     assert.ok(review && review.disabled !== true, 'CHECKS_PASSED must expose review verification');
-    assert.ok(/reviews run outside this functional-beta dashboard/.test(page.text('runs-list')),
-      'the UI does not explain the external review boundary');
-    assert.ok(/does not launch or pay for a review/.test(page.text('runs-list')),
-      'the UI can be read as launching or spending on a review');
+    // The boundary belongs to THIS action, not to the whole page. Since the run
+    // card can also request a Codex review, a blanket "this dashboard cannot
+    // get a review" would be a false statement printed beside a control that
+    // does exactly that.
+    assert.ok(/starts no new review and pays for nothing/.test(page.text('runs-list')),
+      'the UI does not explain what verifying evidence does and does not do');
+    assert.ok(/Requesting a review is a separate, explicit act/.test(page.text('runs-list')),
+      'the UI does not distinguish verifying existing evidence from requesting a review');
+    assert.ok(!/reviews run outside this .*dashboard|does not launch or pay for a review/
+      .test(page.text('runs-list')),
+    `the run card still claims this dashboard cannot obtain a review: ${page.text('runs-list')}`);
     await review._listeners.click[0]();
     assert.strictEqual(review.disabled, true, 'review verification must disable while awaiting lifecycle evidence');
     assert.strictEqual(review.textContent, 'Verifying review evidence…');
@@ -6730,7 +6737,7 @@ async function asyncTests() {
       'dashboard sent fields beyond exact runId authority boundary');
     assert.ok(/waiting for live lifecycle evidence/.test(page.text('live-activity')),
       'the bind response was not treated as pending SSE evidence');
-    assert.ok(/No review was launched by this dashboard/.test(page.text('live-activity')),
+    assert.ok(/Verifying started no review/.test(page.text('live-activity')),
       'the activity feed does not preserve the bind-only boundary');
     assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')) && !/REVIEW_BOUND/.test(page.text('runs-list')),
       'the POST response optimistically repainted the run before SSE evidence');
@@ -7024,6 +7031,597 @@ async function asyncTests() {
       'a late readiness answer put a stale reading on the current run');
     assert.strictEqual(readinessControl(late), null,
       'the readiness control survived after the run left CHECKS_PASSED');
+  });
+
+  // ── "Request Codex review": one explicit ask, and honest uncertainty ───────
+  // This is the only control on the page that can cause a canonical review to
+  // be attempted, so every proof below holds one of four lines: it is offered
+  // only when the canonical preflight has just said Codex owes a review of THIS
+  // run; it dispatches exactly once even across a repaint; it never presents a
+  // written record, a stopped process or a lost answer as an approval; and an
+  // answer it cannot read is an honest unknown rather than a quiet success.
+  const codexSettle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+
+  function codexPreflight(over) {
+    return Object.assign({
+      runId: 'RUN-READY', state: 'CHECKS_PASSED', status: 'REVIEW_PERMITTED', mutations: 'NONE',
+      reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+      reasonSummary: 'At least one required reviewer still owes a review of this exact checked version.',
+      requiredReviewers: ['codex', 'grok'],
+      pendingReviewers: [{ reviewer: 'codex', executed: 'MISSING', coverage: 'NONE' }],
+    }, over || {});
+  }
+
+  function codexAnswer(over) {
+    return Object.assign({
+      runId: 'RUN-READY', reviewer: 'codex', review: 'RECORD_WRITTEN',
+      reviewProcess: 'DRAINED', admission: 'RELEASED', reasonCode: 'REVIEW_RECORD_WRITTEN',
+      reasonSummary: 'A review record was written. It records what the reviewer said; it is not an approval and it moves no gate.',
+    }, over || {});
+  }
+
+  // The canonical preflight answers about the run it was asked about, so the
+  // default fixture echoes the posted runId. A proof that wants a mismatched
+  // answer builds one explicitly rather than getting it by accident.
+  const codexPreflightEcho = (over) => (options) => ({ ok: true,
+    json: async () => codexPreflight(Object.assign(
+      { runId: JSON.parse(options.body).runId }, over || {})) });
+
+  // preflight and request are functions of the request options, so a proof can
+  // change the answer between asks, stall one, or refuse the transport outright.
+  function codexPage(status, preflight, request) {
+    const calls = [];
+    const page = bootPage(fixtureState(), { fetch: async (requestPath, options) => {
+      calls.push({ path: requestPath, options });
+      if (requestPath === '/api/status') return { ok: true, json: async () => status };
+      if (requestPath === '/api/review-preflight') return preflight(options);
+      if (requestPath === '/api/request-codex-review') return request(options);
+      throw new Error('unexpected request ' + requestPath);
+    } });
+    return { page, calls };
+  }
+
+  function codexOfferNodes(page) {
+    return findByAttr(page.document.getElementById('runs-list'), 'data-codex-offer');
+  }
+
+  function codexControl(page) {
+    return codexOfferNodes(page).find((node) => node.tagName === 'BUTTON') || null;
+  }
+
+  function codexResult(page) {
+    return findByAttr(page.document.getElementById('runs-list'), 'data-codex-request')[0] || null;
+  }
+
+  function codexCalls(calls) {
+    return calls.filter((call) => call.path === '/api/request-codex-review');
+  }
+
+  const codexRefused = () => { throw new Error('the page requested a Codex review it was never told to request'); };
+
+  await atest('DOM: the Codex request appears only after the preflight names Codex as still owing a review of this run', async () => {
+    // Nothing on first paint, and nothing from a repaint: only an answered ask
+    // can put this control on the page.
+    const status = readinessStatus('RUN-READY');
+    const { page, calls } = codexPage(status,
+      codexPreflightEcho(), codexRefused);
+    await codexSettle();
+    assert.strictEqual(codexControl(page), null,
+      'the Codex request control was offered before any readiness answer existed');
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(status) }));
+    await codexSettle();
+    assert.strictEqual(codexControl(page), null,
+      'a live status push offered a Codex review request on the operator\'s behalf');
+    assert.strictEqual(codexCalls(calls).length, 0,
+      'the page reached the canonical review request route with no operator click');
+
+    // The one eligible answer offers it, in the operator's words, and still
+    // reaches no route.
+    await readinessControl(page)._listeners.click[0]();
+    await codexSettle();
+    const ask = codexControl(page);
+    assert.ok(ask && ask.disabled !== true,
+      'an eligible preflight answer offered no Codex review request');
+    assert.strictEqual(ask.textContent, 'Request Codex review',
+      `the Codex control does not say plainly what it does: ${ask.textContent}`);
+    assert.strictEqual(ask.attrs['data-codex-offer'], 'AVAILABLE',
+      'the offered Codex control does not record itself as available');
+    assert.ok(/separate, explicit act/.test(page.text('runs-list')),
+      'the page does not say that requesting a review is a separate explicit act');
+    assert.ok(/AEGIS rechecks eligibility and may refuse/.test(page.text('runs-list')),
+      'the page presents the browser reading as the authority rather than the server');
+    assert.strictEqual(codexCalls(calls).length, 0,
+      'offering the control dispatched a canonical review request by itself');
+    assert.strictEqual(codexResult(page), null,
+      'the card reported a request outcome before any request was made');
+    // Everything that was on the card is still on it.
+    for (const kept of ['Verify independent review', 'Check review readiness', 'Cancel', 'Pause']) {
+      assert.ok(runButtonLabels(page).includes(kept),
+        `the Codex control displaced ${kept}: ${runButtonLabels(page).join(', ')}`);
+    }
+
+    // Every answer that does not name Codex as pending on a permitted review
+    // leaves no control behind — including the ones that are about a review
+    // still being needed by somebody else.
+    const ineligible = [
+      { label: 'only Grok still owes a review',
+        body: codexPreflight({ pendingReviewers: [{ reviewer: 'grok', executed: 'MISSING', coverage: 'NONE' }] }) },
+      { label: 'no reviewer is named as pending', body: codexPreflight({ pendingReviewers: [] }) },
+      { label: 'the pending list is missing', body: codexPreflight({ pendingReviewers: undefined }) },
+      { label: 'the pending list is not a list', body: codexPreflight({ pendingReviewers: { reviewer: 'codex' } }) },
+      { label: 'a pending entry is a bare string', body: codexPreflight({ pendingReviewers: ['codex'] }) },
+      { label: 'a pending entry is null', body: codexPreflight({ pendingReviewers: [null] }) },
+      { label: 'review coverage is already complete',
+        body: codexPreflight({ status: 'NO_ADDITIONAL_REVIEW_NEEDED', reasonCode: 'EXACT_SUBJECT_REVIEW_COMPLETE' }) },
+      { label: 'the preflight refused', body: codexPreflight({ status: 'REFUSED', reasonCode: 'REVIEW-GATE-BLOCKED' }) },
+      { label: 'the answer admits a mutation', body: codexPreflight({ mutations: 'SOME' }) },
+      { label: 'the answer is about another run', body: codexPreflight({ runId: 'RUN-OTHER' }) },
+      { label: 'the answer is unreadable', body: null },
+    ];
+    for (const scenario of ineligible) {
+      const other = codexPage(readinessStatus('RUN-READY'),
+        () => ({ ok: true, json: async () => scenario.body }), codexRefused);
+      await codexSettle();
+      await readinessControl(other.page)._listeners.click[0]();
+      await codexSettle();
+      assert.strictEqual(codexControl(other.page), null,
+        `${scenario.label} offered a Codex review request anyway`);
+      assert.strictEqual(codexOfferNodes(other.page).length, 0,
+        `${scenario.label} left a Codex offer node on the card`);
+      assert.strictEqual(codexCalls(other.calls).length, 0,
+        `${scenario.label} reached the canonical review request route`);
+      // Grok's own eligibility reading is untouched by any of this.
+      assert.ok(readinessLine(other.page), `${scenario.label} lost the readiness answer itself`);
+    }
+
+    // A later ineligible answer withdraws an offer an earlier one made: the
+    // control never outlives the reading that justified it.
+    let permitted = true;
+    const { page: withdrawn, calls: withdrawnCalls } = codexPage(readinessStatus('RUN-READY'),
+      () => ({ ok: true, json: async () => (permitted ? codexPreflight()
+        : codexPreflight({ status: 'NO_ADDITIONAL_REVIEW_NEEDED', pendingReviewers: [] })) }),
+      codexRefused);
+    await codexSettle();
+    await readinessControl(withdrawn)._listeners.click[0]();
+    await codexSettle();
+    assert.ok(codexControl(withdrawn), 'the first eligible answer offered nothing');
+    permitted = false;
+    await readinessControl(withdrawn)._listeners.click[0]();
+    await codexSettle();
+    assert.strictEqual(codexControl(withdrawn), null,
+      'a stale Codex request control survived an answer that no longer permits one');
+    assert.strictEqual(codexCalls(withdrawnCalls).length, 0,
+      'withdrawing the offer dispatched a request');
+  });
+
+  await atest('DOM: one Codex request sends exactly the run id, exactly once, and states pending as an open question', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { page, calls } = codexPage(readinessStatus('RUN-READY'),
+      codexPreflightEcho(),
+      async () => { await gate; return { ok: true, json: async () => codexAnswer() }; });
+    await codexSettle();
+    await readinessControl(page)._listeners.click[0]();
+    await codexSettle();
+    const ask = codexControl(page);
+
+    // Two presses, one canonical request.
+    const first = ask._listeners.click[0]();
+    const second = ask._listeners.click[0]();
+    await codexSettle();
+    const sent = codexCalls(calls);
+    assert.strictEqual(sent.length, 1,
+      `two presses produced ${sent.length} canonical review requests`);
+    assert.deepStrictEqual(JSON.parse(sent[0].options.body), { runId: 'RUN-READY' },
+      'the request carried a field beyond the exact runId authority boundary');
+    assert.strictEqual(sent[0].options.method, 'POST', 'the canonical POST route was not used');
+    assert.strictEqual(sent[0].options.credentials, 'same-origin',
+      'the request left the same-origin authenticated credential path');
+
+    // Pending is an open question about the request, never evidence of work.
+    const pendingLine = codexResult(page);
+    assert.ok(pendingLine, 'the in-flight request printed nothing at all');
+    assert.strictEqual(pendingLine.attrs['data-codex-request'], 'PENDING',
+      'an in-flight request did not record itself as pending');
+    assert.ok(/not proof that a reviewer is running/.test(pendingLine.textContent),
+      `pending is presented as proof of reviewer work: ${pendingLine.textContent}`);
+    assert.ok(!/approved|complete|passed|succeeded/i.test(pendingLine.textContent),
+      `an unanswered request claims an outcome: ${pendingLine.textContent}`);
+    assert.strictEqual(ask.disabled, true, 'the control stayed pressable while its request was open');
+    assert.ok(/Requested \d{4}-\d{2}-\d{2}T[\d:.]+Z · no answer has come back here yet\./
+      .test(pendingLine.textContent),
+    `an open request is undated or claims a receipt it never got: ${pendingLine.textContent}`);
+
+    release();
+    await first;
+    await second;
+    await codexSettle();
+    assert.strictEqual(codexCalls(calls).length, 1,
+      'the settled request produced a second dispatch');
+    assert.strictEqual(codexResult(page).attrs['data-codex-request'], 'RECORD_WRITTEN',
+      'the canonical answer did not replace the pending line');
+    assert.strictEqual(calls.filter((call) =>
+      ['/api/review-bind', '/api/checks', '/api/start', '/api/retry', '/api/cancel']
+        .indexOf(call.path) !== -1).length, 0,
+    'requesting a review reached a lifecycle route');
+    assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')) &&
+      !/REVIEW_BOUND/.test(page.text('runs-list')),
+    'a review request repainted the run lifecycle from its own answer');
+  });
+
+  await atest('DOM: a Codex request reports record, processes and admission as three separate facts and never as approval', async () => {
+    const outcomes = [
+      { label: 'a record written and everything given back',
+        body: codexAnswer(),
+        request: 'RECORD_WRITTEN', process: 'DRAINED', admission: 'RELEASED',
+        expect: [/A review record was written/, /It is not an approval, it is not a pass, and it moves no gate/,
+          /Stopped means the processes ended, not that a review passed/,
+          /Every claim this request took was given back/,
+          /not a reading of what the review gate needs now/] },
+      { label: 'a record written while the admission slot stays held',
+        body: codexAnswer({ reviewProcess: 'UNDRAINED', admission: 'HELD' }),
+        request: 'RECORD_WRITTEN', process: 'UNDRAINED', admission: 'HELD',
+        expect: [/A review record was written/, /not recorded as finished/,
+          /deliberately still held, so nothing else can take it/] },
+      { label: 'the reviewer refused',
+        body: codexAnswer({ review: 'REVIEW_REFUSED', reviewProcess: 'DRAINED', admission: 'RELEASED',
+          reasonCode: 'REVIEW_REQUEST_REFUSED',
+          reasonSummary: 'The canonical reviewer refused this request. That is not an approval, and it does not establish whether a review record was published before the refusal.' }),
+        request: 'REVIEW_REFUSED', process: 'DRAINED', admission: 'RELEASED',
+        expect: [/The reviewer refused this request/, /whether any record was published before the refusal is not established/,
+          /canonical reviewer refused this request/] },
+      { label: 'the review never completed and claims could not be confirmed free',
+        body: codexAnswer({ review: 'REVIEW_UNCOMPLETED', reviewProcess: 'UNKNOWN', admission: 'UNCONFIRMED',
+          reasonCode: 'REVIEW_CALL_FAILED',
+          reasonSummary: 'The canonical review call did not complete, so what the reviewer did is unknown.' }),
+        request: 'REVIEW_UNCOMPLETED', process: 'UNKNOWN', admission: 'UNCONFIRMED',
+        expect: [/No completed review record came back/, /Whether reviewer work is still running is unknown/,
+          /could not be confirmed free/] },
+      { label: 'nothing was requested because admission was unavailable',
+        body: codexAnswer({ review: 'NOT_REQUESTED', reviewProcess: 'NOT_LAUNCHED', admission: 'NOT_ACQUIRED',
+          reasonCode: 'ADMISSION_UNAVAILABLE',
+          reasonSummary: 'A build or review already holds the single governed admission slot, so no review was started.' }),
+        request: 'NOT_REQUESTED', process: 'NOT_LAUNCHED', admission: 'NOT_ACQUIRED',
+        expect: [/No review record was written, because no reviewer was ever asked/,
+          /No reviewer process was started/, /never taken by this request/,
+          /already holds the single governed admission slot/] },
+      { label: 'the canonical result itself was unreadable to the server',
+        body: codexAnswer({ review: 'UNKNOWN', reviewProcess: 'UNKNOWN', admission: 'UNCONFIRMED',
+          reasonCode: 'REVIEW_RESULT_UNREADABLE',
+          reasonSummary: 'The canonical review request produced no answer this host recognises, so what the reviewer did — and whether the governed admission slot came back — are both unknown.' }),
+        request: 'UNKNOWN', process: 'UNKNOWN', admission: 'UNCONFIRMED',
+        expect: [/What the reviewer did is unknown/, /Whether reviewer work is still running is unknown/,
+          /could not be confirmed free/] },
+      { label: 'a refusal that carries no reason this page can state',
+        body: codexAnswer({ review: 'NOT_REQUESTED', reviewProcess: 'NOT_LAUNCHED', admission: 'NOT_ACQUIRED',
+          reasonCode: null, reasonSummary: null }),
+        request: 'NOT_REQUESTED', process: 'NOT_LAUNCHED', admission: 'NOT_ACQUIRED',
+        expect: [/It gave no reason this page can state/],
+        forbid: [/undefined|null/] },
+    ];
+    for (const scenario of outcomes) {
+      const { page, calls } = codexPage(readinessStatus('RUN-READY'),
+        codexPreflightEcho(),
+        () => ({ ok: true, json: async () => scenario.body }));
+      await codexSettle();
+      await readinessControl(page)._listeners.click[0]();
+      await codexSettle();
+      await codexControl(page)._listeners.click[0]();
+      await codexSettle();
+
+      const line = codexResult(page);
+      assert.ok(line, `${scenario.label} printed no outcome`);
+      assert.strictEqual(codexCalls(calls).length, 1,
+        `${scenario.label} did not send exactly one canonical request`);
+      // The three questions stay three answers. A record says nothing about a
+      // process, and neither says whether the governed slot came back.
+      assert.strictEqual(line.attrs['data-codex-request'], scenario.request,
+        `${scenario.label} recorded the wrong review-record outcome`);
+      assert.strictEqual(line.attrs['data-codex-process'], scenario.process,
+        `${scenario.label} recorded the wrong reviewer-process outcome`);
+      assert.strictEqual(line.attrs['data-codex-admission'], scenario.admission,
+        `${scenario.label} recorded the wrong admission outcome`);
+      for (const expected of scenario.expect) {
+        assert.ok(expected.test(line.textContent),
+          `${scenario.label} is missing ${expected}: ${line.textContent}`);
+      }
+      for (const banned of scenario.forbid || []) {
+        assert.ok(!banned.test(line.textContent),
+          `${scenario.label} says ${banned}: ${line.textContent}`);
+      }
+      // No outcome may read as approval, as a passed review, or as a moved gate,
+      // and DRAINED specifically may not read as a review that succeeded. The
+      // page's own denials are removed first, so "not that a review passed" is
+      // measured as the denial it is rather than as the claim it refuses.
+      const claimed = line.textContent
+        .replace(/\bnot that a review passed\b/gi, '')
+        .replace(/\bis not an approval\b/gi, '')
+        .replace(/\bnot a pass\b/gi, '');
+      for (const claim of [/\breview passed\b/i, /\bis approved\b/i, /\bapproval granted\b/i,
+        /\bgate (?:is )?(?:clear|cleared|moved)\b/i, /\breview succeeded\b/i, /ready to merge/i]) {
+        assert.ok(!claim.test(claimed),
+          `${scenario.label} claims ${claim}: ${line.textContent}`);
+      }
+      // The page holds this for as long as it stays open — that is what makes a
+      // delayed answer visible at all — and says exactly that, without implying
+      // a durable record that outlives the tab or that anyone else can read.
+      assert.ok(/held by this open page/.test(line.textContent) &&
+        /Reloading or closing the page loses it/.test(line.textContent),
+      `${scenario.label} does not state how long this answer is kept: ${line.textContent}`);
+      assert.ok(!/\bnot kept\b|disappears when this page repaints/.test(line.textContent),
+        `${scenario.label} still claims a repaint discards the answer: ${line.textContent}`);
+      // Dated by two real moments: when the request left, and when the answer
+      // came back. An undated outcome cannot be told from a fresher one.
+      assert.ok(/Requested \d{4}-\d{2}-\d{2}T[\d:.]+Z · answer received \d{4}-\d{2}-\d{2}T[\d:.]+Z\./
+        .test(line.textContent),
+      `${scenario.label} did not date the request and the answer it received: ${line.textContent}`);
+      assert.strictEqual(line.attrs['data-codex-run'], 'RUN-READY',
+        `${scenario.label} did not record which run this outcome belongs to`);
+      assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')),
+        `${scenario.label} moved the run from its canonical state`);
+    }
+  });
+
+  await atest('DOM: a malformed answer or a lost one is an honest unknown, is never retried, and never reads as success', async () => {
+    const unreadable = [
+      { label: 'an answer about a different run', body: codexAnswer({ runId: 'RUN-OTHER' }) },
+      { label: 'an answer from a different reviewer', body: codexAnswer({ reviewer: 'grok' }) },
+      { label: 'an unrecognised review word', body: codexAnswer({ review: 'REVIEW_PASSED' }) },
+      { label: 'an unrecognised process word', body: codexAnswer({ reviewProcess: 'FINISHED' }) },
+      { label: 'an unrecognised admission word', body: codexAnswer({ admission: 'FREE' }) },
+      { label: 'an inherited property name as the review word', body: codexAnswer({ review: 'constructor' }) },
+      { label: 'an inherited property name as the admission word', body: codexAnswer({ admission: 'toString' }) },
+      { label: 'an array instead of a record', body: [] },
+      { label: 'no answer body at all', body: null },
+    ];
+    for (const scenario of unreadable) {
+      const { page, calls } = codexPage(readinessStatus('RUN-READY'),
+        codexPreflightEcho(),
+        () => ({ ok: true, json: async () => scenario.body }));
+      await codexSettle();
+      await readinessControl(page)._listeners.click[0]();
+      await codexSettle();
+      await codexControl(page)._listeners.click[0]();
+      await codexSettle();
+      const line = codexResult(page);
+      assert.ok(line, `${scenario.label} printed nothing at all`);
+      assert.strictEqual(line.attrs['data-codex-request'], 'UNREADABLE',
+        `${scenario.label} was treated as a readable request outcome`);
+      assert.strictEqual(line.attrs['data-codex-admission'], 'UNCONFIRMED',
+        `${scenario.label} reported the governed admission slot as settled`);
+      assert.ok(/not one this page can read/.test(line.textContent),
+        `${scenario.label} did not report the answer as unreadable: ${line.textContent}`);
+      assert.ok(!/A review record was written|given back|No reviewer process was started/
+        .test(line.textContent),
+      `${scenario.label} produced an optimistic claim: ${line.textContent}`);
+      assert.strictEqual(codexCalls(calls).length, 1,
+        `${scenario.label} was retried automatically`);
+    }
+
+    // A refused or broken transport is the same honest absence, keeps whatever
+    // reason the server did publish, and is never retried on the page's own.
+    for (const scenario of [
+      { label: 'an HTTP refusal',
+        respond: () => ({ ok: false, status: 409, json: async () => ({ error: {
+          code: 'RUN_CLAIM_UNAVAILABLE', message: 'another action already holds this run' } }) }),
+        leaked: /another action already holds this run|RUN_CLAIM_UNAVAILABLE|request failed with status/ },
+      { label: 'a dropped connection',
+        respond: () => { throw new Error('network error'); },
+        leaked: /network error/ },
+    ]) {
+      const { page, calls } = codexPage(readinessStatus('RUN-READY'),
+        codexPreflightEcho(),
+      scenario.respond);
+      await codexSettle();
+      await readinessControl(page)._listeners.click[0]();
+      await codexSettle();
+      await codexControl(page)._listeners.click[0]();
+      await codexSettle();
+      const line = codexResult(page);
+      assert.strictEqual(line.attrs['data-codex-request'], 'NO_ANSWER',
+        `${scenario.label} was reported as a request outcome`);
+      assert.strictEqual(line.attrs['data-codex-process'], 'UNKNOWN',
+        `${scenario.label} claimed to know whether reviewer work is running`);
+      assert.strictEqual(line.attrs['data-codex-admission'], 'UNCONFIRMED',
+        `${scenario.label} reported the governed admission slot as free`);
+      assert.ok(/no answer came back/.test(line.textContent),
+        `${scenario.label} dropped the honest absence: ${line.textContent}`);
+      // The transport's own words are deliberately not shown. A socket error or
+      // an HTTP status describes the trip, not the review, and printed beside
+      // three plain-English unknowns it reads as the reason a review did not
+      // happen. The fixed sentence says the only thing actually known.
+      assert.ok(!scenario.leaked.test(line.textContent),
+        `${scenario.label} printed raw transport text as if it explained the review: ${line.textContent}`);
+      assert.ok(/Nothing was retried/.test(line.textContent),
+        `${scenario.label} does not state that nothing was retried`);
+      assert.strictEqual(codexCalls(calls).length, 1,
+        `${scenario.label} sent ${codexCalls(calls).length} requests — a lost answer must never be retried`);
+    }
+  });
+
+  await atest('DOM: a repaint cannot dispatch a second Codex request, and no other run inherits a pending one', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const status = readinessStatus('RUN-READY');
+    const { page, calls } = codexPage(status,
+      codexPreflightEcho(),
+      async () => { await gate; return { ok: true, json: async () => codexAnswer() }; });
+    await codexSettle();
+    await readinessControl(page)._listeners.click[0]();
+    await codexSettle();
+    const pending = codexControl(page)._listeners.click[0]();
+    await codexSettle();
+    assert.strictEqual(codexCalls(calls).length, 1, 'the first request never left');
+
+    // A live repaint rebuilds the card. The open request survives it, because a
+    // repaint is not an answer: it is redrawn from page memory onto the new
+    // card, still pending and still dated by when it was actually sent. What
+    // must NOT survive is the offer of a second request while one is open.
+    const pendingText = codexResult(page).textContent;
+    const repainted = JSON.parse(JSON.stringify(status));
+    repainted.generatedAt = '2026-09-04T09:00:02.000Z';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(repainted) }));
+    await codexSettle();
+    const afterRepaint = codexResult(page);
+    assert.ok(afterRepaint, 'the repaint dropped the open request the operator had already made');
+    assert.strictEqual(afterRepaint.attrs['data-codex-request'], 'PENDING',
+      'the repainted card resolved an open request it had no answer for');
+    assert.strictEqual(afterRepaint.textContent, pendingText,
+      `the repaint rewrote the pending request instead of restating it: ${afterRepaint.textContent}`);
+    assert.strictEqual(codexControl(page), null,
+      'a repaint re-offered the Codex request without a readiness answer');
+    await readinessControl(page)._listeners.click[0]();
+    await codexSettle();
+    assert.strictEqual(codexControl(page), null,
+      'a repaint plus a fresh readiness ask offered a second Codex request while one was open');
+    const held = codexOfferNodes(page);
+    assert.strictEqual(held.length, 1, 'the repainted card explains nothing about the open request');
+    assert.strictEqual(held[0].tagName === 'BUTTON', false,
+      'the repainted card offered a pressable second request while one was open');
+    assert.strictEqual(held[0].attrs['data-codex-offer'], 'IN_FLIGHT',
+      'the repainted card does not record the open request as in flight');
+    assert.ok(/already waiting for an outcome/.test(held[0].textContent),
+      `the repainted card does not say why no request is offered: ${held[0].textContent}`);
+    assert.strictEqual(codexCalls(calls).length, 1,
+      `the repaint path dispatched ${codexCalls(calls).length} requests`);
+
+    // A different run cannot take the open slot either, and cannot be given the
+    // first run's result.
+    const moved = JSON.parse(JSON.stringify(status));
+    moved.generatedAt = '2026-09-04T09:00:05.000Z';
+    moved.runs[0].runId = 'RUN-SECOND';
+    moved.runsBinding.runId = 'RUN-SECOND';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(moved) }));
+    await codexSettle();
+    await readinessControl(page)._listeners.click[0]();
+    await codexSettle();
+    assert.strictEqual(codexControl(page), null,
+      'a different run was offered a Codex request while another run\'s request was open');
+    assert.ok(/for another run is already waiting/.test(page.text('runs-list')),
+      'the second run does not say the open request belongs to a different run');
+
+    release();
+    await pending;
+    await codexSettle();
+    assert.strictEqual(codexCalls(calls).length, 1, 'settling the request dispatched another');
+    assert.strictEqual(codexResult(page), null,
+      'the first run\'s answer landed on a different run\'s card');
+    assert.ok(!/A review record was written/.test(page.text('runs-list')),
+      'a stale request outcome was printed on the run that never asked for it');
+
+    // With the request settled the guard is released, and the SAME server
+    // authority — a fresh eligible preflight answer — is what re-offers it.
+    await readinessControl(page)._listeners.click[0]();
+    await codexSettle();
+    assert.strictEqual(codexCalls(calls).length, 1,
+      're-offering the control dispatched a request by itself');
+    const reoffered = codexControl(page);
+    assert.ok(reoffered && reoffered.disabled !== true,
+      'the in-flight guard was never released after the request settled');
+  });
+
+  // ── the answer has to reach the person who asked ──────────────────────────
+  // The request is asynchronous and every status push rebuilds every card, so
+  // the node a click starts from is routinely detached before the answer
+  // arrives. An outcome written only to that node is written where no reader
+  // can see it: the operator makes the one request on this page that can cause
+  // a review, and is left looking at "pending" forever. The outcome is
+  // therefore kept per run, redrawn on whichever card is on the page now, and
+  // never carried onto a run that did not ask.
+  await atest('DOM: a delayed Codex answer reaches the card on the page, is kept by run, and is restored dated', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const status = readinessStatus('RUN-READY');
+    let permitted = true;
+    const { page, calls } = codexPage(status,
+      (options) => ({ ok: true, json: async () => (permitted
+        ? codexPreflight({ runId: JSON.parse(options.body).runId })
+        : codexPreflight({ runId: JSON.parse(options.body).runId,
+          status: 'NO_ADDITIONAL_REVIEW_NEEDED', pendingReviewers: [] })) }),
+      async () => { await gate; return { ok: true, json: async () => codexAnswer() }; });
+    await codexSettle();
+    await readinessControl(page)._listeners.click[0]();
+    await codexSettle();
+    const pending = codexControl(page)._listeners.click[0]();
+    await codexSettle();
+    assert.strictEqual(codexResult(page).attrs['data-codex-request'], 'PENDING',
+      'the request was never reported as open');
+
+    // The repaint that destroys the card the request was made from.
+    const repainted = JSON.parse(JSON.stringify(status));
+    repainted.generatedAt = '2026-09-04T09:00:03.000Z';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(repainted) }));
+    await codexSettle();
+    assert.ok(codexResult(page), 'a routine repaint discarded a request that was still open');
+
+    // The answer lands AFTER that repaint, and has to be visible on the card
+    // that exists now rather than on the one that was replaced.
+    release();
+    await pending;
+    await codexSettle();
+    const answered = codexResult(page);
+    assert.ok(answered, 'the delayed answer went to a card that is no longer on the page');
+    assert.strictEqual(answered.attrs['data-codex-request'], 'RECORD_WRITTEN',
+      'the operator was left looking at a pending line that its own answer never replaced');
+    assert.ok(/A review record was written/.test(answered.textContent),
+      `the delayed answer is not readable on the repainted card: ${answered.textContent}`);
+    const answerText = answered.textContent;
+    assert.ok(/Requested \d{4}-\d{2}-\d{2}T[\d:.]+Z · answer received \d{4}-\d{2}-\d{2}T[\d:.]+Z\./
+      .test(answerText), `the delayed answer is undated: ${answerText}`);
+
+    // Withdrawing the offer is not erasing the outcome. Whether AEGIS would
+    // permit ANOTHER request is a question about the future; what this operator
+    // already caused is a question about the past, and the two are not the same
+    // fact. The outcome therefore does not depend on a new request being
+    // offerable.
+    permitted = false;
+    await readinessControl(page)._listeners.click[0]();
+    await codexSettle();
+    assert.strictEqual(codexControl(page), null,
+      'an answer that permits no review still offered one');
+    assert.strictEqual(codexResult(page).textContent, answerText,
+      'withdrawing the offer erased the outcome of a request that had already been made');
+
+    // A run that never asked inherits nothing — not the outcome, not the words.
+    const moved = JSON.parse(JSON.stringify(status));
+    moved.generatedAt = '2026-09-04T09:00:04.000Z';
+    moved.runs[0].runId = 'RUN-SECOND';
+    moved.runsBinding.runId = 'RUN-SECOND';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(moved) }));
+    await codexSettle();
+    assert.strictEqual(codexResult(page), null,
+      'a run that never asked for a review inherited another run\'s outcome');
+    assert.ok(!/A review record was written/.test(page.text('runs-list')),
+      `a stale outcome was printed on the run that never asked for it: ${page.text('runs-list')}`);
+
+    // ...and the run that did ask gets it back, restated rather than re-decided:
+    // the same sentences and the same two stamps, with no readiness ask, no
+    // re-fetch and no second request.
+    const back = JSON.parse(JSON.stringify(status));
+    back.generatedAt = '2026-09-04T09:00:05.000Z';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(back) }));
+    await codexSettle();
+    const restored = codexResult(page);
+    assert.ok(restored, 'returning to the run that asked restored nothing');
+    assert.strictEqual(restored.textContent, answerText,
+      `the restored outcome was rewritten rather than restated: ${restored.textContent}`);
+    assert.strictEqual(restored.attrs['data-codex-run'], 'RUN-READY',
+      'the restored outcome does not name the run it belongs to');
+    assert.strictEqual(codexControl(page), null,
+      'restoring an outcome also re-offered a request no readiness answer permits');
+
+    // The run moving on does not unmake what the operator asked for.
+    const bound = JSON.parse(JSON.stringify(status));
+    bound.generatedAt = '2026-09-04T09:00:06.000Z';
+    bound.runs[0].state = 'REVIEW_BOUND';
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(bound) }));
+    await codexSettle();
+    assert.ok(codexResult(page) && codexResult(page).textContent === answerText,
+      'the outcome vanished as soon as the run left the state that can request a review');
+
+    // None of the above re-asked, re-fetched, polled or retried anything.
+    assert.strictEqual(codexCalls(calls).length, 1,
+      `repaints and restorations dispatched ${codexCalls(calls).length} canonical review requests`);
   });
 
   await atest('DOM: ROOT-subject mismatch cannot hide run-scoped review verification and canonical refusal stays truthful', async () => {
@@ -7867,8 +8465,10 @@ async function asyncTests() {
       `complete review evidence was presented as review work still owed: ${nextStep.textContent}`);
     assert.ok(!/No next action is recorded yet/.test(nextStep.textContent),
       'a CHECKS_PASSED run still falls through to the silent next-step fallback');
-    assert.ok(/does not launch or pay for reviews/.test(nextStep.textContent),
+    assert.ok(/starts no new review and pays for nothing/.test(nextStep.textContent),
       `the bind action drops the no-launch boundary: ${nextStep.textContent}`);
+    assert.ok(!/(?:This dashboard|It) does not launch or pay for reviews/.test(nextStep.textContent),
+      `the deck still denies the page can request a review at all: ${nextStep.textContent}`);
     assert.ok(!/Open the pull request for review/.test(nextStep.textContent),
       `CHECKS_PASSED preserved a contradictory PR action: ${nextStep.textContent}`);
     assert.ok(!/Ready to open a pull request|Open the pull request/.test(page.text('founder-body')),
@@ -7908,8 +8508,10 @@ async function asyncTests() {
       assert.ok(alternateNext && scenario.expected.test(alternateNext.textContent),
         `${scenario.label} presented unknown review evidence as ready: ${alternateNext && alternateNext.textContent}`);
       if (scenario.reviewBoundary) {
-        assert.ok(/does not launch or pay for reviews/.test(alternateNext.textContent),
+        assert.ok(/starts no new review and pays for nothing/.test(alternateNext.textContent),
           `${scenario.label} suppressed the bind-only boundary: ${alternateNext.textContent}`);
+        assert.ok(/Requesting a review is a separate, explicit act/.test(alternateNext.textContent),
+          `${scenario.label} presented verifying as the only way to obtain a review: ${alternateNext.textContent}`);
       }
       assert.ok(!scenario.forbidden.test(alternateNext.textContent),
         `${scenario.label} leaked a contradictory fallback: ${alternateNext.textContent}`);
@@ -8086,7 +8688,7 @@ async function asyncTests() {
       .find((n) => n.attrs['data-operator-field'] === 'next-step');
     assert.ok(missingNext && /Get grok to review this exact change/.test(missingNext.textContent),
       `CHECKS_PASSED erased the gate's named reviewer action: ${missingNext && missingNext.textContent}`);
-    assert.ok(/does not launch or pay for reviews/.test(missingNext.textContent),
+    assert.ok(/starts no new review and pays for nothing/.test(missingNext.textContent),
       `CHECKS_PASSED dropped the external-review boundary: ${missingNext && missingNext.textContent}`);
     assert.ok(!/appears ready for server verification/.test(missingNext.textContent),
       `missing review evidence was presented as ready to bind: ${missingNext.textContent}`);
@@ -8116,10 +8718,10 @@ async function asyncTests() {
     // existed — never as a review this page caused to happen — and the run does
     // not advance until canonical lifecycle evidence says so.
     const activity = page.text('live-activity');
-    assert.ok(/No review was launched by this dashboard/.test(activity),
+    assert.ok(/Verifying started no review/.test(activity),
       `the bind result drops the no-launch boundary: ${activity}`);
     assert.ok(!/\b(?:launched|started|commissioned)\s+(?:an?\s+)?(?:independent\s+)?review\b/i.test(
-      activity.replace(/No review was launched by this dashboard/g, '')),
+      activity.replace(/Verifying started no review/g, '')),
       `the activity feed claims this dashboard launched a review: ${activity}`);
     assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')) && !/REVIEW_BOUND/.test(page.text('runs-list')),
       'the bind response optimistically advanced the run before SSE evidence');
