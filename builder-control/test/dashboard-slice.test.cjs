@@ -6751,6 +6751,281 @@ async function asyncTests() {
       'checkpoint control was exposed outside this packet');
   });
 
+  // ── "Check review readiness": an ask, never a review ──────────────────────
+  // The canonical route behind this control only READS. Every proof below has
+  // to hold both halves of that: the operator learns what review is actually
+  // needed, and asking launches nothing, binds nothing, spends nothing and
+  // moves no run. An answer this page cannot read must land as readiness
+  // UNAVAILABLE — never as an optimistic "nothing more is needed".
+  function readinessStatus(runId, runState) {
+    return {
+      generatedAt: '2026-09-04T09:00:00.000Z', runsState: 'OK',
+      engineering: { state: 'OK', verdict: 'READY_FOR_PR', subjectSha256: 'a'.repeat(64),
+        subjectPaths: ['builder-control/dashboard/index.html'], problems: [],
+        reviewerCompleteness: passingReviewCompleteness() },
+      runsBinding: { state: 'BOUND', runId, updatedAt: '2026-09-04T09:00:00.000Z',
+        subjectState: 'UNLINKED', gateSubjectSha256: 'a'.repeat(64), reason: 'bound' },
+      integration: { connectors: [] },
+      runs: [{ runId, state: runState || 'CHECKS_PASSED',
+        objective: 'Ask what review this version still needs',
+        checks: { passed: 2, total: 2, outcome: 'PASS' }, updatedAt: '2026-09-04T09:00:00.000Z' }],
+    };
+  }
+
+  function readinessPage(status, answer) {
+    const calls = [];
+    const page = bootPage(fixtureState(), { fetch: async (requestPath, options) => {
+      calls.push({ path: requestPath, options });
+      if (requestPath === '/api/status') return { ok: true, json: async () => status };
+      if (requestPath === '/api/review-preflight') return answer(options);
+      throw new Error('unexpected request ' + requestPath);
+    } });
+    return { page, calls };
+  }
+
+  function readinessControl(page) {
+    return allNodes(page.document.getElementById('runs-list'))
+      .find((node) => node.tagName === 'BUTTON' && node.textContent === 'Check review readiness') || null;
+  }
+
+  function readinessLine(page) {
+    return findByAttr(page.document.getElementById('runs-list'), 'data-review-readiness')[0] || null;
+  }
+
+  function runButtonLabels(page) {
+    return allNodes(page.document.getElementById('runs-list'))
+      .filter((node) => node.tagName === 'BUTTON').map((node) => node.textContent);
+  }
+
+  function preflightCalls(calls) {
+    return calls.filter((call) => call.path === '/api/review-preflight');
+  }
+
+  await atest('DOM: review readiness is an explicit ask on the bound CHECKS_PASSED run and reaches no API until it is clicked', async () => {
+    const status = readinessStatus('RUN-READY');
+    const { page, calls } = readinessPage(status, () => {
+      throw new Error('the page asked for readiness without an operator click');
+    });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const ask = readinessControl(page);
+    assert.ok(ask && ask.disabled !== true,
+      'the bound CHECKS_PASSED run exposes no review-readiness control');
+    assert.ok(/launches, binds and pays for nothing/.test(page.text('runs-list')),
+      'the readiness control does not state that asking changes nothing');
+    // The label is the operator's question, not the route's vocabulary.
+    assert.ok(!/preflight|REVIEW_PERMITTED|API|POST/i.test(ask.textContent),
+      `the readiness label carries code jargon: ${ask.textContent}`);
+    assert.strictEqual(readinessLine(page), null,
+      'the card claimed a readiness answer it never asked for');
+    assert.strictEqual(preflightCalls(calls).length, 0,
+      'the first paint reached the readiness route with no operator click');
+
+    // A live status push and a repaint are repaints, not questions.
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(status) }));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(preflightCalls(calls).length, 0,
+      'a live status push asked the readiness route on the operator\'s behalf');
+
+    // The new control is an addition: nothing that was on the card is gone.
+    const labels = runButtonLabels(page);
+    for (const kept of ['Verify independent review', 'Cancel', 'Pause']) {
+      assert.ok(labels.includes(kept),
+        `the readiness control displaced ${kept}: ${labels.join(', ')}`);
+    }
+
+    // Every other run is unchanged, and none of them may ask this question.
+    for (const scenario of [
+      { label: 'an unbound history row',
+        status: Object.assign(readinessStatus('RUN-READY'), { runsBinding: {
+          state: 'UNAVAILABLE', runId: null, reason: 'no authoritative binding' } }),
+        keeps: [] },
+      { label: 'a review-bound run', status: readinessStatus('RUN-READY', 'REVIEW_BOUND'), keeps: [] },
+      { label: 'a built run', status: readinessStatus('RUN-READY', 'BUILT'),
+        keeps: ['Run deterministic checks'] },
+      { label: 'a failed-checks run', status: readinessStatus('RUN-READY', 'CHECKS_FAILED'),
+        keeps: ['Retry'] },
+    ]) {
+      const other = readinessPage(scenario.status, () => {
+        throw new Error('an ineligible run reached the readiness route');
+      });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      assert.strictEqual(readinessControl(other.page), null,
+        `${scenario.label} exposed the review-readiness control`);
+      const otherLabels = runButtonLabels(other.page);
+      for (const kept of scenario.keeps) {
+        assert.ok(otherLabels.includes(kept),
+          `${scenario.label} lost ${kept}: ${otherLabels.join(', ')}`);
+      }
+    }
+  });
+
+  await atest('DOM: review readiness states three truthful outcomes, posts only the run id, and moves nothing', async () => {
+    const cases = [
+      { label: 'review still needed',
+        body: { runId: 'RUN-READY', state: 'CHECKS_PASSED', status: 'REVIEW_PERMITTED',
+          mutations: 'NONE', reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+          reasonSummary: 'At least one required reviewer still owes a review of this exact checked version.' },
+        expect: [/Review is still needed for this exact checked version/,
+          /Nothing was launched, nothing was bound and nothing was paid for/],
+        forbid: [/No further review is needed/, /cannot prepare a review/] },
+      { label: 'no further review needed',
+        body: { runId: 'RUN-READY', state: 'CHECKS_PASSED', status: 'NO_ADDITIONAL_REVIEW_NEEDED',
+          mutations: 'NONE', reasonCode: 'EXACT_SUBJECT_REVIEW_COMPLETE',
+          reasonSummary: 'Review coverage of this exact checked version is already complete.' },
+        expect: [/No further review is needed for this exact checked version/,
+          /Nothing was newly reviewed and nothing was bound/],
+        forbid: [/Review is still needed/] },
+      { label: 'refused with a canonical reason',
+        body: { runId: 'RUN-READY', state: 'CHECKS_PASSED', status: 'REFUSED', mutations: 'NONE',
+          reasonCode: 'REVIEW-CYCLE-EXHAUSTED',
+          reasonSummary: 'The bounded review cycle for this packet permits no further round; another round is an escalation decision, not remaining work.' },
+        expect: [/AEGIS cannot prepare a review for this run right now/, /Nothing was launched/,
+          /bounded review cycle for this packet permits no further round/],
+        forbid: [/No further review is needed/, /It gave no reason/] },
+      { label: 'refused with no reason at all',
+        body: { runId: 'RUN-READY', state: 'CHECKS_PASSED', status: 'REFUSED', mutations: 'NONE',
+          reasonCode: null, reasonSummary: null },
+        expect: [/AEGIS cannot prepare a review for this run right now/,
+          /It gave no reason this page can state/],
+        forbid: [/No further review is needed/, /undefined|null/] },
+    ];
+    for (const scenario of cases) {
+      const status = readinessStatus('RUN-READY');
+      const { page, calls } = readinessPage(status,
+        () => ({ ok: true, json: async () => scenario.body }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const ask = readinessControl(page);
+      assert.ok(ask, `${scenario.label} exposed no readiness control`);
+      // Two clicks, one question: a second press while the first is in flight
+      // must not become a second request.
+      const first = ask._listeners.click[0]();
+      const second = ask._listeners.click[0]();
+      await first;
+      await second;
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const asked = preflightCalls(calls);
+      assert.strictEqual(asked.length, 1,
+        `${scenario.label} sent ${asked.length} readiness requests for one operator ask`);
+      assert.deepStrictEqual(JSON.parse(asked[0].options.body), { runId: 'RUN-READY' },
+        `${scenario.label} sent fields beyond the exact runId authority boundary`);
+      assert.strictEqual(asked[0].options.method, 'POST',
+        `${scenario.label} did not use the canonical POST route`);
+      assert.strictEqual(asked[0].options.credentials, 'same-origin',
+        `${scenario.label} did not reuse the same-origin credential path`);
+
+      const line = readinessLine(page);
+      assert.ok(line, `${scenario.label} printed no readiness answer`);
+      assert.strictEqual(line.attrs['data-review-readiness'], scenario.body.status,
+        `${scenario.label} recorded the wrong canonical outcome on the card`);
+      for (const expected of scenario.expect) {
+        assert.ok(expected.test(line.textContent),
+          `${scenario.label} is missing ${expected}: ${line.textContent}`);
+      }
+      for (const banned of scenario.forbid) {
+        assert.ok(!banned.test(line.textContent),
+          `${scenario.label} says ${banned}: ${line.textContent}`);
+      }
+      assert.ok(!/\b(?:launched|started|commissioned|ran|paid)\s+(?:for\s+)?(?:an?\s+)?(?:independent\s+)?review\b/i
+        .test(line.textContent.replace(/Nothing was [^.]*\./g, '')),
+      `${scenario.label} claims this dashboard obtained a review: ${line.textContent}`);
+
+      // Asking changed nothing: the run, its lifecycle and every other control
+      // are exactly where they were, and the control is ready to be asked again.
+      assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')) &&
+        !/REVIEW_BOUND|REVIEW_FAILED/.test(page.text('runs-list')),
+      `${scenario.label} repainted the run lifecycle from a readiness answer`);
+      assert.strictEqual(ask.textContent, 'Check review readiness',
+        `${scenario.label} left the readiness control in its pending label`);
+      assert.strictEqual(ask.disabled, false,
+        `${scenario.label} left the readiness control disabled after an answer`);
+      assert.ok(runButtonLabels(page).includes('Verify independent review'),
+        `${scenario.label} disturbed the review-bind control`);
+      assert.strictEqual(calls.filter((call) =>
+        ['/api/review-bind', '/api/checks', '/api/start', '/api/retry', '/api/cancel']
+          .indexOf(call.path) !== -1).length, 0,
+      `${scenario.label} reached a lifecycle route while only asking a question`);
+    }
+  });
+
+  await atest('DOM: an unreadable, failed or late readiness answer reports UNAVAILABLE and never lands on another card', async () => {
+    const unreadable = [
+      { label: 'an answer about a different run',
+        body: { runId: 'RUN-OTHER', status: 'REVIEW_PERMITTED', mutations: 'NONE' } },
+      { label: 'an unrecognised outcome',
+        body: { runId: 'RUN-READY', status: 'REVIEW_STARTED', mutations: 'NONE' } },
+      { label: 'an answer that admits a mutation',
+        body: { runId: 'RUN-READY', status: 'NO_ADDITIONAL_REVIEW_NEEDED', mutations: 'SOME' } },
+      { label: 'an inherited property name as the outcome',
+        body: { runId: 'RUN-READY', status: 'constructor', mutations: 'NONE' } },
+      { label: 'no answer body at all', body: null },
+    ];
+    for (const scenario of unreadable) {
+      const { page } = readinessPage(readinessStatus('RUN-READY'),
+        () => ({ ok: true, json: async () => scenario.body }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      await readinessControl(page)._listeners.click[0]();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const line = readinessLine(page);
+      assert.ok(line, `${scenario.label} printed nothing at all`);
+      assert.strictEqual(line.attrs['data-review-readiness'], 'UNAVAILABLE',
+        `${scenario.label} was treated as a readable readiness answer`);
+      assert.ok(/Review readiness is unavailable/.test(line.textContent),
+        `${scenario.label} did not report readiness as unavailable: ${line.textContent}`);
+      assert.ok(!/No further review is needed|Review is still needed/.test(line.textContent),
+        `${scenario.label} produced an optimistic readiness claim: ${line.textContent}`);
+      assert.ok(/CHECKS_PASSED/.test(page.text('runs-list')),
+        `${scenario.label} moved the run`);
+    }
+
+    // A refused or broken transport is the same honest absence, and it keeps
+    // the canonical refusal text the server did publish.
+    const { page: failed } = readinessPage(readinessStatus('RUN-READY'),
+      () => ({ ok: false, status: 500, json: async () => ({ error: {
+        code: 'INTERNAL', message: 'review preflight failed' } }) }));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const failedAsk = readinessControl(failed);
+    await failedAsk._listeners.click[0]();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const failedLine = readinessLine(failed);
+    assert.strictEqual(failedLine.attrs['data-review-readiness'], 'UNAVAILABLE',
+      'an HTTP failure was reported as a readiness reading');
+    assert.ok(/Review readiness is unavailable/.test(failedLine.textContent) &&
+      /review preflight failed/.test(failedLine.textContent),
+    `the failure drops either the honest absence or its recorded reason: ${failedLine.textContent}`);
+    assert.strictEqual(failedAsk.disabled, false, 'a failed ask left the control unusable');
+    assert.strictEqual(failedAsk.textContent, 'Check review readiness',
+      'a failed ask left the control in its pending label');
+
+    // A late answer belongs to the card that asked. After canonical evidence
+    // repaints the run, the answer must reach no card at all.
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const lateStatus = readinessStatus('RUN-LATE');
+    const { page: late } = readinessPage(lateStatus, async () => {
+      await gate;
+      return { ok: true, json: async () => ({ runId: 'RUN-LATE', status: 'NO_ADDITIONAL_REVIEW_NEEDED',
+        mutations: 'NONE', reasonSummary: null }) };
+    });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const pending = readinessControl(late)._listeners.click[0]();
+    const advanced = JSON.parse(JSON.stringify(lateStatus));
+    advanced.generatedAt = '2026-09-04T09:00:05.000Z';
+    advanced.runs[0].state = 'REVIEW_BOUND';
+    advanced.runs[0].updatedAt = '2026-09-04T09:00:05.000Z';
+    late.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(advanced) }));
+    release();
+    await pending;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.ok(/REVIEW_BOUND/.test(late.text('runs-list')),
+      'the repaint that outran the answer did not happen');
+    assert.strictEqual(readinessLine(late), null,
+      'a late readiness answer attached itself to the repainted card');
+    assert.ok(!/No further review is needed/.test(late.text('runs-list')),
+      'a late readiness answer put a stale reading on the current run');
+    assert.strictEqual(readinessControl(late), null,
+      'the readiness control survived after the run left CHECKS_PASSED');
+  });
+
   await atest('DOM: ROOT-subject mismatch cannot hide run-scoped review verification and canonical refusal stays truthful', async () => {
     const checked = {
       generatedAt: '2026-08-27T16:06:00.000Z',

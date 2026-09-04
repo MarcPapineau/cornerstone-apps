@@ -5998,6 +5998,18 @@
     return host;
   }
 
+  // Every sentence this page may say about review readiness. The route behind
+  // it only READS: each outcome therefore states what is still needed AND that
+  // nothing was launched, bound or paid for, because an operator who reads
+  // "review is still needed" must never take it for "a review has started".
+  var READINESS_OUTCOMES = {
+    REVIEW_PERMITTED: 'Review is still needed for this exact checked version. Nothing was launched, nothing was bound and nothing was paid for.',
+    NO_ADDITIONAL_REVIEW_NEEDED: 'No further review is needed for this exact checked version. Nothing was newly reviewed and nothing was bound.',
+    REFUSED: 'AEGIS cannot prepare a review for this run right now. Nothing was launched.',
+  };
+  var READINESS_NO_REASON = 'It gave no reason this page can state.';
+  var READINESS_UNREADABLE = 'Review readiness is unavailable, so nothing is known about what review is needed. Nothing was launched, bound or changed.';
+
   function runActionRow(run, isBoundCurrent){
     var row = el('div', 'btn-row');
 
@@ -6070,6 +6082,59 @@
         }
       });
       row.appendChild(reviewBtn);
+
+      // Asking what review is still needed is not the same as getting one. This
+      // control posts the run id to the read-only readiness route and prints the
+      // answer beside the card that asked for it. It launches nothing, binds
+      // nothing and spends nothing: the only thing it can change on this page is
+      // the sentence below the button, and only on an explicit click.
+      var readinessMsg = el('div', 'meta');
+      var readinessPending = false;
+      var showReadiness = function(state, cls, text){
+        readinessMsg.textContent = '';
+        var line = el('div', cls ? 'api-msg ' + cls : 'api-msg', text);
+        line.setAttribute('data-review-readiness', state);
+        readinessMsg.appendChild(line);
+      };
+      var readinessBtn = el('button', 'action', 'Check review readiness');
+      readinessBtn.type = 'button';
+      readinessBtn.addEventListener('click', async function(){
+        if (readinessPending) return;
+        readinessPending = true;
+        readinessBtn.disabled = true;
+        readinessBtn.textContent = 'Checking review readiness…';
+        try {
+          var answer = await callApi('/api/review-preflight', { runId: run.runId });
+          // Three things make an answer readable: it is about THIS run, it says
+          // it changed nothing, and its outcome is one this page can state in
+          // plain English. Own-property lookup only, and anything else is an
+          // unreadable answer — never a hopeful "ready".
+          var status = answer && answer.runId === run.runId && answer.mutations === 'NONE' &&
+            typeof answer.status === 'string' &&
+            Object.prototype.hasOwnProperty.call(READINESS_OUTCOMES, answer.status)
+            ? answer.status : null;
+          if (!status) {
+            showReadiness('UNAVAILABLE', 'err', READINESS_UNREADABLE);
+          } else if (status === 'REFUSED') {
+            showReadiness(status, null, READINESS_OUTCOMES[status] + ' ' +
+              (typeof answer.reasonSummary === 'string' && answer.reasonSummary
+                ? answer.reasonSummary : READINESS_NO_REASON));
+          } else {
+            showReadiness(status, status === 'NO_ADDITIONAL_REVIEW_NEEDED' ? 'ok' : null,
+              READINESS_OUTCOMES[status]);
+          }
+        } catch (e) {
+          showReadiness('UNAVAILABLE', 'err', READINESS_UNREADABLE + ' ' + e.message);
+        } finally {
+          readinessPending = false;
+          readinessBtn.disabled = false;
+          readinessBtn.textContent = 'Check review readiness';
+        }
+      });
+      row.appendChild(readinessBtn);
+      row.appendChild(el('div', 'meta',
+        'Asking is read-only: it reports what review this exact checked version still needs, and launches, binds and pays for nothing.'));
+      row.appendChild(readinessMsg);
     }
 
     if (run.state === 'REVIEW_BOUND') {
