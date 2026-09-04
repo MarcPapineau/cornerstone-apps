@@ -222,10 +222,12 @@ test('switchboard: review verification uses the canonical bind-only route only f
   assert.ok(/run\.state\s*===\s*'CHECKS_PASSED'/.test(row),
     'review verification is not gated to CHECKS_PASSED');
   assert.ok(/Verify independent review/.test(row), 'review verification has no founder-readable label');
-  assert.ok(/reviews run outside this functional-beta dashboard/.test(row),
-    'the dashboard does not explain that reviews run externally');
-  assert.ok(/does not launch or pay for a review/.test(row),
-    'the dashboard could imply that binding launches a reviewer');
+  assert.ok(/only verifies and binds review evidence that already exists for this exact code version/.test(row),
+    'the dashboard does not scope binding to review evidence that already exists for this exact version');
+  assert.ok(/it starts no new review and pays for nothing/.test(row),
+    'the dashboard could imply that binding launches or pays for a reviewer');
+  assert.ok(/Requesting a review is a separate, explicit act/.test(row),
+    'the dashboard does not separate binding from the explicit review request');
   assert.strictEqual(S.API_POST_ROUTES['/api/review-bind'], 'review-bind',
     'hosting does not declare the canonical review-bind route');
   assert.strictEqual(S.DEFAULT_CONTROL_AUTHORITIES.bindIndependentReview,
@@ -237,7 +239,7 @@ test('switchboard: review verification uses the canonical bind-only route only f
 });
 
 test('control authority composition seam is exact, frozen, and unavailable to browser input', () => {
-  const SEAM = ['bindIndependentReview', 'prepareIndependentReview',
+  const SEAM = ['bindIndependentReview', 'checkpointRun', 'prepareIndependentReview',
     'requestIndependentReview', 'runChecks'];
   assert.ok(Object.isFrozen(S.DEFAULT_CONTROL_AUTHORITIES));
   assert.deepStrictEqual(Object.keys(S.DEFAULT_CONTROL_AUTHORITIES).sort(), SEAM);
@@ -252,13 +254,18 @@ test('control authority composition seam is exact, frozen, and unavailable to br
   }), /provide exactly/, 'a seam missing the review-request authority was accepted');
   assert.throws(() => S.resolveControlAuthorities({
     runChecks() {}, bindIndependentReview() {}, prepareIndependentReview() {},
-    requestIndependentReview() {}, startRun() {},
+    requestIndependentReview() {},
+  }), /provide exactly/, 'a seam missing the checkpoint authority was accepted');
+  assert.throws(() => S.resolveControlAuthorities({
+    runChecks() {}, bindIndependentReview() {}, prepareIndependentReview() {},
+    requestIndependentReview() {}, checkpointRun() {}, startRun() {},
   }), /provide exactly/);
   const supplied = S.resolveControlAuthorities({
     runChecks() { return 'checks'; },
     bindIndependentReview() { return 'review'; },
     prepareIndependentReview() { return 'preflight'; },
     requestIndependentReview() { return 'request'; },
+    checkpointRun() { return 'checkpoint'; },
   });
   assert.ok(Object.isFrozen(supplied));
   assert.deepStrictEqual(Object.keys(supplied).sort(), SEAM);
@@ -267,8 +274,14 @@ test('control authority composition seam is exact, frozen, and unavailable to br
     'production server construction must not inject alternate control authorities');
   assert.throws(() => S.resolveControlAuthorities(Object.defineProperty({
     bindIndependentReview() {}, prepareIndependentReview() {}, requestIndependentReview() {},
+    checkpointRun() {},
   }, 'runChecks', { enumerable: true, get() { throw new Error('getter executed'); } })),
   /provide exactly/, 'accessor-backed control authority was accepted');
+  assert.throws(() => S.resolveControlAuthorities(Object.defineProperty({
+    runChecks() {}, bindIndependentReview() {}, prepareIndependentReview() {},
+    requestIndependentReview() {},
+  }, 'checkpointRun', { enumerable: true, get() { throw new Error('getter executed'); } })),
+  /provide exactly/, 'an accessor-backed checkpoint authority was accepted');
 });
 
 // ── read-only independent-review preflight — static and unit proofs ─────────
@@ -322,6 +335,121 @@ test('the Codex review request is one named POST pinned to the canonical callabl
     assert.ok(!route.includes(forbidden),
       `the review-request route reaches ${forbidden}, which the canonical callable owns`);
   }
+});
+
+// ── the one authenticated checkpoint route — static and unit proofs ─────────
+test('the checkpoint route is one named POST pinned to the canonical checkpoint authority, and nothing more', () => {
+  assert.strictEqual(S.API_POST_ROUTES['/api/checkpoint'], 'checkpoint',
+    'hosting does not declare the canonical checkpoint route');
+  assert.strictEqual(S.DEFAULT_CONTROL_AUTHORITIES.checkpointRun,
+    require('../aegis-run.cjs').checkpointRun,
+    'the production HTTP route is not pinned to canonical checkpointRun');
+
+  const source = fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8');
+  assert.match(source,
+    /pathname === '\/api\/checkpoint'\) result = recordCheckpoint\(runId, controlAuthorities\)/,
+    'the HTTP route is not a thin pass-through to its fixed checkpoint authority');
+  assert.match(source, /const runId = parseRunIdBody\(body\);/,
+    'the checkpoint route must share the single runId-only body parser');
+
+  const route = source.slice(source.indexOf('function recordCheckpoint('),
+    source.indexOf('async function handleApi('));
+  assert.match(route, /answer = controlAuthorities\.checkpointRun\(runId\);/,
+    'the route is not a single pass-through carrying only the validated runId');
+  assert.strictEqual((route.match(/checkpointRun\(/g) || []).length, 1,
+    'the route invokes the canonical checkpoint authority more than once');
+  // Committing, claiming, restoring, deploying, launching and retrying all
+  // belong to authorities this route is not allowed to be.
+  for (const forbidden of ['commit', 'force', 'rollbackRun', 'cmdRollback', 'acquireRunLaunchClaim',
+    'releaseRunLaunchClaim', 'launchWorker', 'startGovernedRun', 'runChecks',
+    'bindIndependentReview', 'saveRun', 'transition', 'spawn', 'setTimeout', 'setInterval']) {
+    assert.ok(!route.includes(forbidden),
+      `the checkpoint route reaches ${forbidden}, which the canonical authority owns`);
+  }
+});
+
+test('the checkpoint DTO publishes validated coordinates only, and never the packet, subject or objective', () => {
+  const runId = 'RUN-20260904-0badc0de';
+  const canonical = {
+    runId, state: 'CHECKPOINTED', action: 'checkpoint',
+    checkpointId: 'CP-20260904123456-0badc0de',
+    createdAt: '2026-09-04T12:34:56.789Z',
+    rollbackPoint: 'a'.repeat(40), tree: 'b'.repeat(40), digest: 'c'.repeat(64),
+    reviewedBase: 'd'.repeat(40),
+    packet: { path: 'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json',
+      sha256: 'e'.repeat(64) },
+    subject: { subjectSha256: 'f'.repeat(64), pathCount: 2, diffBytes: 4096,
+      reviewedRange: 'aaa..bbb', committedRange: 'ccc..ddd' },
+    checkReceiptSha256: '9'.repeat(64),
+    checks: { passed: 13, total: 13 },
+    objective: 'the canonical objective text must never travel',
+    nextAction: 'rollback remains deferred',
+  };
+  const dto = S.minimizeCheckpoint(runId, canonical);
+  assert.deepStrictEqual(dto, {
+    runId, action: 'checkpoint', outcome: 'RECORDED', state: 'CHECKPOINTED',
+    checkpointId: 'CP-20260904123456-0badc0de', createdAt: '2026-09-04T12:34:56.789Z',
+    rollbackPoint: 'a'.repeat(40), tree: 'b'.repeat(40), digest: 'c'.repeat(64),
+    reasonCode: null, reasonSummary: null,
+    summary: S.PUBLIC_CHECKPOINT_SUMMARIES.RECORDED,
+  });
+  const text = JSON.stringify(dto);
+  for (const forbidden of ['packets/', 'PKT-', 'aaa..bbb', 'ccc..ddd', 'objective',
+    'subjectSha256', 'diffBytes', 'reviewedBase', 'checkReceiptSha256']) {
+    assert.ok(!text.includes(forbidden),
+      `the checkpoint DTO published ${forbidden}, which is callable-only evidence`);
+  }
+  assert.match(dto.summary, /restores no files and deploys nothing/,
+    'a recorded checkpoint does not state that it neither restores nor deploys');
+
+  // Every coordinate is validated by FORMAT, not copied. Any one of them being
+  // wrong makes the whole answer unreadable rather than half-published.
+  for (const [field, value] of [
+    ['runId', 'RUN-20260904-deadbeef'], ['state', 'ROLLED_BACK'], ['action', 'rollback'],
+    ['checkpointId', '../../etc/passwd'], ['checkpointId', 'CP-20260904123456-nothex!'],
+    ['createdAt', 'yesterday'], ['rollbackPoint', 'HEAD'], ['tree', 'z'.repeat(40)],
+    ['digest', 'c'.repeat(63)],
+  ]) {
+    assert.strictEqual(S.minimizeCheckpoint(runId, { ...canonical, [field]: value }), null,
+      `an invalid ${field} (${value}) was published as a recorded checkpoint`);
+  }
+  for (const answer of [null, 'CHECKPOINTED', [], { ...canonical, checkpointId: undefined }]) {
+    assert.strictEqual(S.minimizeCheckpoint(runId, answer), null,
+      `a malformed canonical answer was published as a recorded checkpoint: ${JSON.stringify(answer)}`);
+  }
+});
+
+test('every checkpoint refusal and uncertainty sentence is host-written and claims no safety', () => {
+  const AegisRun = require('../aegis-run.cjs');
+  // The host maps the canonical refusal vocabulary as it stands, and invents
+  // no code of its own: every mapped code is one the canonical authority can
+  // actually raise. CHECKPOINT_CLAIM_NOT_RELEASED is deliberately NOT here —
+  // it is a post-write uncertainty, not a refusal.
+  const canonicalCodes = Object.values(AegisRun.CHECKPOINT_REFUSAL_CODES);
+  assert.deepStrictEqual(Object.keys(S.PUBLIC_CHECKPOINT_REFUSALS).sort(),
+    [...canonicalCodes].sort(),
+    'the host refusal table and the canonical refusal vocabulary disagree');
+  assert.ok(!Object.prototype.hasOwnProperty.call(
+    S.PUBLIC_CHECKPOINT_REFUSALS, 'CHECKPOINT_CLAIM_NOT_RELEASED'),
+  'an unreleased claim is reported as a plain refusal');
+  for (const [code, mapped] of Object.entries(S.PUBLIC_CHECKPOINT_REFUSALS)) {
+    assert.ok([400, 404, 409].includes(mapped.httpStatus), `${code} has no bounded refusal status`);
+    assert.ok(mapped.message.length > 0 && !/\//.test(mapped.message),
+      `${code} refusal wording carries a path: ${mapped.message}`);
+    assert.ok(!/no checkpoint was recorded|nothing changed|nothing happened|safe/i.test(mapped.message),
+      `${code} refusal wording fabricates a no-mutation or safety claim: ${mapped.message}`);
+  }
+  for (const [code, sentence] of Object.entries(S.PUBLIC_CHECKPOINT_UNCERTAIN_REASONS)) {
+    assert.ok(!/nothing changed|nothing was recorded|no checkpoint was recorded/i.test(sentence),
+      `the ${code} sentence claims nothing changed: ${sentence}`);
+    assert.match(sentence, /unknown|could not prove/,
+      `the ${code} sentence does not report uncertainty: ${sentence}`);
+  }
+  assert.match(S.PUBLIC_CHECKPOINT_SUMMARIES.UNCERTAIN,
+    /neither checkpointed nor unchanged/,
+    'the uncertain summary picks a side it cannot know');
+  assert.match(S.PUBLIC_CHECKPOINT_SUMMARIES.UNCERTAIN, /never restores files and never deploys/,
+    'the uncertain summary does not state that a checkpoint neither restores nor deploys');
 });
 
 // This replaces a stage-boundary lock that forbade the dashboard from naming
@@ -1925,6 +2053,11 @@ async function runReviewPreflightCompositionSuite() {
   // answer, defer, reject or throw without a second fixture. It reaches no
   // reviewer, no provider and no paid API — nothing here executes a review.
   let requestResult = null;
+  // The checkpoint double is a FUNCTION for the same reason: one closed test
+  // authority can record, refuse, fail to release its claim or blow up without
+  // a second fixture. It writes no checkpoint record, takes no claim, runs no
+  // git command and creates no commit — nothing here checkpoints anything.
+  let checkpointResult = null;
   const controlAuthorities = {
     prepareIndependentReview(runId) {
       calls.push({ route: 'prepareIndependentReview', runId });
@@ -1937,10 +2070,19 @@ async function runReviewPreflightCompositionSuite() {
       calls.push({ route: 'requestIndependentReview', request });
       return requestResult === null ? null : requestResult();
     },
+    checkpointRun(runId) {
+      calls.push({ route: 'checkpointRun', runId });
+      return checkpointResult === null ? null : checkpointResult();
+    },
   };
   const preflightCalls = () => calls.filter((c) => c.route === 'prepareIndependentReview');
   const forbiddenCalls = () => calls.filter((c) => c.route !== 'prepareIndependentReview');
   const requestCalls = () => calls.filter((c) => c.route === 'requestIndependentReview');
+  const checkpointCalls = () => calls.filter((c) => c.route === 'checkpointRun');
+  // Every control that existed before the checkpoint route. A checkpoint case
+  // asserts this list stayed empty, so the new route cannot quietly reach a
+  // check, a binding, a preflight or a review request.
+  const otherControlCalls = () => calls.filter((c) => c.route !== 'checkpointRun');
   const canonicalAnswer = (fields) => ({
     runId: RUN_ID, state: 'CHECKS_PASSED', action: 'prepare-independent-review',
     authority: 'aegis-run.cjs prepareIndependentReview (read-only)', mutations: 'NONE',
@@ -1973,6 +2115,47 @@ async function runReviewPreflightCompositionSuite() {
     ...(extra.cookie ? { cookie: extra.cookie } : {}),
     body,
   });
+  const askCheckpoint = (body, extra = {}) => ask('/api/checkpoint', {
+    headers: { authorization: 'Bearer ' + PREFLIGHT_TOKEN, 'content-type': 'application/json',
+      origin: ORIGIN, ...(extra.headers || {}) },
+    ...(extra.cookie ? { cookie: extra.cookie } : {}),
+    body,
+  });
+  // The checkpoint coordinates a canonical answer carries, in the exact shapes
+  // aegis-run's checkpoint authority produces them.
+  const CHECKPOINT_ID = 'CP-20260904123456-0badc0de';
+  const CREATED_AT = '2026-09-04T12:34:56.789Z';
+  const ROLLBACK_POINT = 'a'.repeat(40);
+  const TREE = 'b'.repeat(40);
+  const CHECKPOINT_DIGEST = 'e'.repeat(64);
+  // Shaped exactly like the canonical callable's own answer, including the
+  // packet path, subject detail and objective a browser must never receive.
+  const canonicalCheckpointAnswer = (fields) => ({
+    runId: RUN_ID, state: 'CHECKPOINTED', action: 'checkpoint',
+    checkpointId: CHECKPOINT_ID, createdAt: CREATED_AT,
+    rollbackPoint: ROLLBACK_POINT, tree: TREE, digest: CHECKPOINT_DIGEST,
+    reviewedBase: 'd'.repeat(40),
+    packet: { path: S.SWITCHBOARD_PACKET, sha256: '7'.repeat(64) },
+    subject: { subjectSha256: SUBJECT, pathCount: 2, diffBytes: 4096,
+      reviewedRange: 'aaa..bbb', committedRange: 'ccc..ddd' },
+    checkReceiptSha256: RECEIPT, checks: { passed: 13, total: 13 },
+    objective: `canonical objective ${CANONICAL_ONLY}`,
+    nextAction: 'rollback remains deferred',
+    ...fields,
+  });
+  const recordedCheckpointDto = () => ({
+    runId: RUN_ID, action: 'checkpoint', outcome: 'RECORDED', state: 'CHECKPOINTED',
+    checkpointId: CHECKPOINT_ID, createdAt: CREATED_AT,
+    rollbackPoint: ROLLBACK_POINT, tree: TREE, digest: CHECKPOINT_DIGEST,
+    reasonCode: null, reasonSummary: null,
+    summary: S.PUBLIC_CHECKPOINT_SUMMARIES.RECORDED,
+  });
+  const uncertainCheckpointDto = (reasonCode) => ({
+    runId: RUN_ID, action: 'checkpoint', outcome: 'UNCERTAIN', state: null,
+    checkpointId: null, createdAt: null, rollbackPoint: null, tree: null, digest: null,
+    reasonCode, reasonSummary: S.PUBLIC_CHECKPOINT_UNCERTAIN_REASONS[reasonCode],
+    summary: S.PUBLIC_CHECKPOINT_SUMMARIES.UNCERTAIN,
+  });
   const settle = () => new Promise((resolve) => setTimeout(resolve, 250));
   const waitFor = async (predicate, what) => {
     const deadline = Date.now() + 2000;
@@ -1991,6 +2174,7 @@ async function runReviewPreflightCompositionSuite() {
     answer = null;
     thrown = null;
     requestResult = null;
+    checkpointResult = null;
     return fn();
   });
 
@@ -2437,6 +2621,240 @@ async function runReviewPreflightCompositionSuite() {
         'an unreadable result claimed the governed admission slot was freed');
       assert.deepStrictEqual(forbiddenCalls().filter((c) => c.route !== 'requestIndependentReview'), []);
     });
+
+    // ── POST /api/checkpoint ────────────────────────────────────────────────
+    // The one control that RECORDS where a run reached. Same transport
+    // fixture, same closed doubles, same per-case reset — and still no commit,
+    // no claim, no git command and no checkpoint record anywhere in it.
+    //
+    // What these cases do NOT prove, deliberately: that the prerequisites are
+    // satisfiable from here (they are decided by the canonical authority, and
+    // the double stands in for it), or that a recorded checkpoint can be
+    // restored (rollback stays deferred to its own packet).
+    await ptest('API RED: unauthenticated, cross-origin, non-POST and malformed checkpoint requests reach no authority', async () => {
+      const unauth = await ask('/api/checkpoint', {
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: RUN_ID }),
+      });
+      assert.strictEqual(unauth.status, 401);
+      const wrongToken = await askCheckpoint(JSON.stringify({ runId: RUN_ID }),
+        { headers: { authorization: 'Bearer ' + 'x'.repeat(40) } });
+      assert.strictEqual(wrongToken.status, 401);
+
+      const crossOrigin = await askCheckpoint(JSON.stringify({ runId: RUN_ID }),
+        { headers: { origin: 'http://evil.example' } });
+      assert.strictEqual(crossOrigin.status, 403);
+      const cookieNoOrigin = await ask('/api/checkpoint', {
+        headers: { 'content-type': 'application/json' },
+        cookie: `aegis_session=${S.sessionFor(PREFLIGHT_TOKEN)}`,
+        body: JSON.stringify({ runId: RUN_ID }),
+      });
+      assert.strictEqual(cookieNoOrigin.status, 403);
+      assert.strictEqual(JSON.parse(cookieNoOrigin.body).error.code, 'CSRF_ORIGIN_REQUIRED');
+
+      for (const method of ['GET', 'HEAD']) {
+        const r = await new Promise((resolve) => {
+          const req = http.request({ host: '127.0.0.1', port: PORT, path: '/api/checkpoint',
+            method, agent, headers: { authorization: 'Bearer ' + PREFLIGHT_TOKEN } },
+          (res) => { res.resume(); res.on('end', () => resolve({ status: res.statusCode })); });
+          req.on('error', () => resolve({ status: 0 }));
+          req.end();
+        });
+        assert.strictEqual(r.status, 405, `${method} reached the checkpoint dispatcher`);
+      }
+
+      const wrongType = await askCheckpoint(JSON.stringify({ runId: RUN_ID }),
+        { headers: { 'content-type': 'text/plain' } });
+      assert.strictEqual(wrongType.status, 415);
+      const malformed = await askCheckpoint('{ not json');
+      assert.strictEqual(malformed.status, 400);
+      assert.strictEqual(JSON.parse(malformed.body).error.code, 'MALFORMED_JSON');
+      const oversized = await askCheckpoint(JSON.stringify({
+        runId: RUN_ID, pad: 'p'.repeat(S.MAX_API_BODY_BYTES + 1024) }));
+      assert.strictEqual(oversized.status, 413);
+
+      // A checkpoint cannot be widened by describing one. Every coordinate the
+      // canonical authority re-derives under its own claim is refused here.
+      for (const key of ['commit', 'baseCommit', 'packet', 'packetId', 'force', 'override',
+        'rollback', 'rollbackPoint', 'restore', 'deploy', 'checkpointId', 'tree', 'digest',
+        'subject', 'subjectSha256', 'checks', 'reviewedBase', 'state', 'objective']) {
+        const r = await askCheckpoint(JSON.stringify({ runId: RUN_ID, [key]: 'caller-controlled' }));
+        assert.strictEqual(r.status, 400, `${key} was not refused: ${r.body}`);
+        assert.strictEqual(JSON.parse(r.body).error.code, 'INVALID_REQUEST');
+      }
+      for (const body of ['[]', '{}', '"RUN-20260904-0badc0de"',
+        JSON.stringify({ runId: '' }), JSON.stringify({ runId: 7 })]) {
+        const r = await askCheckpoint(body);
+        assert.strictEqual(r.status, 400, `${body} was not refused: ${r.body}`);
+      }
+      // A well-formed body naming a non-canonical run id is refused by this
+      // host before the authority is reached, so no unvalidated string is ever
+      // handed to the canonical checkpoint callable.
+      for (const badRunId of ['../../etc/passwd', 'RUN-2026-0badc0de', 'run-20260904-0badc0de']) {
+        const r = await askCheckpoint(JSON.stringify({ runId: badRunId }));
+        assert.strictEqual(r.status, 400, r.body);
+        assert.deepStrictEqual(JSON.parse(r.body), { error: { code: 'INVALID_RUN_ID',
+          message: 'runId is not a canonical AEGIS run identifier.' } });
+      }
+
+      assert.deepStrictEqual(calls, [], 'a refused checkpoint request reached a control authority');
+    });
+
+    await ptest('an authenticated checkpoint invokes the canonical authority exactly once and publishes only validated coordinates', async () => {
+      checkpointResult = () => canonicalCheckpointAnswer();
+      const r = await askCheckpoint(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(r.status, 200, r.body);
+      assert.strictEqual(r.headers['cache-control'], 'no-store');
+      assert.ok(/application\/json/.test(r.headers['content-type']));
+      assert.deepStrictEqual(checkpointCalls(), [{ route: 'checkpointRun', runId: RUN_ID }],
+        'the canonical checkpoint authority was not reached exactly once with the exact runId');
+      assert.deepStrictEqual(otherControlCalls(), [],
+        'a checkpoint reached a check, binding, preflight or review-request authority');
+      assert.deepStrictEqual(JSON.parse(r.body), recordedCheckpointDto());
+      assert.ok(!r.body.includes(CANONICAL_ONLY),
+        `the response echoed canonical objective text the host never wrote: ${r.body}`);
+      // The callable's answer carries a relative packet path. It is
+      // deliberately excluded from HTTP, along with the subject and its ranges.
+      assert.ok(!/packets\/|PKT-|aaa\.\.bbb|ccc\.\.ddd|subjectSha256|diffBytes|objective/.test(r.body),
+        `the checkpoint response leaked packet, subject or objective detail: ${r.body}`);
+      assert.match(JSON.parse(r.body).summary, /restores no files and deploys nothing/,
+        'a recorded checkpoint was published without saying it neither restores nor deploys');
+    });
+
+    await ptest('API RED: mismatched coordinates and hostile malformed checkpoint output are never published as a checkpoint', async () => {
+      const unreadable = uncertainCheckpointDto('CHECKPOINT_RESULT_UNREADABLE');
+      const hostile = canonicalCheckpointAnswer({
+        transcript: HOSTILE_WORKER_OUTPUT.source, stdoutTail: HOSTILE_WORKER_OUTPUT.unlabelled,
+        credentials: HOSTILE_WORKER_OUTPUT.jwt + ' ' + HOSTILE_WORKER_OUTPUT.cookie,
+        worktree: '/Users/someone/checkout/builder-control',
+        checkpointFile: '/Users/someone/checkout/builder-control/checkpoints/CP.json',
+        summary: HOSTILE_WORKER_OUTPUT.pem,
+        checkpointId: '../../etc/passwd',
+      });
+      for (const result of [
+        // A hostile answer whose own checkpoint id is unusable.
+        () => hostile,
+        // Coordinates about another run, another action or another state.
+        () => canonicalCheckpointAnswer({ runId: 'RUN-20260904-deadbeef' }),
+        () => canonicalCheckpointAnswer({ runId: null }),
+        () => canonicalCheckpointAnswer({ state: 'ROLLED_BACK' }),
+        () => canonicalCheckpointAnswer({ state: 'REVIEW_BOUND' }),
+        () => canonicalCheckpointAnswer({ action: 'rollback' }),
+        // Coordinates that are the right names in the wrong shapes.
+        () => canonicalCheckpointAnswer({ createdAt: 'just now' }),
+        () => canonicalCheckpointAnswer({ rollbackPoint: 'HEAD' }),
+        () => canonicalCheckpointAnswer({ tree: 'z'.repeat(40) }),
+        () => canonicalCheckpointAnswer({ digest: 'e'.repeat(63) }),
+        () => canonicalCheckpointAnswer({ checkpointId: 'CP-2026-0badc0de' }),
+        () => 'CHECKPOINTED',
+        () => [canonicalCheckpointAnswer()],
+        () => null,
+      ]) {
+        checkpointResult = result;
+        const r = await askCheckpoint(JSON.stringify({ runId: RUN_ID }));
+        assert.strictEqual(r.status, 200, r.body);
+        assert.deepStrictEqual(JSON.parse(r.body), unreadable, r.body);
+        assertNoHostileWorkerOutput(JSON.parse(r.body), '/api/checkpoint');
+        assert.ok(!/Users|checkpoints|BEGIN PRIVATE KEY|deadbeef/.test(r.body),
+          `the checkpoint response leaked a path, credential or foreign run: ${r.body}`);
+      }
+      assert.ok(!/nothing changed|no checkpoint was recorded/i.test(JSON.stringify(unreadable)),
+        'an unreadable checkpoint result claimed nothing changed');
+      assert.deepStrictEqual(otherControlCalls(), []);
+    });
+
+    await ptest('API RED: known canonical checkpoint refusals map to fixed host wording, never a canonical message echo', async () => {
+      const { AegisControlError } = require('../aegis-run.cjs');
+      const leaky = `checkpoint refused in /Users/someone/checkout/builder-control/runs/${RUN_ID}.json ` +
+        HOSTILE_WORKER_OUTPUT.pem;
+      for (const [code, mapped] of Object.entries(S.PUBLIC_CHECKPOINT_REFUSALS)) {
+        checkpointResult = () => { throw new AegisControlError(code, leaky, mapped.httpStatus); };
+        const r = await askCheckpoint(JSON.stringify({ runId: RUN_ID }));
+        assert.strictEqual(r.status, mapped.httpStatus, `${code}: ${r.body}`);
+        assert.deepStrictEqual(JSON.parse(r.body),
+          { error: { code, message: mapped.message } }, r.body);
+        assert.ok(!/Users|runs\/|BEGIN PRIVATE KEY/.test(r.body),
+          `a checkpoint refusal echoed canonical internals: ${r.body}`);
+      }
+      assert.strictEqual(checkpointCalls().length,
+        Object.keys(S.PUBLIC_CHECKPOINT_REFUSALS).length,
+        'a refused checkpoint reached the canonical authority more or less than once');
+      assert.deepStrictEqual(otherControlCalls(), []);
+    });
+
+    await ptest('API RED: an unreleased claim and an unexpected failure report uncertainty, never that nothing changed', async () => {
+      const { AegisControlError } = require('../aegis-run.cjs');
+      const leaky = `checkpoint CP-20260904123456-0badc0de was recorded under ` +
+        `/Users/someone/checkout/builder-control/checkpoints ${HOSTILE_WORKER_OUTPUT.pem}`;
+      for (const [result, reasonCode] of [
+        // The canonical post-write refusal: the record exists, the claim does not
+        // provably. This must never read as "refused" and never as "recorded".
+        [() => { throw new AegisControlError('CHECKPOINT_CLAIM_NOT_RELEASED', leaky, 409); },
+          'CHECKPOINT_CLAIM_NOT_RELEASED'],
+        // Anything raised deeper than the checkpoint gates — a refused ledger
+        // append, an unavailable git or subject authority — is unknown, not safe.
+        [() => { throw new AegisControlError('LEDGER-APPEND-REFUSED', leaky, 409); },
+          'CHECKPOINT_CALL_FAILED'],
+        [() => { throw new Error(leaky); }, 'CHECKPOINT_CALL_FAILED'],
+        [() => { throw new TypeError(HOSTILE_WORKER_OUTPUT.jwt); }, 'CHECKPOINT_CALL_FAILED'],
+      ]) {
+        checkpointResult = result;
+        const r = await askCheckpoint(JSON.stringify({ runId: RUN_ID }));
+        assert.strictEqual(r.status, 200,
+          `an uncertain outcome must be reported, not swallowed: ${r.body}`);
+        const parsed = JSON.parse(r.body);
+        assert.deepStrictEqual(parsed, uncertainCheckpointDto(reasonCode), r.body);
+        assert.ok(!/Users|checkpoints|BEGIN PRIVATE KEY|eyJhbGciOi/.test(r.body),
+          `an uncertain checkpoint echoed canonical internals: ${r.body}`);
+        assert.ok(!/nothing changed|nothing was recorded|no checkpoint was recorded/i.test(r.body),
+          `an uncertain checkpoint claimed nothing changed: ${r.body}`);
+        assert.strictEqual(parsed.checkpointId, null,
+          'an uncertain outcome published a checkpoint id it could not validate');
+        assert.strictEqual(parsed.state, null,
+          'an uncertain outcome published a lifecycle state it could not read');
+      }
+      assert.match(uncertainCheckpointDto('CHECKPOINT_CLAIM_NOT_RELEASED').reasonSummary,
+        /could not prove it released/,
+        'an unreleased claim was not reported as an unreleased claim');
+      assert.deepStrictEqual(otherControlCalls(), []);
+    });
+
+    await ptest('the existing controls still route to their own authorities after a checkpoint', async () => {
+      checkpointResult = () => canonicalCheckpointAnswer();
+      assert.strictEqual((await askCheckpoint(JSON.stringify({ runId: RUN_ID }))).status, 200);
+
+      answer = canonicalAnswer({
+        status: 'REVIEW_PERMITTED', reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+        nextAction: 'independent-review', requiredReviewers: ['gpt-5-codex'],
+        subject: { subjectSha256: SUBJECT },
+        evidence: { receiptSha256: RECEIPT, hostContainment: 'BOUND' },
+      });
+      const preflight = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(preflight.status, 200, preflight.body);
+      assert.strictEqual(JSON.parse(preflight.body).status, 'REVIEW_PERMITTED');
+
+      requestResult = () => canonicalRequestAnswer({ review: 'NOT_REQUESTED',
+        reviewProcess: 'NOT_LAUNCHED', admission: 'NOT_ACQUIRED',
+        reasonCode: 'ADMISSION_UNAVAILABLE' });
+      const requested = await askRequest(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(requested.status, 200, requested.body);
+      assert.deepStrictEqual(JSON.parse(requested.body), expectedRequestDto(
+        'NOT_REQUESTED', 'NOT_LAUNCHED', 'NOT_ACQUIRED', 'ADMISSION_UNAVAILABLE'));
+
+      const checks = await ask('/api/checks', {
+        headers: { authorization: 'Bearer ' + PREFLIGHT_TOKEN, 'content-type': 'application/json',
+          origin: ORIGIN },
+        body: JSON.stringify({ runId: RUN_ID }),
+      });
+      assert.strictEqual(checks.status, 200, checks.body);
+      assert.deepStrictEqual(JSON.parse(checks.body), { runId: RUN_ID });
+
+      assert.deepStrictEqual(calls.map((c) => c.route),
+        ['checkpointRun', 'prepareIndependentReview', 'requestIndependentReview', 'runChecks'],
+        'the checkpoint route disturbed the existing control routing');
+      assert.strictEqual(checkpointCalls().length, 1,
+        'an existing control reached the canonical checkpoint authority');
+    });
   } finally {
     agent.destroy();
     await new Promise((resolve) => srv.close(resolve));
@@ -2536,6 +2954,14 @@ async function runApiSuite() {
           authority: 'aegis-run.cjs requestIndependentReview',
           review: 'NOT_REQUESTED', reviewProcess: 'NOT_LAUNCHED', admission: 'NOT_ACQUIRED',
           reasonCode: 'REVIEW_NOT_PERMITTED', summary: 'fixture refusal' };
+      },
+      // Closed and inert for the same reason: the seam records the runId and
+      // answers with a canonical-shaped refusal. No checkpoint record is
+      // written, no per-run claim is taken and no commit is created here.
+      checkpointRun(runId) {
+        record('checkpointRun', runId);
+        throw new AegisRun.AegisControlError('INVALID_CHECKPOINT',
+          'checkpoint requires REVIEW_BOUND', 409);
       },
     };
     const launchedWorkers = [];
