@@ -183,14 +183,21 @@
 
   /* ── live activity: one item, two reading levels ─────────────────
      A live update is one list item, never two. Command View reads the
-     founder answers; the exact recorded text and its canonical timestamp are
-     written into the SAME item by the same renderer and disclosed by the
-     Detail control, so no receipt is dropped, rewritten or duplicated. There
+     founder answers and the receipt's own canonical time; the exact recorded
+     text and that same timestamp are written into the SAME item by the same
+     renderer and disclosed by the Detail control, so no receipt is dropped,
+     rewritten or duplicated. There
      is no width, no track minimum and no nowrap anywhere here: every value
      wraps inside its column, so a run id or a refusal code cannot drag a
      390px phone sideways. */
   .activity-item{display:block;min-width:0}
   .activity-what{font-weight:500;color:var(--text-0);font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+  /* The canonical time the receipt itself carries, or the explicit statement
+     that it carries none. It is readable in Command View and not only in
+     Detail View, because an undated feed reads as "just now" whatever the
+     receipt actually says. It is the SAME sentence Detail View discloses
+     beside the exact receipt, wraps at every width, and is never a clock. */
+  .activity-stamp{margin:3px 0 0;font:11px/1.45 var(--mono);color:var(--text-2);overflow-wrap:anywhere}
   /* A consecutive identical status snapshot folds into the item it repeats and
      says how many canonical updates it stands for. It is a count of updates,
      not a claim of work: it sits beside the founder answers, never in place of
@@ -505,20 +512,29 @@
   .brief-row.is-clear .brief-label{color:var(--pass)}
 
   /* ── handoff indicator ──
-     One compact line, rendered only when canonical run state reports that the
+     One compact strip, rendered only when canonical run state reports that the
      bound run moved from one workflow stage to another. It carries no motion
      of its own beyond a border colour change, which reduced motion disables
      above. When no transition has been reported it is [hidden] and says
      nothing, because an idle strip that still reads like activity is exactly
-     the fabrication this page exists to avoid. */
+     the fabrication this page exists to avoid.
+
+     It holds TWO labelled groups, and they are two different kinds of fact:
+     the recorded handoff with its canonical states and the time the run record
+     was written, and the current action sentence the deck is showing right
+     now. A repaint may change the second without anything having moved, so
+     they are never one sentence — each group wraps onto its own row rather
+     than letting a long timestamp or a long task push the page sideways. */
   .handoff{display:flex;flex-wrap:wrap;align-items:baseline;gap:5px 10px;margin:10px 0 0;
     padding:6px 10px;border:1px solid #2b465b;border-left:2px solid var(--cyan);border-radius:3px;
     background:#0f1a24;font-size:12px;line-height:1.45;transition:border-color .12s linear}
   .handoff[hidden]{display:none}
+  .handoff-recorded,.handoff-current{display:flex;flex-wrap:wrap;align-items:baseline;
+    gap:4px 8px;min-width:0;flex:1 1 260px}
   .handoff-label{font:650 10px/1.3 var(--mono);letter-spacing:.12em;color:var(--cyan)}
   .handoff-flow{min-width:0;color:var(--text-0);overflow-wrap:anywhere}
-  .handoff-task{color:var(--text-1)}
-  .handoff-at{color:var(--text-2);font-size:11px}
+  .handoff-task{min-width:0;color:var(--text-1);overflow-wrap:anywhere}
+  .handoff-at{min-width:0;color:var(--text-2);font-size:11px;overflow-wrap:anywhere}
   .founder-details{margin-top:12px}.founder-details>summary{font-size:12px;color:#9ab2c8}
 
   #topology-overview{min-height:220px;border-color:#24516b;background:#0c1620}
@@ -2282,6 +2298,21 @@
       'Detail View lists all ' + count + ' exact receipts with their canonical timestamps, in order.';
   }
 
+  // Two canonical receipt times on one folded item, told apart by ARRIVAL
+  // ORDER and nothing else. A folded item stands for several receipts, so a
+  // single time beside it would be a guess about which receipt it belongs to;
+  // naming the receipt that arrived first and the one that arrived last keeps
+  // both readable in Command View without ranking them. Arrival order is not
+  // chronology: it says which receipt reached this page first, never which
+  // event happened later, never which is more current, and never that the
+  // build did anything. Both halves are the stamps activityStamp already
+  // wrote, so an absent canonical time stays an explicit absence here too.
+  function activityFoldStamp(first, last){
+    return 'Received first: ' + first + '. Received last: ' + last +
+      '. That is the order these receipts arrived in this feed — not a claim about which ' +
+      'event happened later, and not progress.';
+  }
+
   // Own-property lookup only, and an unrecognised code is stated as
   // unrecognised: an update AEGIS cannot name must never borrow the wording of
   // one it can.
@@ -3114,19 +3145,37 @@
     }
     var from = handoffActor(moved.from, run);
     var to = handoffActor(moved.to, run);
-    strip.appendChild(el('span','handoff-label','HANDOFF'));
-    strip.appendChild(el('span','handoff-flow', from + ' handed off to ' + to + '.'));
-    strip.appendChild(el('span','handoff-task','Now: ' + task));
-    strip.appendChild(el('span','handoff-at mono',
+    // Two labelled groups, because these are two different kinds of fact and
+    // reading them as one sentence made recorded history sound like something
+    // happening at this moment. The first group is the transition the canonical
+    // run record already wrote, with the exact states and the time that record
+    // was written — it does not become newer because this page repainted. The
+    // second group is the current action sentence the deck is showing now,
+    // which a repaint may legitimately change while the last observed handoff
+    // stays exactly what it was. Nothing new is observed or decided here.
+    var recorded = el('div','handoff-recorded');
+    recorded.setAttribute('data-handoff-part','RECORDED');
+    recorded.appendChild(el('span','handoff-label','LAST RECORDED HANDOFF'));
+    recorded.appendChild(el('span','handoff-flow', from + ' handed off to ' + to + '.'));
+    recorded.appendChild(el('span','handoff-at mono',
       'canonical ' + moved.from + ' → ' + moved.to + ', run record written ' + (moved.at || 'UNAVAILABLE')));
+    strip.appendChild(recorded);
+    var current = el('div','handoff-current');
+    current.setAttribute('data-handoff-part','CURRENT');
+    current.appendChild(el('span','handoff-label','CURRENT ACTION'));
+    current.appendChild(el('span','handoff-task', task));
+    strip.appendChild(current);
     host.appendChild(strip);
     // Announced once per transition, not once per repaint: a live region that
-    // re-reads the same sentence on every push is noise, not information.
+    // re-reads the same sentence on every push is noise, not information. The
+    // key is the recorded transition alone, so a changed current action does
+    // not re-announce a handoff that was already announced.
     var key = moved.runId + '|' + moved.from + '|' + moved.to + '|' + (moved.at || '');
     if (handoffAnnounced !== key){
       handoffAnnounced = key;
       var live = $('live');
-      if (live) live.textContent = from + ' handed off to ' + to + '. Now: ' + task;
+      if (live) live.textContent = 'Last recorded handoff: ' + from + ' handed off to ' + to +
+        '. Current action: ' + task;
     }
     // Returned so the path around the AEGIS Core marks the same proven move
     // rather than re-observing the run and deciding a second time.
@@ -5692,7 +5741,11 @@
     // rather than copied there. The repeat sentence crosses the same seam for
     // the same reason: the renderer must not phrase a repeat in its own words.
     activityUpdate: activityUpdate,
-    activityRepeat: activityRepeat
+    activityRepeat: activityRepeat,
+    // The visible receipt time crosses the same seam for the same reason: the
+    // renderer must not phrase a folded item's two arrival-order stamps, and it
+    // must not compose a timestamp sentence of its own.
+    activityFoldStamp: activityFoldStamp
   };
 })();
 </script>
@@ -6101,11 +6154,15 @@
   // One item, two reading levels, one renderer.
   //
   // Command View reads the four founder answers — what happened, who or what
-  // acted, whether the build moved forward, and what happens next. Detail View
+  // acted, whether the build moved forward, and what happens next — and the
+  // canonical time the receipt itself carries, because a feed with no visible
+  // time reads as "just now" whatever the receipt actually says. Detail View
   // discloses the SAME item's engineering evidence: the exact recorded text,
-  // byte for byte as the caller published it, beside its canonical timestamp.
-  // Both are written every time, so switching view discloses evidence that was
-  // already in the DOM rather than fetching, re-deriving or regenerating it.
+  // byte for byte as the caller published it, beside that same canonical
+  // timestamp. Both are written every time, so switching view discloses
+  // evidence that was already in the DOM rather than fetching, re-deriving or
+  // regenerating it. The time is never a clock reading: it is whatever the one
+  // translation seam wrote, including its explicit statement of absence.
   //
   // The founder answers come from the ONE exported translation seam in the
   // renderer block. If that seam is unavailable the item says so and still
@@ -6129,7 +6186,10 @@
   // canonical timestamp stays in that same item's Detail View evidence in
   // arrival order, and the count is a count of updates that explicitly denies
   // being progress. The "did this move the build forward?" answer is left
-  // exactly as the translation seam wrote it.
+  // exactly as the translation seam wrote it. Because one folded item now
+  // stands for several receipts, its visible time names two of them by arrival
+  // order — the receipt the item was opened with, and the one it has just
+  // received — rather than letting a single time speak for all of them.
   var lastActivity = null;
   function appendActivity(text, record){
     var host = $('live-activity');
@@ -6149,6 +6209,12 @@
     var repeatSentence = dashboard && typeof dashboard.activityRepeat === 'function'
       ? dashboard.activityRepeat
       : null;
+    // The one translation of a folded item's two arrival-order receipt times.
+    // If the seam is unavailable the item keeps the canonical stamp it already
+    // shows rather than composing a timestamp sentence here.
+    var foldStampSentence = dashboard && typeof dashboard.activityFoldStamp === 'function'
+      ? dashboard.activityFoldStamp
+      : null;
     // Presentation identity: the code, the exact receipt, and every sentence
     // Command View would show. If any of them differs this is a different
     // item, not a repeat of this one. Each part is length-prefixed, because a
@@ -6167,6 +6233,14 @@
         lastActivity.node.insertBefore(lastActivity.repeat, lastActivity.answers);
       }
       lastActivity.repeat.textContent = repeatSentence(lastActivity.count);
+      // One item now stands for several receipts, so the visible time names two
+      // of them by arrival order — the first this item received and the one it
+      // has just received — instead of silently standing in for all of them
+      // with the earliest. Both sentences are canonical stamps; neither is a
+      // ranking, a freshness reading or a claim about the build.
+      if (foldStampSentence) {
+        lastActivity.stamp.textContent = foldStampSentence(lastActivity.firstStamp, update.stamp);
+      }
       // The repeated update keeps its own receipt and its own canonical
       // timestamp, appended after the ones already disclosed.
       lastActivity.evidence.appendChild(el('div', 'activity-raw-text', raw));
@@ -6178,6 +6252,13 @@
     li.setAttribute('data-activity', update.code);
     li.setAttribute('data-activity-repeats', '1');
     li.appendChild(el('div', 'activity-what', update.what));
+    // The receipt's own canonical time, read in Command View rather than only
+    // behind the Detail control: a feed with no visible time reads as "just
+    // now", which is a claim no receipt made. It is the exact sentence the
+    // translation seam already wrote — a real canonical timestamp, or the
+    // explicit statement that this receipt carries none.
+    var stamp = el('div', 'activity-stamp', update.stamp);
+    li.appendChild(stamp);
     var answers = el('dl', 'activity-answers');
     [['Who acted', update.who],
       ['Did this move the build forward?', update.moved],
@@ -6196,7 +6277,11 @@
     host.insertBefore(li, host.firstChild);
     while (host.children.length > 30) host.removeChild(host.lastChild);
     lastActivity = { node: li, identity: identity, count: 1,
-      answers: answers, evidence: evidence, repeat: null };
+      answers: answers, evidence: evidence, repeat: null,
+      // The visible time line, and the stamp of the FIRST receipt this item
+      // was opened with. A later fold names that one and the receipt it has
+      // just taken in, so neither end of the arrival order is lost.
+      stamp: stamp, firstStamp: update.stamp };
   }
   // One activity renderer owns the live feed. The primary Command View may
   // request a write through this seam, but it never creates a second log.

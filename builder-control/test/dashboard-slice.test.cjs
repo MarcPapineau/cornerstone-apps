@@ -252,6 +252,56 @@ test('the handoff indicator claims a transition only from canonical run state, n
   assert.ok(/strip\.hidden\s*=\s*true/.test(render), 'an inactive strip must be hidden, not rendered as reassuring text');
 });
 
+// A recorded transition and the current action are two different kinds of fact.
+// Read as one sentence — "X handed off to Y. Now: <task>" — the ledger's own
+// history borrowed the present tense of the task beside it, and a repaint that
+// changed only the task made a move recorded minutes ago look like a move that
+// had just happened. They are kept apart here, in the markup and in the words.
+test('the handoff strip reads recorded transition evidence apart from the current action', () => {
+  const render = code.slice(code.indexOf('function renderHandoff'), code.indexOf('function renderFounderSummary'));
+  const recordedStart = render.indexOf("el('div','handoff-recorded')");
+  const currentStart = render.indexOf("el('div','handoff-current')");
+  assert.ok(recordedStart !== -1 && currentStart > recordedStart,
+    'the strip does not build a recorded group and a current-action group, in that order');
+  const recorded = render.slice(recordedStart, currentStart);
+  const current = render.slice(currentStart, render.indexOf('host.appendChild(strip)', currentStart));
+  assert.ok(/data-handoff-part','RECORDED'/.test(recorded) && /data-handoff-part','CURRENT'/.test(current),
+    'the two groups are not marked as what they are, so nothing can tell them apart');
+  assert.ok(/'LAST RECORDED HANDOFF'/.test(recorded) && /'CURRENT ACTION'/.test(current),
+    'the strip does not say in words which half is recorded history and which is the current action');
+  // The recorded half carries the exact canonical states, the actors and the
+  // time the run record was written — and nothing about what is happening now.
+  assert.ok(/moved\.from/.test(recorded) && /moved\.to/.test(recorded) &&
+    /moved\.at \|\| 'UNAVAILABLE'/.test(recorded),
+    'the recorded half dropped the exact canonical states or the run-record timestamp');
+  assert.ok(!/\btask\b/.test(recorded), 'the current action was mixed back into the recorded transition');
+  assert.ok(!/\bmoved\./.test(current), 'the recorded transition was mixed back into the current action');
+  assert.ok(/handoff-task', task/.test(current),
+    'the current action is no longer the exact task sentence the deck resolved');
+  // Announcement stays keyed to the transition alone. Keying it to the task
+  // would re-read a handoff that never happened again every time the deck's
+  // current action sentence changed.
+  const key = /var key = ([^;]+);/.exec(render);
+  assert.ok(key, 'the one announcement key was not found');
+  assert.ok(!/task/.test(key[1]),
+    'the handoff announcement is keyed to the current action, so a changed task re-announces a move');
+  assert.ok(/handoffAnnounced !== key/.test(render),
+    'the strip no longer announces once per transition');
+  assert.ok(!/new Date|Date\.now|setTimeout|setInterval/.test(render),
+    'the strip consulted a clock instead of the canonical run record');
+  // Two groups mean two things that can be long. A canonical timestamp and a
+  // task sentence both wrap inside the strip; neither drags a narrow viewport
+  // sideways, and neither is clamped, because clamping would hide evidence.
+  for (const selector of ['.handoff-task', '.handoff-at']) {
+    assert.ok(new RegExp('\\' + selector + '\\{[^}]*overflow-wrap:anywhere').test(code),
+      `${selector} can push a narrow viewport sideways instead of wrapping`);
+  }
+  assert.ok(/\.handoff-recorded,\.handoff-current\{[^}]*flex-wrap:wrap/.test(code),
+    'the recorded and current groups cannot wrap onto their own rows');
+  assert.ok(!/\.handoff-(?:task|at|flow)\{[^}]*(?:display:none|-webkit-line-clamp)/.test(code),
+    'part of the strip is hidden or clamped instead of wrapped');
+});
+
 // ── handoff path around the AEGIS Core (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
 // The failure this guards is the same one the indicator above guards, moved to
 // a bigger surface: a row of stations is a diagram, and a diagram that lights
@@ -1012,6 +1062,58 @@ test('only consecutive identical status snapshots fold, and a fold deletes no ev
   assert.ok(/\.activity-repeat\{[^}]*font-size/.test(code) &&
     !/\.activity-repeat\{[^}]*display:none/.test(code),
     'the repeat count is not legible in Command View — a hidden count is how a repeat passes for a change');
+});
+
+// ── visible receipt time (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─────────
+// The defect: every canonical timestamp lived behind the Detail control, so the
+// founder-readable feed was a stack of undated sentences that read as "just
+// now" however old the receipt was — and a folded item, standing for several
+// receipts, showed no time at all. The fix may only surface times the receipt
+// already carries: no clock, no relative wording, and no ranking of one receipt
+// above another.
+test('the founder feed shows the receipt time it already has, and a fold names two by arrival order', () => {
+  assert.ok(/\.activity-stamp\{[^}]*font/.test(code),
+    'the visible canonical timestamp has no Command View styling at all');
+  assert.ok(!/\.activity-stamp\{[^}]*display:none/.test(code),
+    'the receipt time is hidden in Command View — an undated feed is how an old receipt reads as now');
+  assert.ok(/\.activity-stamp\{[^}]*overflow-wrap:anywhere/.test(code),
+    'a long canonical timestamp can push the feed sideways instead of wrapping');
+  assert.ok(/body\[data-detail="true"\] \.activity-raw\{display:block\}/.test(code),
+    'the exact receipt no longer belongs to Detail View alone');
+
+  const renderer = code.slice(code.indexOf('function appendActivity'),
+    code.indexOf('// One activity renderer owns the live feed'));
+  assert.ok(/el\('div', 'activity-stamp', update\.stamp\)/.test(renderer),
+    'the visible time is not the stamp the one translation seam already wrote');
+  assert.ok(!/new Date|Date\.now|setTimeout|setInterval/.test(renderer),
+    'the feed reads a clock instead of the canonical receipt time');
+  assert.ok(/firstStamp: update\.stamp/.test(renderer),
+    'the item does not remember the stamp of the receipt it was opened with');
+
+  // A fold stands for several receipts, so one time beside it would be a guess
+  // about which. Both ends of the arrival order are named, through the same
+  // translation seam that phrases the count — never in the renderer's words.
+  const fold = renderer.slice(renderer.indexOf('if (update.repeatable === true'),
+    renderer.indexOf('var li = el('));
+  assert.ok(/foldStampSentence\(lastActivity\.firstStamp, update\.stamp\)/.test(fold),
+    'a folded item does not name both the first receipt it took and the one it has just taken');
+  assert.strictEqual((fold.match(/lastActivity\.stamp\.textContent =/g) || []).length, 1,
+    'the folded item’s visible time is written from more than one place, or not at all');
+  assert.ok(!/Canonical timestamp|Received first|Received last/.test(fold),
+    'the renderer composes a timestamp sentence of its own instead of using the one seam');
+
+  const sentence = code.slice(code.indexOf('function activityFoldStamp('),
+    code.indexOf('function activityUpdate('));
+  assert.strictEqual((code.match(/function activityFoldStamp\(/g) || []).length, 1,
+    'the folded-receipt time has more than one translation authority, or none');
+  assert.ok(/activityFoldStamp: activityFoldStamp/.test(code),
+    'the folded-receipt translation is not exported through the one renderer seam');
+  assert.ok(/arrived in this feed/.test(sentence) && /not progress/.test(sentence),
+    'the two folded receipt times are not stated as arrival order that claims no progress');
+  assert.ok(!/\b(newest|latest|freshest|newer|most recent|up to date|current)\b/i.test(sentence),
+    'a folded receipt time is ranked by freshness or currency rather than stated as arrival order');
+  assert.ok(!/progressed|advanced|completed|succeeded|finished/i.test(sentence),
+    'a later arrival is presented as the build having moved');
 });
 
 test('accepted, waiting, refused and stopping activity never claims recorded progress', () => {
@@ -2868,6 +2970,19 @@ function handoffNode(page) {
   const nodes = findByAttr(page.document.getElementById('founder-body'), 'data-handoff-state');
   assert.strictEqual(nodes.length, 1, `expected exactly one handoff indicator, found ${nodes.length}`);
   return nodes[0];
+}
+
+// The strip carries two labelled groups, and they answer two different
+// questions: what canonical state change was RECORDED, and what the deck says
+// is happening now. Reading them apart is what these proofs are for — a single
+// blob of text cannot show that a repaint changed one without touching the
+// other.
+function handoffParts(page) {
+  const parts = {};
+  for (const node of findByAttr(handoffNode(page), 'data-handoff-part')) {
+    parts[node.attrs['data-handoff-part']] = node.textContent;
+  }
+  return parts;
 }
 
 test('DOM: an idle dashboard renders a hidden, silent handoff indicator', () => {
@@ -5397,6 +5512,73 @@ test('DOM: repeated status snapshots read as one counted item that keeps every r
     'the feed holds fewer exact receipts than the number of canonical updates it received');
 });
 
+test('DOM: every founder activity card shows the canonical time it carries, or states that it carries none', () => {
+  const page = bootPage(fixtureState());
+  const host = page.document.getElementById('live-activity');
+  const push = (text, record) => page.sandbox.AEGIS_DASHBOARD.appendActivity(text, record);
+  const kids = (node, cls) => node.children.filter((child) => child.className === cls);
+  const stampOf = (item) => {
+    const stamps = kids(item, 'activity-stamp');
+    assert.strictEqual(stamps.length, 1, 'an activity card carries no single visible receipt time');
+    return stamps[0].textContent;
+  };
+
+  // A receipt that carries a canonical timestamp prints that exact timestamp in
+  // Command View, without opening Detail View and without a relative reading.
+  push('Retry failed for RUN-TIMED: exact refusal',
+    { code: 'RETRY_REFUSED', runId: 'RUN-TIMED', ts: '2026-09-03T15:04:05.000Z' });
+  assert.strictEqual(stampOf(host.children[0]), 'Canonical timestamp 2026-09-03T15:04:05.000Z',
+    'the founder card did not print the exact canonical timestamp the receipt carries');
+  assert.ok(!/\bago\b|\bjust now\b|\bmoments\b|\bminutes\b/i.test(host.children[0].textContent),
+    'the card described the receipt time relative to a clock instead of citing it');
+
+  // A control receipt carries no time of its own, and the card says so rather
+  // than stamping one — that absence is the whole reason this line is visible.
+  push('Cancel accepted for RUN-TIMED', { code: 'CANCEL_ACCEPTED', runId: 'RUN-TIMED' });
+  assert.strictEqual(stampOf(host.children[0]),
+    'Canonical timestamp UNAVAILABLE — this receipt carries none.',
+    'a receipt with no canonical time was given one, or was left silently undated');
+
+  // A folded item stands for several receipts, so its visible time names both
+  // ends of the ARRIVAL order and nothing in between is lost.
+  const raw = 'status: engineering=OK runs=1 current=RUN-TIMED';
+  push(raw, { code: 'STATUS_SNAPSHOT', runId: 'RUN-TIMED', ts: '2026-09-03T15:10:00.000Z' });
+  const folded = host.children[0];
+  push(raw, { code: 'STATUS_SNAPSHOT', runId: 'RUN-TIMED', ts: '2026-09-03T15:10:30.000Z' });
+  push(raw, { code: 'STATUS_SNAPSHOT', runId: 'RUN-TIMED', ts: '2026-09-03T15:11:00.000Z' });
+  assert.strictEqual(host.children[0], folded, 'the three identical snapshots did not fold into one item');
+  assert.strictEqual(folded.attrs['data-activity-repeats'], '3',
+    'the fold lost its truthful count of the canonical updates it stands for');
+  const foldStamp = stampOf(folded);
+  assert.ok(foldStamp.includes('Received first: Canonical timestamp 2026-09-03T15:10:00.000Z'),
+    `the folded item does not name the receipt it was opened with: ${foldStamp}`);
+  assert.ok(foldStamp.includes('Received last: Canonical timestamp 2026-09-03T15:11:00.000Z'),
+    `the folded item does not name the receipt it has just taken in: ${foldStamp}`);
+  assert.match(foldStamp, /order these receipts arrived in this feed/,
+    `the two times are not stated as arrival order: ${foldStamp}`);
+  assert.ok(!/newest|latest|most recent|freshest/i.test(foldStamp),
+    `the folded item ranked one receipt above the other: ${foldStamp}`);
+
+  // Every raw receipt and every canonical stamp is still disclosed, in arrival
+  // order, inside that same item: the visible line summarises nothing away.
+  const evidence = findByAttr(folded, 'data-activity-evidence');
+  assert.strictEqual(evidence.length, 1, 'a folded repeat opened a second evidence block');
+  assert.deepStrictEqual(kids(evidence[0], 'activity-raw-text').map((n) => n.textContent), [raw, raw, raw],
+    'Detail View dropped one of the three exact receipts');
+  assert.deepStrictEqual(kids(evidence[0], 'activity-raw-stamp').map((n) => n.textContent), [
+    'Canonical timestamp 2026-09-03T15:10:00.000Z',
+    'Canonical timestamp 2026-09-03T15:10:30.000Z',
+    'Canonical timestamp 2026-09-03T15:11:00.000Z',
+  ], 'Detail View lost a canonical timestamp or disclosed the three receipts out of order');
+
+  // The items the fold did not touch still read exactly as they did.
+  assert.strictEqual(stampOf(host.children[1]),
+    'Canonical timestamp UNAVAILABLE — this receipt carries none.',
+    'folding one item rewrote the visible time of the item below it');
+  assert.strictEqual(stampOf(host.children[2]), 'Canonical timestamp 2026-09-03T15:04:05.000Z',
+    'folding one item rewrote the visible time of an older item');
+});
+
 // ── founder-readable builder activity (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ─
 // "Stream activity was observed" is true and tells the owner nothing. The
 // supervision projection now carries a bounded category and the time its own
@@ -6919,10 +7101,24 @@ async function asyncTests() {
     const text = node.textContent;
     assert.ok(/claude-opus-5 \(claude-cli\) handed off to the deterministic checks\./.test(text),
       `the routed model and its destination are not both named: ${text}`);
-    assert.ok(/Now: The build finished and is waiting for deterministic checks\./.test(text),
+    assert.ok(/The build finished and is waiting for deterministic checks\./.test(text),
       `the current task is not stated in plain English: ${text}`);
     assert.ok(/canonical BUILDING → BUILT, run record written 2026-08-28T10:03:00\.000Z/.test(text),
       `the exact canonical states and the record timestamp are not cited: ${text}`);
+    // The recorded transition and the current action are two different kinds of
+    // fact and are read as two labelled groups, so a move the ledger wrote at
+    // 10:03 cannot be read as something starting at this moment.
+    const parts = handoffParts(page);
+    assert.match(parts.RECORDED, /LAST RECORDED HANDOFF/,
+      `the recorded half of the strip is not labelled as recorded history: ${parts.RECORDED}`);
+    assert.match(parts.RECORDED, /run record written 2026-08-28T10:03:00\.000Z/,
+      `the canonical record time does not sit with the transition it belongs to: ${parts.RECORDED}`);
+    assert.ok(!/The build finished and is waiting/.test(parts.RECORDED),
+      `the current action leaked into the recorded transition: ${parts.RECORDED}`);
+    assert.match(parts.CURRENT, /CURRENT ACTIONThe build finished and is waiting for deterministic checks\./,
+      `the current action is not labelled as the current action: ${parts.CURRENT}`);
+    assert.ok(!/handed off|BUILDING → BUILT|run record written/.test(parts.CURRENT),
+      `the recorded transition leaked into the current action: ${parts.CURRENT}`);
     assert.ok(/claude-opus-5 \(claude-cli\) handed off to the deterministic checks\./.test(page.text('live')),
       'the transition was never announced to assistive technology');
   });
@@ -6941,6 +7137,76 @@ async function asyncTests() {
       'the observed handoff was dropped by a repaint of the same evidence');
     assert.strictEqual(node.textContent, first,
       'a repaint of unchanged state rewrote the handoff — a repaint is not a transition');
+  });
+
+  // The defect this proves out: the strip read "X handed off to Y. Now: <task>"
+  // as one sentence, so a transition the ledger recorded minutes ago was read
+  // as something happening at this moment, and a changed task made the whole
+  // line look like a fresh move. The two facts are now separate, and each has
+  // to survive the other changing.
+  await atest('DOM: a same-state repaint updates the current action and leaves the recorded handoff untouched', async () => {
+    const routed = {
+      generatedAt: '2026-08-28T10:00:00.000Z',
+      engineering: { state: 'UNAVAILABLE' },
+      integration: { connectors: [] },
+      reviewers: [], events: [],
+      runs: [{ runId: 'RUN-SPLIT', state: 'ROUTED', objective: 'Separate history from now',
+        updatedAt: '2026-08-28T10:00:00.000Z', transitions: 3,
+        route: { model: 'claude-opus-5', execution: 'claude-cli', source: 'tool-router.cjs routeRole' } }],
+      runsBinding: { state: 'BOUND', runId: 'RUN-SPLIT', updatedAt: '2026-08-28T10:00:00.000Z', reason: 'bound' },
+    };
+    // One canonical transition, then TWO readings of the same BUILDING state
+    // whose recorded activity sentence differs. Only the second changes.
+    const building = (updatedAt, summary) => {
+      const next = JSON.parse(JSON.stringify(routed));
+      next.generatedAt = updatedAt;
+      next.runs[0].state = 'BUILDING';
+      next.runs[0].updatedAt = updatedAt;
+      next.runs[0].transitions = 4;
+      next.runs[0].build = { mode: 'async', status: 'RUNNING', startedAt: '2026-08-28T10:03:00.000Z',
+        activity: { active: true, code: 'RUNNING', phase: 'RUNNING', summary } };
+      next.runsBinding.updatedAt = updatedAt;
+      return next;
+    };
+
+    const page = bootPage(fixtureState(), { status: routed });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.strictEqual(handoffNode(page).attrs['data-handoff-state'], 'INACTIVE',
+      'precondition: the first sighting of a routed run is not a transition');
+
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(
+      building('2026-08-28T10:03:00.000Z', 'Editing the dashboard.')) }));
+    const first = handoffParts(page);
+    assert.match(first.RECORDED, /AEGIS capability routing handed off to claude-opus-5 \(claude-cli\)\./,
+      `the recorded transition does not name both canonical actors: ${first.RECORDED}`);
+    assert.match(first.RECORDED, /canonical ROUTED → BUILDING, run record written 2026-08-28T10:03:00\.000Z/,
+      `the recorded transition does not cite its canonical states and record time: ${first.RECORDED}`);
+    assert.match(first.CURRENT, /CURRENT ACTIONEditing the dashboard\./,
+      `the current action is not the recorded activity sentence: ${first.CURRENT}`);
+    const announced = page.text('live');
+    assert.match(announced, /Last recorded handoff: AEGIS capability routing handed off to claude-opus-5 \(claude-cli\)\./,
+      `the transition was not announced as recorded history: ${announced}`);
+
+    // A later push of the SAME canonical state with a different recorded
+    // activity sentence. No transition happened, so the recorded half — actors,
+    // exact states and the run-record time — must be byte-identical.
+    page.sse.listeners.status.forEach((fn) => fn({ data: JSON.stringify(
+      building('2026-08-28T10:09:00.000Z', 'Running the deterministic checks.')) }));
+    const second = handoffParts(page);
+    assert.strictEqual(handoffNode(page).attrs['data-handoff-state'], 'ACTIVE',
+      'the observed handoff was dropped by a repaint that changed only the current action');
+    assert.strictEqual(second.RECORDED, first.RECORDED,
+      `a repaint rewrote recorded history: ${first.RECORDED} → ${second.RECORDED}`);
+    assert.ok(!/10:09:00/.test(second.RECORDED),
+      `the recorded transition adopted the time of a repaint that moved nothing: ${second.RECORDED}`);
+    assert.match(second.CURRENT, /CURRENT ACTIONRunning the deterministic checks\./,
+      `the current action did not follow the newly recorded activity sentence: ${second.CURRENT}`);
+    assert.ok(!/Editing the dashboard\./.test(second.CURRENT),
+      `the superseded current action survived the repaint: ${second.CURRENT}`);
+    // Announced once per transition, not once per repaint: nothing moved, so
+    // the live region must still hold the one announcement it already made.
+    assert.strictEqual(page.text('live'), announced,
+      'a repaint that moved nothing announced the same handoff a second time');
   });
 
   await atest('DOM: out-of-order and uncorroborated evidence never light the handoff', async () => {
