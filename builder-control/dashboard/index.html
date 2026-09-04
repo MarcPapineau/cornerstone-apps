@@ -1313,7 +1313,16 @@
   .research-line{margin-top:calc(var(--sp)*1.5);color:var(--text-1);font-size:12px;overflow-wrap:anywhere}
   .research-counts{margin-top:calc(var(--sp)*3);padding-top:calc(var(--sp)*2);
     border-top:1px solid var(--line);color:var(--text-0);font-size:12px}
+  /* A recommendation is read as one card, top to bottom: title, recorded state,
+     the projector's plain sentence, every answer in full, then the controls.
+     The shared .row rule is a two-column ledger line — right for a name/value
+     list, wrong here, because it sets the risks beside the evidence and pushes
+     the decision controls into a third column where the notice under them is a
+     fragment. The override is scoped to this card, so .row keeps the layout
+     every other list on the page ships with. */
+  .research-item{display:block;min-width:0}
   .research-item>h3{font-size:14px;overflow-wrap:anywhere}
+  .research-item>.research-head{margin-top:calc(var(--sp)*2)}
   .research-answers{margin:calc(var(--sp)*3) 0 0}
   .research-answers dt{font:600 10px/1.4 var(--mono);letter-spacing:.09em;
     text-transform:uppercase;color:var(--text-2)}
@@ -1321,6 +1330,18 @@
   .research-list{margin:0;padding-left:calc(var(--sp)*4)}
   .research-list>li{overflow-wrap:anywhere}
   .research-blocked{color:var(--text-1);font-size:12px;overflow-wrap:anywhere}
+  /* The decision footer is ruled off from the answers above it, because
+     everything above is reading and everything in it is irreversible. */
+  .research-decision{margin-top:calc(var(--sp)*3);padding-top:calc(var(--sp)*3);
+    border-top:1px solid var(--line)}
+  /* The immutable-decision notice — and the recorded receipt or the refusal
+     that later replaces it in the same element — takes its own full line below
+     the buttons. A sentence saying a decision is appended once and never
+     overwritten cannot be a fragment wedged beside the button that takes it.
+     The row's own gap does the spacing, so the api-msg margin is stood down
+     rather than added to it. */
+  .research-decision>.research-blocked,
+  .research-decision>.api-msg{flex:1 0 100%;margin-top:0;overflow-wrap:anywhere}
 
   /* ── Detail View: the tactical evidence surface ───────────────────
      Detail View is not a second dashboard and not a second authority. It is
@@ -5367,7 +5388,10 @@
   }
 
   function researchDecisionRow(view, item){
-    var row = el('div','btn-row');
+    // The same shared button row, marked as this card's footer so the ruled
+    // separation and the full-width notice below the buttons are scoped here
+    // and reach no other .btn-row on the page.
+    var row = el('div','btn-row research-decision');
     // Both gates must hold: the projection must be offering decisions at all,
     // and this exact recommendation must still be open for one.
     if (!(view.decisionsAvailable === true && item.decidable === true)){

@@ -8869,6 +8869,177 @@ test('DOM: research identifiers and digests stay in Detail View, not in the foun
   }
 });
 
+// ── the recommendation card: reading order, full text, decision footer ─────
+// The failure guarded here is a layout failure with a governance consequence.
+// The card inherits .row, a two-column ledger line, which sets the risks beside
+// the evidence and squeezes Approve / Park / Reject into a third column where
+// the "appended once and never overwritten" notice is a fragment beside the
+// button that takes the decision. Every proof below drives the REAL renderer,
+// so a card that reads sideways, drops a sentence, or breaks the footer fails
+// here rather than under a founder's cursor on a Monday morning.
+const LONG_TITLE = 'Route independent review to the cheaper checked model everywhere it is ' +
+  'billed today, including the protected-path lane that currently carries every high-risk subject';
+const LONG_DECISION = 'Whether AEGIS should route independent review to the cheaper model for ' +
+  'every subject, or only for the low-risk lane, knowing that the cheaper model has never ' +
+  'returned a recorded verdict on a protected path in this repository and that the first ' +
+  'review under it would be the one that decides whether a high-risk change is allowed to land.';
+const LONG_RISK = 'The cheaper model has no recorded review result on this repository yet, so ' +
+  'approving this route would make the first independent review billed under it the same review ' +
+  'that has to catch a protected-path regression nobody has seen it catch before.';
+const SECOND_RISK = 'A second recorded risk must still be readable and must not be pushed off ' +
+  'the card by the length of the first one.';
+const LONG_EVIDENCE_LABEL = 'Published pricing page for the independent review model family, ' +
+  'compared against the recorded review volume of the last four weeks';
+const LONG_EVIDENCE_URL = 'https://example.com/pricing/independent-review/' + 'a'.repeat(120) +
+  '?compare=recorded-review-volume';
+
+function longResearchProjection(over) {
+  return researchProjectionFixture(Object.assign({
+    recommendations: [researchRecommendationFixture(Object.assign({
+      title: LONG_TITLE,
+      marcMustDecide: LONG_DECISION,
+      risks: [LONG_RISK, SECOND_RISK],
+      evidence: [{ label: LONG_EVIDENCE_LABEL, url: LONG_EVIDENCE_URL }],
+    }, (over && over.item) || {}))],
+  }, (over && over.projection) || {}));
+}
+
+function researchCard(page) {
+  const list = page.document.getElementById('decision-queue-list');
+  assert.strictEqual(list.children.length, 1, 'expected exactly one rendered recommendation card');
+  return list.children[0];
+}
+
+// "H3", "DIV.research-head" — tag plus the exact shipped class list, so a
+// reordered, renamed or newly-wrapped child is a visible diff in the failure.
+function shape(node) {
+  return node.children.map((c) => `${c.tagName}${c.className ? `.${c.className}` : ''}`);
+}
+
+// The page sets className directly rather than via setAttribute, so findByAttr
+// cannot see it.
+function findByClass(root, cls, out = []) {
+  if (root.classList && root.classList.contains(cls)) out.push(root);
+  (root.children || []).forEach((c) => findByClass(c, cls, out));
+  return out;
+}
+
+const CARD_SHAPE = ['H3', 'DIV.research-head', 'DIV.research-line',
+  'DL.research-answers', 'DIV.btn-row research-decision'];
+
+test('DOM: a recommendation reads top to bottom as one card and keeps every sentence in full', () => {
+  const page = bootPage(fixtureState());
+  const projection = longResearchProjection();
+  renderMinimizedStatus(page, researchStatus(projection));
+
+  const card = researchCard(page);
+  assert.ok(card.classList.contains('research-item'),
+    'the recommendation card lost the class its scoped layout is written against');
+  assert.ok(card.classList.contains('row'),
+    'the shipped list-row class was removed rather than overridden in research-scoped CSS');
+  assert.deepStrictEqual(shape(card), CARD_SHAPE,
+    'the card must read title, recorded state, plain sentence, answers, then controls');
+
+  // Nothing is abbreviated on the way to an irreversible decision: the whole
+  // recorded sentence is on the card, not a prefix of it.
+  const queue = page.text('decision-queue-list');
+  for (const full of [LONG_TITLE, LONG_DECISION, LONG_RISK, SECOND_RISK, LONG_EVIDENCE_LABEL]) {
+    assert.ok(queue.includes(full), `the card truncated or dropped a recorded sentence: ${full.slice(0, 48)}…`);
+  }
+  assert.ok(!queue.includes('…'), 'the card ellipsised recorded text');
+  // Both risks are separate list items, so the second cannot be swallowed by
+  // the length of the first.
+  const lists = findByClass(card, 'research-list');
+  assert.strictEqual(lists.length, 2, 'expected one list for the risks and one for the evidence');
+  assert.deepStrictEqual(lists[0].children.map((li) => li.textContent), [LONG_RISK, SECOND_RISK],
+    'the recorded risks are not two separately readable items');
+  assert.ok(page.text('research-machine').includes(LONG_EVIDENCE_URL),
+    'Detail View dropped the exact long evidence address');
+});
+
+test('DOM: the decision footer carries the three controls with the immutable notice below them', () => {
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, researchStatus(longResearchProjection()));
+
+  const card = researchCard(page);
+  const footer = card.children[card.children.length - 1];
+  assert.strictEqual(footer.className, 'btn-row research-decision',
+    'the decision footer is not the shipped button row marked as this card\'s footer');
+  assert.deepStrictEqual(shape(footer), [
+    'BUTTON.action primary', 'BUTTON.action', 'BUTTON.action warn', 'DIV.research-blocked',
+  ], 'the footer must be Approve, Park, Reject, then the notice on its own line below them');
+
+  // Labels, payload routes and handlers are the shipped ones; only where the
+  // notice sits has changed.
+  const buttons = decisionButtons(page);
+  assert.deepStrictEqual(buttons.map((b) => [b.attrs['data-research-decision'], b.textContent]),
+    [['APPROVE', 'Approve'], ['PARK', 'Park'], ['REJECT', 'Reject']],
+    'the decision controls changed word or label');
+  const notice = footer.children[footer.children.length - 1];
+  assert.strictEqual(notice.textContent, 'A decision is appended once and never overwritten.',
+    'the immutable-decision notice was reworded or moved out of the footer');
+});
+
+test('DOM: a blocked recommendation keeps the same card and footer, with the refusal and no control', () => {
+  const blocked = 'You already recorded APPROVED BY MARC for this on 2026-09-02T10:00:00.000Z. ' +
+    'Decisions are appended, never overwritten.';
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, researchStatus(longResearchProjection({
+    item: { decidable: false, notDecidableReason: blocked },
+  })));
+
+  const card = researchCard(page);
+  assert.deepStrictEqual(shape(card), CARD_SHAPE,
+    'a blocked recommendation reads in a different order from a decidable one');
+  const footer = card.children[card.children.length - 1];
+  assert.strictEqual(footer.className, 'btn-row research-decision',
+    'a blocked recommendation lost the ruled footer that separates decision from reading');
+  assert.deepStrictEqual(shape(footer), ['DIV.research-blocked'],
+    'the blocked footer must hold the recorded refusal and nothing else');
+  assert.strictEqual(footer.children[0].textContent, blocked,
+    'the recorded refusal was reworded on its way to the footer');
+  assert.deepStrictEqual(decisionButtons(page), [],
+    'an already-decided recommendation was offered a second, overwriting decision');
+});
+
+test('the research card layout is scoped to research and hides nothing', () => {
+  // The shipped list-row and button-row rules are byte-identical: every other
+  // list and every other control row on the page is untouched by this card.
+  assert.ok(code.includes('.row{display:flex;justify-content:space-between;gap:calc(var(--sp)*3);align-items:flex-start;'),
+    'the global .row rule was changed to fix one card');
+  assert.ok(code.includes('.btn-row{display:flex;flex-wrap:wrap;gap:calc(var(--sp)*2)}'),
+    'the global .btn-row rule was changed to fix one card');
+
+  const css = code.slice(code.indexOf('.research-head{'), code.indexOf('#evidence-rail{border-color'));
+  assert.ok(css.length > 0 && css.length < 2400, 'the research style block was not located');
+  for (const [selector, property] of [
+    ['.research-item{', 'display:block'],
+    ['.research-decision{', 'border-top:1px solid var(--line)'],
+  ]) {
+    const rule = css.slice(css.indexOf(selector), css.indexOf('}', css.indexOf(selector)));
+    assert.ok(css.includes(selector) && rule.includes(property),
+      `${selector} does not set ${property}, so the card would keep the inherited row layout`);
+  }
+  assert.ok(/\.research-decision>\.research-blocked,\s*\.research-decision>\.api-msg\{flex:1 0 100%/.test(css),
+    'the decision notice and the recorded receipt that replaces it must both take a full line');
+
+  // Every selector in the block names the research surface, so nothing here can
+  // reach another panel.
+  const selectors = (css.match(/[^{}]+\{/g) || []).map((s) => s.slice(0, -1))
+    .join(',').split(',').map((s) => s.trim()).filter(Boolean);
+  assert.ok(selectors.length > 0, 'no research selectors were parsed');
+  for (const selector of selectors) {
+    assert.ok(selector.includes('research'),
+      `the research block styles ${selector}, which is not scoped to the research surface`);
+  }
+  // A half-shown recommendation is how an unread risk gets approved: nothing on
+  // this card may clamp, mask, truncate or hide.
+  for (const banned of [/-webkit-line-clamp/, /text-overflow/, /overflow\s*:\s*hidden/,
+    /white-space\s*:\s*nowrap/, /max-height/, /display\s*:\s*none/, /visibility\s*:/]) {
+    assert.ok(!banned.test(css), `the research card uses ${banned} to hide recorded text`);
+  }
+});
+
 async function atest(name, fn) {
   try { await fn(); passed++; console.log(`ok   ${name}`); }
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }
