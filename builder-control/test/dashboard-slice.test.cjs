@@ -1344,7 +1344,7 @@ test('the wide Command View fits the whole HUD, all nine stations and the build 
 
   // Clamping is presentation over supporting prose only. Every operator answer
   // — current action, next step, blocker, last safe checkpoint, and the brief's
-  // NOW / NEXT / NEEDS MARC rows — is read in full at this width.
+  // right-now / next-action / attention rows — is read in full at this width.
   const clamped = wideSelectorsDeclaring(/-webkit-line-clamp/);
   for (const answer of ['.is-now', '.is-next', '.is-blocked', '.is-clear', '.is-checkpoint',
     '"now"', '"next"', '"needs-marc"']) {
@@ -3916,7 +3916,8 @@ test('DOM: missing or invalid lifecycle evidence is reported as UNAVAILABLE, nev
 });
 
 // ── V2 OPERATOR COCKPIT — the operator brief ──────────────────────────────
-// FINISHED / WHY VERIFY / NOW / NEXT / NEEDS MARC. The brief is the first
+// Completed so far / Still to verify / Right now / Next action / Attention.
+// The brief is the first
 // thing the owner reads and the single place the deck explains itself in
 // founder language, so the only thing it may do is repeat canonical fields the
 // deck has already resolved. These proofs hold the properties that would make
@@ -3975,15 +3976,19 @@ function briefUnreadableLedgerStatus() {
   };
 }
 
-test('DOM: the operator brief names FINISHED, WHY VERIFY, NOW, NEXT and NEEDS MARC at the top of Command View', () => {
+test('DOM: the operator brief names the five operator questions in the owner\'s words at the top of Command View', () => {
   const page = bootPage(fixtureState());
   const rows = briefRows(page);
   assert.deepStrictEqual(rows.map((node) => node.attrs['data-operator-brief']),
     ['finished', 'verify', 'now', 'next', 'needs-marc'],
     'the brief must answer exactly the five operator questions, in that order');
+  // The headings are the operator's own words. "Needs Marc" in particular
+  // named an owner for evidence that is usually a generic build blocker.
   assert.deepStrictEqual(rows.map((node) => node.firstChild.textContent),
-    ['FINISHED', 'WHY VERIFY', 'NOW', 'NEXT', 'NEEDS MARC'],
+    ['Completed so far', 'Still to verify', 'Right now', 'Next action', 'Attention'],
     'the five brief labels are not rendered as founder-readable text');
+  assert.doesNotMatch(rows.map((node) => node.firstChild.textContent).join(' '), /Marc/i,
+    'a brief heading still claims every blocker is a personal request for the owner');
   const founder = page.document.getElementById('founder-body');
   const classes = founder.children.map((node) => node.className);
   const brief = classes.indexOf('operator-brief');
@@ -4005,11 +4010,12 @@ test('DOM: every brief answer is the canonical field the deck already resolved, 
   const needs = briefField(page, 'needs-marc').value;
   const blocker = deckCardText(page, 'blocker');
   assert.ok(needs.endsWith(blocker),
-    `NEEDS MARC is not built from the canonical blocker/decision field: ${needs}`);
+    `Attention is not built from the canonical blocker/decision field: ${needs}`);
   assert.match(briefField(page, 'now').value, /Editing the command deck\./,
-    'NOW dropped the recorded worker activity the deck reads');
-  // A running builder is a stage fact, not an owner decision.
-  assert.match(needs, /No owner decision is canonically required right now\./,
+    'Right now dropped the recorded worker activity the deck reads');
+  // A running builder is a stage fact, not an owner decision — and an absent
+  // blocker is not a record that owner approvals are settled either.
+  assert.match(needs, /No blocker is currently recorded, which is not evidence that owner approvals are settled\./,
     `a running build was presented as waiting on the owner: ${needs}`);
   for (const invented of [/\d+\s*%/, /elapsed/i, /remaining/i, /estimat/i, /progress/i]) {
     assert.doesNotMatch(briefRows(page).map((node) => node.textContent).join(' '), invented,
@@ -4017,13 +4023,17 @@ test('DOM: every brief answer is the canonical field the deck already resolved, 
   }
 });
 
-test('DOM: NEEDS MARC says plainly when no owner decision is required, and never softens a real one', () => {
+test('DOM: Attention states only what a clear blocker proves, and never softens a real one', () => {
   const idle = bootPage(fixtureState());
   const idleNeeds = briefField(idle, 'needs-marc').value;
-  assert.match(idleNeeds, /No owner decision is canonically required right now\./,
-    `an idle deck did not state plainly that nothing needs the owner: ${idleNeeds}`);
+  assert.match(idleNeeds, /No blocker is currently recorded, which is not evidence that owner approvals are settled\./,
+    `an idle deck did not state plainly what its clear blocker evidence proves: ${idleNeeds}`);
+  // blockerClear proves an absence of blockers, so the row may not be read as
+  // a positive record that the owner has approved anything.
+  assert.doesNotMatch(idleNeeds, /No owner decision is (?:canonically )?required/,
+    `an absent blocker was inflated into settled owner approval: ${idleNeeds}`);
   assert.ok(idleNeeds.includes(deckCardText(idle, 'blocker')),
-    'the plain "nothing needed" answer dropped the canonical blocker line it rests on');
+    'the plain "no blocker recorded" answer dropped the canonical blocker line it rests on');
 
   const blockedState = fixtureState({
     engineering: Object.assign({}, fixtureState().engineering, { state: 'OK', problems: [] }),
@@ -4033,8 +4043,8 @@ test('DOM: NEEDS MARC says plainly when no owner decision is required, and never
   const blocked = bootPage(blockedState);
   const blockedNeeds = briefField(blocked, 'needs-marc').value;
   assert.strictEqual(blockedNeeds, deckCardText(blocked, 'blocker'),
-    'a real blocker was not carried into NEEDS MARC verbatim');
-  assert.doesNotMatch(blockedNeeds, /No owner decision is canonically required/,
+    'a real blocker was not carried into Attention verbatim');
+  assert.doesNotMatch(blockedNeeds, /No blocker is currently recorded/,
     `a recorded blocker was reported as needing nothing from the owner: ${blockedNeeds}`);
 });
 
@@ -4046,10 +4056,10 @@ test('DOM: unreadable run evidence makes the brief say so instead of answering f
   assert.strictEqual(now, deckCardText(page, 'current-action'),
     'NOW stopped tracking the canonical current-action field under unavailable evidence');
   assert.strictEqual(needs, deckCardText(page, 'blocker'),
-    'NEEDS MARC stopped tracking the canonical blocker field under unavailable evidence');
+    'Attention stopped tracking the canonical blocker field under unavailable evidence');
   assert.match(needs, /could not be read or validated/,
     `the recorded reason the ledger is unusable was withheld from the brief: ${needs}`);
-  assert.doesNotMatch(needs, /No owner decision is canonically required/,
+  assert.doesNotMatch(needs, /No blocker is currently recorded/,
     'unreadable evidence was rendered as a positive "nothing is needed" answer');
   assert.doesNotMatch(briefRows(page).map((node) => node.textContent).join(' '), /No blocker — no run has started\./,
     'unreadable evidence was rendered as clean idle in the brief');
@@ -4390,9 +4400,9 @@ test('DOM: a finished-but-unverified run is explained in founder language, not i
   assert.strictEqual(page.text('hud-core-status'), 'BLOCKED',
     'founder language softened a blocked control state into a finished one');
   assert.match(briefField(page, 'needs-marc').value, /older code version/,
-    'NEEDS MARC dropped the real blocker');
+    'Attention dropped the real blocker');
   assert.doesNotMatch(briefField(page, 'needs-marc').value,
-    /No owner decision is canonically required/,
+    /No blocker is currently recorded/,
     'a real blocker was reported as needing nothing from the owner');
   assert.strictEqual(briefField(page, 'next').value, MISSING_EVIDENCE_NEXT.mismatched,
     'the next valid action is not stated in founder language');
@@ -4442,7 +4452,7 @@ test('DOM: unavailable gate evidence refuses to call the work finished, in plain
     'it stands right now, so it is not confirmed finished.',
     'unavailable gate evidence was not explained as an unverified integrated version');
   assert.match(briefField(page, 'needs-marc').value, /Not confirmed — AEGIS cannot yet show/,
-    'the fail-closed refusal was softened out of NEEDS MARC');
+    'the fail-closed refusal was softened out of Attention');
   assert.doesNotMatch(founderSurfaceText(page), FOUNDER_JARGON,
     `Command View still repeats the internal phrases this packet replaced: ${founderSurfaceText(page)}`);
 });
@@ -7867,6 +7877,14 @@ async function asyncTests() {
     assert.match(cells.progress.textContent, /No run is active, so there is no builder to supervise\./);
     assertCellStates(cells.watchdog, { state: 'NOT_RUNNING', plain: 'Nothing running' }, 'watchdog');
     assert.match(cells.watchdog.textContent, /no builder watchdog is armed/);
+    // Both labels ask the operator's question; the sentences beneath them, and
+    // the canonical cell ids, are unchanged.
+    assert.match(cells.progress.textContent, /Latest builder activity/);
+    assert.match(cells.watchdog.textContent, /Run limits/);
+    for (const jargon of [/REAL PROGRESS VS HEARTBEAT/, /WATCHDOG \/ TIMEOUT/]) {
+      assert.doesNotMatch(cells.progress.textContent + ' ' + cells.watchdog.textContent, jargon,
+        `the strip still leads with implementation vocabulary: ${jargon}`);
+    }
     assertCellStates(cells.cost, { state: 'UNAVAILABLE', plain: 'Not recorded' }, 'cost');
     assert.match(cells.cost.textContent, /CAD UNAVAILABLE — no transcripts are recorded/,
       `an absent cost projection was not stated as explicitly unavailable: ${cells.cost.textContent}`);

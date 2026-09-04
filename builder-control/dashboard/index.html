@@ -490,7 +490,7 @@
   .command-value{font-size:14px;line-height:1.4}.command-label{font-size:11px;color:#829bb2}
 
   /* ── operator brief ──
-     The first block the owner reads: NOW, NEXT and NEEDS MARC, in that order.
+     The first block the owner reads: right now, next action and attention.
      It is a re-reading of canonical fields the deck below already renders, so
      it carries no motion, no timer and no state of its own. Rows stack their
      own label above their value, which keeps it legible at every width without
@@ -1210,7 +1210,7 @@
      crew, routing rationale, live evidence, builder-progress detail, elapsed,
      the two explanatory brief rows and the station's own role line. The
      operator answers (current action, next step, blocker, last safe checkpoint,
-     and the brief's NOW / NEXT / NEEDS MARC rows) are never clamped here.
+     and the brief's right-now / next-action / attention rows) are never clamped here.
 
      No colour, chip, glyph or state signal is touched, so nothing here becomes
      legible by colour alone, and there is no transition, animation, timer or
@@ -3866,10 +3866,12 @@
       { id: 'run-state', label: 'GATE READINESS',
         state: opsCellState(control.state), chip: opsCellState(control.state),
         value: opsCellText(control.plain) },
-      { id: 'progress', label: 'REAL PROGRESS VS HEARTBEAT',
+      // The label reads as the operator's question; the sentence beneath it is
+      // unchanged and still separates real progress from heartbeat-only liveness.
+      { id: 'progress', label: 'Latest builder activity',
         state: opsCellState(supervision.state), chip: opsCellState(supervision.state),
         value: opsCellText(supervision.headline) },
-      { id: 'watchdog', label: 'WATCHDOG / TIMEOUT',
+      { id: 'watchdog', label: 'Run limits',
         state: opsCellState(supervision.watchdogState), chip: opsCellState(supervision.watchdogState),
         value: opsCellText(supervision.watchdog) + ' ' + opsCellText(supervision.timeout) },
       { id: 'cost', label: 'RECORDED COST (CAD)',
@@ -4234,10 +4236,10 @@
     mission.appendChild(chip(controlState.state));
     host.appendChild(mission);
 
-    // Operator brief: the five questions the owner arrives with — what
-    // FINISHED, WHY the integrated version still has to be VERIFIED, what is
-    // happening NOW, what happens NEXT, and does this NEED MARC (which is the
-    // blocker read out loud). This is the one place the deck explains itself in
+    // Operator brief: the five questions the owner arrives with — what is
+    // completed so far, what is still to verify about the integrated version,
+    // what is happening right now, the next action, and what needs attention
+    // (the blocker read out loud). This is the one place the deck explains itself in
     // founder language; the gate vocabulary, rule names, subject hashes and
     // receipts stay in Detail View. Every value is a canonical field this deck
     // has already resolved above. It derives nothing of its own — no elapsed
@@ -4258,24 +4260,25 @@
       brief.appendChild(row);
     }
     var briefBlocker = briefText(operatorBlocker);
-    // "Needs Marc" is not a new signal. It is the deck's own blocker/decision
-    // verdict, read out loud: when that verdict is clear the honest answer is
-    // that nothing is waiting on the owner, stated plainly and still showing
-    // the recorded blocker line it rests on.
+    // Attention is not a new signal. It is the deck's own blocker/decision
+    // verdict, read out loud. blockerClear proves only that no blocker is
+    // recorded right now, so the clear sentence claims exactly that — never
+    // that owner approvals are settled — and still shows the recorded blocker
+    // line it rests on.
     var briefDecision = !briefBlocker
       ? 'UNAVAILABLE — no canonical blocker or decision evidence is recorded, so whether an owner decision is required cannot be stated.'
       : (blockerClear
-        ? 'No owner decision is canonically required right now. Recorded blocker status: ' + briefBlocker
+        ? 'No blocker is currently recorded, which is not evidence that owner approvals are settled. Recorded blocker status: ' + briefBlocker
         : briefBlocker);
-    briefRow('FINISHED', 'finished', briefText(deckFinished) ||
+    briefRow('Completed so far', 'finished', briefText(deckFinished) ||
       'UNAVAILABLE — no canonical run evidence records what finished.');
-    briefRow('WHY VERIFY', 'verify', briefText(deckVerification) ||
+    briefRow('Still to verify', 'verify', briefText(deckVerification) ||
       'UNAVAILABLE — no canonical evidence records whether this code version was verified.');
-    briefRow('NOW', 'now', briefText(currentAction) ||
+    briefRow('Right now', 'now', briefText(currentAction) ||
       'UNAVAILABLE — no current action is recorded in canonical run evidence.');
-    briefRow('NEXT', 'next', briefText(deckActions.join(' ')) ||
+    briefRow('Next action', 'next', briefText(deckActions.join(' ')) ||
       'UNAVAILABLE — no next action is recorded in canonical run evidence.');
-    briefRow('NEEDS MARC', 'needs-marc', briefDecision,
+    briefRow('Attention', 'needs-marc', briefDecision,
       briefBlocker && blockerClear ? 'is-clear' : (briefBlocker ? 'is-blocked' : ''));
     host.appendChild(brief);
 
