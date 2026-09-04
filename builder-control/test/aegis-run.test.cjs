@@ -1773,12 +1773,53 @@ function reviewGate(subject, overrides = {}) {
   }, overrides);
 }
 
+// What `--start --packet <p> --json` actually prints: the subject, the
+// classification, and review-cycle.cjs analyze() verbatim under `reviewCycle`.
+function reviewCycleStart(subject, cycleOverrides = {}) {
+  return {
+    call: 'start',
+    status: 0,
+    body: {
+      subject,
+      classification: { lane: 'FULL', requiredReviewers: ['codex', 'grok'] },
+      reviewCycle: Object.assign({
+        packetId: REVIEW_PACKET_ID,
+        roundCount: 1,
+        maxRounds: 3,
+        roundsRemaining: 2,
+        verdict: 'PROCEED',
+        requiredReviewers: ['codex', 'grok'],
+        missingReviewers: ['codex', 'grok'],
+        allowedReviewers: ['codex', 'grok'],
+        currentRoundComplete: false,
+        reasons: [],
+      }, cycleOverrides),
+    },
+  };
+}
+
+// The prose --start prints instead of JSON when the cycle stops the round.
+function reviewCycleStop(kind = 'HARD STOP') {
+  return {
+    call: 'start',
+    status: 3,
+    stdout: `ENGINEERING OS — REVIEW CYCLE ${kind}\n${'='.repeat(60)}\n` +
+      `packet      : ${REVIEW_PACKET_ID}\nrounds      : 3 of 3\n` +
+      'D-14        : automated review stops here.\n',
+  };
+}
+
 function engineeringOsMock(responses) {
   const engos = path.join(ROOT, 'builder-control', 'engineering-os.cjs');
   const expectedGitDir = spawnSync('git', ['-C', REVIEW_WORKTREE.path, 'rev-parse', '--absolute-git-dir'],
     { encoding: 'utf8' }).stdout.trim();
   const expectedGitWorkTree = fs.realpathSync(REVIEW_WORKTREE.path);
   const expectedCalls = responses.map((response) => {
+    // The review-cycle authority is asked about the same packet as the gate, so
+    // it cannot be told apart by its body alone; it declares itself.
+    if (response && response.call === 'start') {
+      return [engos, '--start', '--packet', path.resolve(ROOT, REVIEW_PACKET), '--json'];
+    }
     const body = response && response.body;
     if (body && body.subject && body.reviewerCompleteness) {
       return [engos, '--gate-done', '--packet', path.resolve(ROOT, REVIEW_PACKET),
@@ -1817,7 +1858,10 @@ function engineeringOsMock(responses) {
           throw new Error('engineering-os spawn options are not bound to the canonical worktree');
         }
         const response = engosResponses[engosIndex++] || { status: 3, body: { ok: false, problems: [] } };
-        return { status: response.status, stdout: JSON.stringify(response.body), stderr: '' };
+        // --start prints prose, not JSON, when the cycle itself stops the round.
+        return { status: response.status,
+          stdout: typeof response.stdout === 'string' ? response.stdout : JSON.stringify(response.body),
+          stderr: typeof response.stderr === 'string' ? response.stderr : '' };
       }
       return originalSpawnSync.apply(this, arguments);
     };
@@ -1860,6 +1904,7 @@ function engineeringSubjectSequenceMock(subjects, packetPath) {
 }
 
 const REVIEW_PACKET = 'builder-control/packets/PKT-20260826-ASYNC-WORKER-OPERATOR-BETA.json';
+const REVIEW_PACKET_ID = JSON.parse(fs.readFileSync(path.join(ROOT, REVIEW_PACKET), 'utf8')).packetId;
 function createCanonicalReviewWorktreeFixture() {
   const root = fs.mkdtempSync(path.join(
     OUTER_SNAPSHOT ? OUTER_SNAPSHOT.boundaryRoot : fs.realpathSync(os.tmpdir()),
@@ -2565,6 +2610,475 @@ test('bindIndependentReview: owns the per-run claim and accepts no browser autho
   assert.match(body, /acquireRunLaunchClaim/);
   assert.match(body, /bindIndependentReviewClaimed\(run\)/);
   assert.doesNotMatch(body, /options|reviewer|model|executable|subjectSha/);
+});
+
+// Records every process the control path actually starts. The read-only
+// preflight is allowed to ASK the canonical subject and gate authorities; it is
+// not allowed to launch a reviewer, a worker, a shell or a check suite.
+function spawnLedgerProbe() {
+  return `
+    const probeChildProcess = require('child_process');
+    const probeRecords = [];
+    const probeSpawnSync = probeChildProcess.spawnSync;
+    probeChildProcess.spawnSync = function(command, args) {
+      probeRecords.push(command === 'git' ? 'git'
+        : (command === process.execPath && Array.isArray(args) && typeof args[0] === 'string' &&
+            args[0].endsWith('/builder-control/engineering-os.cjs')
+              ? 'engineering-os ' + args[1]
+              : 'UNEXPECTED_SPAWN_SYNC ' + command));
+      return probeSpawnSync.apply(this, arguments);
+    };
+    for (const forbidden of ['spawn', 'exec', 'execFile', 'execSync', 'fork']) {
+      const originalForbidden = probeChildProcess[forbidden];
+      probeChildProcess[forbidden] = function() {
+        probeRecords.push('UNEXPECTED_' + forbidden.toUpperCase());
+        return originalForbidden.apply(this, arguments);
+      };
+    }
+    global.__probeRecords = probeRecords;
+  `;
+}
+
+const PREFLIGHT_OBSERVATION_DRIVER = `
+  const preflightFs = require('fs');
+  const runFile = require('path').join(process.env.AEGIS_RUNS_DIR, runId + '.json');
+  const beforeRun = preflightFs.readFileSync(runFile, 'utf8');
+  const beforeLedger = preflightFs.readFileSync(process.env.AEGIS_LEDGER_FILE, 'utf8');
+  const probeStart = global.__probeRecords ? global.__probeRecords.length : 0;
+  const result = R.prepareIndependentReview(runId);
+  console.log(JSON.stringify({
+    result,
+    frozen: Object.isFrozen(result),
+    spawned: global.__probeRecords ? global.__probeRecords.slice(probeStart) : [],
+    runUnchanged: preflightFs.readFileSync(runFile, 'utf8') === beforeRun,
+    ledgerUnchanged: preflightFs.readFileSync(process.env.AEGIS_LEDGER_FILE, 'utf8') === beforeLedger,
+    runLockExists: preflightFs.existsSync(runFile + '.launch.lock'),
+    globalLockExists: preflightFs.existsSync(R.globalWorkerLockPath()),
+  }));
+`;
+
+function assertPreflightLeftNothingBehind(out, runsDir, ledger, runId, label = '') {
+  assert.strictEqual(out.runUnchanged, true, `${label}: the preflight rewrote the run file`);
+  assert.strictEqual(out.ledgerUnchanged, true, `${label}: the preflight appended to the canonical ledger`);
+  assert.strictEqual(out.runLockExists, false, `${label}: the preflight took a per-run launch claim`);
+  assert.strictEqual(out.globalLockExists, false, `${label}: the preflight touched the global worker lock`);
+  assert.strictEqual(out.frozen, true, `${label}: the preflight answer is mutable`);
+  assert.strictEqual(out.result.mutations, 'NONE', label);
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  assert.strictEqual(saved.subject, undefined, label);
+  assert.strictEqual(saved.reviewGate, undefined, label);
+  assert.strictEqual(saved.reviewFailure, undefined, label);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-run').length,
+    0, label);
+  return saved;
+}
+
+test('prepareIndependentReview: names the canonical pending reviewers for the exact subject and mutates nothing', () => {
+  const subject = reviewSubject();
+  const gate = reviewGate(subject, {
+    ok: false,
+    state: 'BLOCKED',
+    problems: [
+      { rule: 'ENGOS-REVIEW-MISSING', detail: 'codex has no record bound to this subject' },
+      { rule: 'ENGOS-REVIEW-MISSING', detail: 'grok has no record bound to this subject' },
+    ],
+    reviewerCompleteness: {
+      subjectSha256: subject.subjectSha256,
+      complete: false,
+      required: ['codex', 'grok'],
+      missing: ['codex', 'grok'],
+      pathCoverage: { total: 2, coveredByEveryRequiredReviewer: [],
+        notCoveredByEveryRequiredReviewer: subject.subjectPaths },
+      rows: [
+        { reviewer: 'codex', required: 'REQUIRED', executed: 'MISSING', disposition: null,
+          reviewId: null, missingPaths: subject.subjectPaths, stalePaths: [] },
+        { reviewer: 'grok', required: 'REQUIRED', executed: 'STALE', disposition: null,
+          reviewId: null, missingPaths: subject.subjectPaths, stalePaths: [] },
+        { reviewer: 'copilot', required: 'ADVISORY', executed: 'MISSING', disposition: null,
+          reviewId: null, missingPaths: subject.subjectPaths, stalePaths: [] },
+      ],
+    },
+    reviewsBound: 0, reviewsActive: 0, reviewsForeign: 2,
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), PREFLIGHT_OBSERVATION_DRIVER,
+  `${engineeringOsMock([{ status: 0, body: subject }, { status: 3, body: gate },
+    reviewCycleStart(subject)])}
+   ${spawnLedgerProbe()}`);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+
+  assert.strictEqual(out.result.status, 'REVIEW_PERMITTED');
+  assert.strictEqual(out.result.reasonCode, 'EXACT_SUBJECT_REVIEW_PENDING');
+  assert.strictEqual(out.result.nextAction, 'independent-review');
+  assert.strictEqual(out.result.runId, runId);
+  assert.strictEqual(out.result.state, 'CHECKS_PASSED');
+  assert.strictEqual(out.result.action, 'prepare-independent-review');
+
+  // Only REQUIRED reviewers that still owe an exact-subject review are named.
+  assert.deepStrictEqual(out.result.pendingReviewers, [
+    { reviewer: 'codex', executed: 'MISSING', coverage: 'NONE' },
+    { reviewer: 'grok', executed: 'STALE', coverage: 'NONE' },
+  ]);
+  assert.deepStrictEqual(out.result.requiredReviewers, ['codex', 'grok']);
+  assert.strictEqual(out.result.lane, 'FULL');
+
+  // Exact coordinates, taken from the canonical subject and the canonical receipt.
+  assert.deepStrictEqual(out.result.subject, {
+    subjectSha256: subject.subjectSha256,
+    subjectPaths: subject.subjectPaths,
+    diffBytes: subject.diffBytes,
+    range: subject.range,
+  });
+  assert.deepStrictEqual(out.result.packet, {
+    path: REVIEW_PACKET,
+    sha256: crypto.createHash('sha256').update(fs.readFileSync(path.join(ROOT, REVIEW_PACKET))).digest('hex'),
+  });
+  assert.deepStrictEqual(out.result.evidence, {
+    source: 'CANONICAL_CHECK_RECEIPT',
+    receiptSha256: passedChecksFor(runId, subject).receipt.receiptSha256,
+    hostContainment: 'BOUND',
+  });
+
+  // The canonical cycle verdict is reported as given, never re-derived here.
+  assert.deepStrictEqual(out.result.reviewCycle, {
+    packetId: REVIEW_PACKET_ID, roundCount: 1, maxRounds: 3, roundsRemaining: 2, verdict: 'PROCEED',
+  });
+
+  // Three read-only authority questions, and no launch of anything.
+  assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('engineering-os')),
+    ['engineering-os --subject', 'engineering-os --gate-done', 'engineering-os --start']);
+  assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('UNEXPECTED')), []);
+  assert.ok(out.spawned.every((entry) => entry === 'git' || entry.startsWith('engineering-os')),
+    `unexpected process launched by the preflight: ${JSON.stringify(out.spawned)}`);
+
+  const saved = assertPreflightLeftNothingBehind(out, runsDir, ledger, runId, 'pending reviewers');
+  assert.strictEqual(saved.state, 'CHECKS_PASSED');
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+test('prepareIndependentReview: complete exact-subject coverage reports no additional review and binds nothing', () => {
+  const subject = reviewSubject();
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: preHostChecksFor(seedRunId, subject),
+  }), PREFLIGHT_OBSERVATION_DRIVER,
+  `${engineeringOsMock([{ status: 0, body: subject }, { status: 0, body: reviewGate(subject) }])}
+   ${spawnLedgerProbe()}`);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+
+  assert.strictEqual(out.result.status, 'NO_ADDITIONAL_REVIEW_NEEDED');
+  assert.strictEqual(out.result.reasonCode, 'EXACT_SUBJECT_REVIEW_COMPLETE');
+  assert.strictEqual(out.result.nextAction, 'bind-independent-review');
+  assert.deepStrictEqual(out.result.pendingReviewers, []);
+  assert.strictEqual(out.result.subject.subjectSha256, subject.subjectSha256);
+
+  // Pre-host evidence is real evidence, and it is stated as what it is: the
+  // top-level host containment suite has not run and binding is what runs it.
+  assert.deepStrictEqual(out.result.evidence, {
+    source: 'CANONICAL_PRE_HOST_CHECK_RECEIPT',
+    receiptSha256: preHostChecksFor(runId, subject).preHostReceipt.receiptSha256,
+    hostContainment: 'PENDING_AT_BINDING',
+  });
+  assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('UNEXPECTED')), []);
+  assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('engineering-os')),
+    ['engineering-os --subject', 'engineering-os --gate-done']);
+
+  const saved = assertPreflightLeftNothingBehind(out, runsDir, ledger, runId, 'no additional review');
+  assert.strictEqual(saved.state, 'CHECKS_PASSED', 'a preflight answer bound a review');
+  assert.strictEqual(saved.checks.hostContainment.state, 'PENDING',
+    'the preflight executed the subject-controlled host suite');
+  assert.strictEqual(ledgerEntriesFor(ledger, runId)
+    .filter((entry) => entry.gate === 'aegis-check-receipt').length, 0,
+    'the preflight published a final host-bound receipt');
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+test('prepareIndependentReview: a recorded exact-subject rejection is a refusal, never pending review work', () => {
+  const subject = reviewSubject();
+  const gate = reviewGate(subject, {
+    ok: false,
+    state: 'BLOCKED',
+    problems: [{ rule: 'ENGOS-OPEN-BLOCKING-FINDING',
+      detail: 'HIGH from codex in builder-control/aegis-run.cjs: untrusted detail must not persist' }],
+    reviewerCompleteness: {
+      subjectSha256: subject.subjectSha256,
+      complete: true,
+      required: ['codex', 'grok'],
+      missing: [],
+      pathCoverage: { total: 2, coveredByEveryRequiredReviewer: subject.subjectPaths,
+        notCoveredByEveryRequiredReviewer: [] },
+      rows: [
+        { reviewer: 'codex', required: 'REQUIRED', executed: 'EXECUTED',
+          disposition: 'APPROVE_WITH_NOTES', reviewId: 'REV-codex-open-high',
+          missingPaths: [], stalePaths: [] },
+        { reviewer: 'grok', required: 'REQUIRED', executed: 'EXECUTED',
+          disposition: 'APPROVE', reviewId: 'REV-grok-current', missingPaths: [], stalePaths: [] },
+      ],
+    },
+    reviewsBound: 1, reviewsActive: 1, reviewsForeign: 0,
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), PREFLIGHT_OBSERVATION_DRIVER,
+  `${engineeringOsMock([{ status: 0, body: subject }, { status: 3, body: gate }])}
+   ${spawnLedgerProbe()}`);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+
+  assert.strictEqual(out.result.status, 'REFUSED');
+  assert.strictEqual(out.result.reasonCode, 'EXACT_SUBJECT_REVIEW_REFUSED');
+  assert.strictEqual(out.result.nextAction, 'retry');
+  assert.deepStrictEqual(out.result.pendingReviewers, []);
+  assert.deepStrictEqual(out.result.rejectedReviewers,
+    [{ reviewer: 'codex', reviewId: 'REV-codex-open-high' }]);
+  assert.strictEqual(out.result.blockingFindingCount, 1);
+  assert.ok(!JSON.stringify(out.result).includes('untrusted detail'),
+    'unbounded reviewer prose reached the preflight answer');
+
+  // Binding records REVIEW_FAILED for this same gate. A preflight records nothing.
+  const saved = assertPreflightLeftNothingBehind(out, runsDir, ledger, runId, 'recorded rejection');
+  assert.strictEqual(saved.state, 'CHECKS_PASSED');
+  assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('UNEXPECTED')), []);
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+test('prepareIndependentReview: a gate blocked outside review work names no reviewer', () => {
+  const subject = reviewSubject();
+  const gate = reviewGate(subject, {
+    ok: false,
+    state: 'BLOCKED',
+    problems: [
+      { rule: 'ENGOS-PATH-UNAUTHORIZED', detail: '3 changed path(s) are outside the packet filesAllowed' },
+      { rule: 'ENGOS-REVIEW-MISSING', detail: 'codex has no record bound to this subject' },
+    ],
+    reviewerCompleteness: {
+      subjectSha256: subject.subjectSha256,
+      complete: false,
+      required: ['codex', 'grok'],
+      missing: ['codex', 'grok'],
+      pathCoverage: { total: 2, coveredByEveryRequiredReviewer: [],
+        notCoveredByEveryRequiredReviewer: subject.subjectPaths },
+      rows: [
+        { reviewer: 'codex', required: 'REQUIRED', executed: 'MISSING', disposition: null,
+          reviewId: null, missingPaths: subject.subjectPaths, stalePaths: [] },
+        { reviewer: 'grok', required: 'REQUIRED', executed: 'MISSING', disposition: null,
+          reviewId: null, missingPaths: subject.subjectPaths, stalePaths: [] },
+      ],
+    },
+    reviewsBound: 0, reviewsActive: 0, reviewsForeign: 0,
+  });
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+  }), PREFLIGHT_OBSERVATION_DRIVER,
+  `${engineeringOsMock([{ status: 0, body: subject }, { status: 3, body: gate }])}
+   ${spawnLedgerProbe()}`);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.strictEqual(out.result.status, 'REFUSED');
+  assert.strictEqual(out.result.reasonCode, 'REVIEW-GATE-BLOCKED');
+  assert.deepStrictEqual(out.result.pendingReviewers, [],
+    'an unauthorized-path block was reported as review work a reviewer could clear');
+  assert.strictEqual(out.result.nextAction, 'none');
+  assertPreflightLeftNothingBehind(out, runsDir, ledger, runId, 'gate blocked outside review');
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+// A gate that still has outstanding exact-subject review work, used wherever a
+// scenario needs the preflight to get past the complete-coverage answer.
+function pendingReviewGate(subject) {
+  return reviewGate(subject, {
+    ok: false,
+    state: 'BLOCKED',
+    problems: [{ rule: 'ENGOS-REVIEW-MISSING', detail: 'codex has no record bound to this subject' }],
+    reviewerCompleteness: {
+      subjectSha256: subject.subjectSha256,
+      complete: false,
+      required: ['codex', 'grok'],
+      missing: ['codex', 'grok'],
+      pathCoverage: {
+        total: subject.subjectPaths.length,
+        coveredByEveryRequiredReviewer: [],
+        notCoveredByEveryRequiredReviewer: subject.subjectPaths,
+      },
+    },
+  });
+}
+
+test('prepareIndependentReview RED: wrong state, exhausted cycle, absent receipt and a moved subject fail closed', () => {
+  const subject = reviewSubject();
+  const moved = reviewSubject({ subjectSha256: 'b'.repeat(64), diffBytes: 4097 });
+  const refusedCycle = [1, 2, 3].map((n) => ({
+    schemaVersion: 1, status: 'REFUSED', reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+    subjectSha256: subject.subjectSha256, refusedAt: `2026-08-27T18:0${n}:00.000Z`,
+  }));
+  const scenarios = [
+    {
+      label: 'wrong state', state: 'BUILT', responses: [], nextAction: 'none',
+      reasonCode: 'REVIEW-WRONG-STATE', checks: (id) => passedChecksFor(id, subject),
+    },
+    {
+      label: 'exhausted review cycle', state: 'CHECKS_PASSED', nextAction: 'escalate',
+      responses: [{ status: 0, body: subject }, { status: 3, body: pendingReviewGate(subject) }],
+      reasonCode: 'REVIEW-CYCLE-EXHAUSTED', checks: (id) => passedChecksFor(id, subject),
+      extra: { reviewFailures: refusedCycle, corrections: 3 },
+    },
+    {
+      label: 'absent canonical receipt', state: 'CHECKS_PASSED', responses: [], nextAction: 'none',
+      reasonCode: 'REVIEW-CHECKS-INVALID',
+      checks: (id) => { const c = passedChecksFor(id, subject); delete c.receipt; return c; },
+    },
+    {
+      label: 'receipt bound to a different subject', state: 'CHECKS_PASSED', nextAction: 'none',
+      responses: [{ status: 0, body: moved }], reasonCode: 'REVIEW-CHECKS-STALE',
+      checks: (id) => passedChecksFor(id, subject),
+    },
+  ];
+  for (const scenario of scenarios) {
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun(scenario.state, (seedRunId) => ({
+      ...REVIEW_RUN, checks: scenario.checks(seedRunId), ...(scenario.extra || {}),
+    }), PREFLIGHT_OBSERVATION_DRIVER,
+    `${engineeringOsMock(scenario.responses)}
+     ${spawnLedgerProbe()}`);
+    assert.strictEqual(r.status, 0, `${scenario.label}: ${r.stderr}`);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.result.status, 'REFUSED', scenario.label);
+    assert.strictEqual(out.result.reasonCode, scenario.reasonCode, scenario.label);
+    assert.strictEqual(out.result.nextAction, scenario.nextAction, scenario.label);
+    assert.deepStrictEqual(out.result.pendingReviewers, [],
+      `${scenario.label}: a closed refusal still advertised pending review work`);
+    assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('UNEXPECTED')), [],
+      scenario.label);
+    const saved = assertPreflightLeftNothingBehind(out, runsDir, ledger, runId, scenario.label);
+    assert.strictEqual(saved.state, scenario.state, scenario.label);
+    fs.rmSync(TMP, { recursive: true, force: true });
+  }
+});
+
+// The gate names who owes an exact-subject review; the canonical review cycle
+// answers whether another round may start at all. The preflight reports the
+// intersection, and never names a reviewer the cycle did not permit.
+test('prepareIndependentReview: names only reviewers the canonical review cycle permits', () => {
+  const subject = reviewSubject();
+  const gate = pendingReviewGate(subject);
+  const scenarios = [
+    {
+      label: 'canonical packet cycle exhausted with zero per-run review failures',
+      response: reviewCycleStop(),
+      status: 'REFUSED', reasonCode: 'REVIEW-CYCLE-EXHAUSTED', nextAction: 'escalate', names: [],
+    },
+    {
+      label: 'a clean third round is complete, not permission for a fourth',
+      response: reviewCycleStop('COMPLETE'),
+      status: 'REFUSED', reasonCode: 'REVIEW-CYCLE-EXHAUSTED', nextAction: 'escalate', names: [],
+    },
+    {
+      label: 'only the one permitted reviewer is named',
+      response: reviewCycleStart(subject, { allowedReviewers: ['grok'], missingReviewers: ['grok'] }),
+      status: 'REVIEW_PERMITTED', reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+      nextAction: 'independent-review', names: ['grok'],
+    },
+    {
+      label: 'no reviewer permitted',
+      response: reviewCycleStart(subject, { allowedReviewers: [], missingReviewers: [] }),
+      status: 'REFUSED', reasonCode: 'REVIEW-CYCLE-NO-PERMITTED-REVIEWER', nextAction: 'none', names: [],
+    },
+    {
+      // Exit 3 without the cycle's own stop banner is a policy failure printed
+      // to stderr, not a verdict, and must not read as an exhausted cycle.
+      label: 'unreadable cycle verdict',
+      response: { call: 'start', status: 3, stdout: 'not a canonical cycle verdict' },
+      status: 'REFUSED', reasonCode: 'REVIEW-CYCLE-UNREADABLE', nextAction: 'none', names: [],
+    },
+    {
+      label: 'cycle answered for a moved subject',
+      response: reviewCycleStart(reviewSubject({ subjectSha256: 'b'.repeat(64) })),
+      status: 'REFUSED', reasonCode: 'REVIEW-SUBJECT-MOVED', nextAction: 'none', names: [],
+    },
+    {
+      label: 'cycle bound to a foreign packet',
+      response: reviewCycleStart(subject, { packetId: 'FOREIGN-PACKET' }),
+      status: 'REFUSED', reasonCode: 'REVIEW-CYCLE-UNREADABLE', nextAction: 'none', names: [],
+    },
+    {
+      label: 'cycle reported no readable round budget',
+      response: { call: 'start', status: 0, body: { subject, classification: { lane: 'FULL',
+        requiredReviewers: ['codex', 'grok'] }, reviewCycle: null } },
+      status: 'REFUSED', reasonCode: 'REVIEW-CYCLE-UNREADABLE', nextAction: 'none', names: [],
+    },
+  ];
+  for (const scenario of scenarios) {
+    const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+      ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject), reviewFailures: [], corrections: 0,
+    }), PREFLIGHT_OBSERVATION_DRIVER,
+    `${engineeringOsMock([{ status: 0, body: subject }, { status: 3, body: gate }, scenario.response])}
+     ${spawnLedgerProbe()}`);
+    assert.strictEqual(r.status, 0, `${scenario.label}: ${r.stderr}`);
+    const out = JSON.parse(r.stdout.trim().split('\n').pop());
+    assert.strictEqual(out.result.status, scenario.status, scenario.label);
+    assert.strictEqual(out.result.reasonCode, scenario.reasonCode, scenario.label);
+    assert.strictEqual(out.result.nextAction, scenario.nextAction, scenario.label);
+    assert.deepStrictEqual(out.result.pendingReviewers.map((row) => row.reviewer), scenario.names,
+      `${scenario.label}: the preflight named a reviewer the canonical cycle did not permit`);
+    assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('engineering-os')),
+      ['engineering-os --subject', 'engineering-os --gate-done', 'engineering-os --start'],
+      scenario.label);
+    assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('UNEXPECTED')), [],
+      scenario.label);
+    assertPreflightLeftNothingBehind(out, runsDir, ledger, runId, scenario.label);
+    fs.rmSync(TMP, { recursive: true, force: true });
+  }
+});
+
+// The recorded per-run refusals are history. bindIndependentReview accepts this
+// exact run, so a preflight that refused it would report a block the canonical
+// path does not enforce.
+test('prepareIndependentReview: recorded past refusals never refuse a gate that is complete now', () => {
+  const subject = reviewSubject();
+  const refusedCycle = [1, 2, 3].map((n) => ({
+    schemaVersion: 1, status: 'REFUSED', reasonCode: 'EXACT_SUBJECT_REVIEW_REFUSED',
+    subjectSha256: subject.subjectSha256, refusedAt: `2026-08-27T18:0${n}:00.000Z`,
+  }));
+  const { r, runsDir, ledger, runId, TMP } = withSeededRun('CHECKS_PASSED', (seedRunId) => ({
+    ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+    reviewFailures: refusedCycle, corrections: 3,
+  }), PREFLIGHT_OBSERVATION_DRIVER,
+  `${engineeringOsMock([{ status: 0, body: subject }, { status: 0, body: reviewGate(subject) }])}
+   ${spawnLedgerProbe()}`);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.strictEqual(out.result.status, 'NO_ADDITIONAL_REVIEW_NEEDED');
+  assert.strictEqual(out.result.reasonCode, 'EXACT_SUBJECT_REVIEW_COMPLETE');
+  assert.strictEqual(out.result.nextAction, 'bind-independent-review');
+  assert.deepStrictEqual(out.result.pendingReviewers, []);
+  // No new round is being proposed, so the cycle authority is not asked.
+  assert.deepStrictEqual(out.spawned.filter((entry) => entry.startsWith('engineering-os')),
+    ['engineering-os --subject', 'engineering-os --gate-done']);
+  assertPreflightLeftNothingBehind(out, runsDir, ledger, runId, 'complete gate with past refusals');
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+test('prepareIndependentReview: read-only by construction and shares one coordinate authority with binding', () => {
+  const src = fs.readFileSync(CLI, 'utf8');
+  const preflightStart = src.indexOf('function prepareIndependentReview(runId)');
+  const preflight = src.slice(preflightStart,
+    src.indexOf('function bindIndependentReviewClaimed', preflightStart));
+  const binding = src.slice(src.indexOf('function bindIndependentReviewClaimed'),
+    src.indexOf('function bindIndependentReview(runId)'));
+  assert.ok(preflightStart > 0 && preflight.length > 0);
+  assert.strictEqual(R.prepareIndependentReview.length, 1);
+  assert.match(preflight, /canonicalReviewCoordinates\(run\)/);
+  assert.match(preflight, /canonicalReviewCycleVerdict\(/,
+    'the preflight reports permitted reviewers without asking the canonical review cycle');
+  assert.match(binding, /canonicalReviewCoordinates\(run\)/,
+    'binding no longer resolves its coordinates through the shared authority');
+  assert.doesNotMatch(preflight,
+    /saveRun|transition\(|recordReviewFailure|persistCanonical|appendCanonicalLedgerEntry|acquireRunLaunchClaim|releaseRunLaunchClaim|finalizeReviewedHostContainment|spawn|Worker|writeFileSync|rmSync/);
+  assert.throws(() => R.prepareIndependentReview('../../etc/passwd'),
+    (e) => e instanceof R.AegisControlError && e.code === 'INVALID_RUN_ID' && e.httpStatus === 400);
+  assert.throws(() => R.prepareIndependentReview('RUN-19700101-deadbeef'),
+    (e) => e instanceof R.AegisControlError && e.code === 'RUN_NOT_FOUND' && e.httpStatus === 404);
 });
 
 hostContainmentTest('runChecks: exported claim-safe authority runs only packet-declared checks and returns a minimized result', () => {

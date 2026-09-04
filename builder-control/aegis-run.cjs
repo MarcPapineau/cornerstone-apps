@@ -5360,20 +5360,32 @@ function canonicalGitEnvironment(run) {
   return env;
 }
 
-function runCanonicalEngineeringOs(args, env) {
+// One read of the canonical authority. `parseable` is reported rather than
+// thrown on, because engineering-os has one command — --start — whose refusal
+// is deliberately printed as prose with a hard-block exit rather than JSON.
+// For every other caller an unparseable answer is still an error; that is
+// runCanonicalEngineeringOs below, whose behaviour is unchanged.
+function readCanonicalEngineeringOs(args, env) {
   const r = spawnSync(process.execPath, [ENGOS, ...args], {
     cwd: ROOT, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000,
   });
   if (r.error) {
     throw new RunError('REVIEW-AUTHORITY-UNAVAILABLE', `engineering-os.cjs could not run: ${r.error.message}`);
   }
-  let parsed;
+  let parsed = null;
+  let parseable = true;
   try { parsed = JSON.parse((r.stdout || '').trim()); }
-  catch {
+  catch { parseable = false; }
+  return { status: r.status === null ? 124 : r.status, parsed, parseable, stdout: r.stdout || '' };
+}
+
+function runCanonicalEngineeringOs(args, env) {
+  const r = readCanonicalEngineeringOs(args, env);
+  if (!r.parseable) {
     throw new RunError('REVIEW-AUTHORITY-UNAVAILABLE',
       `engineering-os.cjs returned no parseable JSON${r.status === 0 ? '' : ` (exit ${r.status})`}`);
   }
-  return { status: r.status === null ? 124 : r.status, parsed };
+  return { status: r.status, parsed: r.parsed };
 }
 
 function validPassedChecks(checks, expected = {}) {
@@ -5607,10 +5619,16 @@ function checkpointCandidateProblem(candidate) {
   return null;
 }
 
-function bindIndependentReviewClaimed(run) {
-  if (run.state !== 'CHECKS_PASSED') {
-    throw new RunError('ILLEGAL-TRANSITION', `review binding requires CHECKS_PASSED, run is ${run.state}`);
-  }
+// ── one coordinate authority for independent review ─────────────────────────
+// Binding and the read-only preflight below must be talking about the SAME
+// packet, the SAME exact subject and the SAME canonical receipt. If each
+// derived its own plausible-looking set, the dashboard could describe a review
+// of one version of the code while binding a review of another — which is the
+// exact recycling failure the subject hash exists to prevent.
+//
+// This validates and returns coordinates. It persists nothing, transitions
+// nothing, and takes no claim; every caller-visible refusal is a RunError.
+function canonicalReviewCoordinates(run) {
   if (!run.checks || !Number.isInteger(run.checks.total) || run.checks.total <= 0 ||
       run.checks.passed !== run.checks.total || !Array.isArray(run.checks.results) ||
       run.checks.results.length !== run.checks.total ||
@@ -5642,7 +5660,7 @@ function bindIndependentReviewClaimed(run) {
       !Number.isInteger(subject.diffBytes) || subject.diffBytes <= 0) {
     throw new RunError('REVIEW-SUBJECT-INVALID', 'canonical subject is empty, malformed, or unavailable');
   }
-  let checkReceipt = loadCanonicalCheckReceipt(run.checks, {
+  const checkReceipt = loadCanonicalCheckReceipt(run.checks, {
     runId: run.runId, packetPath: packetNow.path, packetSha256: packetNow.sha256,
     subject, commands, hostCommands,
   });
@@ -5654,6 +5672,372 @@ function bindIndependentReviewClaimed(run) {
     throw new RunError('REVIEW-CHECKS-STALE',
       'deterministic check evidence is missing, partial, stale, or bound to a different packet or subject');
   }
+  return { packet, env, packetNow, commands, hostCommands, subject, checkReceipt, preHostReceipt };
+}
+
+// ── canonical review-cycle authority (read-only) ────────────────────────────
+// The bounded review cycle — D-19's three-round ceiling and D-14's "it does not
+// attempt one more pass" — is enforced by engineering-os --start, not by
+// --gate-done. The gate answers "which required reviewer has no record bound to
+// this exact subject"; it never answers "is another review round allowed at
+// all". An exhausted packet still produces a gate full of ENGOS-REVIEW-MISSING
+// rows, so a preflight that reads only the gate will name reviewers and call it
+// permitted work — which is the fourth round D-14 exists to stop.
+//
+// This introduces NO second counter. The rounds are the review records already
+// on disk and --start is their one reader; this asks that same authority about
+// the SAME packet and the SAME subject the gate was asked about, and takes its
+// verdict and its allowedReviewers as given.
+const ENGOS_HARD_BLOCK = 3;
+
+// --start prints this banner on stdout, and only this banner, when the cycle
+// itself stops the round. Exit 3 alone does not mean that: every PolicyError
+// fails closed on the same exit code and prints to stderr instead.
+const ENGOS_CYCLE_STOP_BANNER = /^ENGINEERING OS — REVIEW CYCLE (COMPLETE|HARD STOP)$/m;
+
+function canonicalReviewCycleVerdict(packetPath, packetId, subject, env) {
+  const named = (name) => typeof name === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(name);
+  const unreadable = (message) => ({ refusal: { code: 'REVIEW-CYCLE-UNREADABLE', message } });
+  let answer;
+  try { answer = readCanonicalEngineeringOs(['--start', '--packet', packetPath, '--json'], env); }
+  catch (e) {
+    if (!(e instanceof RunError)) throw e;
+    return { refusal: { code: e.code, message: e.message } };
+  }
+
+  // --start hard-blocks and prints prose instead of JSON when no further round
+  // may start. That is the authority answering, not a malfunction, and the
+  // answer is STOP. It is deliberately not read back out of that prose beyond
+  // its banner: the only thing a preflight needs from it is that no reviewer
+  // may be named. A bare exit 3 with no banner is a policy failure, not a
+  // verdict, and is reported as unreadable rather than as an exhausted cycle.
+  if (!answer.parseable) {
+    if (answer.status === ENGOS_HARD_BLOCK && ENGOS_CYCLE_STOP_BANNER.test(answer.stdout)) {
+      return { stopped: true };
+    }
+    return unreadable(
+      `the canonical review-cycle authority returned no readable verdict (exit ${answer.status})`);
+  }
+  const cycle = answer.parsed && typeof answer.parsed === 'object' ? answer.parsed.reviewCycle : null;
+  if (answer.status !== 0 || !cycle || typeof cycle !== 'object') {
+    return unreadable(
+      `the canonical review-cycle authority named no review cycle for this packet (exit ${answer.status})`);
+  }
+  if (!sameCanonicalSubject(subject, answer.parsed.subject)) {
+    return { refusal: { code: 'REVIEW-SUBJECT-MOVED',
+      message: 'the canonical subject changed between reading the review gate and the review cycle' } };
+  }
+  if (typeof cycle.packetId !== 'string' || cycle.packetId !== packetId) {
+    return unreadable('the canonical review cycle is bound to a different packet than the run');
+  }
+  if (!Number.isInteger(cycle.roundCount) || !Number.isInteger(cycle.maxRounds) ||
+      !Number.isInteger(cycle.roundsRemaining) || typeof cycle.verdict !== 'string' || !cycle.verdict) {
+    return unreadable('the canonical review cycle reported no readable round budget');
+  }
+  const budget = {
+    packetId: cycle.packetId,
+    roundCount: cycle.roundCount,
+    maxRounds: cycle.maxRounds,
+    roundsRemaining: cycle.roundsRemaining,
+    verdict: cycle.verdict,
+  };
+  // COMPLETE_GATE and HALT_ESCALATE both mean "do not start another round".
+  // Only PROCEED authorises naming a reviewer.
+  if (cycle.verdict !== 'PROCEED') return { stopped: true, cycle: Object.freeze(budget) };
+  if (!Array.isArray(cycle.allowedReviewers) || !cycle.allowedReviewers.every(named)) {
+    return unreadable('the canonical review cycle named no readable set of allowed reviewers');
+  }
+  return { cycle: Object.freeze({ ...budget,
+    allowedReviewers: Object.freeze(cycle.allowedReviewers.slice(0, 16)) }) };
+}
+
+// ── read-only independent-review preflight ──────────────────────────────────
+// The operator surface needs one honest answer to "what review action is
+// permitted on this run right now", and it needs it BEFORE anything is
+// launched. Previously the only way to find out was to attempt the binding
+// itself, which is a decision, not a question.
+//
+// This asks the question and nothing else. It takes no claim, writes no run
+// file, appends no ledger entry, rewrites no receipt, executes no check and
+// starts no reviewer. REVIEW_PERMITTED means a review of this exact subject
+// MAY now be run — never that one has been run, and never that binding has
+// happened. Binding remains a separate decision with its own evidence.
+//
+// It reads two canonical authorities, both read-only queries that binding
+// already makes: the subject and the gate. It fabricates neither.
+const REVIEW_PREFLIGHT_ACTION = 'prepare-independent-review';
+const REVIEW_PREFLIGHT_AUTHORITY = 'aegis-run.cjs prepareIndependentReview (read-only)';
+
+// Gate rules that a NEW exact-subject review can actually clear. Anything else
+// blocking the gate — an invalid packet, unauthorized paths, an unpinned spec,
+// a malformed record, a self-verified fix — is not review work, and naming a
+// reviewer for it would be inventing a task that cannot succeed.
+const REVIEW_PENDING_RULES = new Set([
+  'ENGOS-REVIEW-MISSING',
+  'ENGOS-REVIEWER-UNAVAILABLE',
+  'ENGOS-REVIEW-COVERAGE-SHORT',
+  'ENGOS-REVIEW-COVERAGE-EXTRA',
+]);
+
+// Which required reviewers still owe an exact-subject review, taken from the
+// canonical completeness rows rather than re-derived. Returns null when the
+// completeness record cannot be read as a list of named required reviewers:
+// an unreadable answer is reported as a refusal, never smoothed into an empty
+// or guessed set of pending work.
+function pendingRequiredReviewers(completeness) {
+  const named = (name) => typeof name === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(name);
+  const rows = Array.isArray(completeness && completeness.rows) ? completeness.rows : null;
+  if (rows && rows.length) {
+    const requiredRows = rows.filter((row) => row && row.required === 'REQUIRED');
+    if (requiredRows.length === 0 || !requiredRows.every((row) => named(row.reviewer))) return null;
+    return requiredRows
+      .filter((row) => row.executed !== 'EXECUTED' ||
+        (Array.isArray(row.missingPaths) && row.missingPaths.length !== 0) ||
+        (Array.isArray(row.stalePaths) && row.stalePaths.length !== 0))
+      .map((row) => Object.freeze({
+        reviewer: row.reviewer,
+        executed: typeof row.executed === 'string' ? row.executed : 'UNKNOWN',
+        coverage: row.executed === 'EXECUTED' ? 'INCOMPLETE' : 'NONE',
+      }));
+  }
+  const missing = Array.isArray(completeness && completeness.missing) ? completeness.missing : null;
+  if (!missing || missing.length === 0 || !missing.every(named)) return null;
+  return missing.map((reviewer) => Object.freeze({
+    reviewer, executed: 'MISSING', coverage: 'NONE',
+  }));
+}
+
+function reviewPreflightAnswer(run, fields) {
+  return Object.freeze({
+    runId: run.runId,
+    state: run.state,
+    action: REVIEW_PREFLIGHT_ACTION,
+    authority: REVIEW_PREFLIGHT_AUTHORITY,
+    mutations: 'NONE',
+    pendingReviewers: Object.freeze([]),
+    ...fields,
+  });
+}
+
+function reviewPreflightRefusal(run, reasonCode, summary, fields = {}) {
+  return reviewPreflightAnswer(run, {
+    status: 'REFUSED', reasonCode, summary, nextAction: 'none', ...fields,
+  });
+}
+
+function prepareIndependentReview(runId) {
+  const run = loadRunForControl(runId);
+
+  if (run.state !== 'CHECKS_PASSED') {
+    return reviewPreflightRefusal(run, 'REVIEW-WRONG-STATE',
+      `review binding requires CHECKS_PASSED, run is ${run.state}`);
+  }
+
+  let coordinates;
+  try { coordinates = canonicalReviewCoordinates(run); }
+  catch (e) {
+    if (!(e instanceof RunError)) throw e;
+    return reviewPreflightRefusal(run, e.code, e.message);
+  }
+  const { env, packetNow, subject, checkReceipt, preHostReceipt } = coordinates;
+  const evidence = checkReceipt || preHostReceipt;
+  const coordinateFields = {
+    packet: Object.freeze({ path: packetNow.path, sha256: packetNow.sha256 }),
+    subject: Object.freeze({
+      subjectSha256: subject.subjectSha256,
+      subjectPaths: Object.freeze(subject.subjectPaths.slice()),
+      diffBytes: subject.diffBytes,
+      range: subject.range,
+    }),
+    evidence: Object.freeze({
+      source: checkReceipt ? 'CANONICAL_CHECK_RECEIPT' : 'CANONICAL_PRE_HOST_CHECK_RECEIPT',
+      receiptSha256: evidence.receiptSha256,
+      // A pre-host receipt is real evidence, but the top-level host containment
+      // suite has not run yet. Binding is what executes it; say so rather than
+      // letting a preflight read as if containment were already proven.
+      hostContainment: checkReceipt ? 'BOUND' : 'PENDING_AT_BINDING',
+    }),
+  };
+
+  let gateResult;
+  try {
+    gateResult = runCanonicalEngineeringOs([
+      '--gate-done', '--packet', path.resolve(ROOT, coordinates.packet),
+      '--subject-sha', subject.subjectSha256, '--json',
+    ], env);
+  } catch (e) {
+    if (!(e instanceof RunError)) throw e;
+    return reviewPreflightRefusal(run, e.code, e.message, coordinateFields);
+  }
+  const gate = gateResult.parsed;
+  const completeness = gate && gate.reviewerCompleteness;
+  if (!gate || !gate.subject || !sameCanonicalSubject(subject, gate.subject)) {
+    return reviewPreflightRefusal(run, 'REVIEW-SUBJECT-MOVED',
+      'the canonical subject changed between resolving it and reading the review gate',
+      coordinateFields);
+  }
+  const classification = (gate.classification && typeof gate.classification === 'object')
+    ? gate.classification : {};
+  const laneFields = {
+    lane: classification.lane || null,
+    requiredReviewers: Object.freeze(Array.isArray(classification.requiredReviewers)
+      ? classification.requiredReviewers.slice(0, 16) : []),
+  };
+  if (!completeness) {
+    return reviewPreflightRefusal(run, 'REVIEW-COMPLETENESS-UNREADABLE',
+      'the canonical review gate returned no reviewer completeness for this exact subject',
+      { ...coordinateFields, ...laneFields });
+  }
+
+  // Exactly the condition binding requires, read as a question instead of a
+  // decision. Review coverage being complete does not bind anything: the run is
+  // still CHECKS_PASSED and binding remains a separate action with its own
+  // subject recomputation and its own evidence.
+  const coverage = completeness.pathCoverage;
+  if (gateResult.status === 0 && gate.ok === true &&
+      Array.isArray(gate.problems) && gate.problems.length === 0 &&
+      completeness.complete === true && coverage &&
+      Array.isArray(coverage.notCoveredByEveryRequiredReviewer) &&
+      coverage.notCoveredByEveryRequiredReviewer.length === 0) {
+    return reviewPreflightAnswer(run, {
+      status: 'NO_ADDITIONAL_REVIEW_NEEDED',
+      reasonCode: 'EXACT_SUBJECT_REVIEW_COMPLETE',
+      summary: 'Every required reviewer has an exact-subject review covering the whole subject. ' +
+        'No additional review is needed. Nothing is bound: binding is a separate action.',
+      ...coordinateFields,
+      ...laneFields,
+      nextAction: 'bind-independent-review',
+    });
+  }
+
+  // An exhausted review cycle is not pending work. Once the bounded ceiling of
+  // exact-subject review refusals has been recorded, another review round is an
+  // escalation decision, and reporting reviewers as "pending" here would dress
+  // that escalation up as ordinary remaining work. It is read AFTER the gate,
+  // not before it: those refusals are history, and history does not override a
+  // gate that is complete on the subject as it stands now — binding accepts
+  // that same run, so refusing it here would be a false refusal.
+  const reviewFailures = Array.isArray(run.reviewFailures) ? run.reviewFailures : [];
+  const corrections = Number.isInteger(run.corrections) ? run.corrections : 0;
+  if (reviewFailures.length >= MAX_CORRECTIONS) {
+    return reviewPreflightRefusal(run, 'REVIEW-CYCLE-EXHAUSTED',
+      `${reviewFailures.length} exact-subject review refusal(s) are already recorded against the ` +
+      `${MAX_CORRECTIONS}-cycle ceiling; a further review round is an escalation, not remaining work.`, {
+        ...coordinateFields,
+        ...laneFields,
+        nextAction: 'escalate',
+        reviewCycles: Object.freeze({
+          recordedReviewFailures: reviewFailures.length, corrections, ceiling: MAX_CORRECTIONS,
+        }),
+      });
+  }
+
+  if (gateResult.status !== EXIT_REFUSED || gate.ok !== false || gate.state !== 'BLOCKED' ||
+      !Array.isArray(gate.problems) || gate.problems.length === 0) {
+    return reviewPreflightRefusal(run, 'REVIEW-GATE-UNREADABLE',
+      `the canonical review gate returned neither a clean pass nor a readable block (exit ${gateResult.status})`,
+      { ...coordinateFields, ...laneFields });
+  }
+
+  // A recorded rejection of this exact subject is not missing review work.
+  const refusal = attributableReviewRefusal(gate, subject);
+  if (refusal) {
+    return reviewPreflightRefusal(run, 'EXACT_SUBJECT_REVIEW_REFUSED',
+      refusal.blockingFindingCount > 0
+        ? `Independent review found ${refusal.blockingFindingCount} blocking issue(s) on this exact checked version.`
+        : 'An independent reviewer rejected this exact checked version.', {
+        ...coordinateFields,
+        ...laneFields,
+        nextAction: 'retry',
+        rejectedReviewers: Object.freeze(refusal.rejectedReviewers.map((row) => Object.freeze({ ...row }))),
+        blockingFindingCount: refusal.blockingFindingCount,
+      });
+  }
+
+  const blockingRules = gate.problems.map((problem) => problem && problem.rule);
+  const unnamedRule = blockingRules.some((rule) => typeof rule !== 'string' || !rule);
+  const outsideReviewWork = [...new Set(blockingRules.filter((rule) =>
+    typeof rule === 'string' && rule && !REVIEW_PENDING_RULES.has(rule)))];
+  if (unnamedRule || outsideReviewWork.length) {
+    return reviewPreflightRefusal(run, 'REVIEW-GATE-BLOCKED',
+      `the canonical gate is blocked by ${outsideReviewWork.join(', ') || 'an unnamed rule'}, ` +
+      'which no additional independent review can clear',
+      { ...coordinateFields, ...laneFields });
+  }
+
+  const pending = pendingRequiredReviewers(completeness);
+  if (!pending || pending.length === 0) {
+    return reviewPreflightRefusal(run, 'REVIEW-COMPLETENESS-UNREADABLE',
+      'the canonical gate reports outstanding review work but names no required reviewer that could do it',
+      { ...coordinateFields, ...laneFields });
+  }
+
+  // The gate names who owes an exact-subject review. It never answers whether
+  // another review round may start at all — that is the canonical review cycle,
+  // asked here about the SAME packet and the SAME subject the gate was asked
+  // about. No reviewer is reported as permitted unless it says so.
+  const packetId = packetNow.parsed && typeof packetNow.parsed.packetId === 'string'
+    ? packetNow.parsed.packetId : '';
+  if (!packetId) {
+    return reviewPreflightRefusal(run, 'REVIEW-PACKET-INVALID',
+      'the packet bound to the run names no packetId, so its review cycle cannot be read',
+      { ...coordinateFields, ...laneFields });
+  }
+  const cycleAnswer = canonicalReviewCycleVerdict(
+    path.resolve(ROOT, coordinates.packet), packetId, subject, env);
+  const cycleFields = cycleAnswer.cycle ? {
+    reviewCycle: Object.freeze({
+      packetId: cycleAnswer.cycle.packetId,
+      roundCount: cycleAnswer.cycle.roundCount,
+      maxRounds: cycleAnswer.cycle.maxRounds,
+      roundsRemaining: cycleAnswer.cycle.roundsRemaining,
+      verdict: cycleAnswer.cycle.verdict,
+    }),
+  } : {};
+  if (cycleAnswer.refusal) {
+    return reviewPreflightRefusal(run, cycleAnswer.refusal.code, cycleAnswer.refusal.message,
+      { ...coordinateFields, ...laneFields, ...cycleFields });
+  }
+  if (cycleAnswer.stopped) {
+    return reviewPreflightRefusal(run, 'REVIEW-CYCLE-EXHAUSTED',
+      'the canonical review cycle for this packet permits no further review round; ' +
+      'a further round is an escalation, not remaining work.',
+      { ...coordinateFields, ...laneFields, ...cycleFields, nextAction: 'escalate' });
+  }
+
+  // Owing a review and being allowed to run one are two different facts. Report
+  // only the intersection, and refuse rather than name a reviewer the cycle
+  // authority did not permit.
+  const allowedReviewers = new Set(cycleAnswer.cycle.allowedReviewers);
+  const permitted = pending.filter((row) => allowedReviewers.has(row.reviewer));
+  if (permitted.length === 0) {
+    return reviewPreflightRefusal(run, 'REVIEW-CYCLE-NO-PERMITTED-REVIEWER',
+      'the canonical gate reports outstanding review work, but the canonical review cycle ' +
+      'permits no reviewer to run it against this subject.',
+      { ...coordinateFields, ...laneFields, ...cycleFields });
+  }
+
+  return reviewPreflightAnswer(run, {
+    status: 'REVIEW_PERMITTED',
+    reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+    summary: `${permitted.map((row) => row.reviewer).join(' and ')} still owe an exact-subject review ` +
+      `of ${subject.subjectSha256.slice(0, 16)}… over ${subject.subjectPaths.length} path(s). ` +
+      'Nothing has been launched by this preflight.',
+    ...coordinateFields,
+    ...laneFields,
+    ...cycleFields,
+    pendingReviewers: Object.freeze(permitted),
+    nextAction: 'independent-review',
+  });
+}
+
+function bindIndependentReviewClaimed(run) {
+  if (run.state !== 'CHECKS_PASSED') {
+    throw new RunError('ILLEGAL-TRANSITION', `review binding requires CHECKS_PASSED, run is ${run.state}`);
+  }
+  const coordinates = canonicalReviewCoordinates(run);
+  const { packet, env, packetNow, commands, hostCommands, subject, preHostReceipt } = coordinates;
+  let checkReceipt = coordinates.checkReceipt;
 
   const gateResult = runCanonicalEngineeringOs([
     '--gate-done', '--packet', path.resolve(ROOT, packet),
@@ -6184,4 +6568,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, bindIndependentReview, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, prepareIndependentReview, bindIndependentReview, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
