@@ -2211,6 +2211,74 @@ function connectorFixture(lastUsedByRun) {
   };
 }
 
+// ── event history reads as recorded receipts, not a product scoreboard ─────
+test('DOM: every event row leads with its recorded historical result and keeps the exact receipt', () => {
+  const events = [
+    { entryId: 'E1', ts: '2026-08-27T12:00:00.000Z', gate: 'aegis-run', status: 'PASS' },
+    { entryId: 'E2', ts: '2026-08-27T12:01:00.000Z', gate: 'build', status: 'BLOCKED', blockRule: 'ENGOS-REVIEW-MISSING' },
+    { entryId: 'E3', ts: '2026-08-27T12:02:00.000Z', gate: 'aegis-check-receipt', status: 'FAILED' },
+    { entryId: 'E4', ts: '2026-08-27T12:03:00.000Z', gate: 'aegis-marc-decision', status: 'SUPERSEDED' },
+    { entryId: 'E5', ts: '2026-08-27T12:04:00.000Z', gate: 'aegis-run' },
+  ];
+  const list = bootPage(fixtureState({ events: { state: 'OK', events } })).document.getElementById('events');
+  assert.strictEqual(list.children.length, events.length, 'the event panel dropped, added or merged recorded rows');
+  const rows = list.children.map((li) => ({
+    outcome: li.children[0].children[0].textContent,
+    receipt: li.children[0].children[1].textContent,
+    ts: li.children[0].children[2].textContent,
+    badge: li.children[1].textContent,
+  }));
+
+  // Every recorded result reads differently from the others. A PASS receipt in
+  // particular must not read as "this works now".
+  assert.strictEqual(new Set(rows.map((r) => r.outcome)).size, events.length,
+    'recorded outcomes are not distinguishable from one another');
+  assert.match(rows[0].outcome, /^Recorded PASS — aegis-run was recorded as passed on this dated receipt\./);
+  assert.match(rows[0].outcome, /not a statement of current readiness/);
+  assert.match(rows[1].outcome, /^Recorded BLOCKED — a rule stopped Build on this dated receipt\./);
+  assert.match(rows[1].outcome, /not a current permission/);
+  assert.match(rows[2].outcome, /^Recorded FAILED — aegis-check-receipt broke on this dated receipt\./);
+  assert.match(rows[3].outcome, /^Recorded SUPERSEDED — this page does not recognise that outcome word/);
+  assert.match(rows[4].outcome, /^Outcome unavailable — this receipt records no result word\./);
+
+  // The exact evidence still travels with the sentence, in order.
+  assert.strictEqual(rows[0].receipt, 'aegis-run', 'an unfamiliar gate name was rewritten');
+  assert.strictEqual(rows[1].receipt, 'build · ENGOS-REVIEW-MISSING', 'the exact gate and block rule were not preserved');
+  rows.forEach((r, i) => assert.strictEqual(r.ts, events[i].ts, `row ${i} lost its recorded timestamp or order`));
+  assert.match(rows[3].badge, /SUPERSEDED$/, 'the exact recorded status badge was not preserved');
+  assert.match(rows[4].badge, /UNKNOWN$/, 'a receipt with no status lost its UNKNOWN badge');
+});
+
+test('DOM: an event history that is empty says so, and one that could not be read keeps its exact reason', () => {
+  const emptyText = bootPage(fixtureState({ events: { state: 'OK', events: [] } })).text('events');
+  assert.match(emptyText, /No gate decisions are recorded yet\. The history was read and it holds no events\./);
+  assert.doesNotMatch(emptyText, /UNAVAILABLE/, 'an available empty history was reported as unreadable');
+
+  const unreadable = bootPage(fixtureState({
+    events: { state: 'UNAVAILABLE', reason: 'ledger unreadable: Unexpected token }', events: [] },
+  })).text('events');
+  assert.match(unreadable, /UNAVAILABLE — ledger unreadable: Unexpected token \}/);
+  assert.doesNotMatch(unreadable, /No gate decisions are recorded yet/,
+    'an unreadable history was reported as an empty one');
+});
+
+test('DOM: an event receipt missing its gate or timestamp states the absence instead of printing undefined', () => {
+  const text = bootPage(fixtureState({
+    events: { state: 'OK', events: [{ entryId: 'E1', status: 'PASS' }] },
+  })).text('events');
+  assert.doesNotMatch(text, /undefined|null/, 'a missing event field reached the page as a machine value');
+  assert.match(text, /Gate unavailable — this receipt names no gate\./);
+  assert.match(text, /Timestamp unavailable — this receipt carries no time\./);
+  assert.match(text, /Recorded PASS — an unnamed gate was recorded as passed/);
+});
+
+test('event history rows wrap long gate names and rules instead of widening the page', () => {
+  assert.match(code, /#events \.row>div:first-child\{min-width:0/,
+    'the event row text column can be stretched by one long recorded value');
+  assert.match(code, /#events \.name,#events \.meta\{overflow-wrap:anywhere\}/,
+    'event names and receipts do not wrap at every width');
+});
+
 test('DOM: Command and Detail controls execute the real disclosure switch', () => {
   const page = bootPage(fixtureState());
   const command = page.document.getElementById('view-command');

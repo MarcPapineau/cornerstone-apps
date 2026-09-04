@@ -180,6 +180,12 @@
   .row .name{font-weight:500}
   .row .meta{color:var(--text-2);font-size:12px;margin-top:2px}
   .badges{display:flex;gap:calc(var(--sp)*1.5);flex-wrap:wrap;justify-content:flex-end}
+  /* A recorded-result sentence is a sentence, and a gate name or a rule id can
+     be one long unbroken token. Both wrap inside the row's own column at every
+     width, so an event receipt cannot widen the page. */
+  #events .row>div:first-child{min-width:0;flex:1 1 auto}
+  #events .name,#events .meta{overflow-wrap:anywhere}
+  #events .event-outcome{font-weight:400;font-size:13px;line-height:1.45;color:var(--text-1)}
 
   /* ── live activity: one item, two reading levels ─────────────────
      A live update is one list item, never two. Command View reads the
@@ -5213,6 +5219,31 @@
   renderReviewers(S.reviewers, eng);
 
   // ── events ──────────────────────────────────────────────────────
+  // A row here is a dated receipt the ledger already wrote, and a panel of
+  // green PASS chips reads as "the product works" when it means "these gate
+  // decisions were recorded that way at the time". So each row leads with the
+  // recorded result in words, scoped to that receipt, and the exact status
+  // chip, gate, rule and timestamp stay beside it unchanged.
+  function eventOutcome(status, gateWord){
+    if (status === 'PASS'){
+      return 'Recorded PASS — ' + gateWord + ' was recorded as passed on this dated receipt. '
+        + 'That is what was recorded then, not a statement of current readiness.';
+    }
+    if (status === 'BLOCKED'){
+      return 'Recorded BLOCKED — a rule stopped ' + gateWord + ' on this dated receipt. '
+        + 'That is what was recorded then, not a current permission.';
+    }
+    if (status === 'FAILED'){
+      return 'Recorded FAILED — ' + gateWord + ' broke on this dated receipt. '
+        + 'That is what was recorded then, not a current state.';
+    }
+    if (typeof status === 'string' && status){
+      return 'Recorded ' + status + ' — this page does not recognise that outcome word, so the receipt '
+        + 'stands exactly as written. That is what was recorded then, not a current state.';
+    }
+    return 'Outcome unavailable — this receipt records no result word. '
+      + 'Nothing about the current state follows from it.';
+  }
   function renderEvents(source){
     var evl = $('events');
     evl.textContent = '';
@@ -5223,11 +5254,23 @@
       evl.appendChild(el('li','empty','UNAVAILABLE — ' + ((source && source.reason) || 'ledger could not be read')));
       return;
     }
+    // A history that was read and holds nothing is not a history that could not
+    // be read. Both are empty lists; only one of them is evidence of anything.
+    if (!rows.length){
+      evl.appendChild(el('li','empty','No gate decisions are recorded yet. The history was read and it holds no events.'));
+      return;
+    }
     rows.forEach(function(e){
       var li = el('li','row');
       var left = el('div');
-      left.appendChild(el('div','name', e.gate + (e.blockRule ? ' · ' + e.blockRule : '')));
-      left.appendChild(el('div','meta mono', e.ts));
+      // Unfamiliar gate names are kept verbatim; only the stage names the page
+      // already speaks are put in plain words.
+      var gate = typeof e.gate === 'string' && e.gate ? e.gate : null;
+      var gateWord = gate ? plainStageLabel({ id: gate, label: gate }) : 'an unnamed gate';
+      left.appendChild(el('div','name event-outcome', eventOutcome(e.status, gateWord)));
+      left.appendChild(el('div','meta', (gate || 'Gate unavailable — this receipt names no gate.')
+        + (e.blockRule ? ' · ' + e.blockRule : '')));
+      left.appendChild(el('div','meta mono', e.ts || 'Timestamp unavailable — this receipt carries no time.'));
       // CONFIRMED FINDING #9: every non-PASS ledger event was rendered
       // "BLOCKED", which turned a FAILED integration operation into what looked
       // like a governance refusal. Those are opposite diagnoses — one means a
