@@ -292,6 +292,14 @@ const REVIEW_ADMISSION_CASES = Object.freeze([
   'review admission: generic, stale and unproven release all preserve the held bytes',
   'review admission: another live process cannot release a hold it does not own',
   'review admission: proven lifecycle evidence releases the slot back to the builders',
+  'review request: an ineligible run or an unnamed reviewer never launches',
+  'review request: caller authorization, proof and coordinate fields are refused outright',
+  'review request: evidence that changed under both claims refuses without launching',
+  'review request: an eligible request reaches the canonical reviewer exactly once',
+  'review request: contention for the single admission slot refuses without launching',
+  'review request: only this invocation\'s own lifecycle evidence frees admission',
+  'review request: an unexpected preflight or admission failure is answered, not thrown',
+  'review request: a failed cleanup neither escapes nor reports a freed hold',
 ]);
 const selectedReviewAdmissionCases = new Set();
 function executeTest(n, fn) {
@@ -5587,6 +5595,625 @@ hostContainmentTest('review admission: proven lifecycle evidence releases the sl
     'proven drainage could not release the hold');
   assert.strictEqual(out.lockExists, false, 'the proven release left the global claim behind');
   fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+// ── one bounded internal review request over that admission ─────────────────
+// The callable owns a SEQUENCE, so every proof below is about the sequence:
+// what it refuses before taking anything, what it re-checks once it holds both
+// canonical claims, that it reaches the canonical reviewer exactly once, and
+// which evidence may hand the admission slot back.
+//
+// The canonical adapter is replaced inside the isolated subprocess through
+// Module._load, before aegis-run is required — the same interception the
+// worker-launch contention proof already uses. Production code gains no
+// injection point, and no reviewer, provider, network or paid API is reached.
+function reviewRequestAdapterDouble(body) {
+  return `
+    const reviewRequestModule = require('module');
+    const originalReviewRequestLoad = reviewRequestModule._load;
+    global.__adapterRequests = [];
+    reviewRequestModule._load = function (request) {
+      if (/review-adapters\\.cjs$/.test(request)) {
+        return { requestCanonicalReview: async (received) => {
+          global.__adapterRequests.push(received);
+          // Observed from INSIDE the one invocation: both canonical claims are
+          // held for as long as the reviewer is running.
+          const heldR = require(${JSON.stringify(CLI)});
+          global.__admissionDuringReview = {
+            builderRefused: (() => {
+              try { heldR.acquireGlobalWorkerClaim(0); return false; }
+              catch (error) { return error.code === 'LAUNCH_IN_PROGRESS'; }
+            })(),
+            runLockHeld: require('fs').existsSync(global.__runFile + '.launch.lock'),
+          };
+          ${body}
+        } };
+      }
+      return originalReviewRequestLoad.apply(this, arguments);
+    };
+  `;
+}
+
+function reviewRequestFixture(options) {
+  const adapterBody = options.adapter ||
+    'throw new Error("the canonical review adapter was invoked by a refused request");';
+  return withSeededRun(options.state || 'CHECKS_PASSED', options.seed, `
+    ${options.prelude || ''}
+    const requestFs = require('fs');
+    const requestFile = require('path').join(process.env.AEGIS_RUNS_DIR, runId + '.json');
+    global.__runFile = requestFile;
+    const beforeRun = requestFs.readFileSync(requestFile, 'utf8');
+    const beforeLedger = requestFs.readFileSync(process.env.AEGIS_LEDGER_FILE, 'utf8');
+    (async () => {
+      const answers = [];
+      for (const request of ${options.requests}) {
+        answers.push(await R.requestIndependentReview(request));
+      }
+      console.log(JSON.stringify({
+        answers,
+        frozen: answers.every((answer) => Object.isFrozen(answer)),
+        adapterRequests: global.__adapterRequests,
+        admissionDuringReview: global.__admissionDuringReview || null,
+        runUnchanged: requestFs.readFileSync(requestFile, 'utf8') === beforeRun,
+        ledgerUnchanged: requestFs.readFileSync(process.env.AEGIS_LEDGER_FILE, 'utf8') === beforeLedger,
+        runLockExists: requestFs.existsSync(requestFile + '.launch.lock'),
+        globalLockExists: requestFs.existsSync(R.globalWorkerLockPath()),
+      }));
+    })().catch((error) => {
+      console.error(error && error.stack ? error.stack : String(error));
+      process.exitCode = 1;
+    });
+  `, `${engineeringOsMock(options.responses || [])}
+     ${reviewRequestAdapterDouble(adapterBody)}`);
+}
+
+// Exactly the pending shape the canonical gate publishes: every REQUIRED
+// reviewer is listed, and only the named ones still owe an exact-subject
+// review. Coverage is deliberately incomplete, so the gate blocks on review
+// work alone and the recorded-rejection path is not reachable from here.
+function reviewRequestPendingGate(subject, pending) {
+  return reviewGate(subject, {
+    ok: false,
+    state: 'BLOCKED',
+    problems: pending.map((reviewer) => ({ rule: 'ENGOS-REVIEW-MISSING',
+      detail: `${reviewer} has no record bound to this subject` })),
+    reviewerCompleteness: {
+      subjectSha256: subject.subjectSha256,
+      complete: false,
+      required: ['codex', 'grok'],
+      missing: pending,
+      pathCoverage: { total: subject.subjectPaths.length, coveredByEveryRequiredReviewer: [],
+        notCoveredByEveryRequiredReviewer: subject.subjectPaths },
+      rows: ['codex', 'grok'].map((reviewer) => (pending.includes(reviewer)
+        ? { reviewer, required: 'REQUIRED', executed: 'MISSING', disposition: null,
+          reviewId: null, missingPaths: subject.subjectPaths, stalePaths: [] }
+        : { reviewer, required: 'REQUIRED', executed: 'EXECUTED', disposition: 'APPROVE',
+          reviewId: `REV-${reviewer}-fixture`, missingPaths: [], stalePaths: [] })),
+    },
+    reviewsBound: 0, reviewsActive: 0, reviewsForeign: 0,
+  });
+}
+
+// One permitted preflight costs three canonical reads: the subject, the gate,
+// and the bounded review cycle. The callable performs two preflights, so a
+// launched request scripts six.
+const reviewRequestPreflight = (subject, pending) => [
+  { status: 0, body: subject },
+  { status: 3, body: reviewRequestPendingGate(subject, pending) },
+  reviewCycleStart(subject),
+];
+
+const reviewRequestSeed = (subject) => (seedRunId) => ({
+  ...REVIEW_RUN, checks: passedChecksFor(seedRunId, subject),
+});
+
+const REVIEW_REQUEST_SECRET = 'SECRET-PROVIDER-TEXT /Users/fixture/secret/prompt.txt';
+const reviewRequestAdapterResult = (outcome, exitCode, lifecycle) => `
+  return { ok: ${exitCode === 0}, exitCode: ${exitCode}, outcome: ${JSON.stringify(outcome)},
+    reason: ${JSON.stringify(REVIEW_REQUEST_SECRET)}${lifecycle ? `,
+    processLifecycle: ${lifecycle}` : ''} };
+`;
+
+function reviewRequestOutcome(r) {
+  assert.strictEqual(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout.trim().split('\n').pop());
+}
+
+// Nothing this callable does may move a lifecycle, bind a review, append to the
+// canonical ledger or leave the per-run claim behind — on ANY exit path.
+function assertReviewRequestMovedNothing(out, runsDir, ledger, runId, state, label) {
+  assert.strictEqual(out.frozen, true, `${label}: a returned answer is mutable`);
+  assert.strictEqual(out.runUnchanged, true, `${label}: the request rewrote the run file`);
+  assert.strictEqual(out.ledgerUnchanged, true, `${label}: the request appended to the canonical ledger`);
+  assert.strictEqual(out.runLockExists, false, `${label}: the per-run claim was not released`);
+  const saved = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
+  assert.strictEqual(saved.state, state, `${label}: the run state moved`);
+  assert.strictEqual(saved.subject, undefined, `${label}: a subject was bound`);
+  assert.strictEqual(saved.reviewGate, undefined, `${label}: a review gate was recorded`);
+  assert.strictEqual(saved.reviewFailure, undefined, `${label}: a review failure was recorded`);
+  assert.strictEqual(saved.corrections, 0, `${label}: a correction cycle was consumed`);
+  assert.strictEqual(ledgerEntriesFor(ledger, runId).filter((entry) => entry.gate === 'aegis-run').length,
+    0, `${label}: a canonical ledger transition was appended`);
+  const serialized = JSON.stringify(out.answers);
+  assert.doesNotMatch(serialized, /SECRET-PROVIDER-TEXT/,
+    `${label}: provider output reached the caller`);
+  assert.doesNotMatch(serialized, /\/Users\//, `${label}: a filesystem path reached the caller`);
+}
+
+test('review request: an ineligible run or an unnamed reviewer never launches', () => {
+  // A run that is not CHECKS_PASSED, and a run that does not exist: the
+  // preflight refuses both before any canonical authority is asked at all.
+  const ineligible = reviewRequestFixture({
+    state: 'BUILT',
+    seed: (seedRunId) => ({ ...REVIEW_RUN, checks: passedChecksFor(seedRunId) }),
+    requests: `[{ runId, reviewer: 'codex' },
+      { runId: 'RUN-19700101-deadbeef', reviewer: 'grok' }]`,
+  });
+  const refusedOut = reviewRequestOutcome(ineligible.r);
+  for (const answer of refusedOut.answers) {
+    assert.strictEqual(answer.reasonCode, 'REVIEW_NOT_PERMITTED', JSON.stringify(answer));
+    assert.strictEqual(answer.review, 'NOT_REQUESTED');
+    assert.strictEqual(answer.reviewProcess, 'NOT_LAUNCHED');
+    assert.strictEqual(answer.admission, 'NOT_ACQUIRED');
+  }
+  assert.deepStrictEqual(refusedOut.adapterRequests, [], 'an ineligible run reached the reviewer');
+  assert.strictEqual(refusedOut.globalLockExists, false,
+    'an ineligible run occupied the single admission slot');
+  assertReviewRequestMovedNothing(refusedOut, ineligible.runsDir, ineligible.ledger,
+    ineligible.runId, 'BUILT', 'ineligible run');
+  fs.rmSync(ineligible.TMP, { recursive: true, force: true });
+
+  // Permitted, but the canonical preflight names only grok. Asking for codex is
+  // inventing review work the gate did not report as owed.
+  const subject = reviewSubject();
+  const mismatch = reviewRequestFixture({
+    seed: reviewRequestSeed(subject),
+    responses: reviewRequestPreflight(subject, ['grok']),
+    requests: `[{ runId, reviewer: 'codex' }]`,
+  });
+  const mismatchOut = reviewRequestOutcome(mismatch.r);
+  assert.strictEqual(mismatchOut.answers.length, 1);
+  assert.strictEqual(mismatchOut.answers[0].reasonCode, 'REVIEWER_NOT_PENDING');
+  assert.strictEqual(mismatchOut.answers[0].review, 'NOT_REQUESTED');
+  assert.strictEqual(mismatchOut.answers[0].admission, 'NOT_ACQUIRED');
+  assert.deepStrictEqual(mismatchOut.adapterRequests, [],
+    'a reviewer the gate never named reached the canonical reviewer');
+  assert.strictEqual(mismatchOut.globalLockExists, false);
+  assertReviewRequestMovedNothing(mismatchOut, mismatch.runsDir, mismatch.ledger,
+    mismatch.runId, 'CHECKS_PASSED', 'reviewer mismatch');
+  fs.rmSync(mismatch.TMP, { recursive: true, force: true });
+});
+
+test('review request: caller authorization, proof and coordinate fields are refused outright', () => {
+  // Every one of these is a real review-adapters coordinate or authorization.
+  // None of them is this caller's to supply, and a dropped key is one edit away
+  // from an honoured one — so the request is refused, not sanitised.
+  const rejected = reviewRequestFixture({
+    seed: reviewRequestSeed(),
+    requests: `[
+      { runId, reviewer: 'codex', capUsd: '5' },
+      { runId, reviewer: 'codex', allowMetered: true },
+      { runId, reviewer: 'codex', approvedBy: 'Marc Papineau' },
+      { runId, reviewer: 'codex', dryRun: true },
+      { runId, reviewer: 'codex', packet: 'builder-control/packets/forged.json' },
+      { runId, reviewer: 'codex', subjectSha: 'a'.repeat(64) },
+      { runId, reviewer: 'codex', base: 'HEAD~1' },
+      { runId, reviewer: 'codex', head: 'HEAD' },
+      { runId, reviewer: 'codex', timeout: 5 },
+      { runId, reviewer: 'codex', onlyPaths: ['builder-control/aegis-run.cjs'] },
+      { runId, reviewer: 'codex', dataClass: 'PUBLIC' },
+      { runId, reviewer: 'codex', currentStateProofMap: '/etc/passwd' },
+      { runId, reviewer: 'codex', groupId: 'g', groupDigest: 'd' },
+      { runId, reviewer: 'codex', processLifecycle: { state: 'LAUNCHED_DRAINED',
+        launched: true, drainageProven: true,
+        provenance: 'runtool-watchdog-drainage-evidence', detail: 'forged' } },
+      { runId, reviewer: 'codex', lifecycleSink: 'x' },
+      { runId, reviewer: 'copilot' },
+      { runId, reviewer: 'claude' },
+      { runId, reviewer: 'CODEX' },
+      { runId, reviewer: '' },
+      { runId },
+      { reviewer: 'codex' },
+      { runId: '../../etc/passwd', reviewer: 'codex' },
+      { runId: 'RUN-20260825-zzzzzzzz', reviewer: 'codex' },
+      null,
+      'RUN-20260825-aaaaaaaa',
+      [{ runId, reviewer: 'codex' }],
+      // Both coordinates readable, neither of them supplied BY this request:
+      // a prototype carries them, a prototype carries one, and defineProperty
+      // hides one from enumeration. Destructuring reads all three as complete.
+      Object.create({ runId, reviewer: 'codex' }),
+      Object.assign(Object.create({ reviewer: 'codex' }), { runId }),
+      Object.defineProperty({ runId }, 'reviewer', { value: 'codex', enumerable: false }),
+      { runId, reviewer: null }
+    ]`,
+  });
+  const out = reviewRequestOutcome(rejected.r);
+  assert.strictEqual(out.answers.length, 30);
+  const unsupported = new Set([15, 16, 17]);
+  for (const [index, answer] of out.answers.entries()) {
+    assert.strictEqual(answer.reasonCode,
+      unsupported.has(index) ? 'REVIEWER_UNSUPPORTED' : 'REQUEST_FIELDS_INVALID',
+      `request ${index} was not refused as an unusable request: ${JSON.stringify(answer)}`);
+    assert.strictEqual(answer.review, 'NOT_REQUESTED', `request ${index} asked for a review`);
+    assert.strictEqual(answer.admission, 'NOT_ACQUIRED', `request ${index} took admission`);
+    // A refused request is never echoed back, so a caller-shaped string can
+    // never leave through this answer either.
+    assert.strictEqual(answer.runId, null, `request ${index} echoed a caller coordinate`);
+    assert.strictEqual(answer.reviewer, null, `request ${index} echoed a caller reviewer`);
+  }
+  assert.deepStrictEqual(out.adapterRequests, [],
+    'a request carrying caller authority reached the canonical reviewer');
+  assert.strictEqual(out.globalLockExists, false);
+  assertReviewRequestMovedNothing(out, rejected.runsDir, rejected.ledger, rejected.runId,
+    'CHECKS_PASSED', 'refused request fields');
+  fs.rmSync(rejected.TMP, { recursive: true, force: true });
+
+  // The two-field shape is the contract, not a convention.
+  assert.deepStrictEqual(R.REVIEW_REQUEST_FIELDS, ['runId', 'reviewer']);
+  assert.deepStrictEqual(R.REVIEW_REQUEST_REVIEWERS, ['codex', 'grok']);
+  assert.strictEqual(R.requestIndependentReview.length, 1);
+  const src = fs.readFileSync(CLI, 'utf8');
+  const body = src.slice(src.indexOf('async function requestIndependentReview(request)'),
+    src.indexOf('// ── step 8:'));
+  assert.doesNotMatch(body, /\.\.\.request/, 'caller input is spread into an adapter argument');
+  assert.match(body, /require\('\.\/review-adapters\.cjs'\)/,
+    'the canonical adapter is not loaded lazily from inside the callable');
+  assert.strictEqual((body.match(/requestCanonicalReview\(/g) || []).length, 1,
+    'the callable names more than one canonical review invocation');
+  assert.doesNotMatch(body, /transition\(|saveRun|appendCanonicalLedgerEntry|bindIndependentReview/,
+    'the callable reaches a lifecycle, ledger or binding authority');
+});
+
+test('review request: evidence that changed under both claims refuses without launching', () => {
+  const subject = reviewSubject();
+  // The tree moved: the second canonical subject no longer matches the check
+  // receipt the first answer was built on.
+  const moved = reviewRequestFixture({
+    seed: reviewRequestSeed(subject),
+    responses: [...reviewRequestPreflight(subject, ['codex', 'grok']),
+      { status: 0, body: reviewSubject({ subjectSha256: 'b'.repeat(64) }) }],
+    requests: `[{ runId, reviewer: 'codex' }]`,
+  });
+  const movedOut = reviewRequestOutcome(moved.r);
+  assert.strictEqual(movedOut.answers[0].reasonCode, 'REVIEW_EVIDENCE_CHANGED');
+  assert.strictEqual(movedOut.answers[0].review, 'NOT_REQUESTED');
+  assert.strictEqual(movedOut.answers[0].reviewProcess, 'NOT_LAUNCHED');
+  assert.strictEqual(movedOut.answers[0].admission, 'RELEASED',
+    'a refusal that launched nothing kept the admission slot');
+  assert.deepStrictEqual(movedOut.adapterRequests, [], 'a moved subject reached the reviewer');
+  assert.strictEqual(movedOut.globalLockExists, false);
+  assertReviewRequestMovedNothing(movedOut, moved.runsDir, moved.ledger, moved.runId,
+    'CHECKS_PASSED', 'moved subject');
+  fs.rmSync(moved.TMP, { recursive: true, force: true });
+
+  // Still permitted under the claims — but codex stopped owing this subject
+  // between the two answers, so this exact request is no longer the work.
+  const reassigned = reviewRequestFixture({
+    seed: reviewRequestSeed(subject),
+    responses: [...reviewRequestPreflight(subject, ['codex', 'grok']),
+      ...reviewRequestPreflight(subject, ['grok'])],
+    requests: `[{ runId, reviewer: 'codex' }]`,
+  });
+  const reassignedOut = reviewRequestOutcome(reassigned.r);
+  assert.strictEqual(reassignedOut.answers[0].reasonCode, 'REVIEW_EVIDENCE_CHANGED');
+  assert.strictEqual(reassignedOut.answers[0].admission, 'RELEASED');
+  assert.deepStrictEqual(reassignedOut.adapterRequests, [],
+    'a reviewer that stopped owing the subject was still launched');
+  assert.strictEqual(reassignedOut.globalLockExists, false);
+  assertReviewRequestMovedNothing(reassignedOut, reassigned.runsDir, reassigned.ledger,
+    reassigned.runId, 'CHECKS_PASSED', 'reviewer no longer pending');
+  fs.rmSync(reassigned.TMP, { recursive: true, force: true });
+});
+
+test('review request: an eligible request reaches the canonical reviewer exactly once', () => {
+  const subject = reviewSubject();
+  const fixture = reviewRequestFixture({
+    seed: reviewRequestSeed(subject),
+    responses: [...reviewRequestPreflight(subject, ['codex', 'grok']),
+      ...reviewRequestPreflight(subject, ['codex', 'grok'])],
+    requests: `[{ runId, reviewer: 'codex' }]`,
+    adapter: reviewRequestAdapterResult('RECORD_WRITTEN', 0, `{ state: 'LAUNCHED_DRAINED',
+      launched: true, drainageProven: true,
+      provenance: 'runtool-watchdog-drainage-evidence',
+      detail: 'a reviewer process group was launched and this invocation proved it drained' }`),
+  });
+  const out = reviewRequestOutcome(fixture.r);
+
+  // ONE invocation, carrying exactly four coordinates, every one of them read
+  // back out of the canonical preflight rather than out of the caller.
+  assert.strictEqual(out.adapterRequests.length, 1, 'the canonical reviewer was not called exactly once');
+  assert.deepStrictEqual(out.adapterRequests[0], {
+    runId: fixture.runId,
+    reviewer: 'codex',
+    packet: path.resolve(ROOT, REVIEW_PACKET),
+    subjectSha: subject.subjectSha256,
+  });
+  assert.deepStrictEqual(Object.keys(out.adapterRequests[0]).sort(),
+    ['packet', 'reviewer', 'runId', 'subjectSha']);
+
+  // Both canonical claims were held while the reviewer was running.
+  assert.deepStrictEqual(out.admissionDuringReview, { builderRefused: true, runLockHeld: true },
+    'the request did not hold both canonical claims across the invocation');
+
+  // The whole answer, exactly. RECORD_WRITTEN is reported as a written record
+  // and nothing more; the process and admission facts stay separate fields.
+  assert.deepStrictEqual(out.answers[0], {
+    runId: fixture.runId,
+    reviewer: 'codex',
+    action: 'request-independent-review',
+    authority: 'aegis-run.cjs requestIndependentReview',
+    review: 'RECORD_WRITTEN',
+    reviewProcess: 'DRAINED',
+    admission: 'RELEASED',
+    reasonCode: 'REVIEW_RECORD_WRITTEN',
+    summary: 'A review record was written. It records what the reviewer said; ' +
+      'it is not an approval and it moves no gate.',
+  });
+  assert.strictEqual(out.globalLockExists, false, 'a drained review kept the admission slot');
+  assertReviewRequestMovedNothing(out, fixture.runsDir, fixture.ledger, fixture.runId,
+    'CHECKS_PASSED', 'one exact invocation');
+  fs.rmSync(fixture.TMP, { recursive: true, force: true });
+});
+
+test('review request: contention for the single admission slot refuses without launching', () => {
+  const subject = reviewSubject();
+  // Another review already owns the one canonical admission slot. The preflight
+  // still permits this run — admission is what refuses, and it refuses without
+  // waiting, because a reviewer holds the slot for as long as it runs.
+  const fixture = reviewRequestFixture({
+    seed: reviewRequestSeed(subject),
+    responses: reviewRequestPreflight(subject, ['codex', 'grok']),
+    prelude: `
+      const competing = R.acquireGlobalReviewHold('RUN-20260825-aaaaaaaa', 0);
+      global.__competingBytes = require('fs').readFileSync(competing.ownerPath, 'utf8');
+      global.__competingOwnerPath = competing.ownerPath;
+    `,
+    requests: `[{ runId, reviewer: 'codex' }]`,
+  });
+  const out = reviewRequestOutcome(fixture.r);
+  assert.strictEqual(out.answers[0].reasonCode, 'ADMISSION_UNAVAILABLE');
+  assert.strictEqual(out.answers[0].review, 'NOT_REQUESTED');
+  assert.strictEqual(out.answers[0].reviewProcess, 'NOT_LAUNCHED');
+  assert.strictEqual(out.answers[0].admission, 'NOT_ACQUIRED',
+    'a request that never took the slot reported an admission decision about it');
+  assert.deepStrictEqual(out.adapterRequests, [], 'two reviews overlapped on one admission slot');
+  assert.strictEqual(out.runLockExists, false, 'a refused request left the per-run claim behind');
+  assert.strictEqual(out.globalLockExists, true,
+    'the refused request removed the competing review hold');
+  assertReviewRequestMovedNothing(out, fixture.runsDir, fixture.ledger, fixture.runId,
+    'CHECKS_PASSED', 'admission contention');
+  fs.rmSync(fixture.TMP, { recursive: true, force: true });
+});
+
+test('review request: only this invocation\'s own lifecycle evidence frees admission', () => {
+  const drained = `{ state: 'LAUNCHED_DRAINED', launched: true, drainageProven: true,
+    provenance: 'runtool-watchdog-drainage-evidence',
+    detail: 'a reviewer process group was launched and this invocation proved it drained' }`;
+  const scenarios = [
+    { label: 'proven drainage', exitCode: 0, outcome: 'RECORD_WRITTEN', lifecycle: drained,
+      review: 'RECORD_WRITTEN', reviewProcess: 'DRAINED', admission: 'RELEASED',
+      reasonCode: 'REVIEW_RECORD_WRITTEN' },
+    { label: 'proven no launch', exitCode: 2, outcome: 'REFUSED_REQUEST',
+      lifecycle: `{ state: 'NOT_LAUNCHED', launched: false, drainageProven: null,
+        provenance: 'callable-entry-before-launch',
+        detail: 'no reviewer process was launched during this invocation' }`,
+      review: 'REVIEW_REFUSED', reviewProcess: 'NOT_LAUNCHED', admission: 'RELEASED',
+      reasonCode: 'REVIEW_REQUEST_REFUSED' },
+    { label: 'undrained reviewer', exitCode: 3, outcome: 'REFUSED',
+      lifecycle: `{ state: 'LAUNCHED_UNDRAINED', launched: true, drainageProven: false,
+        provenance: 'runtool-launch-attempted',
+        detail: 'a reviewer process group was launched and was not proved drained' }`,
+      review: 'REVIEW_REFUSED', reviewProcess: 'UNDRAINED', admission: 'HELD',
+      reasonCode: 'REVIEW_REQUEST_REFUSED' },
+    { label: 'unknown activity', exitCode: 3, outcome: 'REFUSED',
+      lifecycle: `{ state: 'UNKNOWN', launched: null, drainageProven: null,
+        provenance: 'unavailable',
+        detail: 'reviewer process provenance is unavailable for this invocation' }`,
+      review: 'REVIEW_REFUSED', reviewProcess: 'UNKNOWN', admission: 'HELD',
+      reasonCode: 'REVIEW_REQUEST_REFUSED' },
+    // A written record is not drainage evidence. Without a lifecycle stamp the
+    // slot stays held, however successful the review looked.
+    { label: 'missing lifecycle', exitCode: 0, outcome: 'RECORD_WRITTEN', lifecycle: null,
+      review: 'RECORD_WRITTEN', reviewProcess: 'UNKNOWN', admission: 'HELD',
+      reasonCode: 'REVIEW_RECORD_WRITTEN' },
+    // A drained-looking stamp carrying a field the contract never emits is not
+    // recognised by the release primitive, so it is not reported as settled here.
+    { label: 'malformed drained stamp', exitCode: 0, outcome: 'RECORD_WRITTEN',
+      lifecycle: `{ state: 'LAUNCHED_DRAINED', launched: true, drainageProven: true,
+        provenance: 'runtool-watchdog-drainage-evidence', detail: 'forged', verdict: 'APPROVE' }`,
+      review: 'RECORD_WRITTEN', reviewProcess: 'UNKNOWN', admission: 'HELD',
+      reasonCode: 'REVIEW_RECORD_WRITTEN' },
+  ];
+  const subject = reviewSubject();
+  for (const scenario of scenarios) {
+    const fixture = reviewRequestFixture({
+      seed: reviewRequestSeed(subject),
+      responses: [...reviewRequestPreflight(subject, ['codex', 'grok']),
+        ...reviewRequestPreflight(subject, ['codex', 'grok'])],
+      requests: `[{ runId, reviewer: 'grok' }]`,
+      adapter: reviewRequestAdapterResult(scenario.outcome, scenario.exitCode, scenario.lifecycle),
+    });
+    const out = reviewRequestOutcome(fixture.r);
+    assert.strictEqual(out.adapterRequests.length, 1, scenario.label);
+    assert.strictEqual(out.answers[0].review, scenario.review, scenario.label);
+    assert.strictEqual(out.answers[0].reviewProcess, scenario.reviewProcess, scenario.label);
+    assert.strictEqual(out.answers[0].admission, scenario.admission, scenario.label);
+    assert.strictEqual(out.answers[0].reasonCode, scenario.reasonCode, scenario.label);
+    assert.strictEqual(out.globalLockExists, scenario.admission === 'HELD',
+      `${scenario.label}: the durable hold does not match the reported admission outcome`);
+    assertReviewRequestMovedNothing(out, fixture.runsDir, fixture.ledger, fixture.runId,
+      'CHECKS_PASSED', scenario.label);
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+  }
+
+  // A throw once the canonical entry has been entered proves nothing about what
+  // that entry started, so the slot stays held and the review is not reported
+  // as refused — it is reported as not completed.
+  const thrown = reviewRequestFixture({
+    seed: reviewRequestSeed(subject),
+    responses: [...reviewRequestPreflight(subject, ['codex', 'grok']),
+      ...reviewRequestPreflight(subject, ['codex', 'grok'])],
+    requests: `[{ runId, reviewer: 'grok' }]`,
+    adapter: `throw new Error(${JSON.stringify(REVIEW_REQUEST_SECRET)});`,
+  });
+  const thrownOut = reviewRequestOutcome(thrown.r);
+  assert.strictEqual(thrownOut.adapterRequests.length, 1);
+  assert.strictEqual(thrownOut.answers[0].review, 'REVIEW_UNCOMPLETED');
+  assert.strictEqual(thrownOut.answers[0].reviewProcess, 'UNKNOWN');
+  assert.strictEqual(thrownOut.answers[0].admission, 'HELD',
+    'an exception after dispatch handed the admission slot back');
+  assert.strictEqual(thrownOut.answers[0].reasonCode, 'REVIEW_CALL_FAILED');
+  assert.strictEqual(thrownOut.globalLockExists, true);
+  assertReviewRequestMovedNothing(thrownOut, thrown.runsDir, thrown.ledger, thrown.runId,
+    'CHECKS_PASSED', 'thrown after dispatch');
+  fs.rmSync(thrown.TMP, { recursive: true, force: true });
+});
+
+// ── the seams that used to answer with a raw error ─────────────────────────
+// Every refusal above is one the callable decided. These are the ones it did
+// not: an internal step that failed in a way no refusal path produces. The
+// contract is the same on all of them — a bounded category, a whole-sentence
+// summary, the source error kept private, and no claim of ownership the
+// failure did not establish.
+const REVIEW_REQUEST_DRAINED = `{ state: 'LAUNCHED_DRAINED', launched: true,
+  drainageProven: true, provenance: 'runtool-watchdog-drainage-evidence',
+  detail: 'a reviewer process group was launched and this invocation proved it drained' }`;
+
+// The answer-level invariants that hold on every one of these paths: frozen,
+// no canonical mutation, and not one byte of the underlying error.
+function assertBoundedRequestFailure(out, label) {
+  assert.strictEqual(out.frozen, true, `${label}: a returned answer is mutable`);
+  assert.strictEqual(out.runUnchanged, true, `${label}: the request rewrote the run file`);
+  assert.strictEqual(out.ledgerUnchanged, true, `${label}: the request appended to the ledger`);
+  const serialized = JSON.stringify(out.answers);
+  assert.doesNotMatch(serialized, /SECRET-PROVIDER-TEXT/, `${label}: source evidence reached the caller`);
+  assert.doesNotMatch(serialized, /\/Users\//, `${label}: a filesystem path reached the caller`);
+  assert.doesNotMatch(serialized, /EACCES|ENOTDIR|not valid JSON/,
+    `${label}: a raw error message reached the caller`);
+}
+
+test('review request: an unexpected preflight or admission failure is answered, not thrown', () => {
+  // The canonical run file no longer parses, so the FIRST preflight throws
+  // something no refusal path produces. Nothing was acquired on the way there,
+  // so NOT_ACQUIRED is proven rather than assumed — and the thrown error, which
+  // quotes the bytes it failed to parse, never leaves this file.
+  const corrupt = reviewRequestFixture({
+    seed: reviewRequestSeed(),
+    prelude: `require('fs').writeFileSync(
+      require('path').join(process.env.AEGIS_RUNS_DIR, runId + '.json'),
+      ${JSON.stringify(REVIEW_REQUEST_SECRET)});`,
+    requests: `[{ runId, reviewer: 'codex' }]`,
+  });
+  const corruptOut = reviewRequestOutcome(corrupt.r);
+  assert.deepStrictEqual(corruptOut.answers[0], {
+    runId: corrupt.runId,
+    reviewer: 'codex',
+    action: 'request-independent-review',
+    authority: 'aegis-run.cjs requestIndependentReview',
+    review: 'NOT_REQUESTED',
+    reviewProcess: 'NOT_LAUNCHED',
+    admission: 'NOT_ACQUIRED',
+    reasonCode: 'REVIEW_PREFLIGHT_FAILED',
+    summary: 'The canonical review preflight did not complete, so this run was never ' +
+      'judged eligible and no review was started.',
+  });
+  assert.deepStrictEqual(corruptOut.adapterRequests, [], 'a failed preflight reached the reviewer');
+  assert.strictEqual(corruptOut.runLockExists, false, 'a failed preflight took the per-run claim');
+  assert.strictEqual(corruptOut.globalLockExists, false,
+    'a failed preflight occupied the single admission slot');
+  assertBoundedRequestFailure(corruptOut, 'preflight failure');
+  fs.rmSync(corrupt.TMP, { recursive: true, force: true });
+
+  // The canonical global claim path is a plain file, so publication cannot
+  // rename onto it. Acquisition fails in a way the primitive never reports as
+  // contention, and what owns the slot afterwards is not established — so the
+  // answer says unconfirmed, keeps its hands off the bytes, and does not retry.
+  const subject = reviewSubject();
+  const unjudged = reviewRequestFixture({
+    seed: reviewRequestSeed(subject),
+    responses: reviewRequestPreflight(subject, ['codex', 'grok']),
+    prelude: `require('fs').writeFileSync(R.globalWorkerLockPath(),
+      ${JSON.stringify(REVIEW_REQUEST_SECRET)});`,
+    requests: `[{ runId, reviewer: 'codex' }]`,
+  });
+  const unjudgedOut = reviewRequestOutcome(unjudged.r);
+  assert.strictEqual(unjudgedOut.answers[0].reasonCode, 'ADMISSION_UNCONFIRMED');
+  assert.strictEqual(unjudgedOut.answers[0].review, 'NOT_REQUESTED');
+  assert.strictEqual(unjudgedOut.answers[0].reviewProcess, 'NOT_LAUNCHED');
+  assert.strictEqual(unjudgedOut.answers[0].admission, 'UNCONFIRMED',
+    'an unjudged admission slot was reported as free');
+  assert.deepStrictEqual(unjudgedOut.adapterRequests, [],
+    'an unjudged admission slot still reached the reviewer');
+  assert.strictEqual(unjudgedOut.runLockExists, false);
+  assert.strictEqual(fs.readFileSync(path.join(unjudged.runsDir, '.global-worker.launch.lock'), 'utf8'),
+    REVIEW_REQUEST_SECRET, 'the failed acquisition guessed at cleaning up the claim path');
+  assertBoundedRequestFailure(unjudgedOut, 'unjudged admission');
+  assertReviewRequestMovedNothing(unjudgedOut, unjudged.runsDir, unjudged.ledger,
+    unjudged.runId, 'CHECKS_PASSED', 'unjudged admission');
+  fs.rmSync(unjudged.TMP, { recursive: true, force: true });
+});
+
+test('review request: a failed cleanup neither escapes nor reports a freed hold', () => {
+  if (process.getuid && process.getuid() === 0) {
+    return skip('directory permission seams do not constrain uid 0');
+  }
+  const subject = reviewSubject();
+  // The reviewer ran and a record was written — that part of the answer is
+  // settled and must survive. What fails is giving the claims back: the claim
+  // directory is made unwritable from inside the one invocation, so the release
+  // hits EACCES. Both scenarios must report the review truthfully, must not let
+  // the cleanup error escape as the whole answer, and must not say RELEASED.
+  const scenarios = [
+    { label: 'per-run claim', seam: `require('fs').chmodSync(global.__runFile + '.launch.lock', 0o500);`,
+      runLockExists: true, globalLockExists: false,
+      lock: (runsDir, runId) => path.join(runsDir, `${runId}.json.launch.lock`) },
+    { label: 'global review hold', seam: `require('fs').chmodSync(heldR.globalWorkerLockPath(), 0o500);`,
+      runLockExists: false, globalLockExists: true,
+      lock: (runsDir) => path.join(runsDir, '.global-worker.launch.lock') },
+    // The generic release does not always throw. An unreadable owner record is
+    // caught inside it and answered with false, so the claim survives while the
+    // release reports failure — and a global release that then succeeds must
+    // not turn that preserved claim into a RELEASED answer.
+    { label: 'unreadable per-run owner record', seam: `{
+        const seamFs = require('fs');
+        const seamLock = global.__runFile + '.launch.lock';
+        for (const seamOwner of seamFs.readdirSync(seamLock)) {
+          seamFs.chmodSync(require('path').join(seamLock, seamOwner), 0o000);
+        }
+      }`,
+      runLockExists: true, globalLockExists: false,
+      lock: (runsDir, runId) => path.join(runsDir, `${runId}.json.launch.lock`) },
+  ];
+  for (const scenario of scenarios) {
+    const fixture = reviewRequestFixture({
+      seed: reviewRequestSeed(subject),
+      responses: [...reviewRequestPreflight(subject, ['codex', 'grok']),
+        ...reviewRequestPreflight(subject, ['codex', 'grok'])],
+      requests: `[{ runId, reviewer: 'codex' }]`,
+      adapter: `${scenario.seam}
+        ${reviewRequestAdapterResult('RECORD_WRITTEN', 0, REVIEW_REQUEST_DRAINED)}`,
+    });
+    const out = reviewRequestOutcome(fixture.r);
+    const answer = out.answers[0];
+    assert.strictEqual(out.adapterRequests.length, 1, scenario.label);
+    assert.strictEqual(answer.review, 'RECORD_WRITTEN',
+      `${scenario.label}: a cleanup failure erased the review that did happen`);
+    assert.strictEqual(answer.reviewProcess, 'DRAINED', scenario.label);
+    assert.strictEqual(answer.reasonCode, 'REVIEW_RECORD_WRITTEN', scenario.label);
+    assert.strictEqual(answer.admission, 'UNCONFIRMED',
+      `${scenario.label}: a failed cleanup reported the claims as given back`);
+    assert.strictEqual(out.runLockExists, scenario.runLockExists, scenario.label);
+    assert.strictEqual(out.globalLockExists, scenario.globalLockExists, scenario.label);
+    assertBoundedRequestFailure(out, scenario.label);
+    const lockDir = scenario.lock(fixture.runsDir, fixture.runId);
+    if (scenario.runLockExists) {
+      assert.strictEqual(fs.readdirSync(lockDir).length, 1,
+        `${scenario.label}: the per-run owner record did not survive the failed cleanup`);
+    }
+    fs.chmodSync(lockDir, 0o700);
+    fs.rmSync(fixture.TMP, { recursive: true, force: true });
+  }
 });
 
 test('launch claim: live owner with unavailable identity observation fails closed and is preserved', () => {

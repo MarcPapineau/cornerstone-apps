@@ -6353,6 +6353,316 @@ function cmdChecks(args) {
   return result.state === 'CHECKS_PASSED' ? EXIT_PASS : EXIT_REFUSED;
 }
 
+// ── one bounded internal review request ─────────────────────────────────────
+// The read-only preflight, the single admission slot and the canonical
+// reviewer already exist, separately and correctly. Nothing connected them, so
+// the only way to actually run a review was to do the sequencing by hand — and
+// a sequence nobody owns is the one that eventually runs two reviewers at once
+// or reports a written record as an approval.
+//
+// This owns the sequence and NOTHING else. Eligibility stays with the
+// preflight, exclusion stays with the two canonical claims, and the review
+// itself — run resolution, worktree, packet, data class, provider policy,
+// spend authorization, the bounded review cycle — stays entirely inside
+// review-adapters.cjs, which revalidates all of it independently.
+//
+// The request is TWO fields. What it may never carry, at any depth: a packet, a
+// subject, paths, a command, a timeout, a lifecycle proof, or any spend or
+// metering authorization. An unknown key is refused rather than dropped, and
+// nothing from the request is spread into the adapter argument object — the
+// four coordinates handed to the reviewer are read back out of the canonical
+// preflight taken under both claims, never out of the caller.
+//
+// It transitions no run, binds no review, appends no ledger entry, writes no
+// receipt, retries nothing and loops over nothing. RECORD_WRITTEN means a
+// review record exists. It never means a reviewer approved anything, and it
+// moves no gate.
+//
+// There is no HTTP route, no CLI flag and no dashboard action here. This is an
+// internal callable; exposing it is a separate decision with its own evidence.
+const REVIEW_REQUEST_ACTION = 'request-independent-review';
+const REVIEW_REQUEST_AUTHORITY = 'aegis-run.cjs requestIndependentReview';
+const REVIEW_REQUEST_FIELDS = Object.freeze(['runId', 'reviewer']);
+
+// Gate reviewers only. Copilot is advisory — review-adapters authorizeLaunch
+// refuses it outright — so naming it here would request work that cannot clear
+// the gate. The canonical preflight never reports it as pending either; this
+// list agrees with that rather than widening it.
+const REVIEW_REQUEST_REVIEWERS = Object.freeze(['codex', 'grok']);
+
+// The ONE provenance that may honestly say nothing was started, and it is used
+// only on a path this function proved never reached the canonical invocation.
+// It is a fixed constant here precisely so it cannot be assembled from, or
+// influenced by, anything a caller supplied.
+const REVIEW_REQUEST_NOT_LAUNCHED = Object.freeze({
+  state: 'NOT_LAUNCHED',
+  launched: false,
+  drainageProven: null,
+  provenance: 'callable-entry-before-launch',
+  detail: 'this request refused before the canonical review invocation was made',
+});
+
+// Fixed plain-English categories. Every summary is a whole sentence a founder
+// can act on, and not one of them is assembled from provider output, a reason
+// string, a prompt, stderr, an error message or a filesystem path.
+const REVIEW_REQUEST_SUMMARY = Object.freeze({
+  REQUEST_FIELDS_INVALID:
+    'The request did not name exactly one canonical run and one reviewer, so nothing was asked for.',
+  REVIEWER_UNSUPPORTED:
+    'The named reviewer is not one this request may run.',
+  REVIEW_NOT_PERMITTED:
+    'The canonical review preflight does not permit a review of this run right now.',
+  REVIEW_PREFLIGHT_FAILED:
+    'The canonical review preflight did not complete, so this run was never judged eligible and no review was started.',
+  ADMISSION_UNCONFIRMED:
+    'The single governed admission slot could not be judged, so no review was started and the slot is not reported as free.',
+  REVIEWER_NOT_PENDING:
+    'The canonical preflight does not report the named reviewer as owing a review of this exact subject.',
+  ADMISSION_UNAVAILABLE:
+    'A build or review already holds the single governed admission slot, so no review was started.',
+  RUN_CLAIM_UNAVAILABLE:
+    'Another action already holds this run, so no review was started.',
+  REVIEW_EVIDENCE_CHANGED:
+    'The canonical review evidence changed after admission was taken, so no review was started.',
+  REVIEW_RECORD_WRITTEN:
+    'A review record was written. It records what the reviewer said; it is not an approval and it moves no gate.',
+  REVIEW_REQUEST_REFUSED:
+    'The canonical reviewer refused this request. That is not an approval, and it does not ' +
+    'establish whether a review record was published before the refusal was reported.',
+  REVIEW_CALL_FAILED:
+    'The canonical review call did not complete, so what the reviewer did is unknown.',
+});
+
+// Source evidence is KEPT, and kept out of the answer. An adapter reason or a
+// thrown error can carry provider output, a prompt fragment, stderr or an
+// absolute path, so it is never a field the caller receives. It is retained
+// against the exact answer object, reachable only from inside this file, and
+// collected with the answer.
+const REVIEW_REQUEST_SOURCE_EVIDENCE = new WeakMap();
+
+// Process lifetime is reported SEPARATELY from the review result and never
+// allowed to change it. It is read through the SAME validation the release
+// primitive applies, so this field can never describe a stamp as settled that
+// the primitive treated as unproven — a malformed drained-looking stamp is
+// UNKNOWN here exactly as it is there. UNKNOWN is also the only honest answer
+// when the invocation threw.
+function reviewRequestProcess(proof) {
+  if (!proof || typeof proof !== 'object' || Array.isArray(proof)) return 'UNKNOWN';
+  if (reviewLifecycleProofPermitsRelease(proof)) {
+    return proof.state === 'NOT_LAUNCHED' ? 'NOT_LAUNCHED' : 'DRAINED';
+  }
+  return proof.state === 'LAUNCHED_UNDRAINED' && proof.launched === true &&
+    proof.drainageProven === false ? 'UNDRAINED' : 'UNKNOWN';
+}
+
+function reviewRequestAnswer(fields, sourceEvidence) {
+  const answer = Object.freeze({
+    runId: fields.runId,
+    reviewer: fields.reviewer,
+    action: REVIEW_REQUEST_ACTION,
+    authority: REVIEW_REQUEST_AUTHORITY,
+    review: fields.review,
+    reviewProcess: fields.reviewProcess,
+    admission: fields.admission,
+    reasonCode: fields.reasonCode,
+    summary: Object.prototype.hasOwnProperty.call(REVIEW_REQUEST_SUMMARY, fields.reasonCode)
+      ? REVIEW_REQUEST_SUMMARY[fields.reasonCode] : REVIEW_REQUEST_SUMMARY.REVIEW_CALL_FAILED,
+  });
+  if (sourceEvidence !== undefined) REVIEW_REQUEST_SOURCE_EVIDENCE.set(answer, sourceEvidence);
+  return answer;
+}
+
+// What "unchanged" has to mean, exactly: the same permitted answer, naming the
+// same reviewer, for the same packet bytes at the same path, over the same
+// subject, against the same canonical check receipt. Anything else is a
+// different piece of work, and a review of different work is not this review.
+function sameReviewRequestCoordinates(before, after, reviewer) {
+  const permits = (answer) => Boolean(answer) && answer.status === 'REVIEW_PERMITTED' &&
+    answer.reasonCode === 'EXACT_SUBJECT_REVIEW_PENDING' &&
+    Array.isArray(answer.pendingReviewers) &&
+    answer.pendingReviewers.some((row) => row && row.reviewer === reviewer);
+  if (!permits(before) || !permits(after)) return false;
+  const packetOf = (a) => a.packet && JSON.stringify([a.packet.path, a.packet.sha256]);
+  const subjectOf = (a) => a.subject && JSON.stringify([a.subject.subjectSha256,
+    a.subject.subjectPaths, a.subject.diffBytes, a.subject.range]);
+  const evidenceOf = (a) => a.evidence &&
+    JSON.stringify([a.evidence.source, a.evidence.receiptSha256]);
+  return before.runId === after.runId && before.state === after.state &&
+    Boolean(packetOf(after)) && packetOf(before) === packetOf(after) &&
+    Boolean(subjectOf(after)) && subjectOf(before) === subjectOf(after) &&
+    Boolean(evidenceOf(after)) && evidenceOf(before) === evidenceOf(after);
+}
+
+async function requestIndependentReview(request) {
+  const refuse = (reasonCode, fields = {}, sourceEvidence) => reviewRequestAnswer({
+    runId: null, reviewer: null, review: 'NOT_REQUESTED', reviewProcess: 'NOT_LAUNCHED',
+    admission: 'NOT_ACQUIRED', reasonCode, ...fields,
+  }, sourceEvidence);
+
+  // Shape first, and an unrecognised key is a refusal. A caller that misspells
+  // runId would otherwise have its coordinate discarded; a caller that adds
+  // capUsd, allowMetered, approvedBy, packet, subjectSha, timeout or a
+  // lifecycle proof would otherwise have authority it does not hold silently
+  // ignored — and "silently ignored" is one edit away from "honoured".
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    return refuse('REQUEST_FIELDS_INVALID');
+  }
+  // Own enumerable keys, and EXACTLY the two. Object.keys sees neither an
+  // inherited field nor a non-enumerable one, so a request that carries its
+  // coordinates on a prototype — or hides one behind defineProperty — is short
+  // of a required own key here and is refused, rather than being read through
+  // destructuring as if it had supplied them.
+  const keys = Object.keys(request);
+  if (keys.length !== REVIEW_REQUEST_FIELDS.length ||
+      !REVIEW_REQUEST_FIELDS.every((field) => keys.includes(field))) {
+    return refuse('REQUEST_FIELDS_INVALID');
+  }
+  const { runId, reviewer } = request;
+  // An unusable field is an unusable REQUEST. Only a well-formed, non-empty
+  // reviewer name may reach the supported-reviewer question, so an empty string
+  // is never reported as a reviewer this request may not run.
+  if (typeof runId !== 'string' || !RUN_ID_RE.test(runId) ||
+      typeof reviewer !== 'string' || reviewer === '') {
+    return refuse('REQUEST_FIELDS_INVALID');
+  }
+  if (!REVIEW_REQUEST_REVIEWERS.includes(reviewer)) return refuse('REVIEWER_UNSUPPORTED');
+  const named = { runId, reviewer };
+
+  // Ask before taking anything. An ineligible run must never occupy the single
+  // admission slot, and the preflight is read-only, so this costs nothing.
+  let preflight;
+  try { preflight = prepareIndependentReview(runId); }
+  catch (e) {
+    // A refusal the preflight expressed is reported as a refusal. Anything
+    // else — a corrupt run file, an unreadable receipt, a parse error — is a
+    // preflight that did not complete, and it leaves through the same bounded
+    // categories rather than as a raw error carrying its own message. Nothing
+    // has been acquired on either path.
+    const expected = e instanceof AegisControlError || e instanceof RunError;
+    return refuse(expected ? 'REVIEW_NOT_PERMITTED' : 'REVIEW_PREFLIGHT_FAILED', { ...named }, e);
+  }
+  if (preflight.status !== 'REVIEW_PERMITTED') return refuse('REVIEW_NOT_PERMITTED', { ...named });
+  if (!Array.isArray(preflight.pendingReviewers) ||
+      !preflight.pendingReviewers.some((row) => row && row.reviewer === reviewer)) {
+    return refuse('REVIEWER_NOT_PENDING', { ...named });
+  }
+
+  // Global first, then the run — the order every other launch path in this file
+  // already takes. Reversed, two requests for different runs could each hold a
+  // run and then contend for the one global slot. There is no wait on the
+  // global slot: a review occupies it for as long as a reviewer runs, so
+  // queueing behind one would be a silent stall, not a refusal.
+  let hold;
+  try { hold = acquireGlobalReviewHold(runId, 0); }
+  catch (e) {
+    // A refused acquisition is a proven non-acquisition: the primitive read the
+    // slot and declined it. An unexpected failure proves nothing about who owns
+    // the slot afterwards, so it is reported as unconfirmed — not as free — and
+    // this request neither cleans up after it nor retries.
+    if (e instanceof AegisControlError) return refuse('ADMISSION_UNAVAILABLE', { ...named }, e);
+    return refuse('ADMISSION_UNCONFIRMED', { ...named, admission: 'UNCONFIRMED' }, e);
+  }
+
+  let review = 'NOT_REQUESTED';
+  let reasonCode = 'RUN_CLAIM_UNAVAILABLE';
+  let evidence;
+  // Nothing has been invoked yet, and this function is the thing that would
+  // invoke it, so NOT_LAUNCHED is proven rather than assumed at this point.
+  let proof = REVIEW_REQUEST_NOT_LAUNCHED;
+  let claim = null;
+  let claimReleased = true;
+  let cleanupEvidence;
+  try {
+    try { claim = acquireRunLaunchClaim(runId, 3000); }
+    catch (e) { evidence = e; }
+    if (claim) {
+      // The SAME question, asked again under both claims. Between the first
+      // answer and this one the tree could have moved, the packet could have
+      // been rewritten, a receipt could have been replaced, or the reviewer
+      // could have stopped being owed. Any of those makes this a different
+      // request, and a different request is not launched.
+      let fresh = null;
+      try { fresh = prepareIndependentReview(runId); }
+      catch (e) { evidence = e; }
+      if (!sameReviewRequestCoordinates(preflight, fresh, reviewer)) {
+        reasonCode = 'REVIEW_EVIDENCE_CHANGED';
+      } else {
+        // Exactly one canonical invocation, with exactly four coordinates, all
+        // read out of the fresh preflight. The adapter is required lazily so
+        // importing this runtime never pulls in the reviewer bridges.
+        let invoked = false;
+        try {
+          const adapters = require('./review-adapters.cjs');
+          invoked = true;
+          const result = await adapters.requestCanonicalReview({
+            runId: fresh.runId,
+            reviewer,
+            packet: path.resolve(ROOT, fresh.packet.path),
+            subjectSha: fresh.subject.subjectSha256,
+          });
+          evidence = result;
+          // The lifecycle stamp used below is the one THIS invocation returned
+          // to THIS function for THIS hold. It is never read from the request,
+          // from a record, or from anything historical.
+          proof = result ? result.processLifecycle : null;
+          review = result && result.outcome === 'RECORD_WRITTEN'
+            ? 'RECORD_WRITTEN' : 'REVIEW_REFUSED';
+          reasonCode = review === 'RECORD_WRITTEN'
+            ? 'REVIEW_RECORD_WRITTEN' : 'REVIEW_REQUEST_REFUSED';
+        } catch (error) {
+          evidence = error;
+          review = invoked ? 'REVIEW_UNCOMPLETED' : 'NOT_REQUESTED';
+          reasonCode = 'REVIEW_CALL_FAILED';
+          // A throw once the canonical entry has been entered proves nothing
+          // about what it started, so the hold is retained. A throw while
+          // merely loading the module is provably before any invocation —
+          // requiring review-adapters.cjs starts no review — and only that
+          // case may still claim NOT_LAUNCHED.
+          proof = invoked ? null : REVIEW_REQUEST_NOT_LAUNCHED;
+        }
+      }
+    }
+  } finally {
+    // The per-run claim is an ordinary launcher generation and is given back on
+    // every exit path. The generic release refuses a review hold outright, so
+    // this can never free global admission as a side effect. A cleanup that
+    // fails is recorded and does not escape: a throw from here would replace
+    // the whole answer with a raw error, and the review that already happened
+    // would go unreported. What it costs is certainty, and that is said below.
+    // A false return is a cleanup that did not happen: the generic release
+    // catches an unreadable owner record and reports failure rather than
+    // throwing, so ignoring the answer would read a preserved claim as a freed
+    // one. Both a false answer and a throw cost the same certainty.
+    if (claim) {
+      try { claimReleased = releaseRunLaunchClaim(claim) === true; }
+      catch (e) { claimReleased = false; cleanupEvidence = e; }
+    }
+  }
+
+  // The durable slot is freed only by the dedicated primitive, and only on this
+  // invocation's own evidence. Unknown, missing or undrained activity keeps it.
+  // The primitive reports refusal rather than throwing, so a throw here is an
+  // unexpected cleanup failure and leaves ownership of the slot unknown.
+  //
+  // `admission` answers one question: were all the canonical claims this
+  // request took given back? RELEASED says yes, HELD says the slot is
+  // deliberately retained, NOT_ACQUIRED says none was taken, and UNCONFIRMED
+  // says at least one could not be confirmed free. UNCONFIRMED is never
+  // narrowed by guessing, and nothing is retried.
+  let release;
+  try { release = releaseGlobalReviewHold(hold, proof); }
+  catch (e) { cleanupEvidence = cleanupEvidence || e; }
+  const admission = !release ? 'UNCONFIRMED'
+    : release.released ? (claimReleased ? 'RELEASED' : 'UNCONFIRMED') : 'HELD';
+  return reviewRequestAnswer({
+    ...named,
+    review,
+    reviewProcess: reviewRequestProcess(proof),
+    admission,
+    reasonCode,
+  }, evidence !== undefined ? evidence : cleanupEvidence);
+}
+
 // ── step 8: automatic bounded correction cycles ─────────────────────────────
 // The contract says corrections are bounded and rechecked. "Bounded" was
 // enforced only as a refusal when someone happened to try a fourth build. This
@@ -6746,4 +7056,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, prepareIndependentReview, bindIndependentReview, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, acquireGlobalReviewHold, releaseGlobalReviewHold, reviewLifecycleProofPermitsRelease, REVIEW_HOLD_HOLDER, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, prepareIndependentReview, bindIndependentReview, requestIndependentReview, REVIEW_REQUEST_FIELDS, REVIEW_REQUEST_REVIEWERS, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, acquireGlobalReviewHold, releaseGlobalReviewHold, reviewLifecycleProofPermitsRelease, REVIEW_HOLD_HOLDER, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
