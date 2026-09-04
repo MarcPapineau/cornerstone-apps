@@ -517,6 +517,36 @@
   .brief-row.is-blocked .brief-label{color:var(--fail)}
   .brief-row.is-clear .brief-label{color:var(--pass)}
 
+  /* ── build journal ──
+     A compact dated list of the recorded build updates the same canonical run
+     projection already carries: one card per exact run id, the recorded time,
+     the change that was REQUESTED, and what the record says happened to it.
+     The exact receipts stay collapsed behind a native disclosure rather than
+     being dropped, and the window toggle is a pair of ordinary .hud-control
+     buttons, so it is keyboard-operable and finger-sized at phone width without
+     inventing a control of its own. No motion, no colour-only signal: every
+     entry prints its canonical state word in a chip beside its time. */
+  .build-journal{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+  .journal-head{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;justify-content:space-between}
+  .journal-title{font:650 10px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--cyan)}
+  .journal-asof{font-size:11px;line-height:1.45;color:var(--text-2);overflow-wrap:anywhere}
+  .journal-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .journal-list{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+  /* display:flex above beats the browser's own [hidden] default, so the window
+     the toggle just closed would keep painting beside the one it opened. */
+  .journal-list[hidden]{display:none}
+  .journal-entry{padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius);
+    background:rgba(11,14,19,.58)}
+  .journal-entry-head{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:space-between}
+  .journal-when{font:11px/1.4 var(--mono);color:var(--text-2);overflow-wrap:anywhere}
+  .journal-what,.journal-outcome{margin-top:4px;font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+  .journal-what{color:var(--text-0)}
+  .journal-outcome{color:var(--text-1)}
+  .journal-detail>summary{margin-top:5px;cursor:pointer;font-size:11px;color:var(--text-2)}
+  .journal-empty,.journal-note{font-size:11px;line-height:1.45;color:var(--text-2);overflow-wrap:anywhere}
+  .journal-empty{margin:0}
+  .journal-note{margin:8px 0 0}
+
   /* ── handoff indicator ──
      One compact strip, rendered only when canonical run state reports that the
      bound run moved from one workflow stage to another. It carries no motion
@@ -1014,6 +1044,14 @@
     .brief-row[data-operator-brief="next"]{order:3}
     .brief-row[data-operator-brief="finished"]{order:4}
     .brief-row[data-operator-brief="verify"]{order:5}
+    /* The build journal stacks rather than shrinks: its as-of line, its window
+       toggle and each entry's time and state chip take their own row instead of
+       competing for one phone line. Nothing is demoted, clamped or dropped. */
+    .journal-head,.journal-entry-head{flex-direction:column;align-items:flex-start;gap:4px}
+    .journal-tabs>.hud-control{flex:1 1 auto}
+    .journal-detail>summary{min-height:44px;display:flex;align-items:center}
+    .journal-when,.journal-what,.journal-outcome,.journal-asof,.journal-note,
+    .journal-empty{overflow-wrap:anywhere}
     /* The recent-decision log is the longest technical block on the deck, so at
        phone width it reads after the health, decision and checkpoint
        instruments rather than ahead of them. Demoted, never removed. */
@@ -4089,6 +4127,295 @@
     return null;
   }
 
+  // ── build journal ─────────────────────────────────────────────────────────
+  // The deck above answers "what is happening" for the ONE bound run. The
+  // question it cannot answer is "what happened lately", which is why that
+  // question kept being asked in chat. This is a reading of the canonical run
+  // projection the page already holds — it opens no source, starts nothing,
+  // resolves no lifecycle, and reuses the founder sentence, the checks receipt
+  // and the checkpoint sentence the rest of the page already prints.
+  //
+  // Four refusals hold it honest, and each of them is a proof below:
+  //   · the 24-hour window is measured from the snapshot's own generatedAt. A
+  //     page with no recorded snapshot time counts NOTHING as recent rather
+  //     than reaching for the device clock;
+  //   · a record whose time is missing, unreadable, or later than the snapshot
+  //     is never counted as recent. It moves to the earlier/undated view, so
+  //     the window hides evidence from a list and never deletes it;
+  //   · one entry per EXACT run id. Records filed under one id that disagree
+  //     stay UNVERIFIED and unmerged — a duplicate never becomes a success;
+  //   · the objective is printed as the change that was REQUESTED. Whether it
+  //     is available to use, which category it belongs to and whether it is a
+  //     milestone are not recorded anywhere in this projection, so they are
+  //     stated as NOT RECORDED. BUILT and CHECKS_PASSED are build facts, and
+  //     this journal will not promote either into an availability claim.
+  var JOURNAL_WINDOW_MS = 24 * 60 * 60 * 1000;
+  var JOURNAL_METADATA_NOTE = 'Availability, category and milestone: NOT RECORDED. This entry ' +
+    'carries no such metadata, and AEGIS does not infer it from the recorded state, from the wording ' +
+    'of the objective or from how many entries there are.';
+
+  // The one clock this journal is allowed to read: the recorded generatedAt of
+  // the evidence on screen. Its provenance sentence is the page's existing
+  // connection/staleness signal, restated rather than recomputed.
+  function journalWindow(generatedAt){
+    var at = typeof generatedAt === 'string' && generatedAt ? generatedAt : null;
+    var ms = at ? Date.parse(at) : NaN;
+    if (!Number.isFinite(ms)){
+      return { state: 'UNAVAILABLE', asOf: null, asOfMs: null,
+        text: 'As-of time UNAVAILABLE — this page holds no recorded snapshot time, so the last 24 hours ' +
+          'cannot be measured and no entry is counted as recent. Showing ' + evidenceOnScreen() + '.' };
+    }
+    return { state: 'RECORDED', asOf: at, asOfMs: ms,
+      text: 'Last 24 hours as of the recorded snapshot time ' + at + ', not your device clock. Showing ' +
+        evidenceOnScreen() + '.' };
+  }
+
+  function journalTime(record, win){
+    var at = record && typeof record.updatedAt === 'string' && record.updatedAt ? record.updatedAt : null;
+    var ms = at ? Date.parse(at) : NaN;
+    if (!Number.isFinite(ms)){
+      return { state: 'UNDATED', at: null,
+        text: 'No usable recorded time — this record carries no readable timestamp, so it is not counted ' +
+          'as recent and is kept here instead.' };
+    }
+    if (win.state !== 'RECORDED'){
+      return { state: 'UNWINDOWED', at: at,
+        text: 'Recorded ' + at + '. Without a recorded snapshot time this page cannot place it inside the ' +
+          'last 24 hours, so it is not counted as recent.' };
+    }
+    if (ms > win.asOfMs){
+      return { state: 'FUTURE', at: at,
+        text: 'Recorded ' + at + ', which is later than the snapshot time. A future timestamp is evidence of ' +
+          'a clock problem, not of recent work, so it is not counted as recent.' };
+    }
+    if (win.asOfMs - ms <= JOURNAL_WINDOW_MS){
+      return { state: 'RECENT', at: at, text: 'Recorded ' + at + '.' };
+    }
+    return { state: 'OLDER', at: at,
+      text: 'Recorded ' + at + ', which is more than 24 hours before the snapshot time.' };
+  }
+
+  // One group per EXACT run id. A record naming no run id proves no identity at
+  // all, so it is never grouped with anything and never deduplicated away.
+  function journalGroups(runs){
+    var order = [];
+    var byId = {};
+    (Array.isArray(runs) ? runs : []).forEach(function(record, index){
+      if (!record || typeof record !== 'object') return;
+      var runId = typeof record.runId === 'string' && record.runId ? record.runId : null;
+      var groupKey = runId ? 'run:' + runId : 'unidentified:' + index;
+      if (!Object.prototype.hasOwnProperty.call(byId, groupKey)){
+        byId[groupKey] = { runId: runId, records: [] };
+        order.push(groupKey);
+      }
+      byId[groupKey].records.push(record);
+    });
+    return order.map(function(groupKey){ return byId[groupKey]; });
+  }
+
+  // A record's exact content, with object keys read in a fixed order so the
+  // order they were written in cannot make one recorded fact look like two.
+  function journalSignature(value){
+    if (value === null || typeof value !== 'object') return JSON.stringify(value === undefined ? null : value);
+    if (Array.isArray(value)) return '[' + value.map(journalSignature).join(',') + ']';
+    return '{' + Object.keys(value).sort().map(function(key){
+      return JSON.stringify(key) + ':' + journalSignature(value[key]);
+    }).join(',') + '}';
+  }
+
+  // The same record written twice is one fact repeated, not two facts that
+  // disagree, so byte-equivalent records collapse before anything is judged.
+  // Nothing that differs by a single byte is collapsed — two records sharing a
+  // timestamp but recording different evidence stay two records, and stay a
+  // contradiction.
+  function journalDistinct(records){
+    var seen = {}, distinct = [];
+    records.forEach(function(record){
+      var signature = journalSignature(record);
+      if (Object.prototype.hasOwnProperty.call(seen, signature)) return;
+      seen[signature] = true;
+      distinct.push(record);
+    });
+    return distinct;
+  }
+
+  function journalEntry(group, win){
+    var records = journalDistinct(group.records);
+    var latest = null, latestMs = null, tied = false;
+    records.forEach(function(record){
+      var ms = Date.parse(typeof record.updatedAt === 'string' ? record.updatedAt : '');
+      if (!Number.isFinite(ms)) return;
+      if (latestMs === null || ms > latestMs){ latest = record; latestMs = ms; tied = false; }
+      else if (ms === latestMs) tied = true;
+    });
+    if (!latest) latest = records[0];
+    var states = [], objectives = [];
+    records.forEach(function(record){
+      var recordState = typeof record.state === 'string' ? record.state : 'UNAVAILABLE';
+      if (states.indexOf(recordState) === -1) states.push(recordState);
+      var requested = typeof record.objective === 'string' ? record.objective : '';
+      if (objectives.indexOf(requested) === -1) objectives.push(requested);
+    });
+    // Two records under one run id that do not agree are a contradiction in the
+    // record, not a later update, so the pair is reported UNVERIFIED and both
+    // are kept. Merging them would be exactly how a duplicate becomes a success.
+    var conflict = records.length > 1 && (states.length > 1 || objectives.length > 1 || tied);
+    var time = journalTime(latest, win);
+    return {
+      runId: group.runId,
+      record: latest,
+      records: records,
+      recordCount: records.length,
+      conflict: conflict,
+      time: time,
+      recent: time.state === 'RECENT',
+      state: conflict ? 'UNVERIFIED'
+        : (typeof latest.state === 'string' && latest.state ? latest.state : 'UNKNOWN'),
+      objective: typeof latest.objective === 'string' && latest.objective ? latest.objective : null,
+      outcome: conflict
+        ? 'UNVERIFIED — ' + records.length + ' records are filed under this exact run id and they do not ' +
+          'agree, so what this run did is not established here. AEGIS keeps both and merges neither.'
+        : founderFinished(latest, false)
+    };
+  }
+
+  // Newest first, by the time the entry itself records. An entry the record
+  // never dated is never sorted by a time nobody wrote down: it keeps the order
+  // it arrived in, after every dated entry.
+  function journalNewestFirst(a, b){
+    var am = a.time.at ? Date.parse(a.time.at) : NaN;
+    var bm = b.time.at ? Date.parse(b.time.at) : NaN;
+    var aDated = Number.isFinite(am), bDated = Number.isFinite(bm);
+    if (aDated && bDated && am !== bm) return bm - am;
+    if (aDated !== bDated) return aDated ? -1 : 1;
+    return 0;
+  }
+
+  // An empty journal and an unreadable one are different facts. The affirmative
+  // -empty judgement is the page's existing run-ledger authority, handed in, so
+  // this surface cannot reach a second verdict about the same run store.
+  function journalReading(view, emptyRunsAvailable){
+    var win = journalWindow(view && view.generatedAt);
+    var runs = (view && Array.isArray(view.runs)) ? view.runs : [];
+    var binding = view && view.binding;
+    if (!runs.length && emptyRunsAvailable !== true){
+      // The recorded reason is carried verbatim apart from its own full stop, so
+      // the sentence this page adds after it cannot be mistaken for part of it.
+      var why = ((binding && binding.reason) || 'authenticated run-ledger evidence has not loaded')
+        .replace(/\s*\.\s*$/, '');
+      return { window: win, state: 'UNAVAILABLE', recent: [], older: [],
+        reason: 'Build journal UNAVAILABLE — ' + why + '. An empty journal here would not be evidence ' +
+          'that nothing was built.' };
+    }
+    var entries = journalGroups(runs).map(function(group){ return journalEntry(group, win); });
+    return { window: win, state: 'OK', reason: null,
+      recent: entries.filter(function(entry){ return entry.recent; }).sort(journalNewestFirst),
+      older: entries.filter(function(entry){ return !entry.recent; }).sort(journalNewestFirst) };
+  }
+
+  function journalRow(entry){
+    var li = el('li','journal-entry');
+    li.setAttribute('data-journal-entry', entry.runId || 'UNAVAILABLE');
+    li.setAttribute('data-journal-time', entry.time.state);
+    li.setAttribute('data-journal-state', entry.state);
+    var head = el('div','journal-entry-head');
+    head.appendChild(el('div','journal-when', entry.time.text));
+    head.appendChild(chip(entry.state));
+    li.appendChild(head);
+    li.appendChild(el('div','journal-what','Requested change: ' +
+      (entry.objective || 'UNAVAILABLE — this record carries no objective.')));
+    li.appendChild(el('div','journal-outcome','What the record says: ' + entry.outcome));
+    // The exact receipts, collapsed rather than dropped: a native disclosure is
+    // keyboard-operable and screen-reader-operable without a control of its own.
+    var detail = el('details','journal-detail');
+    detail.appendChild(el('summary',null,'Recorded evidence for this entry'));
+    var facts = el('ul','rows');
+    function fact(text){ facts.appendChild(el('li','meta', text)); }
+    fact('Run id: ' + (entry.runId ||
+      'UNAVAILABLE — this record names no run id, so it is grouped with nothing.'));
+    fact('Recorded lifecycle state: ' + ((entry.record && entry.record.state) || 'UNAVAILABLE'));
+    fact('Records filed under this exact run id: ' + entry.recordCount +
+      (entry.conflict ? ' — they disagree, and each one is preserved below.' : '.'));
+    if (entry.conflict){
+      entry.records.forEach(function(record){
+        fact('Unmerged record: state ' + (record.state || 'UNAVAILABLE') +
+          ' · recorded ' + (record.updatedAt || 'no readable time') +
+          ' · requested ' + (record.objective || 'no objective recorded'));
+      });
+    }
+    var checks = evidenceChecksPanel(entry.record);
+    fact('What the checks recorded: ' + checks.value);
+    (checks.meta || []).forEach(fact);
+    fact(checkpointEvidence(entry.record));
+    fact(JOURNAL_METADATA_NOTE);
+    detail.appendChild(facts);
+    li.appendChild(detail);
+    return li;
+  }
+
+  function renderBuildJournal(host, journal){
+    var section = el('div','build-journal');
+    section.setAttribute('data-build-journal', journal.state);
+    var head = el('div','journal-head');
+    head.appendChild(el('div','journal-title','Build journal'));
+    var asOf = el('div','journal-asof', journal.window.text);
+    asOf.setAttribute('data-journal-asof', journal.window.state);
+    head.appendChild(asOf);
+    section.appendChild(head);
+    if (journal.state !== 'OK'){
+      var unreadable = el('p','journal-empty', journal.reason);
+      unreadable.setAttribute('data-journal-list','unavailable');
+      section.appendChild(unreadable);
+      host.appendChild(section);
+      return section;
+    }
+    // Two views over the same entries, and the second one exists so the first
+    // one is allowed to filter: everything the 24-hour window excludes — older,
+    // undated and future-dated records alike — is still one keypress away.
+    var panes = [
+      { name: 'recent', label: 'Last 24 hours', entries: journal.recent,
+        empty: 'No recorded build update falls inside the 24 hours before the snapshot time. That is what ' +
+          'this record shows for this window; it is not proof that nothing else exists.' },
+      { name: 'older', label: 'Earlier & undated', entries: journal.older,
+        empty: 'No earlier, undated or future-dated record is being held back from the 24-hour view.' }
+    ];
+    var tabs = el('div','journal-tabs');
+    tabs.setAttribute('role','group');
+    tabs.setAttribute('aria-label','Build journal window');
+    var lists = {}, buttons = {};
+    function showWindow(name){
+      panes.forEach(function(pane){
+        var selected = pane.name === name;
+        buttons[pane.name].setAttribute('aria-pressed', selected ? 'true' : 'false');
+        if (selected) lists[pane.name].removeAttribute('hidden');
+        else lists[pane.name].setAttribute('hidden','');
+      });
+      section.setAttribute('data-journal-view', name);
+    }
+    panes.forEach(function(pane){
+      var button = el('button','hud-control journal-tab', pane.label + ' (' + pane.entries.length + ')');
+      button.type = 'button';
+      button.setAttribute('data-journal-tab', pane.name);
+      button.addEventListener('click', function(){ showWindow(pane.name); });
+      buttons[pane.name] = button;
+      tabs.appendChild(button);
+      var list = el('ul','journal-list');
+      list.setAttribute('data-journal-list', pane.name);
+      if (!pane.entries.length) list.appendChild(el('li','journal-empty', pane.empty));
+      else pane.entries.forEach(function(entry){ list.appendChild(journalRow(entry)); });
+      lists[pane.name] = list;
+    });
+    section.appendChild(tabs);
+    panes.forEach(function(pane){ section.appendChild(lists[pane.name]); });
+    showWindow('recent');
+    section.appendChild(el('p','journal-note',
+      'Every line is the change that was requested and what the record says happened to it. None of them ' +
+      'says a change is ready for you to use: availability, category and milestone are not recorded yet, ' +
+      'and this page will not infer them.'));
+    host.appendChild(section);
+    return section;
+  }
+
   function renderFounderSummary(view){
     var host = $('founder-body'); if (!host) return;
     var topologyHost = $('topology-live-body');
@@ -4444,6 +4771,11 @@
       if (deckRetry.reason) retryControls.appendChild(el('div','meta',deckRetry.reason));
       host.appendChild(retryControls);
     }
+    // What happened lately, dated from this snapshot's own recorded time. It is
+    // handed the view and the deck's existing empty-ledger judgement, so it can
+    // neither open a second source nor reach a second verdict about the runs the
+    // deck above has already read.
+    renderBuildJournal(host, journalReading(view, emptyRunsAvailable));
     currentOperatorContext = {
       objective: deckObjective,
       verdict: controlState.state,

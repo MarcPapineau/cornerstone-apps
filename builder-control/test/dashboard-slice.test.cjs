@@ -10865,6 +10865,322 @@ test('the research card layout is scoped to research and hides nothing', () => {
   }
 });
 
+// ── build journal (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ────────────────
+// The deck answers "what is happening" about one bound run. The journal answers
+// "what happened lately", and the failure it must not have is the one every
+// other instrument on this page is written against: a dated list of REQUESTED
+// changes that reads as a list of delivered, available features. These proofs
+// hold the four refusals it rests on — the window is measured from the recorded
+// snapshot time, an undated or future record is never counted as recent and is
+// never deleted, one entry per exact run id with disagreeing records left
+// unverified, and no build state promoted into an availability or milestone
+// claim.
+const JOURNAL_AS_OF = '2026-09-03T12:00:00.000Z';
+
+function journalRun(over) {
+  return Object.assign({
+    runId: 'RUN-20260903-aaaaaaaa', state: 'BUILT',
+    objective: 'Add a compact build journal to Command View',
+    updatedAt: '2026-09-03T11:00:00.000Z',
+  }, over || {});
+}
+
+function journalFixture(runs, over) {
+  return fixtureState(Object.assign({
+    generatedAt: JOURNAL_AS_OF,
+    runs: { state: 'OK', runs: runs, current: { state: 'UNAVAILABLE', runId: null,
+      evidenceState: 'OK', reason: 'no run is bound in this journal fixture.' } },
+  }, over || {}));
+}
+
+function journalSection(page) {
+  const found = findByAttr(page.document.getElementById('founder-body'), 'data-build-journal');
+  assert.strictEqual(found.length, 1, 'Command View does not render exactly one build journal');
+  return found[0];
+}
+
+function journalList(section, name) {
+  return findByAttr(section, 'data-journal-list')
+    .find((node) => node.attrs['data-journal-list'] === name) || null;
+}
+
+function journalRows(section, name) {
+  const list = journalList(section, name);
+  assert.ok(list, `the build journal rendered no ${name} list`);
+  return (list.children || []).filter((row) => row.attrs && row.attrs['data-journal-entry'] !== undefined);
+}
+
+function journalTabs(section) {
+  return Object.fromEntries(findByAttr(section, 'data-journal-tab')
+    .map((node) => [node.attrs['data-journal-tab'], node]));
+}
+
+test('DOM: the build journal windows 24 hours from the recorded snapshot time and reads newest first', () => {
+  const runs = [
+    journalRun({ runId: 'RUN-20260902-cccccccc', state: 'CHECKPOINTED',
+      objective: 'One millisecond outside the window', updatedAt: '2026-09-02T11:59:59.999Z' }),
+    journalRun({ runId: 'RUN-20260902-bbbbbbbb', state: 'BUILT',
+      objective: 'Exactly on the 24 hour edge', updatedAt: '2026-09-02T12:00:00.000Z' }),
+    journalRun({ runId: 'RUN-20260903-aaaaaaaa', state: 'CHECKS_PASSED',
+      objective: 'One hour before the snapshot', updatedAt: '2026-09-03T11:00:00.000Z' }),
+  ];
+  const section = journalSection(bootPage(journalFixture(runs)));
+  assert.strictEqual(section.attrs['data-build-journal'], 'OK');
+  assert.deepStrictEqual(journalRows(section, 'recent').map((row) => row.attrs['data-journal-entry']),
+    ['RUN-20260903-aaaaaaaa', 'RUN-20260902-bbbbbbbb'],
+    'the 24-hour window is not measured from the snapshot time, or entries are not newest first');
+  assert.deepStrictEqual(journalRows(section, 'older').map((row) => row.attrs['data-journal-entry']),
+    ['RUN-20260902-cccccccc'],
+    'a record just outside the window was deleted instead of kept in the earlier view');
+  const asOf = findByAttr(section, 'data-journal-asof')[0];
+  assert.ok(asOf, 'the journal states no as-of time at all');
+  assert.strictEqual(asOf.attrs['data-journal-asof'], 'RECORDED');
+  assert.match(asOf.textContent, /Last 24 hours as of the recorded snapshot time 2026-09-03T12:00:00\.000Z/,
+    'the window is dated from something other than the recorded snapshot time');
+  assert.match(asOf.textContent, /not your device clock/);
+  // The as-of line restates the page's existing provenance signal rather than
+  // inventing a second answer to "where did this come from".
+  assert.match(asOf.textContent, /saved snapshot evidence from state\.js/,
+    'the journal does not reuse the shipped connection and staleness signal');
+});
+
+test('DOM: a live authenticated push re-dates the journal window and names that provenance', () => {
+  const page = bootPage(journalFixture([]));
+  renderMinimizedStatus(page, {
+    generatedAt: '2026-09-03T13:00:00.000Z',
+    engineering: fixtureState().engineering,
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [journalRun({ updatedAt: '2026-09-03T12:30:00.000Z' })],
+    runsBinding: { state: 'UNAVAILABLE', runId: null, updatedAt: null, evidenceState: 'OK',
+      reason: 'no run is bound in this journal fixture.' },
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  });
+  const section = journalSection(page);
+  const asOf = findByAttr(section, 'data-journal-asof')[0];
+  assert.match(asOf.textContent, /Last 24 hours as of the recorded snapshot time 2026-09-03T13:00:00\.000Z/,
+    'the journal kept the stale snapshot time after an authenticated status arrived');
+  assert.match(asOf.textContent, /the last authenticated status received \(2026-09-03T13:00:00\.000Z\)/,
+    'the journal does not name the authenticated status it was painted from');
+  assert.strictEqual(journalRows(section, 'recent').length, 1,
+    'the live push did not repaint the journal from its own run evidence');
+});
+
+test('DOM: with no recorded snapshot time the journal counts nothing as recent and keeps every record', () => {
+  const section = journalSection(bootPage(journalFixture([journalRun()], { generatedAt: null })));
+  const asOf = findByAttr(section, 'data-journal-asof')[0];
+  assert.strictEqual(asOf.attrs['data-journal-asof'], 'UNAVAILABLE');
+  assert.match(asOf.textContent, /As-of time UNAVAILABLE/);
+  assert.strictEqual(journalRows(section, 'recent').length, 0,
+    'a record was counted as recent with no recorded snapshot time to measure it against');
+  const older = journalRows(section, 'older');
+  assert.strictEqual(older.length, 1, 'the record was deleted rather than moved out of the window');
+  assert.strictEqual(older[0].attrs['data-journal-time'], 'UNWINDOWED');
+});
+
+test('DOM: missing and future timestamps are never counted as recent and never print a machine value', () => {
+  const runs = [
+    journalRun({ runId: 'RUN-20260903-dddddddd', objective: 'No recorded time', updatedAt: null }),
+    journalRun({ runId: 'RUN-20260903-eeeeeeee', objective: 'Unreadable time', updatedAt: 'yesterday-ish' }),
+    journalRun({ runId: 'RUN-20260904-ffffffff', objective: 'Later than the snapshot',
+      updatedAt: '2026-09-04T12:00:00.000Z' }),
+  ];
+  const section = journalSection(bootPage(journalFixture(runs)));
+  assert.strictEqual(journalRows(section, 'recent').length, 0,
+    'an unusable or future timestamp was silently counted as recent build work');
+  const older = Object.fromEntries(journalRows(section, 'older')
+    .map((row) => [row.attrs['data-journal-entry'], row]));
+  assert.deepStrictEqual(Object.keys(older).sort(),
+    ['RUN-20260903-dddddddd', 'RUN-20260903-eeeeeeee', 'RUN-20260904-ffffffff'],
+    'a record with a bad or future timestamp was dropped from the journal entirely');
+  assert.strictEqual(older['RUN-20260903-dddddddd'].attrs['data-journal-time'], 'UNDATED');
+  assert.strictEqual(older['RUN-20260903-eeeeeeee'].attrs['data-journal-time'], 'UNDATED');
+  assert.strictEqual(older['RUN-20260904-ffffffff'].attrs['data-journal-time'], 'FUTURE');
+  assert.match(older['RUN-20260904-ffffffff'].textContent, /later than the snapshot time/);
+  assert.doesNotMatch(section.textContent, /undefined|NaN|Invalid Date/,
+    'a missing journal field reached the page as a machine value');
+});
+
+test('DOM: one journal entry per exact run id, and records that disagree stay unverified', () => {
+  const conflicting = [
+    journalRun({ state: 'BUILD_FAILED', updatedAt: '2026-09-03T10:00:00.000Z' }),
+    journalRun({ state: 'CHECKS_PASSED', updatedAt: '2026-09-03T11:00:00.000Z',
+      checks: { passed: 4, total: 4, outcome: 'PASS' } }),
+  ];
+  const section = journalSection(bootPage(journalFixture(conflicting)));
+  const rows = journalRows(section, 'recent');
+  assert.strictEqual(rows.length, 1, 'two records for one exact run id rendered as two journal entries');
+  assert.strictEqual(rows[0].attrs['data-journal-state'], 'UNVERIFIED',
+    'conflicting records for one run id were merged into a single recorded outcome');
+  assert.match(rows[0].textContent, /2 records are filed under this exact run id and they do not agree/);
+  assert.doesNotMatch(rows[0].textContent, /The build finished and its automated checks passed/,
+    'the newer of two conflicting records was promoted into a successful outcome');
+  // Deduplication is not deletion: both records stay readable under the entry.
+  assert.match(rows[0].textContent, /Unmerged record: state BUILD_FAILED/);
+  assert.match(rows[0].textContent, /Unmerged record: state CHECKS_PASSED/);
+
+  // Records that agree are one entry reported from the latest of them, with no
+  // unverified verdict invented out of an ordinary repeated write.
+  const agreeing = [
+    journalRun({ state: 'BUILT', updatedAt: '2026-09-03T10:00:00.000Z' }),
+    journalRun({ state: 'BUILT', updatedAt: '2026-09-03T11:00:00.000Z' }),
+  ];
+  const agreed = journalRows(journalSection(bootPage(journalFixture(agreeing))), 'recent');
+  assert.strictEqual(agreed.length, 1, 'two agreeing records for one run id rendered as two entries');
+  assert.strictEqual(agreed[0].attrs['data-journal-state'], 'BUILT');
+  assert.match(agreed[0].textContent, /Recorded 2026-09-03T11:00:00\.000Z/,
+    'the entry is not reported from the latest recorded record for that run id');
+  assert.match(agreed[0].textContent, /Records filed under this exact run id: 2\./);
+});
+
+test('DOM: a BUILT or CHECKS_PASSED journal entry claims no availability, category or milestone', () => {
+  const runs = [
+    journalRun({ runId: 'RUN-20260903-aaaaaaaa', state: 'BUILT', objective: 'Ship the founder dashboard',
+      updatedAt: '2026-09-03T11:00:00.000Z' }),
+    journalRun({ runId: 'RUN-20260903-bbbbbbbb', state: 'CHECKS_PASSED', objective: 'Ship the founder dashboard',
+      updatedAt: '2026-09-03T11:30:00.000Z', checks: { passed: 4, total: 4, outcome: 'PASS' } }),
+  ];
+  const rows = journalRows(journalSection(bootPage(journalFixture(runs))), 'recent');
+  assert.strictEqual(rows.length, 2);
+  for (const row of rows) {
+    assert.match(row.textContent, /Requested change: Ship the founder dashboard/,
+      'the objective is stated as something other than the change that was requested');
+    assert.doesNotMatch(row.textContent,
+      /\bis available\b|\bnow available\b|\bavailable to use\b|\bshipped\b|\bdeployed\b|\bin production\b|\bmilestone reached\b/i,
+      'a recorded build state was promoted into an availability or milestone claim');
+    assert.match(row.textContent, /Availability, category and milestone: NOT RECORDED/,
+      'the entry does not state that availability, category and milestone are unrecorded');
+  }
+  // Newest first, in the page's own founder vocabulary — not a second one.
+  assert.match(rows[0].textContent, /The build finished and its automated checks passed\./);
+  assert.match(rows[1].textContent, /The build finished\. Its automated checks have not run yet\./);
+  assert.strictEqual((code.match(/function founderFinished\(/g) || []).length, 1,
+    'the journal introduced a second founder-language outcome authority');
+});
+
+test('DOM: the journal window toggle is a real keyboard control that hides no evidence', () => {
+  const runs = [
+    journalRun({ runId: 'RUN-20260903-aaaaaaaa', updatedAt: '2026-09-03T11:00:00.000Z' }),
+    journalRun({ runId: 'RUN-20260901-bbbbbbbb', objective: 'Older work', updatedAt: '2026-09-01T11:00:00.000Z' }),
+  ];
+  const section = journalSection(bootPage(journalFixture(runs)));
+  const tabs = journalTabs(section);
+  assert.deepStrictEqual(Object.keys(tabs).sort(), ['older', 'recent'],
+    'the journal does not offer exactly the last-24-hours and earlier/undated windows');
+  for (const name of ['recent', 'older']) {
+    assert.strictEqual(tabs[name].tagName, 'BUTTON', `the ${name} window control is not a button`);
+    assert.strictEqual(tabs[name].type, 'button', `the ${name} window control could submit a form`);
+    assert.ok(tabs[name].classList.contains('hud-control'),
+      `the ${name} window control does not reuse the shipped finger-sized control`);
+    assert.strictEqual((tabs[name]._listeners.click || []).length, 1,
+      `the ${name} window control has no executable handler`);
+  }
+  assert.match(tabs.recent.textContent, /Last 24 hours \(1\)/);
+  assert.match(tabs.older.textContent, /Earlier & undated \(1\)/);
+  assert.strictEqual(tabs.recent.getAttribute('aria-pressed'), 'true');
+  assert.strictEqual(tabs.older.getAttribute('aria-pressed'), 'false');
+  assert.strictEqual(journalList(section, 'recent').getAttribute('hidden'), null);
+  assert.strictEqual(journalList(section, 'older').getAttribute('hidden'), '');
+
+  tabs.older._listeners.click[0]();
+  assert.strictEqual(tabs.older.getAttribute('aria-pressed'), 'true');
+  assert.strictEqual(tabs.recent.getAttribute('aria-pressed'), 'false');
+  assert.strictEqual(journalList(section, 'older').getAttribute('hidden'), null,
+    'the earlier and undated view is not disclosed by its own control');
+  assert.strictEqual(journalList(section, 'recent').getAttribute('hidden'), '');
+  assert.strictEqual(section.getAttribute('data-journal-view'), 'older');
+  // Windowing is presentation: both recorded entries exist either way.
+  assert.strictEqual(journalRows(section, 'recent').length + journalRows(section, 'older').length, 2,
+    'switching the window deleted a recorded entry instead of disclosing the other list');
+  // The list rule sets display:flex, which outranks the browser's own [hidden]
+  // default: without this rule the closed window paints beside the open one.
+  assert.ok(/\.journal-list\[hidden\]\{display:none\}/.test(code),
+    'a journal window marked hidden is still displayed by the .journal-list rule');
+});
+
+test('DOM: a record written twice is one fact, and equal-time records that differ still disagree', () => {
+  const identical = [
+    journalRun({ state: 'BUILT', updatedAt: '2026-09-03T11:00:00.000Z' }),
+    journalRun({ state: 'BUILT', updatedAt: '2026-09-03T11:00:00.000Z' }),
+  ];
+  const repeated = journalRows(journalSection(bootPage(journalFixture(identical))), 'recent');
+  assert.strictEqual(repeated.length, 1, 'one run id rendered as two journal entries');
+  assert.strictEqual(repeated[0].attrs['data-journal-state'], 'BUILT',
+    'a record written twice, byte for byte, was reported as records that disagree');
+  assert.match(repeated[0].textContent, /Records filed under this exact run id: 1\./);
+  assert.doesNotMatch(repeated[0].textContent, /they do not agree/,
+    'an ordinary repeated write was turned into a contradiction in the record');
+
+  // Same recorded time, different recorded evidence: a real contradiction, and
+  // deduplication must not reach it. Both records stay, unmerged and readable.
+  const differing = [
+    journalRun({ state: 'BUILT', updatedAt: '2026-09-03T11:00:00.000Z',
+      checks: { passed: 4, total: 4, outcome: 'PASS' } }),
+    journalRun({ state: 'BUILT', updatedAt: '2026-09-03T11:00:00.000Z',
+      checks: { passed: 3, total: 4, outcome: 'FAIL' } }),
+  ];
+  const tied = journalRows(journalSection(bootPage(journalFixture(differing))), 'recent');
+  assert.strictEqual(tied.length, 1, 'one run id rendered as two journal entries');
+  assert.strictEqual(tied[0].attrs['data-journal-state'], 'UNVERIFIED',
+    'two records recorded at the same time with different evidence were merged into one outcome');
+  assert.match(tied[0].textContent, /2 records are filed under this exact run id and they do not agree/);
+});
+
+test('DOM: an unreadable run ledger renders no journal entries, says why, and changes no existing control', () => {
+  const page = bootPage(fixtureState({
+    generatedAt: JOURNAL_AS_OF,
+    runs: { state: 'UNAVAILABLE', reason: 'run records could not be read', runs: [],
+      current: { state: 'UNAVAILABLE', runId: null, evidenceState: 'UNAVAILABLE',
+        reason: '1 run record(s) could not be read or validated, so current run status is unavailable.' } },
+  }));
+  const section = journalSection(page);
+  assert.strictEqual(section.attrs['data-build-journal'], 'UNAVAILABLE');
+  assert.match(section.textContent,
+    /Build journal UNAVAILABLE — 1 run record\(s\) could not be read or validated/,
+    'the unreadable ledger lost its exact recorded reason');
+  assert.match(section.textContent, /would not be evidence that nothing was built/);
+  assert.strictEqual(journalList(section, 'recent'), null,
+    'an unreadable ledger still rendered a 24-hour list, which would read as an empty week');
+  // The journal is additive: the deck's existing cards and the run history the
+  // page already shipped are untouched by it.
+  assert.ok(findByAttr(page.document.getElementById('founder-body'), 'data-operator-field').length > 0,
+    'the journal displaced the existing Command View cards');
+  assert.match(page.text('runs-list'), /Run history UNAVAILABLE/i);
+
+  // An affirmatively empty ledger is a different fact and says so.
+  const empty = journalSection(bootPage(journalFixture([])));
+  assert.strictEqual(empty.attrs['data-build-journal'], 'OK');
+  assert.match(empty.textContent,
+    /No recorded build update falls inside the 24 hours before the snapshot time/);
+  assert.strictEqual(journalRows(empty, 'recent').length, 0);
+});
+
+test('the build journal reads recorded evidence only: no clock, no request, no second state source', () => {
+  const journal = code.slice(code.indexOf('var JOURNAL_WINDOW_MS'),
+    code.indexOf('function renderFounderSummary'));
+  assert.ok(journal.length > 0, 'the build journal source boundary was not found');
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.random', 'fetch(', 'innerHTML', 'AEGIS_STATE', 'document.querySelector']) {
+    assert.ok(!journal.includes(banned),
+      `the build journal uses ${banned} — it may only read the run projection the deck was handed`);
+  }
+  // The 24-hour window is a named constant read from the snapshot time, and the
+  // outcome, check and checkpoint sentences are the page's existing ones.
+  assert.ok(/var JOURNAL_WINDOW_MS = 24 \* 60 \* 60 \* 1000;/.test(journal),
+    'the window is not one declared 24-hour constant');
+  assert.ok(/win\.asOfMs - ms <= JOURNAL_WINDOW_MS/.test(journal),
+    'recency is decided by something other than the recorded snapshot time');
+  for (const helper of ['founderFinished(latest, false)', 'evidenceChecksPanel(entry.record)',
+    'checkpointEvidence(entry.record)', 'evidenceOnScreen()']) {
+    assert.ok(journal.includes(helper),
+      `the journal does not reuse ${helper} — a second vocabulary for the same evidence`);
+  }
+  assert.strictEqual((code.match(/renderBuildJournal\(/g) || []).length, 2,
+    'the journal is painted from more than one place, or never painted at all');
+  assert.ok(/renderBuildJournal\(host, journalReading\(view, emptyRunsAvailable\)\)/.test(code),
+    'the journal is not handed the deck\'s own view and empty-ledger judgement');
+});
+
 async function atest(name, fn) {
   try { await fn(); passed++; console.log(`ok   ${name}`); }
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }
