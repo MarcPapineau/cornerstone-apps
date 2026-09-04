@@ -239,24 +239,235 @@ test('switchboard: review verification uses the canonical bind-only route only f
 test('control authority composition seam is exact, frozen, and unavailable to browser input', () => {
   assert.ok(Object.isFrozen(S.DEFAULT_CONTROL_AUTHORITIES));
   assert.deepStrictEqual(Object.keys(S.DEFAULT_CONTROL_AUTHORITIES).sort(),
-    ['bindIndependentReview', 'runChecks']);
+    ['bindIndependentReview', 'prepareIndependentReview', 'runChecks']);
+  assert.ok(Object.isFrozen(S.CONTROL_AUTHORITY_NAMES), 'the seam membership list must be frozen');
+  assert.deepStrictEqual([...S.CONTROL_AUTHORITY_NAMES],
+    ['bindIndependentReview', 'prepareIndependentReview', 'runChecks']);
   assert.throws(() => S.resolveControlAuthorities({ runChecks() {} }), /provide exactly/);
   assert.throws(() => S.resolveControlAuthorities({
-    runChecks() {}, bindIndependentReview() {}, startRun() {},
+    runChecks() {}, bindIndependentReview() {},
+  }), /provide exactly/, 'a seam missing the preflight authority was accepted');
+  assert.throws(() => S.resolveControlAuthorities({
+    runChecks() {}, bindIndependentReview() {}, prepareIndependentReview() {}, startRun() {},
   }), /provide exactly/);
   const supplied = S.resolveControlAuthorities({
     runChecks() { return 'checks'; },
     bindIndependentReview() { return 'review'; },
+    prepareIndependentReview() { return 'preflight'; },
   });
   assert.ok(Object.isFrozen(supplied));
-  assert.deepStrictEqual(Object.keys(supplied).sort(), ['bindIndependentReview', 'runChecks']);
+  assert.deepStrictEqual(Object.keys(supplied).sort(),
+    ['bindIndependentReview', 'prepareIndependentReview', 'runChecks']);
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8');
   assert.match(serverSource, /http\.createServer\(handler\(config\)\)/,
     'production server construction must not inject alternate control authorities');
   assert.throws(() => S.resolveControlAuthorities(Object.defineProperty({
-    bindIndependentReview() {},
+    bindIndependentReview() {}, prepareIndependentReview() {},
   }, 'runChecks', { enumerable: true, get() { throw new Error('getter executed'); } })),
   /provide exactly/, 'accessor-backed control authority was accepted');
+});
+
+// ── read-only independent-review preflight — static and unit proofs ─────────
+test('the review preflight route is a named POST bound to the canonical read-only authority', () => {
+  assert.strictEqual(S.API_POST_ROUTES['/api/review-preflight'], 'review-preflight',
+    'hosting does not declare the canonical review-preflight route');
+  assert.strictEqual(S.DEFAULT_CONTROL_AUTHORITIES.prepareIndependentReview,
+    require('../aegis-run.cjs').prepareIndependentReview,
+    'the production HTTP route is not pinned to canonical prepareIndependentReview');
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'hosting', 'server.cjs'), 'utf8');
+  assert.match(serverSource,
+    /pathname === '\/api\/review-preflight'\) result = reviewPreflight\(runId, controlAuthorities\)/,
+    'the HTTP route is not a thin pass-through to its fixed preflight authority');
+  assert.match(serverSource,
+    /const runId = parseRunIdBody\(body\);/,
+    'the preflight route must share the single runId-only body parser');
+  // The preflight is a question. It must not be able to reach a launch, a
+  // binding, a check or a run mutation from inside this route.
+  const route = serverSource.slice(serverSource.indexOf('function reviewPreflight('),
+    serverSource.indexOf('// ── authenticated SSE event stream'));
+  for (const forbidden of ['launchWorker', 'bindIndependentReview', 'runChecks',
+    'startGovernedRun', 'saveRun', 'transition', 'spawn']) {
+    assert.ok(!route.includes(forbidden),
+      `the preflight route reaches ${forbidden}, which is not a read-only question`);
+  }
+});
+
+// This replaces a stage-boundary lock that forbade the dashboard from naming
+// /api/review-preflight at all. That assertion could only hold until the
+// approved UI packet wires the control it is waiting for, and would then fail
+// for doing the right thing — a test that guarantees a future correct change
+// fails is a schedule, not a contract. What has to hold forever is narrower and
+// stronger: whenever the browser reaches review readiness, it reaches it as a
+// question — the one declared read-only POST, pinned to the canonical read-only
+// authority, holding no check, binding or worker-execution authority itself.
+test('review readiness stays a read-only question wherever the browser reaches it', () => {
+  assert.strictEqual(S.API_POST_ROUTES['/api/review-preflight'], 'review-preflight',
+    'hosting does not declare the canonical review-preflight route');
+  assert.strictEqual(S.DEFAULT_CONTROL_AUTHORITIES.prepareIndependentReview,
+    require('../aegis-run.cjs').prepareIndependentReview,
+    'the browser-reachable preflight is not pinned to the canonical read-only authority');
+
+  const html = dashboardHtml();
+  // The only spelling the host answers is the one it declares. A subpath, a
+  // query string or an invented sibling route would need a second, unreviewed
+  // handler before it could mean anything.
+  for (const literal of html.match(/['"`][^'"`\n]*review-preflight[^'"`\n]*['"`]/g) || []) {
+    assert.strictEqual(literal.slice(1, -1), '/api/review-preflight',
+      `the dashboard names a preflight route the host does not declare: ${literal}`);
+  }
+  // The browser asks over HTTP. It never names — and may never hold — the
+  // canonical authority behind the question, nor the check, binding and launch
+  // authorities a read-only question is not allowed to reach.
+  for (const authority of ['prepareIndependentReview', 'bindIndependentReview', 'runChecks',
+    'launchWorker', 'startGovernedRun', 'spawn']) {
+    assert.ok(!html.includes(authority),
+      `the dashboard names ${authority} — the browser holds no canonical authority`);
+  }
+});
+
+test('the preflight DTO is a closed, host-written projection of the three canonical outcomes', () => {
+  const RUN_ID = 'RUN-20260904-0badc0de';
+  const SUBJECT = 'a'.repeat(64);
+  const RECEIPT = 'b'.repeat(64);
+  const CLOSED_KEYS = ['checkReceiptSha256', 'hostContainment', 'mutations', 'nextAction',
+    'pendingReviewers', 'reasonCode', 'reasonSummary', 'requiredReviewers', 'runId',
+    'state', 'status', 'statusSummary', 'subjectSha256'];
+
+  const permitted = S.minimizeReviewPreflight(RUN_ID, {
+    runId: RUN_ID, state: 'CHECKS_PASSED', mutations: 'NONE',
+    status: 'REVIEW_PERMITTED', reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+    summary: 'canonical generated sentence naming /Users/someone/checkout paths',
+    nextAction: 'independent-review',
+    lane: 'DEEP', requiredReviewers: ['gpt-5-codex', 'gemini'],
+    pendingReviewers: [{ reviewer: 'gpt-5-codex', executed: 'MISSING', coverage: 'NONE' }],
+    subject: { subjectSha256: SUBJECT, subjectPaths: ['builder-control/hosting/server.cjs'],
+      diffBytes: 1234, range: 'abc..def' },
+    evidence: { source: 'CANONICAL_CHECK_RECEIPT', receiptSha256: RECEIPT, hostContainment: 'BOUND' },
+  });
+  assert.deepStrictEqual(Object.keys(permitted).sort(), CLOSED_KEYS);
+  assert.strictEqual(permitted.status, 'REVIEW_PERMITTED');
+  assert.strictEqual(permitted.statusSummary, S.PUBLIC_REVIEW_PREFLIGHT_STATUSES.REVIEW_PERMITTED);
+  assert.strictEqual(permitted.reasonSummary,
+    S.PUBLIC_REVIEW_PREFLIGHT_REASONS.EXACT_SUBJECT_REVIEW_PENDING);
+  assert.strictEqual(permitted.nextAction, 'independent-review');
+  assert.deepStrictEqual(permitted.requiredReviewers, ['gpt-5-codex', 'gemini']);
+  assert.deepStrictEqual(permitted.pendingReviewers,
+    [{ reviewer: 'gpt-5-codex', executed: 'MISSING', coverage: 'NONE' }]);
+  assert.strictEqual(permitted.subjectSha256, SUBJECT);
+  assert.strictEqual(permitted.checkReceiptSha256, RECEIPT);
+  assert.strictEqual(permitted.hostContainment, 'BOUND');
+  assert.strictEqual(permitted.mutations, 'NONE');
+  const permittedText = JSON.stringify(permitted);
+  assert.ok(!/subjectPaths|server\.cjs|diffBytes|abc\.\.def|Users/.test(permittedText),
+    `the permitted DTO leaked subject detail: ${permittedText}`);
+  // A permitted reading is permission to ASK for a review, never a claim that
+  // one was started, approved or paid for.
+  assert.ok(!/approved|started|running/i.test(permitted.statusSummary),
+    'a permitted preflight reads as launch approval');
+  assert.match(permitted.statusSummary, /Nothing has been launched and nothing is bound/);
+
+  const complete = S.minimizeReviewPreflight(RUN_ID, {
+    runId: RUN_ID, state: 'CHECKS_PASSED', mutations: 'NONE',
+    status: 'NO_ADDITIONAL_REVIEW_NEEDED', reasonCode: 'EXACT_SUBJECT_REVIEW_COMPLETE',
+    nextAction: 'bind-independent-review', pendingReviewers: [],
+    subject: { subjectSha256: SUBJECT },
+    evidence: { receiptSha256: RECEIPT, hostContainment: 'PENDING_AT_BINDING' },
+  });
+  assert.deepStrictEqual(Object.keys(complete).sort(), CLOSED_KEYS);
+  assert.strictEqual(complete.status, 'NO_ADDITIONAL_REVIEW_NEEDED');
+  assert.deepStrictEqual(complete.pendingReviewers, []);
+  assert.strictEqual(complete.hostContainment, 'PENDING_AT_BINDING');
+
+  const refused = S.minimizeReviewPreflight(RUN_ID, {
+    runId: RUN_ID, state: 'BUILT', mutations: 'NONE', status: 'REFUSED',
+    reasonCode: 'REVIEW-WRONG-STATE', nextAction: 'none', pendingReviewers: [],
+    summary: 'review binding requires CHECKS_PASSED, run is BUILT',
+  });
+  assert.deepStrictEqual(Object.keys(refused).sort(), CLOSED_KEYS);
+  assert.strictEqual(refused.status, 'REFUSED');
+  assert.strictEqual(refused.reasonSummary,
+    S.PUBLIC_REVIEW_PREFLIGHT_REASONS['REVIEW-WRONG-STATE']);
+  assert.strictEqual(refused.subjectSha256, null);
+  assert.strictEqual(refused.checkReceiptSha256, null);
+  assert.strictEqual(refused.hostContainment, null);
+
+  // The packet names REVIEW-CYCLE-NO-PERMITTED-REVIEWER as refused/no-action.
+  const noPermittedReviewer = S.minimizeReviewPreflight(RUN_ID, {
+    runId: RUN_ID, state: 'CHECKS_PASSED', mutations: 'NONE', status: 'REFUSED',
+    reasonCode: 'REVIEW-CYCLE-NO-PERMITTED-REVIEWER', nextAction: 'none',
+    pendingReviewers: [{ reviewer: 'gpt-5-codex', executed: 'MISSING', coverage: 'NONE' }],
+  });
+  assert.strictEqual(noPermittedReviewer.status, 'REFUSED');
+  assert.strictEqual(noPermittedReviewer.nextAction, 'none');
+  assert.match(noPermittedReviewer.reasonSummary, /permits no reviewer/);
+});
+
+test('RED: the preflight DTO refuses hostile, mismatched or mutation-claiming answers', () => {
+  const RUN_ID = 'RUN-20260904-0badc0de';
+  const base = { runId: RUN_ID, state: 'CHECKS_PASSED', mutations: 'NONE',
+    status: 'REFUSED', reasonCode: 'REVIEW-WRONG-STATE', nextAction: 'none' };
+  for (const [name, answer] of [
+    ['a non-object answer', 'REVIEW_PERMITTED'],
+    ['an array answer', [base]],
+    ['a null answer', null],
+    ['a different run', { ...base, runId: 'RUN-20260904-deadbeef' }],
+    ['a mutating answer', { ...base, mutations: 'RUN_RECORD_WRITTEN' }],
+    ['an unrecognised status', { ...base, status: 'LAUNCHED' }],
+  ]) {
+    assert.strictEqual(S.minimizeReviewPreflight(RUN_ID, answer), null,
+      `${name} produced a publishable DTO`);
+  }
+
+  const hostile = S.minimizeReviewPreflight(RUN_ID, {
+    ...base,
+    state: 'PWNED', reasonCode: 'ATTACKER-SUPPLIED-CODE', nextAction: 'launch-reviewer',
+    requiredReviewers: ['../../etc/passwd', 'gpt-5-codex', HOSTILE_WORKER_OUTPUT.jwt],
+    pendingReviewers: [
+      { reviewer: 'gpt-5-codex', executed: 'LAUNCHED', coverage: 'TOTAL',
+        transcript: HOSTILE_WORKER_OUTPUT.source, findings: [HOSTILE_WORKER_OUTPUT.pem] },
+      { reviewer: HOSTILE_WORKER_OUTPUT.cookie, executed: 'MISSING', coverage: 'NONE' },
+    ],
+    subject: { subjectSha256: 'not-a-hash', subjectPaths: [HOSTILE_WORKER_OUTPUT.source] },
+    evidence: { receiptSha256: 'zz', hostContainment: 'PROVEN_BY_THE_REVIEWER' },
+    packet: { path: '/Users/someone/checkout/builder-control/packets/p.json' },
+    commands: ['node builder-control/test/host-containment.test.cjs'],
+    credentials: HOSTILE_WORKER_OUTPUT.pem,
+    stdoutTail: HOSTILE_WORKER_OUTPUT.unlabelled,
+  });
+  assert.deepStrictEqual(Object.keys(hostile).sort(),
+    ['checkReceiptSha256', 'hostContainment', 'mutations', 'nextAction', 'pendingReviewers',
+      'reasonCode', 'reasonSummary', 'requiredReviewers', 'runId', 'state', 'status',
+      'statusSummary', 'subjectSha256']);
+  assert.strictEqual(hostile.state, null, 'an unrecognised lifecycle word travelled');
+  assert.strictEqual(hostile.reasonCode, null, 'an unrecognised reason code travelled');
+  assert.strictEqual(hostile.reasonSummary, null);
+  assert.strictEqual(hostile.nextAction, null, 'an unrecognised next action travelled');
+  assert.deepStrictEqual(hostile.requiredReviewers, ['gpt-5-codex'],
+    'a reviewer identifier outside the bounded name shape travelled');
+  assert.deepStrictEqual(hostile.pendingReviewers,
+    [{ reviewer: 'gpt-5-codex', executed: 'UNKNOWN', coverage: 'UNKNOWN' }]);
+  assert.strictEqual(hostile.subjectSha256, null);
+  assert.strictEqual(hostile.checkReceiptSha256, null);
+  assert.strictEqual(hostile.hostContainment, null);
+  assertNoHostileWorkerOutput(hostile, 'the preflight DTO');
+  const text = JSON.stringify(hostile);
+  assert.ok(!/Users|passwd|packets\/|host-containment/.test(text),
+    `the preflight DTO leaked a path, packet or command: ${text}`);
+});
+
+test('the preflight reviewer lists are bounded and de-duplicated', () => {
+  const RUN_ID = 'RUN-20260904-0badc0de';
+  const many = Array.from({ length: 40 }, (_, i) => `reviewer-${i}`);
+  const dto = S.minimizeReviewPreflight(RUN_ID, {
+    runId: RUN_ID, state: 'CHECKS_PASSED', mutations: 'NONE', status: 'REFUSED',
+    reasonCode: 'REVIEW-GATE-BLOCKED', nextAction: 'none',
+    requiredReviewers: [...many, 'reviewer-0'],
+    pendingReviewers: many.map((reviewer) => ({ reviewer, executed: 'MISSING', coverage: 'NONE' }))
+      .concat([{ reviewer: 'reviewer-0', executed: 'MISSING', coverage: 'NONE' }]),
+  });
+  assert.strictEqual(dto.requiredReviewers.length, 16);
+  assert.strictEqual(dto.pendingReviewers.length, 16);
+  assert.strictEqual(new Set(dto.requiredReviewers).size, dto.requiredReviewers.length);
 });
 
 // Cancel and retry are wired because they are operational: cancelRun takes the
@@ -1522,6 +1733,9 @@ function get(port, path_, headers = {}) {
 
   await new Promise((resolve) => srv.close(resolve));
   fs.rmSync(servedRoot, { recursive: true, force: true });
+  // Reuses the now-closed HOSTING_TEST_PORT listener slot rather than opening a
+  // third port, so the suite still owns exactly two listener ports.
+  await runReviewPreflightCompositionSuite();
   await runApiSuite();
   const failed = process.exitCode ? 'at least 1' : '0';
   console.log(`${passed} passed, 0 skipped, ${failed} failed.`);
@@ -1534,14 +1748,15 @@ function get(port, path_, headers = {}) {
 // ledger.json. The child's own module cache is therefore the only place the
 // temp env applies — the correct isolation, since resolveDir() reads
 // process.env once at require time.
-function post(port, path_, { headers = {}, body, cookie } = {}) {
+function post(port, path_, { headers = {}, body, cookie, agent } = {}) {
   return new Promise((resolve) => {
     const data = body === undefined ? null : Buffer.from(body);
     const h = { ...headers };
     if (cookie) h.cookie = cookie;
     if (data) h['content-length'] = data.length;
     const req = http.request(
-      { host: '127.0.0.1', port, path: path_, method: 'POST', headers: h },
+      { host: '127.0.0.1', port, path: path_, method: 'POST', headers: h,
+        ...(agent === undefined ? {} : { agent }) },
       (res) => {
         let b = '';
         res.on('data', (d) => (b += d));
@@ -1642,6 +1857,320 @@ function openSse(port, path_, headers = {}) {
   });
 }
 
+// ── /api/review-preflight transport suite ───────────────────────────────────
+// The composition seam is exercised in-process with a recording preflight stub,
+// so every transport rule (auth, origin-before-body, method, bounded body,
+// exact-field discipline), the exact runId that reaches the authority, all
+// three canonical outcomes, and the sanitization of hostile answers and
+// exceptions are proved deterministically — without executing a real review,
+// a real check, a model, or any run/ledger write. The runChecks and
+// bindIndependentReview members of the same seam are wired to recorders that
+// fail the suite if this read-only route ever reaches them.
+async function runReviewPreflightCompositionSuite() {
+  const PORT = HOSTING_TEST_PORT;
+  const PREFLIGHT_TOKEN = 'preflight-token-' + crypto.randomBytes(16).toString('hex');
+  const ORIGIN = `http://127.0.0.1:${PORT}`;
+  const RUN_ID = 'RUN-20260904-0badc0de';
+  const SUBJECT = 'c'.repeat(64);
+  const RECEIPT = 'd'.repeat(64);
+  // A string that exists nowhere in the host's own vocabulary. Asserting the
+  // absence of English like "still owes" cannot tell a canonical leak apart
+  // from the host's own sanctioned reason copy, which says "still owes"
+  // legitimately; asserting the absence of this can.
+  const CANONICAL_ONLY = 'CANONICAL-ONLY-' + crypto.randomBytes(16).toString('hex');
+  // Every request in this fixture opens its own connection. This suite reuses
+  // the listener slot the static-file server just released, and that server
+  // left keep-alive sockets in the shared globalAgent pool — reusing one of
+  // those already-closed sockets resolves as status 0, a transport failure that
+  // never happened. A non-pooling agent removes the reuse, deterministically,
+  // without a sleep, a retry or a relaxed expectation.
+  const agent = new http.Agent({ keepAlive: false });
+
+  const calls = [];
+  let answer = null;
+  let thrown = null;
+  const controlAuthorities = {
+    prepareIndependentReview(runId) {
+      calls.push({ route: 'prepareIndependentReview', runId });
+      if (thrown) throw thrown;
+      return answer;
+    },
+    runChecks(runId) { calls.push({ route: 'runChecks', runId }); return { runId }; },
+    bindIndependentReview(runId) { calls.push({ route: 'bindIndependentReview', runId }); return { runId }; },
+  };
+  const preflightCalls = () => calls.filter((c) => c.route === 'prepareIndependentReview');
+  const forbiddenCalls = () => calls.filter((c) => c.route !== 'prepareIndependentReview');
+  const canonicalAnswer = (fields) => ({
+    runId: RUN_ID, state: 'CHECKS_PASSED', action: 'prepare-independent-review',
+    authority: 'aegis-run.cjs prepareIndependentReview (read-only)', mutations: 'NONE',
+    pendingReviewers: [], ...fields,
+  });
+  const ask = (path_, options = {}) => post(PORT, path_, { agent, ...options });
+  const askPreflight = (body, extra = {}) => ask('/api/review-preflight', {
+    headers: { authorization: 'Bearer ' + PREFLIGHT_TOKEN, 'content-type': 'application/json',
+      origin: ORIGIN, ...(extra.headers || {}) },
+    ...(extra.cookie ? { cookie: extra.cookie } : {}),
+    body,
+  });
+  // Each case owns the recorder and the stubbed answer outright. Resetting at
+  // the end of a case only resets the cases that pass: one failed assertion
+  // used to hand the next case a dirty call log and report a second failure
+  // that was never a defect. The reset runs before the assertions, so nothing
+  // here can swallow one.
+  const ptest = (name, fn) => atest(name, () => {
+    calls.length = 0;
+    answer = null;
+    thrown = null;
+    return fn();
+  });
+
+  const v = S.validateConfig({ port: PORT, host: '127.0.0.1', token: PREFLIGHT_TOKEN }, {});
+  assert.strictEqual(v.ok, true, 'the preflight transport fixture requires a validated config');
+  const srv = http.createServer(S.handler(v.config, { controlAuthorities }));
+  await new Promise((resolve, reject) => {
+    const onError = (error) => reject(new Error(
+      `the preflight transport fixture could not reuse port ${PORT}: ${error.message}`));
+    srv.once('error', onError);
+    srv.listen(PORT, '127.0.0.1', () => { srv.off('error', onError); resolve(); });
+  });
+
+  try {
+    await ptest('API RED: unauthenticated POST /api/review-preflight is 401 and reaches no authority', async () => {
+      const r = await ask('/api/review-preflight', {
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: RUN_ID }),
+      });
+      assert.strictEqual(r.status, 401);
+      const wrongToken = await ask('/api/review-preflight', {
+        headers: { authorization: 'Bearer ' + 'x'.repeat(40), 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: RUN_ID }),
+      });
+      assert.strictEqual(wrongToken.status, 401);
+      assert.deepStrictEqual(calls, [], 'an unauthenticated caller reached a control authority');
+    });
+
+    await ptest('API RED: GET and HEAD cannot dispatch the preflight question', async () => {
+      const request = (method) => new Promise((resolve) => {
+        const req = http.request({ host: '127.0.0.1', port: PORT, path: '/api/review-preflight',
+          method, agent, headers: { authorization: 'Bearer ' + PREFLIGHT_TOKEN } },
+        (res) => { res.resume(); res.on('end', () => resolve({ status: res.statusCode })); });
+        req.on('error', () => resolve({ status: 0 }));
+        req.end();
+      });
+      for (const method of ['GET', 'HEAD']) {
+        assert.strictEqual((await request(method)).status, 405, `${method} reached the preflight dispatcher`);
+      }
+      assert.deepStrictEqual(calls, [], 'a non-POST request reached a control authority');
+    });
+
+    await ptest('API RED: a cookie-authenticated preflight is refused on origin before the body is read', async () => {
+      const cookie = `aegis_session=${S.sessionFor(PREFLIGHT_TOKEN)}`;
+      const noOrigin = await ask('/api/review-preflight', {
+        headers: { 'content-type': 'application/json' }, cookie,
+        body: JSON.stringify({ runId: RUN_ID }),
+      });
+      assert.strictEqual(noOrigin.status, 403);
+      assert.strictEqual(JSON.parse(noOrigin.body).error.code, 'CSRF_ORIGIN_REQUIRED');
+      const wrongOrigin = await ask('/api/review-preflight', {
+        headers: { 'content-type': 'application/json', origin: 'http://evil.example' }, cookie,
+        body: 'not even json',
+      });
+      assert.strictEqual(wrongOrigin.status, 403);
+      assert.strictEqual(JSON.parse(wrongOrigin.body).error.code, 'CSRF_ORIGIN_MISMATCH');
+      const bearerWrongOrigin = await askPreflight(JSON.stringify({ runId: RUN_ID }),
+        { headers: { origin: 'http://evil.example' } });
+      assert.strictEqual(bearerWrongOrigin.status, 403);
+      assert.deepStrictEqual(calls, [], 'a cross-origin request reached a control authority');
+    });
+
+    await ptest('API RED: the preflight body must be bounded, well-formed JSON naming only runId', async () => {
+      const wrongType = await askPreflight(JSON.stringify({ runId: RUN_ID }),
+        { headers: { 'content-type': 'text/plain' } });
+      assert.strictEqual(wrongType.status, 415);
+
+      const malformed = await askPreflight('{ not json');
+      assert.strictEqual(malformed.status, 400);
+      assert.strictEqual(JSON.parse(malformed.body).error.code, 'MALFORMED_JSON');
+
+      const oversized = await askPreflight(JSON.stringify({
+        runId: RUN_ID, pad: 'p'.repeat(S.MAX_API_BODY_BYTES + 1024) }));
+      assert.strictEqual(oversized.status, 413);
+
+      for (const key of ['model', 'reviewer', 'packet', 'spendUsd', 'command', 'provider',
+        'verdict', 'permissionMode', 'cwd']) {
+        const r = await askPreflight(JSON.stringify({ runId: RUN_ID, [key]: 'caller-controlled' }));
+        assert.strictEqual(r.status, 400, `${key} was not refused: ${r.body}`);
+        assert.strictEqual(JSON.parse(r.body).error.code, 'INVALID_REQUEST');
+      }
+      for (const body of ['[]', '"RUN-20260904-0badc0de"', '{}',
+        JSON.stringify({ runId: '' }), JSON.stringify({ runId: 7 })]) {
+        const r = await askPreflight(body);
+        assert.strictEqual(r.status, 400, `${body} was not refused: ${r.body}`);
+        assert.strictEqual(JSON.parse(r.body).error.code, 'INVALID_REQUEST');
+      }
+      assert.deepStrictEqual(calls, [],
+        'a malformed, oversized or caller-augmented body reached a control authority');
+    });
+
+    await ptest('authenticated POST /api/review-preflight forwards exactly the runId, once', async () => {
+      answer = canonicalAnswer({
+        status: 'REVIEW_PERMITTED', reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+        nextAction: 'independent-review', lane: 'DEEP',
+        requiredReviewers: ['gpt-5-codex', 'gemini'],
+        pendingReviewers: [{ reviewer: 'gpt-5-codex', executed: 'MISSING', coverage: 'NONE' }],
+        subject: { subjectSha256: SUBJECT, subjectPaths: ['builder-control/hosting/server.cjs'],
+          diffBytes: 4096, range: 'aaa..bbb' },
+        evidence: { source: 'CANONICAL_CHECK_RECEIPT', receiptSha256: RECEIPT, hostContainment: 'BOUND' },
+        summary: `gpt-5-codex still owes an exact-subject review over 1 path(s). ${CANONICAL_ONLY}`,
+      });
+      const r = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(r.status, 200, r.body);
+      assert.strictEqual(r.headers['cache-control'], 'no-store');
+      assert.ok(/application\/json/.test(r.headers['content-type']));
+      assert.deepStrictEqual(preflightCalls(), [{ route: 'prepareIndependentReview', runId: RUN_ID }],
+        'the canonical preflight was not reached exactly once with the exact runId');
+      assert.deepStrictEqual(forbiddenCalls(), [],
+        'a read-only preflight reached the checks or binding authority');
+      const parsed = JSON.parse(r.body);
+      assert.deepStrictEqual(parsed, {
+        runId: RUN_ID, state: 'CHECKS_PASSED', status: 'REVIEW_PERMITTED',
+        statusSummary: S.PUBLIC_REVIEW_PREFLIGHT_STATUSES.REVIEW_PERMITTED,
+        reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+        reasonSummary: S.PUBLIC_REVIEW_PREFLIGHT_REASONS.EXACT_SUBJECT_REVIEW_PENDING,
+        nextAction: 'independent-review',
+        requiredReviewers: ['gpt-5-codex', 'gemini'],
+        pendingReviewers: [{ reviewer: 'gpt-5-codex', executed: 'MISSING', coverage: 'NONE' }],
+        subjectSha256: SUBJECT, checkReceiptSha256: RECEIPT, hostContainment: 'BOUND',
+        mutations: 'NONE',
+      });
+      assert.ok(!r.body.includes(CANONICAL_ONLY),
+        `the response echoed canonical summary text the host never wrote: ${r.body}`);
+      assert.ok(!/subjectPaths|server\.cjs|aaa\.\.bbb/.test(r.body),
+        `the response leaked subject detail: ${r.body}`);
+    });
+
+    await ptest('the preflight distinguishes complete coverage and refusal, and neither approves a launch', async () => {
+      answer = canonicalAnswer({
+        status: 'NO_ADDITIONAL_REVIEW_NEEDED', reasonCode: 'EXACT_SUBJECT_REVIEW_COMPLETE',
+        nextAction: 'bind-independent-review', requiredReviewers: ['gpt-5-codex'],
+        subject: { subjectSha256: SUBJECT },
+        evidence: { receiptSha256: RECEIPT, hostContainment: 'PENDING_AT_BINDING' },
+      });
+      const complete = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(complete.status, 200, complete.body);
+      const completeBody = JSON.parse(complete.body);
+      assert.strictEqual(completeBody.status, 'NO_ADDITIONAL_REVIEW_NEEDED');
+      assert.strictEqual(completeBody.nextAction, 'bind-independent-review');
+      assert.strictEqual(completeBody.hostContainment, 'PENDING_AT_BINDING');
+      assert.strictEqual(completeBody.mutations, 'NONE');
+
+      // The packet names this outcome refused with no action available.
+      answer = canonicalAnswer({
+        status: 'REFUSED', reasonCode: 'REVIEW-CYCLE-NO-PERMITTED-REVIEWER', nextAction: 'none',
+        requiredReviewers: ['gpt-5-codex'],
+        subject: { subjectSha256: SUBJECT },
+        evidence: { receiptSha256: RECEIPT, hostContainment: 'BOUND' },
+        summary: 'the canonical gate reports outstanding review work, but the canonical review cycle permits none.',
+      });
+      const refused = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(refused.status, 200,
+        `a readable refusal is a successful reading: ${refused.body}`);
+      const refusedBody = JSON.parse(refused.body);
+      assert.strictEqual(refusedBody.status, 'REFUSED');
+      assert.strictEqual(refusedBody.reasonCode, 'REVIEW-CYCLE-NO-PERMITTED-REVIEWER');
+      assert.strictEqual(refusedBody.nextAction, 'none');
+      assert.match(refusedBody.statusSummary, /No independent review can be prepared/);
+      assert.ok(!/approved|permitted to launch|started/i.test(refusedBody.statusSummary),
+        'a refused reading could be read as launch approval');
+      assert.strictEqual(preflightCalls().length, 2);
+      assert.deepStrictEqual(forbiddenCalls(), []);
+    });
+
+    await ptest('API RED: a hostile preflight answer cannot publish paths, transcripts or credentials', async () => {
+      answer = {
+        runId: RUN_ID, mutations: 'NONE', state: 'CHECKS_PASSED',
+        status: 'REVIEW_PERMITTED', reasonCode: 'EXACT_SUBJECT_REVIEW_PENDING',
+        nextAction: 'independent-review',
+        requiredReviewers: ['gpt-5-codex'],
+        pendingReviewers: [{ reviewer: 'gpt-5-codex', executed: 'MISSING', coverage: 'NONE',
+          transcript: HOSTILE_WORKER_OUTPUT.source, findings: [HOSTILE_WORKER_OUTPUT.pem] }],
+        subject: { subjectSha256: SUBJECT, subjectPaths: ['/Users/someone/checkout/secret.cjs'] },
+        evidence: { receiptSha256: RECEIPT, hostContainment: 'BOUND' },
+        packet: { path: '/Users/someone/checkout/builder-control/packets/p.json' },
+        commands: ['node builder-control/test/host-containment.test.cjs'],
+        stdoutTail: HOSTILE_WORKER_OUTPUT.unlabelled,
+        modelOutput: HOSTILE_WORKER_OUTPUT.source,
+        credentials: HOSTILE_WORKER_OUTPUT.jwt + ' ' + HOSTILE_WORKER_OUTPUT.cookie,
+        summary: HOSTILE_WORKER_OUTPUT.pem,
+      };
+      const r = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(r.status, 200, r.body);
+      assertNoHostileWorkerOutput(JSON.parse(r.body), '/api/review-preflight');
+      assert.ok(!/Users|packets|host-containment|secret\.cjs/.test(r.body),
+        `the preflight response leaked a path, packet or command: ${r.body}`);
+      assert.deepStrictEqual(Object.keys(JSON.parse(r.body)).sort(),
+        ['checkReceiptSha256', 'hostContainment', 'mutations', 'nextAction', 'pendingReviewers',
+          'reasonCode', 'reasonSummary', 'requiredReviewers', 'runId', 'state', 'status',
+          'statusSummary', 'subjectSha256']);
+
+      // An answer about another run, or one claiming a mutation, is not a
+      // half-published result: it is a flat 500.
+      for (const hostileAnswer of [
+        { ...answer, runId: 'RUN-20260904-deadbeef' },
+        { ...answer, mutations: 'RUN_RECORD_WRITTEN' },
+        { ...answer, status: 'LAUNCHED' },
+        'REVIEW_PERMITTED',
+      ]) {
+        answer = hostileAnswer;
+        const refused = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+        assert.strictEqual(refused.status, 500, refused.body);
+        assert.deepStrictEqual(JSON.parse(refused.body),
+          { error: { code: 'INTERNAL_ERROR', message: 'internal error' } });
+      }
+      assert.deepStrictEqual(forbiddenCalls(), []);
+    });
+
+    await ptest('API RED: preflight exceptions map to fixed host text, never to canonical message echo', async () => {
+      const { AegisControlError } = require('../aegis-run.cjs');
+      const leaky = `preflight blew up reading /Users/someone/checkout/builder-control/runs/${RUN_ID}.json ` +
+        HOSTILE_WORKER_OUTPUT.pem;
+
+      thrown = new AegisControlError('REVIEW-GATE-UNREADABLE', leaky, 409);
+      const unknownCode = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(unknownCode.status, 500, unknownCode.body);
+      assert.deepStrictEqual(JSON.parse(unknownCode.body),
+        { error: { code: 'INTERNAL_ERROR', message: 'internal error' } });
+
+      thrown = new Error(leaky);
+      const plain = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(plain.status, 500, plain.body);
+      assert.deepStrictEqual(JSON.parse(plain.body),
+        { error: { code: 'INTERNAL_ERROR', message: 'internal error' } });
+
+      thrown = new AegisControlError('INVALID_RUN_ID', leaky, 400);
+      const badId = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(badId.status, 400, badId.body);
+      assert.deepStrictEqual(JSON.parse(badId.body), { error: { code: 'INVALID_RUN_ID',
+        message: 'runId is not a canonical AEGIS run identifier.' } });
+
+      thrown = new AegisControlError('RUN_NOT_FOUND', leaky, 404);
+      const missing = await askPreflight(JSON.stringify({ runId: RUN_ID }));
+      assert.strictEqual(missing.status, 404, missing.body);
+      assert.deepStrictEqual(JSON.parse(missing.body), { error: { code: 'RUN_NOT_FOUND',
+        message: 'No run with that identifier exists.' } });
+
+      for (const response of [unknownCode, plain, badId, missing]) {
+        assert.ok(!/Users|runs\/|BEGIN PRIVATE KEY/.test(response.body),
+          `a preflight exception echoed canonical internals: ${response.body}`);
+      }
+      assert.deepStrictEqual(forbiddenCalls(), []);
+    });
+  } finally {
+    agent.destroy();
+    await new Promise((resolve) => srv.close(resolve));
+  }
+}
+
 async function runApiSuite() {
   const PORT = HOSTING_API_TEST_PORT;
   const API_TOKEN = 'api-test-token-' + crypto.randomBytes(16).toString('hex');
@@ -1717,6 +2246,13 @@ async function runApiSuite() {
         record('bindIndependentReview', runId);
         throw new AegisRun.AegisControlError('REVIEW-WORKTREE-INVALID',
           'review worktree failed canonical validation', 409);
+      },
+      // The preflight is read-only, so the composition seam records the runId
+      // and then asks the REAL canonical authority. The route therefore behaves
+      // identically whether or not this seam is supplied.
+      prepareIndependentReview(runId) {
+        record('prepareIndependentReview', runId);
+        return AegisRun.prepareIndependentReview(runId);
       },
     };
     const launchedWorkers = [];
@@ -1811,6 +2347,14 @@ async function runApiSuite() {
 
     await atest('API RED: unauthenticated POST /api/review-bind is 401', async () => {
       const r = await post(PORT, '/api/review-bind', {
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: 'RUN-20260825-deadbeef' }),
+      });
+      assert.strictEqual(r.status, 401);
+    });
+
+    await atest('API RED: unauthenticated POST /api/review-preflight is 401', async () => {
+      const r = await post(PORT, '/api/review-preflight', {
         headers: { 'content-type': 'application/json', origin: ORIGIN },
         body: JSON.stringify({ runId: 'RUN-20260825-deadbeef' }),
       });
@@ -2235,6 +2779,69 @@ async function runApiSuite() {
         `canonical binder code was not preserved: ${JSON.stringify(parsed)}`);
       assert.strictEqual(JSON.parse(fs.readFileSync(runFile, 'utf8')).state, 'CHECKS_PASSED',
         'a refused review bind advanced run state');
+    });
+
+    // The canonical read-only preflight, over HTTP, against the real
+    // aegis-run authority: a run that has not reached CHECKS_PASSED is a
+    // readable REFUSED reading, and reading it changes nothing.
+    await atest('authenticated POST /api/review-preflight reads readiness without launching or mutating anything', async () => {
+      const intake = await post(PORT, '/api/objective', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ objective: 'review preflight readiness proof' }),
+      });
+      assert.strictEqual(intake.status, 200, intake.body);
+      const preflightRunId = JSON.parse(intake.body).runId;
+      const runFile = path.join(runsDir, `${preflightRunId}.json`);
+      const runBefore = fs.readFileSync(runFile, 'utf8');
+      const ledgerBefore = fs.readFileSync(ledger, 'utf8');
+
+      for (const key of ['model', 'reviewer', 'packet', 'spendUsd', 'command', 'verdict']) {
+        const injected = await post(PORT, '/api/review-preflight', {
+          headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+          body: JSON.stringify({ runId: preflightRunId, [key]: 'caller-controlled' }),
+        });
+        assert.strictEqual(injected.status, 400, `${key} was not refused: ${injected.body}`);
+        assert.strictEqual(JSON.parse(injected.body).error.code, 'INVALID_REQUEST');
+      }
+
+      const r = await post(PORT, '/api/review-preflight', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: preflightRunId }),
+      });
+      assert.strictEqual(r.status, 200, r.body);
+      const parsed = JSON.parse(r.body);
+      assert.strictEqual(parsed.runId, preflightRunId);
+      assert.strictEqual(parsed.state, 'INTAKE_RECORDED');
+      assert.strictEqual(parsed.status, 'REFUSED');
+      assert.strictEqual(parsed.reasonCode, 'REVIEW-WRONG-STATE');
+      assert.strictEqual(parsed.nextAction, 'none');
+      assert.strictEqual(parsed.mutations, 'NONE');
+      assert.deepStrictEqual(parsed.pendingReviewers, []);
+      assert.strictEqual(parsed.subjectSha256, null);
+      assert.strictEqual(parsed.hostContainment, null);
+      assert.ok(!/CHECKS_PASSED, run is|Users|worktree/.test(r.body),
+        `the preflight echoed a canonical generated message: ${r.body}`);
+
+      assert.strictEqual(fs.readFileSync(runFile, 'utf8'), runBefore,
+        'a read-only review preflight mutated the run record');
+      assert.strictEqual(fs.readFileSync(ledger, 'utf8'), ledgerBefore,
+        'a read-only review preflight wrote a lifecycle event');
+
+      const unknown = await post(PORT, '/api/review-preflight', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: 'RUN-20260825-deadbeef' }),
+      });
+      assert.strictEqual(unknown.status, 404, unknown.body);
+      assert.deepStrictEqual(JSON.parse(unknown.body), { error: { code: 'RUN_NOT_FOUND',
+        message: 'No run with that identifier exists.' } });
+
+      const malformedId = await post(PORT, '/api/review-preflight', {
+        headers: { authorization: 'Bearer ' + API_TOKEN, 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ runId: '../../etc/passwd' }),
+      });
+      assert.strictEqual(malformedId.status, 400, malformedId.body);
+      assert.deepStrictEqual(JSON.parse(malformedId.body), { error: { code: 'INVALID_RUN_ID',
+        message: 'runId is not a canonical AEGIS run identifier.' } });
     });
 
     await atest('API RED: a runId route for a nonexistent run maps to a stable 404', async () => {
