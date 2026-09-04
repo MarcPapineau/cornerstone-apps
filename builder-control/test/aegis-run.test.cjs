@@ -72,6 +72,10 @@ const HOST_PROOF_ONLY = process.argv.slice(2).includes('--host-proof-only');
 // no framework and no pattern matching: the selected case names are a frozen
 // literal list below, and every one of them must still run.
 const REVIEW_ADMISSION_ONLY = process.argv.slice(2).includes('--review-admission-only');
+// The same fixed-purpose shape for the step 10 checkpoint proofs. It selects a
+// frozen literal list of case names and nothing else; it is a subset, never a
+// gate, and it claims nothing about the rest of the suite.
+const CHECKPOINT_ONLY = process.argv.slice(2).includes('--checkpoint-only');
 
 function assertIsolatedRepositoryMarker() {
   const marker = process.env.AEGIS_TEST_ISOLATED_REPOSITORY;
@@ -126,7 +130,7 @@ function runInDisposableExactRepository() {
       checkedTestCommand('publish canonical untracked subject intent', 'git',
         ['add', '-N', '--', relative], { cwd: repo });
     }
-    const frozenReviewFixtures = HOST_ONLY || REVIEW_ADMISSION_ONLY ? [] : [
+    const frozenReviewFixtures = HOST_ONLY || REVIEW_ADMISSION_ONLY || CHECKPOINT_ONLY ? [] : [
       'builder-control/review-raw/20260828220306-grok.txt',
       'builder-control/review-raw/20260829021134-grok.txt',
     ];
@@ -154,6 +158,7 @@ function runInDisposableExactRepository() {
       ...(HOST_ONLY ? ['--host-only'] : []),
       ...(HOST_PROOF_ONLY ? ['--host-proof-only'] : []),
       ...(REVIEW_ADMISSION_ONLY ? ['--review-admission-only'] : []),
+      ...(CHECKPOINT_ONLY ? ['--checkpoint-only'] : []),
     ], {
       cwd: repo,
       env: { ...process.env, AEGIS_TEST_ISOLATED_REPOSITORY: isolatedRoot },
@@ -302,10 +307,29 @@ const REVIEW_ADMISSION_CASES = Object.freeze([
   'review request: a failed cleanup neither escapes nor reports a freed hold',
 ]);
 const selectedReviewAdmissionCases = new Set();
+// The exact cases --checkpoint-only selects: the existing step 10 checkpoint
+// proof and checkpointCandidateProblem cases, plus the new proofs for the
+// shared CLI/internal checkpoint authority. Same rule as above — a subset that
+// must never be reported as full coverage.
+const CHECKPOINT_CASES = Object.freeze([
+  'STEP 10: checkpoint consumes authenticated prerequisites and records a real rollback point while restoration stays deferred',
+  'STEP 9 gates STEP 10: a checkpoint over a drifted run is refused',
+  'checkpoint candidate accepts one clean descendant containing the exact reviewed subject',
+  'checkpoint candidate RED: dirty tree, unrelated HEAD, or post-bind subject mutation are refused',
+  'checkpoint callable: one internal run-id-only call refuses a dirty subject, then records the same governed checkpoint the CLI records',
+  'checkpoint before independent review: callable and CLI refuse identically and mutate nothing',
+  'checkpoint: the CLI and the internal callable are one authority with one refusal vocabulary',
+  'checkpoint callable is internal only: it carries no host or browser surface of its own',
+]);
+const selectedCheckpointCases = new Set();
 function executeTest(n, fn) {
   if (REVIEW_ADMISSION_ONLY) {
     if (!REVIEW_ADMISSION_CASES.includes(n)) return;
     selectedReviewAdmissionCases.add(n);
+  }
+  if (CHECKPOINT_ONLY) {
+    if (!CHECKPOINT_CASES.includes(n)) return;
+    selectedCheckpointCases.add(n);
   }
   try {
     const result = fn();
@@ -542,7 +566,15 @@ test('RED: absent transcripts render UNAVAILABLE, not zero cost', () => {
 // because an isolated worktree sits at the base commit and committing to the
 // product branch is forbidden. A disposable linked worktree keeps the fixture
 // in the canonical repository while leaving the product branch untouched.
-test('STEP 10: checkpoint consumes authenticated prerequisites and records a real rollback point while restoration stays deferred', () => {
+//
+// Those prerequisites are expensive and identical for every checkpoint proof: a
+// linked worktree at the canonical HEAD, a run driven to REVIEW_BOUND through
+// REAL transitions the watchdog can corroborate against a temp ledger, and one
+// persisted canonical check receipt bound to that exact subject. Building them
+// once, here, is what lets the CLI proof and the internal-callable proof consume
+// the SAME prerequisites instead of two fixtures that could quietly disagree
+// about what was proven.
+function createCheckpointFixture() {
   const TMP = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-cp-'));
   const repo = path.join(TMP, 'repo');
   const runsDir = path.join(TMP, 'runs');
@@ -616,6 +648,7 @@ test('STEP 10: checkpoint consumes authenticated prerequisites and records a rea
   const subject = JSON.parse(subjectRun.stdout);
   assert.ok(subject.subjectPaths.length > 0, 'fixture subject is empty');
   const packetPath = path.join(ROOT, seed.packet);
+  const packetSha256 = crypto.createHash('sha256').update(fs.readFileSync(packetPath)).digest('hex');
   const packet = JSON.parse(fs.readFileSync(packetPath, 'utf8'));
   const commands = (packet.testsRequired || []).filter((command) => {
     const tokens = String(command).trim().split(/\s+/);
@@ -623,7 +656,7 @@ test('STEP 10: checkpoint consumes authenticated prerequisites and records a rea
   });
   const receiptBody = {
     schemaVersion: 1, authority: 'aegis-run.cjs runChecks', runId,
-    packet: { path: seed.packet, sha256: crypto.createHash('sha256').update(fs.readFileSync(packetPath)).digest('hex') },
+    packet: { path: seed.packet, sha256: packetSha256 },
     subject: { subjectSha256: subject.subjectSha256, subjectPaths: subject.subjectPaths, diffBytes: subject.diffBytes, range: subject.range },
     startedAt: '2026-08-25T06:01:00Z', completedAt: '2026-08-25T06:02:00Z', complete: true, outcome: 'PASS',
     total: commands.length, passed: commands.length,
@@ -631,7 +664,7 @@ test('STEP 10: checkpoint consumes authenticated prerequisites and records a rea
     ...(Array.isArray(packet.hostContainmentRequired) && packet.hostContainmentRequired.length ? {
       hostContainment: passingHostContainmentReceipt(runId, {
         path: seed.packet,
-        sha256: crypto.createHash('sha256').update(fs.readFileSync(packetPath)).digest('hex'),
+        sha256: packetSha256,
       }, {
         subjectSha256: subject.subjectSha256,
         subjectPaths: subject.subjectPaths,
@@ -658,59 +691,351 @@ test('STEP 10: checkpoint consumes authenticated prerequisites and records a rea
   `], { cwd: ROOT, encoding: 'utf8', env });
   assert.strictEqual(persistReceipt.status, 0, persistReceipt.stderr);
 
-  // The browser/run authority cannot manufacture a commit. The reviewed
-  // working-tree bytes must first be committed through the approved external
-  // narrow-commit path, and a premature checkpoint stays REVIEW_BOUND.
-  const precommit = exec(['--checkpoint', runId]);
-  assert.strictEqual(precommit.status, 3,
-    `dirty reviewed subject unexpectedly checkpointed: ${precommit.stderr || precommit.stdout}`);
-  assert.match(`${precommit.stderr}\n${precommit.stdout}`, /CHECKPOINT-DIRTY-TREE/);
-  assert.match(`${precommit.stderr}\n${precommit.stdout}`, /external narrow-commit path/);
-  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8')).state,
-    'REVIEW_BOUND');
+  return Object.freeze({
+    TMP, repo, runsDir, cpDir, ledger, env, runId, branch, reviewedBase,
+    fixtureRel, fixtureFile, subject, receipt, packetRel: seed.packet, packetSha256,
+    objective: seed.objective, g, exec,
+    head: () => g(['rev-parse', 'HEAD']).stdout.trim(),
+    tree: () => g(['rev-parse', 'HEAD^{tree}']).stdout.trim(),
+    readRun: () => JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8')),
+    // The ONLY way the reviewed bytes become a commit. Neither entry point
+    // creates one, which is exactly what the dirty-tree refusal proves.
+    commitReviewedSubject: () => {
+      g(['add', '--', fixtureRel]);
+      g(['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=AEGIS Fixture',
+        'commit', '-q', '-m', 'reviewed good']);
+    },
+    assertNoLeakedClaim: (when) => {
+      const leaked = fs.readdirSync(runsDir).filter((name) => name.includes('.launch.lock'));
+      assert.deepStrictEqual(leaked, [],
+        `the per-run checkpoint claim was left behind ${when}: ${leaked.join(', ')}`);
+    },
+    finish: () => { process.removeListener('exit', cleanup); cleanup(); },
+  });
+}
 
-  g(['add', '--', fixtureRel]);
-  g(['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=AEGIS Fixture',
-    'commit', '-q', '-m', 'reviewed good']);
-  const goodCommit = g(['rev-parse', 'HEAD']).stdout.trim();
+// One bounded call into the runtime with the fixture's isolated directories.
+// The module resolves RUNS_DIR/CHECKPOINTS_DIR/LEDGER_FILE from process.env at
+// require time and this file has already required it against the real
+// directories, so an internal callable can only be exercised honestly in a
+// child process — the same isolation withIsolatedRuntime uses.
+const CALL_MARKER = 'AEGIS-CALL:';
+function callInIsolatedRuntime(env, expression) {
+  const r = spawnSync('node', ['-e', `
+    const R = require(${JSON.stringify(CLI)});
+    let answer;
+    try { answer = { ok: true, value: (${expression}) }; }
+    catch (e) {
+      answer = { ok: false, error: e.constructor.name, code: e.code, httpStatus: e.httpStatus, message: e.message };
+    }
+    process.stdout.write(${JSON.stringify(CALL_MARKER)} + JSON.stringify(answer));
+  `], { cwd: ROOT, encoding: 'utf8', env });
+  const at = (r.stdout || '').indexOf(CALL_MARKER);
+  assert.notStrictEqual(at, -1, `the callable driver produced no answer: ${r.stderr || r.stdout}`);
+  return {
+    ...JSON.parse(r.stdout.slice(at + CALL_MARKER.length)),
+    driverStatus: r.status, stdout: r.stdout, stderr: r.stderr,
+  };
+}
 
-  // CHECKPOINT — must succeed and name the real commit.
-  const cp = exec(['--checkpoint', runId]);
-  assert.strictEqual(cp.status, 0, `checkpoint failed: ${cp.stderr || cp.stdout}`);
-  const after = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
-  assert.strictEqual(after.state, 'CHECKPOINTED');
-  assert.strictEqual(after.checkpoint.rollbackPoint, goodCommit,
-    'the checkpoint must record the ACTUAL commit, not a placeholder');
-  assert.ok(fs.existsSync(path.join(cpDir, `${after.checkpoint.checkpointId}.json`)),
-    'the checkpoint record must be written to disk');
+test('STEP 10: checkpoint consumes authenticated prerequisites and records a real rollback point while restoration stays deferred', () => {
+  const f = createCheckpointFixture();
+  try {
+    // The browser/run authority cannot manufacture a commit. The reviewed
+    // working-tree bytes must first be committed through the approved external
+    // narrow-commit path, and a premature checkpoint stays REVIEW_BOUND.
+    const precommit = f.exec(['--checkpoint', f.runId]);
+    assert.strictEqual(precommit.status, 3,
+      `dirty reviewed subject unexpectedly checkpointed: ${precommit.stderr || precommit.stdout}`);
+    assert.match(`${precommit.stderr}\n${precommit.stdout}`, /CHECKPOINT-DIRTY-TREE/);
+    assert.match(`${precommit.stderr}\n${precommit.stdout}`, /external narrow-commit path/);
+    assert.strictEqual(f.readRun().state, 'REVIEW_BOUND');
 
-  // Now diverge — the situation a rollback exists for.
-  fs.writeFileSync(fixtureFile, 'broken state\n');
-  g(['add', '--', fixtureRel]);
-  g(['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=AEGIS Fixture',
-    'commit', '-q', '-m', 'broken']);
-  const brokenCommit = g(['rev-parse', 'HEAD']).stdout.trim();
-  assert.notStrictEqual(brokenCommit, goodCommit, 'the fixture did not actually diverge');
-  assert.strictEqual(fs.readFileSync(fixtureFile, 'utf8'), 'broken state\n');
+    f.commitReviewedSubject();
+    const goodCommit = f.head();
 
-  // ROLLBACK — the beta exposes the authenticated point but deliberately
-  // refuses destructive reset until the dedicated post-beta control packet.
-  const rb = exec(['--rollback', runId]);
-  assert.strictEqual(rb.status, 3, `rollback was not refused: ${rb.stderr || rb.stdout}`);
-  assert.match(rb.stderr, /ROLLBACK-DEFERRED/);
-  const head = g(['rev-parse', 'HEAD']).stdout.trim();
-  assert.strictEqual(head, brokenCommit, 'a refused beta rollback mutated HEAD');
-  assert.strictEqual(fs.readFileSync(fixtureFile, 'utf8'), 'broken state\n',
-    'a refused beta rollback mutated working-tree content');
+    // CHECKPOINT — must succeed and name the real commit.
+    const cp = f.exec(['--checkpoint', f.runId]);
+    assert.strictEqual(cp.status, 0, `checkpoint failed: ${cp.stderr || cp.stdout}`);
+    const after = f.readRun();
+    assert.strictEqual(after.state, 'CHECKPOINTED');
+    assert.strictEqual(after.checkpoint.rollbackPoint, goodCommit,
+      'the checkpoint must record the ACTUAL commit, not a placeholder');
+    assert.ok(fs.existsSync(path.join(f.cpDir, `${after.checkpoint.checkpointId}.json`)),
+      'the checkpoint record must be written to disk');
+    // The CLI still prints its own three lines from the shared authority's
+    // coordinates, and still exits 0.
+    assert.strictEqual(cp.stdout,
+      `checkpoint ${after.checkpoint.checkpointId}\n  rollback point: ${goodCommit.slice(0, 12)}\n` +
+      `  checks: ${after.checkpoint.checks.passed}/${after.checkpoint.checks.total}\n`,
+      'the CLI checkpoint output changed');
+    f.assertNoLeakedClaim('after a CLI checkpoint');
 
-  const final = JSON.parse(fs.readFileSync(path.join(runsDir, `${runId}.json`), 'utf8'));
-  assert.strictEqual(final.state, 'CHECKPOINTED');
-  assert.strictEqual(final.rollback, undefined);
-  assert.strictEqual(final.checkpoint.rollbackPoint, goodCommit,
-    'the recoverable point must remain visible even while restoration is deferred');
+    // Now diverge — the situation a rollback exists for.
+    fs.writeFileSync(f.fixtureFile, 'broken state\n');
+    f.g(['add', '--', f.fixtureRel]);
+    f.g(['-c', 'user.email=fixture@example.invalid', '-c', 'user.name=AEGIS Fixture',
+      'commit', '-q', '-m', 'broken']);
+    const brokenCommit = f.head();
+    assert.notStrictEqual(brokenCommit, goodCommit, 'the fixture did not actually diverge');
+    assert.strictEqual(fs.readFileSync(f.fixtureFile, 'utf8'), 'broken state\n');
 
-  process.removeListener('exit', cleanup);
-  cleanup();
+    // ROLLBACK — the beta exposes the authenticated point but deliberately
+    // refuses destructive reset until the dedicated post-beta control packet.
+    const rb = f.exec(['--rollback', f.runId]);
+    assert.strictEqual(rb.status, 3, `rollback was not refused: ${rb.stderr || rb.stdout}`);
+    assert.match(rb.stderr, /ROLLBACK-DEFERRED/);
+    assert.strictEqual(f.head(), brokenCommit, 'a refused beta rollback mutated HEAD');
+    assert.strictEqual(fs.readFileSync(f.fixtureFile, 'utf8'), 'broken state\n',
+      'a refused beta rollback mutated working-tree content');
+
+    const final = f.readRun();
+    assert.strictEqual(final.state, 'CHECKPOINTED');
+    assert.strictEqual(final.rollback, undefined);
+    assert.strictEqual(final.checkpoint.rollbackPoint, goodCommit,
+      'the recoverable point must remain visible even while restoration is deferred');
+  } finally { f.finish(); }
+});
+
+// ── the internal run-id-only checkpoint callable ───────────────────────────
+// The gap this closes: a later dashboard control needs the governed checkpoint
+// answer, and the only way to get it was to shell out to the CLI and read
+// printed text. The risk in closing it is a SECOND checkpoint path with softer
+// gates, so every proof below is aimed at that: same authority, same refusals,
+// same evidence chain, no commit, and nothing exposed to a browser.
+test('checkpoint callable: one internal run-id-only call refuses a dirty subject, then records the same governed checkpoint the CLI records', () => {
+  const f = createCheckpointFixture();
+  try {
+    // A callable cannot buy what the CLI is refused. The reviewed bytes are
+    // still uncommitted, and this call creates no commit to fix that.
+    const dirty = callInIsolatedRuntime(f.env, `R.checkpointRun(${JSON.stringify(f.runId)})`);
+    assert.strictEqual(dirty.ok, false, 'the callable checkpointed an uncommitted reviewed subject');
+    assert.strictEqual(dirty.error, 'AegisControlError');
+    assert.strictEqual(dirty.code, 'CHECKPOINT_DIRTY_TREE');
+    assert.strictEqual(dirty.httpStatus, 409);
+    assert.match(dirty.message, /external narrow-commit path/);
+    assert.strictEqual(f.readRun().state, 'REVIEW_BOUND', 'a refused callable moved the run');
+    assert.strictEqual(f.readRun().checkpoint, null, 'a refused callable recorded a checkpoint');
+    assert.ok(!fs.existsSync(f.cpDir) || fs.readdirSync(f.cpDir).length === 0,
+      'a refused callable wrote a checkpoint record');
+    assert.strictEqual(f.head(), f.reviewedBase, 'the callable created a commit');
+    f.assertNoLeakedClaim('after a refused callable');
+
+    f.commitReviewedSubject();
+    const goodCommit = f.head();
+    const done = callInIsolatedRuntime(f.env, `R.checkpointRun(${JSON.stringify(f.runId)})`);
+    assert.strictEqual(done.ok, true, `the callable refused: ${done.code} — ${done.message}`);
+    const v = done.value;
+
+    // Structured SAFE coordinates: identifiers, commit-ish values and digests
+    // that are already published in the checkpoint record. No worktree path, no
+    // checkpoint file path, no subject path list and no operator text.
+    assert.deepStrictEqual(Object.keys(v).sort(), [
+      'action', 'checkReceiptSha256', 'checkpointId', 'checks', 'createdAt', 'digest',
+      'nextAction', 'packet', 'reviewedBase', 'rollbackPoint', 'runId', 'state', 'subject', 'tree',
+    ], 'the callable answer gained or lost a coordinate');
+    assert.strictEqual(v.runId, f.runId);
+    assert.strictEqual(v.state, 'CHECKPOINTED');
+    assert.strictEqual(v.action, 'checkpoint');
+    assert.strictEqual(v.nextAction, 'rollback remains deferred');
+    assert.strictEqual(v.rollbackPoint, goodCommit,
+      'the callable must name the ACTUAL commit, not a placeholder');
+    assert.strictEqual(v.reviewedBase, f.reviewedBase);
+    assert.strictEqual(v.tree, f.tree());
+
+    // The evidence chain the gates checked is the evidence chain reported.
+    assert.strictEqual(v.checkReceiptSha256, f.receipt.receiptSha256);
+    assert.deepStrictEqual(v.packet, { path: f.packetRel, sha256: f.packetSha256 });
+    assert.strictEqual(v.subject.subjectSha256, f.subject.subjectSha256);
+    assert.strictEqual(v.subject.pathCount, f.subject.subjectPaths.length);
+    assert.strictEqual(v.subject.diffBytes, f.subject.diffBytes);
+    assert.strictEqual(v.subject.reviewedRange, f.subject.range);
+    assert.strictEqual(v.subject.committedRange, `${f.reviewedBase}..${goodCommit}`,
+      'the committed subject coordinates must name the reviewed base and the real commit');
+
+    // The answer is the record on disk, not a parallel story about it.
+    const record = JSON.parse(fs.readFileSync(path.join(f.cpDir, `${v.checkpointId}.json`), 'utf8'));
+    assert.strictEqual(record.checkpointId, v.checkpointId);
+    assert.strictEqual(record.digest, v.digest);
+    assert.strictEqual(record.rollbackPoint, v.rollbackPoint);
+    assert.strictEqual(record.checkReceiptSha256, v.checkReceiptSha256);
+    const saved = f.readRun();
+    assert.strictEqual(saved.state, 'CHECKPOINTED');
+    assert.strictEqual(saved.checkpoint.checkpointId, v.checkpointId);
+    assert.strictEqual(saved.checkpoint.digest, v.digest);
+
+    const serialized = JSON.stringify(v);
+    for (const leak of [f.repo, f.runsDir, f.cpDir, f.ledger, f.fixtureRel, f.objective]) {
+      assert.ok(!serialized.includes(leak), `the callable answer leaked ${leak}`);
+    }
+    // Printing belongs to the CLI. The shared authority wrote nothing to stdout.
+    assert.ok(done.stdout.startsWith(CALL_MARKER),
+      `the shared checkpoint authority printed to stdout: ${done.stdout}`);
+    f.assertNoLeakedClaim('after a successful callable checkpoint');
+
+    // PARITY on the same run: both entry points now meet the same already
+    // CHECKPOINTED state and give the same refusal under the paired codes.
+    const again = callInIsolatedRuntime(f.env, `R.checkpointRun(${JSON.stringify(f.runId)})`);
+    assert.strictEqual(again.ok, false, 'the callable checkpointed the same run twice');
+    assert.strictEqual(again.code, 'INVALID_CHECKPOINT');
+    const cliAgain = f.exec(['--checkpoint', f.runId]);
+    assert.strictEqual(cliAgain.status, 3, `the CLI checkpointed the same run twice: ${cliAgain.stdout}`);
+    assert.match(cliAgain.stderr, /rule {2}: ILLEGAL-TRANSITION/);
+    assert.ok(cliAgain.stderr.includes(again.message),
+      'the CLI and the callable reported different refusals for the same run');
+    assert.strictEqual(cliAgain.stdout, '', 'a refused CLI checkpoint printed a success line');
+    assert.strictEqual(f.readRun().checkpoint.checkpointId, v.checkpointId,
+      'a refused second checkpoint replaced the recorded one');
+    f.assertNoLeakedClaim('after paired refusals');
+  } finally { f.finish(); }
+});
+
+test('checkpoint before independent review: callable and CLI refuse identically and mutate nothing', () => {
+  const TMP = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-cp-pre-'));
+  const runsDir = path.join(TMP, 'runs');
+  const cpDir = path.join(TMP, 'checkpoints');
+  const ledger = path.join(TMP, 'ledger.json');
+  fs.mkdirSync(runsDir, { recursive: true });
+  fs.writeFileSync(ledger, '[]\n');
+  const env = { ...process.env, AEGIS_RUNS_DIR: runsDir, AEGIS_CHECKPOINTS_DIR: cpDir, AEGIS_LEDGER_FILE: ledger };
+  try {
+    const runId = 'RUN-20260825-b2c3d4e5';
+    const runFile = path.join(runsDir, `${runId}.json`);
+    fs.writeFileSync(runFile, JSON.stringify({
+      runId, createdAt: '2026-08-25T06:00:00Z', updatedAt: '2026-08-25T06:00:00Z',
+      state: 'CHECKS_PASSED', objective: 'pre-review checkpoint refusal',
+      packet: null, baseCommit: null, worktree: null,
+      build: { exit: 0 }, checks: { passed: 3, total: 3 },
+      checkpoint: null, corrections: 0, transitions: [],
+    }, null, 2));
+    const before = fs.readFileSync(runFile, 'utf8');
+
+    const called = callInIsolatedRuntime(env, `R.checkpointRun(${JSON.stringify(runId)})`);
+    assert.strictEqual(called.ok, false, 'a checkpoint was recorded before independent review bound');
+    assert.strictEqual(called.error, 'AegisControlError');
+    assert.strictEqual(called.code, 'INVALID_CHECKPOINT');
+    assert.strictEqual(called.httpStatus, 409);
+    assert.match(called.message, /checkpoint requires REVIEW_BOUND, run is CHECKS_PASSED/);
+
+    const cli = spawnSync('node', [CLI, '--checkpoint', runId], { cwd: ROOT, encoding: 'utf8', env });
+    assert.strictEqual(cli.status, 3, `the CLI did not refuse: ${cli.stdout}${cli.stderr}`);
+    assert.match(cli.stderr, /rule {2}: ILLEGAL-TRANSITION/);
+    assert.ok(cli.stderr.includes(called.message),
+      'the CLI and the callable reported different pre-review refusals');
+    assert.strictEqual(cli.stdout, '', 'a refused checkpoint printed a success line');
+
+    // A malformed or unknown id is refused BEFORE a claim directory is ever
+    // published, and with the same paired codes.
+    const badId = callInIsolatedRuntime(env, "R.checkpointRun('not-a-run')");
+    assert.strictEqual(badId.code, 'INVALID_RUN_ID');
+    assert.strictEqual(badId.httpStatus, 400);
+    assert.match(spawnSync('node', [CLI, '--checkpoint', 'not-a-run'],
+      { cwd: ROOT, encoding: 'utf8', env }).stderr, /rule {2}: BAD-RUN-ID/);
+    const missing = callInIsolatedRuntime(env, "R.checkpointRun('RUN-20260825-ffffffff')");
+    assert.strictEqual(missing.code, 'RUN_NOT_FOUND');
+    assert.strictEqual(missing.httpStatus, 404);
+    assert.match(spawnSync('node', [CLI, '--checkpoint', 'RUN-20260825-ffffffff'],
+      { cwd: ROOT, encoding: 'utf8', env }).stderr, /rule {2}: NO-SUCH-RUN/);
+
+    assert.strictEqual(fs.readFileSync(runFile, 'utf8'), before,
+      'a refused checkpoint mutated the canonical run record');
+    assert.ok(!fs.existsSync(cpDir) || fs.readdirSync(cpDir).length === 0,
+      'a refused checkpoint wrote a checkpoint record');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(ledger, 'utf8')), [],
+      'a refused checkpoint appended a canonical ledger entry');
+    const leaked = fs.readdirSync(runsDir).filter((name) => name.includes('.launch.lock'));
+    assert.deepStrictEqual(leaked, [],
+      `a refused checkpoint left a per-run claim behind: ${leaked.join(', ')}`);
+  } finally { fs.rmSync(TMP, { recursive: true, force: true }); }
+});
+
+test('checkpoint: the CLI and the internal callable are one authority with one refusal vocabulary', () => {
+  const src = fs.readFileSync(CLI, 'utf8');
+  const cmd = src.slice(src.indexOf('function cmdCheckpoint(args)'), src.indexOf('function cmdRollback'));
+  assert.match(cmd, /checkpointRun\(args\.runId\)/, 'the CLI must enter through the shared callable');
+  for (const gate of ['REVIEW_BOUND', 'validPassedChecks', 'watchdog(', 'transition(',
+    'checkpointCandidateProblem', 'git(', 'saveRun(', 'CHECKPOINTS_DIR']) {
+    assert.ok(!cmd.includes(gate),
+      `the CLI entry point re-implements ${gate}; a checkpoint must have exactly one authority`);
+  }
+  // The pre-existing claimed authority keeps its name and its position ahead of
+  // cmdRollback, because the canonical beta snapshot reads exactly that slice.
+  const claimedAt = src.indexOf('function cmdCheckpointClaimed(run)');
+  assert.notStrictEqual(claimedAt, -1, 'the pre-existing claimed checkpoint authority is missing');
+  assert.ok(claimedAt < src.indexOf('function cmdRollback'),
+    'the claimed authority must stay inside the canonical cmdCheckpoint..cmdRollback slice');
+  const claimed = src.slice(claimedAt, src.indexOf('function checkpointRun(runId)'));
+  assert.ok(claimed.length > 0, 'the claimed checkpoint authority is missing');
+  assert.ok(!/console\.log/.test(claimed),
+    'the shared authority must not print; output belongs to the CLI');
+  assert.strictEqual(src.split('cmdCheckpointClaimed(').length - 1, 2,
+    'the claimed checkpoint authority must have exactly one definition and one call site');
+  // Every gate the pre-existing authority enforced is still enforced here.
+  for (const gate of ['ILLEGAL-TRANSITION', 'NO-PASSING-CHECKS', 'WATCHDOG-REFUSED',
+    'CHECKPOINT-EVIDENCE-INVALID', 'CHECKPOINT-DIRTY-TREE', 'NO-ROLLBACK-POINT',
+    'CHECKPOINT-HEAD-UNRELATED', 'CHECKPOINT-SUBJECT-MISMATCH', 'CHECKPOINT-TREE-INVALID']) {
+    assert.ok(claimed.includes(gate), `the shared authority dropped the ${gate} refusal`);
+  }
+  assert.match(claimed, /const w = watchdog\(run\);/, 'the shared authority must consult the watchdog');
+  // The claimed authority never creates the commit it checkpoints.
+  assert.ok(!/'commit'/.test(claimed), 'the checkpoint authority must never create a commit');
+
+  const wrapper = src.slice(src.indexOf('function checkpointRun(runId)'),
+    src.indexOf('function cmdCheckpoint(args)'));
+  assert.match(wrapper, /acquireRunLaunchClaim\(runId, 3000\)/,
+    'per-run claim ownership must stay in the shared wrapper');
+  assert.match(wrapper, /releaseRunLaunchClaim\(claim\)/,
+    'claim cleanup must stay in the shared wrapper');
+  assert.match(wrapper, /CHECKPOINT_CLAIM_NOT_RELEASED/,
+    'a failed claim cleanup must not be answered as a success');
+  assert.ok(wrapper.indexOf('loadRunForControl(runId)') < wrapper.indexOf('acquireRunLaunchClaim('),
+    'a malformed or unknown id must be refused before a claim is published');
+  assert.ok(!/console\.log/.test(wrapper), 'the shared wrapper must not print');
+
+  // The two vocabularies are one table read in both directions, so neither
+  // entry point can grow a refusal the other cannot express.
+  assert.deepStrictEqual(R.CHECKPOINT_CLI_CODES, Object.fromEntries(
+    Object.entries(R.CHECKPOINT_REFUSAL_CODES).map(([cli, control]) => [control, cli])));
+  assert.strictEqual(Object.keys(R.CHECKPOINT_CLI_CODES).length,
+    Object.keys(R.CHECKPOINT_REFUSAL_CODES).length,
+    'two CLI refusals collapsed onto one control code');
+  for (const raised of claimed.match(/new RunError\('([A-Z0-9-]+)'/g) || []) {
+    const code = raised.slice(14, -1);
+    assert.ok(R.CHECKPOINT_REFUSAL_CODES[code],
+      `${code} escapes the checkpoint refusal table untranslated`);
+  }
+});
+
+test('checkpoint callable is internal only: it carries no host or browser surface of its own', () => {
+  const src = fs.readFileSync(CLI, 'utf8');
+  // Scope: the checkpoint authority and its one callable wrapper. The claim is
+  // about THIS function, not about which endpoints exist beside it. Freezing
+  // the whole route table would make an approved packet that adds a checkpoint
+  // endpoint fail here for the wrong reason; what must hold either way is the
+  // direction of the dependency — a host route may call the callable, and the
+  // callable must never reach back for a host or browser surface.
+  const callable = src.slice(src.indexOf('function cmdCheckpointClaimed(run)'),
+    src.indexOf('function cmdRollback'));
+  assert.ok(callable.length > 0, 'the checkpoint callable slice is missing');
+  for (const surface of ['hosting/server', 'API_POST_ROUTES', 'createServer', 'writeHead',
+    'req.', 'res.', '/api/']) {
+    assert.ok(!callable.includes(surface),
+      `the checkpoint callable reaches for ${surface}; a host surface inside the callable is dispatch, not an internal call`);
+  }
+  // It is entered by a run id and nothing else, so no caller — the CLI today or
+  // a host route later — can hand it request-shaped input.
+  assert.strictEqual(typeof R.checkpointRun, 'function');
+  assert.strictEqual(R.checkpointRun.length, 1, 'the callable must take exactly a run id');
+  assert.match(src, /function checkpointRun\(runId\) \{/,
+    'the callable must keep its run-id-only signature');
+  // A host may one day call this callable; it must never own a second copy of
+  // the authority. That stays true whether or not a route exists today.
+  const hosting = fs.readFileSync(SERVER, 'utf8');
+  for (const token of ['cmdCheckpointClaimed', 'checkpointCandidateProblem', 'CHECKPOINTS_DIR',
+    'CHECKPOINT-DIRTY-TREE']) {
+    assert.ok(!hosting.includes(token),
+      `the dashboard host re-implements ${token}; a checkpoint must have exactly one authority`);
+  }
 });
 
 test('RED: the runs directory cannot be redirected outside a temp dir', () => {
@@ -1959,7 +2284,8 @@ function createCanonicalReviewWorktreeFixture() {
   // The host-containment suite replays two frozen, non-subject Grok receipts.
   // Mirror them into this disposable worktree exactly as a real governed run
   // does; they remain outside filesAllowed and cannot change the subject hash.
-  const reviewWorktreeFixtures = HOST_ONLY || REVIEW_ADMISSION_ONLY || OUTER_SNAPSHOT ? [] : [
+  const reviewWorktreeFixtures = HOST_ONLY || REVIEW_ADMISSION_ONLY || CHECKPOINT_ONLY ||
+    OUTER_SNAPSHOT ? [] : [
     'builder-control/review-raw/20260828220306-grok.txt',
     'builder-control/review-raw/20260829021134-grok.txt',
   ];
@@ -7449,6 +7775,16 @@ if (REVIEW_ADMISSION_ONLY) {
     process.exitCode = 1;
   }
   console.log(`review-admission subset: ${REVIEW_ADMISSION_CASES.length} selected cases.`);
+}
+if (CHECKPOINT_ONLY) {
+  // A selector that silently dropped a renamed case would report a smaller
+  // green subset, which is exactly the false comfort this switch must not buy.
+  const missing = CHECKPOINT_CASES.filter((name) => !selectedCheckpointCases.has(name));
+  if (missing.length) {
+    console.error(`FAIL checkpoint selector: unmatched case names ${JSON.stringify(missing)}`);
+    process.exitCode = 1;
+  }
+  console.log(`checkpoint subset: ${CHECKPOINT_CASES.length} selected cases.`);
 }
 const failed = process.exitCode ? 'at least 1' : '0';
 console.log(`${passed} passed, ${skipped} skipped, ${failed} failed.`);

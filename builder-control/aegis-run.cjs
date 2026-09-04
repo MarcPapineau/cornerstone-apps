@@ -6823,7 +6823,38 @@ function cmdWatchdog(args) {
 }
 
 // ── step 10: checkpoint + rollback ──────────────────────────────────────────
-function cmdCheckpointClaimed(run, args) {
+// One checkpoint authority with two entry points and no second copy of the
+// gates. The refusals below ARE the checkpoint, so the CLI (--checkpoint) and
+// the internal run-id-only callable both reach this same claimed function; a
+// later dashboard control gets the identical governed answer or it gets a
+// refusal, because there is nowhere else to ask.
+//
+// The two directions of this table are what keep those entry points from
+// drifting into different refusal vocabularies. The CLI codes are the contract
+// operators already read on stderr; the control codes are what a caller that is
+// not a terminal receives. Neither list is authored twice.
+const CHECKPOINT_REFUSAL_CODES = Object.freeze({
+  'BAD-RUN-ID': 'INVALID_RUN_ID',
+  'NO-SUCH-RUN': 'RUN_NOT_FOUND',
+  'ILLEGAL-TRANSITION': 'INVALID_CHECKPOINT',
+  'NO-PASSING-CHECKS': 'CHECKPOINT_UNPROVEN',
+  'WATCHDOG-REFUSED': 'CHECKPOINT_WATCHDOG_REFUSED',
+  'CHECKPOINT-EVIDENCE-INVALID': 'CHECKPOINT_EVIDENCE_INVALID',
+  'CHECKPOINT-DIRTY-TREE': 'CHECKPOINT_DIRTY_TREE',
+  'NO-ROLLBACK-POINT': 'CHECKPOINT_NO_ROLLBACK_POINT',
+  'CHECKPOINT-HEAD-UNRELATED': 'CHECKPOINT_HEAD_UNRELATED',
+  'CHECKPOINT-SUBJECT-MISMATCH': 'CHECKPOINT_SUBJECT_MISMATCH',
+  'CHECKPOINT-TREE-INVALID': 'CHECKPOINT_TREE_INVALID',
+});
+const CHECKPOINT_CLI_CODES = Object.freeze(Object.fromEntries(
+  Object.entries(CHECKPOINT_REFUSAL_CODES).map(([cli, control]) => [control, cli])));
+
+// The pre-existing claimed authority, under its existing name. It decides
+// everything it decided before and relaxes nothing. The only change is that it
+// RETURNS the coordinates it recorded instead of printing them, so a caller
+// that is not a terminal can read the same evidence the CLI prints. Printing
+// and the exit code stay with the CLI, where they belong.
+function cmdCheckpointClaimed(run) {
   // The guard used to also accept CHECKS_PASSED, which contradicted the
   // transition table (CHECKS_PASSED -> CHECKPOINTED is not legal) and would have
   // let a checkpoint skip step 7 entirely. The table is right: review binds
@@ -6923,14 +6954,97 @@ function cmdCheckpointClaimed(run, args) {
   run.checkpoint = cp;
   saveRun(run);
   transition(run, 'CHECKPOINTED', `checkpoint ${cp.checkpointId} at ${rollbackPoint.slice(0, 12)}`);
-  console.log(`checkpoint ${cp.checkpointId}\n  rollback point: ${rollbackPoint.slice(0, 12)}\n  checks: ${cp.checks.passed}/${cp.checks.total}`);
-  return EXIT_PASS;
+  // Read the state back out of the canonical run record rather than asserting
+  // it, and carry only coordinates: identifiers, commit-ish values and digests
+  // that are already published in the checkpoint record. No worktree path, no
+  // checkpoint file path and no subject path list leave this function.
+  const fresh = loadRun(run.runId);
+  return Object.freeze({
+    runId: fresh.runId,
+    state: fresh.state,
+    action: 'checkpoint',
+    checkpointId: cp.checkpointId,
+    createdAt: cp.createdAt,
+    rollbackPoint: cp.rollbackPoint,
+    tree: cp.tree,
+    reviewedBase: cp.reviewedBase,
+    packet: Object.freeze({ path: cp.packet.path, sha256: cp.packet.sha256 }),
+    subject: Object.freeze({
+      subjectSha256: cp.subject.subjectSha256,
+      pathCount: cp.subject.subjectPaths.length,
+      diffBytes: cp.subject.diffBytes,
+      reviewedRange: cp.subject.reviewedRange,
+      committedRange: cp.subject.committedRange,
+    }),
+    checkReceiptSha256: cp.checkReceiptSha256,
+    checks: Object.freeze({ passed: cp.checks.passed, total: cp.checks.total }),
+    digest: cp.digest,
+    nextAction: 'rollback remains deferred',
+  });
+}
+
+/**
+ * The one internal callable. It takes a run id and NOTHING else — no packet,
+ * no subject, no commit, no gate proof and no override — because every one of
+ * those is re-derived under the claim by the authority above. A caller cannot
+ * widen a checkpoint by describing one differently.
+ *
+ * It creates no commit. The approved external narrow-commit path must already
+ * have committed the reviewed subject, and a run whose reviewed bytes are still
+ * uncommitted is refused here exactly as it is on the CLI.
+ *
+ * Only the checkpoint authority's OWN refusals are translated. A failure raised
+ * deeper — a refused ledger append, an unavailable git or subject authority —
+ * propagates as the RunError it is rather than being dressed in a control code
+ * this packet has not proven. There is no HTTP route here to need one.
+ */
+function checkpointRun(runId) {
+  // Preserve the stable malformed/missing-id refusals BEFORE taking a claim, so
+  // a bad id never publishes a lock directory for a run that cannot exist.
+  loadRunForControl(runId);
+  const claim = acquireRunLaunchClaim(runId, 3000);
+  let result;
+  let released = false;
+  try {
+    result = cmdCheckpointClaimed(loadRunForControl(runId));
+  } catch (e) {
+    if (e instanceof RunError && CHECKPOINT_REFUSAL_CODES[e.code]) {
+      const status = { 'BAD-RUN-ID': 400, 'NO-SUCH-RUN': 404 }[e.code] || 409;
+      throw new AegisControlError(CHECKPOINT_REFUSAL_CODES[e.code], e.message, status);
+    }
+    throw e;
+  } finally {
+    // Cleanup stays here, in the shared wrapper, for both entry points. A
+    // release that throws replaces the return value, which is the point: a
+    // checkpoint whose claim ownership is in doubt is not answered as a success.
+    released = releaseRunLaunchClaim(claim);
+  }
+  if (!released) {
+    // The record on disk is real and the transition happened, so the refusal
+    // says so. Reporting "nothing happened" here would be the same lie in the
+    // other direction.
+    throw new AegisControlError('CHECKPOINT_CLAIM_NOT_RELEASED',
+      `checkpoint ${result.checkpointId} was recorded for run ${result.runId}, but this process could not prove it released the per-run claim it took. ` +
+      'Inspect the claim before treating this run as checkpointed and idle.', 409);
+  }
+  return result;
 }
 
 function cmdCheckpoint(args) {
-  const claim = acquireRunLaunchClaim(args.runId, 3000);
-  try { return cmdCheckpointClaimed(loadRun(args.runId), args); }
-  finally { releaseRunLaunchClaim(claim); }
+  let result;
+  try { result = checkpointRun(args.runId); }
+  catch (e) {
+    // The CLI's own surface is RunError (message on stderr, exit 3).
+    // AegisControlError is the internal/control surface; every refusal the
+    // claimed authority raises comes back through the table with its ORIGINAL
+    // CLI code, so --checkpoint keeps printing exactly what it printed before.
+    if (e instanceof AegisControlError) {
+      throw new RunError(CHECKPOINT_CLI_CODES[e.code] || e.code, e.message);
+    }
+    throw e;
+  }
+  console.log(`checkpoint ${result.checkpointId}\n  rollback point: ${result.rollbackPoint.slice(0, 12)}\n  checks: ${result.checks.passed}/${result.checks.total}`);
+  return EXIT_PASS;
 }
 
 function cmdRollback(args) {
@@ -7056,4 +7170,4 @@ Illegal transitions are refused. There is no --force.
   process.exit(code);
 }
 
-module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, prepareIndependentReview, bindIndependentReview, requestIndependentReview, REVIEW_REQUEST_FIELDS, REVIEW_REQUEST_REVIEWERS, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, acquireGlobalReviewHold, releaseGlobalReviewHold, reviewLifecycleProofPermitsRelease, REVIEW_HOLD_HOLDER, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
+module.exports = { STATES, MAX_CORRECTIONS, WORKER_LAUNCH_GRACE_MS, watchdog, REQUIRED_SEQUENCE, dashboardSliceCheckCommands, transition, loadRun, saveRun, listRuns, RunError, AegisControlError, normalizeObjective, createRunFromObjective, prepareRun, startWorker, startGovernedWorker, continueTimedOutBuild, parseTimeoutContinuationCommand, pauseRun, workerCancellationCapability, cancelRun, retryRun, runChecks, automaticDashboardChecksEligibility, runAutomaticDashboardChecks, prepareIndependentReview, bindIndependentReview, requestIndependentReview, REVIEW_REQUEST_FIELDS, REVIEW_REQUEST_REVIEWERS, recordResearchDecision, RESEARCH_DECISIONS, RESEARCH_DECISION_NOTE_PREFIX, updateWorkerAttempt, transitionWorkerAttempt, reconcileWorkerRun, reconcileBuildingRuns, processIdentity, processExistence, processGroupExistence, processGroupMembers, sameProcessIdentity, acquireGlobalWorkerClaim, transferGlobalWorkerClaim, releaseRunLaunchClaim, verifyGlobalWorkerLease, releaseGlobalWorkerLease, acquireGlobalReviewHold, releaseGlobalReviewHold, reviewLifecycleProofPermitsRelease, REVIEW_HOLD_HOLDER, readRunLaunchClaim, globalWorkerLockPath, checkReceiptDigest, hostContainmentReceiptDigest, validateCheckReceipt, validateCompleteCheckReceipt, validatePreHostCheckReceipt, validateHostContainmentReceipt, validateCompleteHostContainmentReceipt, persistCanonicalCheckReceipt, persistCanonicalPreHostCheckReceipt, loadCanonicalCheckReceipt, loadCanonicalPreHostCheckReceipt, buildHostProofContext, validateHostProofEvidence, checkpointCandidateProblem, checkpointRun, CHECKPOINT_REFUSAL_CODES, CHECKPOINT_CLI_CODES, canonicalGitEnvironment, captureCheckExecutionSource, establishHostContainmentSnapshot, runTopLevelHostContainmentCheck, runPath, RUNS_DIR, CHECKPOINTS_DIR, PACKETS_DIR };
