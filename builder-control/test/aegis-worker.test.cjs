@@ -150,6 +150,8 @@ fs.appendFileSync('allowed.txt', 'grok-applied\\n');
 console.log('grok applied the unchanged objective');
 process.exit(0);
 `, { mode: 0o755 });
+  const grokAuth = path.join(tmp, 'grok-auth.json');
+  fs.writeFileSync(grokAuth, '{"fixture":"subscription"}\n', { mode: 0o600 });
 
   const runId = 'RUN-20260827-deadbeef';
   const runFile = path.join(runs, `${runId}.json`);
@@ -163,6 +165,7 @@ process.exit(0);
   const env = {
     ...process.env, NODE_ENV: 'test', AEGIS_TEST_CLAUDE_EXECUTABLE: path.join(bin, 'claude'),
     AEGIS_TEST_GROK_EXECUTABLE: path.join(bin, 'grok'),
+    AEGIS_TEST_GROK_AUTH_FILE: grokAuth,
     AEGIS_TEST_CONTAINMENT_MODE: 'DETERMINISTIC_PROFILE_ONLY',
     AEGIS_RUNS_DIR: runs, AEGIS_CHECKPOINTS_DIR: path.join(tmp, 'checkpoints'),
     AEGIS_LEDGER_FILE: ledger,
@@ -2252,6 +2255,7 @@ test('governed Grok resolves the exact pinned binary and ignores the mutable con
     fs.chmodSync(grokHome, 0o700);
     fs.mkdirSync(path.join(grokHome, '.grok'), { mode: 0o700 });
     fs.mkdirSync(path.join(grokHome, 'tmp'), { mode: 0o700 });
+    fs.writeFileSync(path.join(grokHome, '.grok', 'auth.json'), '{"fixture":true}\n', { mode: 0o400 });
     process.env.NODE_ENV = 'test';
     delete process.env.AEGIS_TEST_GROK_EXECUTABLE;
     process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE = pinned;
@@ -2319,6 +2323,7 @@ test('Grok launch descriptor pins exact file-only argv inside the outer deny-def
     fs.chmodSync(grokHome, 0o700);
     fs.mkdirSync(path.join(grokHome, '.grok'), { mode: 0o700 });
     fs.mkdirSync(path.join(grokHome, 'tmp'), { mode: 0o700 });
+    fs.writeFileSync(path.join(grokHome, '.grok', 'auth.json'), '{"fixture":true}\n', { mode: 0o400 });
     process.env.NODE_ENV = 'test';
     process.env.AEGIS_TEST_GROK_EXECUTABLE = executable;
     process.env.AEGIS_TEST_CONTAINMENT_MODE = 'DETERMINISTIC_PROFILE_ONLY';
@@ -2335,6 +2340,8 @@ test('Grok launch descriptor pins exact file-only argv inside the outer deny-def
       '--single', prompt, '--model', 'grok-4.6', '--permission-mode', 'acceptEdits',
       '--output-format', 'plain', '--no-subagents', '--verbatim', '--no-plan',
       '--disable-web-search', '--tools', 'read_file,search_replace,grep,list_dir',
+      '--deny', `Read(${grokHome}/**)`, '--deny', `Edit(${grokHome}/**)`,
+      '--deny', `Write(${grokHome}/**)`,
       '--disallowed-tools', 'run_terminal_cmd,web_search,web_fetch,task', '--max-turns', '32',
     ]);
     assert.strictEqual(prepared.argv.includes('bypassPermissions'), false);
@@ -2350,6 +2357,41 @@ test('Grok launch descriptor pins exact file-only argv inside the outer deny-def
     else process.env.AEGIS_TEST_GROK_EXECUTABLE = prior.executable;
     if (prior.containment === undefined) delete process.env.AEGIS_TEST_CONTAINMENT_MODE;
     else process.env.AEGIS_TEST_CONTAINMENT_MODE = prior.containment;
+    if (grokHome) fs.rmSync(grokHome, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Grok stages only the exact private subscription credential into its disposable home', () => {
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-grok-auth-stage-'));
+  const priorNodeEnv = process.env.NODE_ENV;
+  let grokHome;
+  try {
+    process.env.NODE_ENV = 'test';
+    const source = path.join(tmp, 'auth.json');
+    fs.writeFileSync(source, '{"fixture":"oauth"}\n', { mode: 0o600 });
+    grokHome = fs.mkdtempSync('/private/tmp/aegis-grok-');
+    fs.chmodSync(grokHome, 0o700);
+    fs.mkdirSync(path.join(grokHome, '.grok'), { mode: 0o700 });
+    fs.mkdirSync(path.join(grokHome, 'tmp'), { mode: 0o700 });
+    const staged = WORKER.stageGrokSubscriptionCredential(grokHome, source);
+    assert.strictEqual(staged, path.join(grokHome, '.grok', 'auth.json'));
+    assert.strictEqual(fs.readFileSync(staged, 'utf8'), '{"fixture":"oauth"}\n');
+    assert.strictEqual(fs.lstatSync(staged).mode & 0o777, 0o400);
+    assert.strictEqual(fs.lstatSync(staged).nlink, 1);
+
+    const permissive = path.join(tmp, 'permissive.json');
+    fs.writeFileSync(permissive, '{}\n', { mode: 0o644 });
+    const secondHome = fs.mkdtempSync('/private/tmp/aegis-grok-');
+    try {
+      fs.chmodSync(secondHome, 0o700);
+      fs.mkdirSync(path.join(secondHome, '.grok'), { mode: 0o700 });
+      fs.mkdirSync(path.join(secondHome, 'tmp'), { mode: 0o700 });
+      assert.throws(() => WORKER.stageGrokSubscriptionCredential(secondHome, permissive),
+        /private, owner-controlled regular file/);
+    } finally { fs.rmSync(secondHome, { recursive: true, force: true }); }
+  } finally {
+    if (priorNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = priorNodeEnv;
     if (grokHome) fs.rmSync(grokHome, { recursive: true, force: true });
     fs.rmSync(tmp, { recursive: true, force: true });
   }

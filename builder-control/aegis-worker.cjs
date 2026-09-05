@@ -37,6 +37,8 @@ const CLAUDE_VERSIONS_DIR = path.join(os.homedir(), '.local', 'share', 'claude',
 const CLAUDE_EXECUTABLE = path.join(CLAUDE_VERSIONS_DIR, CLAUDE_VERSION);
 const GROK_EXECUTABLE = path.join(os.homedir(), '.grok', 'bin', 'grok');
 const GROK_PINNED_EXECUTABLE = path.join(os.homedir(), '.grok', 'downloads', 'grok-macos-aarch64');
+const OPERATOR_GROK_AUTH = path.join(os.homedir(), '.grok', 'auth.json');
+const MAX_GROK_AUTH_BYTES = 64 * 1024;
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CLAUDE_OAUTH_TOKEN_FILE_DESCRIPTOR = CONTAINMENT.CLAUDE_OAUTH_TOKEN_FD;
 const CLAUDE_OAUTH_EXPIRY_SKEW_MS = 60 * 1000;
@@ -879,6 +881,7 @@ function workerEnvironment(source = process.env) {
     env.NODE_ENV = 'test';
     for (const [key, value] of Object.entries(source)) {
       if ((key === 'AEGIS_TEST_CLAUDE_EXECUTABLE' || key === 'AEGIS_TEST_GROK_EXECUTABLE' ||
+          key === 'AEGIS_TEST_GROK_AUTH_FILE' ||
           key === 'AEGIS_TEST_CONTAINMENT_MODE' ||
           key === 'AEGIS_TEST_CANONICAL_ROOT' || key.startsWith('FAKE_')) && typeof value === 'string') env[key] = value;
     }
@@ -1573,10 +1576,13 @@ function launchClaudeProcess(run, launchSpec, childEnv, testInternals) {
   });
 }
 
-function grokArgv(launchSpec) {
+function grokArgv(launchSpec, disposableHome) {
   const normalized = normalizeLaunchSpec(launchSpec);
   if (normalized.provider !== 'grok-subscription') {
     throw invalidLaunch('Grok argv requires the grok-subscription provider');
+  }
+  if (typeof disposableHome !== 'string' || !disposableHome.startsWith(GROK_HOME_PREFIX)) {
+    throw invalidLaunch('Grok argv requires the exact disposable HOME');
   }
   return Object.freeze([
     '--single', normalized.prompt,
@@ -1588,6 +1594,12 @@ function grokArgv(launchSpec) {
     '--no-plan',
     '--disable-web-search',
     '--tools', GROK_FILE_TOOLS.join(','),
+    // Permission rules constrain model-issued tools, not the pinned client's
+    // own credential loader. The builder may use its private staged session,
+    // but it may never read or edit that session through a model tool.
+    '--deny', `Read(${disposableHome}/**)`,
+    '--deny', `Edit(${disposableHome}/**)`,
+    '--deny', `Write(${disposableHome}/**)`,
     '--disallowed-tools', GROK_DISALLOWED_TOOLS.join(','),
     '--max-turns', String(GROK_MAX_TURNS),
   ]);
@@ -1598,10 +1610,11 @@ function prepareGrokLaunch(run, launchSpec, disposableHome) {
   if (normalized.provider !== 'grok-subscription') {
     throw invalidLaunch('Grok launch preparation requires the grok-subscription provider');
   }
+  validateStagedGrokCredential(disposableHome);
   const executable = resolveGrokExecutable();
   const env = grokEnvironment(disposableHome);
   const contained = prepareRunContainment(run, executable, env);
-  const argv = grokArgv(normalized);
+  const argv = grokArgv(normalized, disposableHome);
   const command = Object.freeze({
     bin: contained.command.bin,
     argv: Object.freeze([...contained.command.argv, ...argv]),
@@ -1619,12 +1632,69 @@ function prepareGrokLaunch(run, launchSpec, disposableHome) {
   });
 }
 
+function validateGrokCredentialFile(authPath, { staged = false } = {}) {
+  let stat;
+  try { stat = fs.lstatSync(authPath); }
+  catch (error) {
+    if (error && error.code === 'ENOENT') {
+      throw invalidLaunch(staged
+        ? 'Grok staged subscription credential is absent'
+        : 'Grok subscription authentication is unavailable; run grok login');
+    }
+    throw error;
+  }
+  const ownerUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const allowedMode = staged ? 0o400 : 0o600;
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1 ||
+      (ownerUid !== null && stat.uid !== ownerUid) || (stat.mode & 0o777) !== allowedMode ||
+      stat.size <= 0 || stat.size > MAX_GROK_AUTH_BYTES || fs.realpathSync(authPath) !== authPath) {
+    throw invalidLaunch(`Grok ${staged ? 'staged ' : ''}subscription credential must be a private, owner-controlled regular file`);
+  }
+  return Object.freeze({ path: authPath, bytes: stat.size });
+}
+
+function validateStagedGrokCredential(disposableHome) {
+  if (typeof disposableHome !== 'string' || !disposableHome.startsWith(GROK_HOME_PREFIX)) {
+    throw invalidLaunch('Grok staged credential requires the exact disposable HOME');
+  }
+  return validateGrokCredentialFile(path.join(disposableHome, '.grok', 'auth.json'), { staged: true });
+}
+
+function stageGrokSubscriptionCredential(disposableHome, sourcePath = OPERATOR_GROK_AUTH) {
+  if (process.env.NODE_ENV !== 'test' && sourcePath !== OPERATOR_GROK_AUTH) {
+    throw invalidLaunch('Grok subscription credential source must be the exact operator auth file');
+  }
+  const source = validateGrokCredentialFile(sourcePath);
+  const grokDir = path.join(disposableHome, '.grok');
+  const dirStat = fs.lstatSync(grokDir);
+  const ownerUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory() || (dirStat.mode & 0o777) !== 0o700 ||
+      (ownerUid !== null && dirStat.uid !== ownerUid) || fs.realpathSync(grokDir) !== grokDir) {
+    throw invalidLaunch('Grok credential destination must be the private disposable .grok directory');
+  }
+  const destination = path.join(grokDir, 'auth.json');
+  fs.copyFileSync(source.path, destination, fs.constants.COPYFILE_EXCL);
+  fs.chmodSync(destination, 0o400);
+  const staged = validateStagedGrokCredential(disposableHome);
+  if (staged.bytes !== source.bytes) throw invalidLaunch('Grok staged subscription credential size mismatch');
+  return staged.path;
+}
+
 function createGrokDisposableHome() {
   const home = fs.realpathSync(fs.mkdtempSync(GROK_HOME_PREFIX));
-  fs.chmodSync(home, 0o700);
-  fs.mkdirSync(path.join(home, '.grok'), { mode: 0o700 });
-  fs.mkdirSync(path.join(home, 'tmp'), { mode: 0o700 });
-  return home;
+  try {
+    fs.chmodSync(home, 0o700);
+    fs.mkdirSync(path.join(home, '.grok'), { mode: 0o700 });
+    fs.mkdirSync(path.join(home, 'tmp'), { mode: 0o700 });
+    const sourcePath = process.env.NODE_ENV === 'test' && process.env.AEGIS_TEST_GROK_AUTH_FILE
+      ? path.resolve(process.env.AEGIS_TEST_GROK_AUTH_FILE)
+      : OPERATOR_GROK_AUTH;
+    stageGrokSubscriptionCredential(home, sourcePath);
+    return home;
+  } catch (error) {
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* disposable */ }
+    throw error;
+  }
 }
 
 /**
@@ -2413,6 +2483,7 @@ module.exports = {
   normalizeLaunchSpec, normalizeTimeoutSec, resolveClaudeExecutable, resolvePinnedGrokExecutable,
   resolveGrokExecutable,
   launchClaudeProcess, grokArgv, prepareGrokLaunch,
+  validateGrokCredentialFile, validateStagedGrokCredential, stageGrokSubscriptionCredential,
   runContainedClaudeAuthStatus,
   assertClaudeOAuthFreshness,
   resolveApprovedPacket, derivePacketAllowlists, prepareRunContainment,
@@ -2427,7 +2498,8 @@ module.exports = {
   MAX_PROMPT_BYTES, MAX_TIMEOUT_SEC, DEFAULT_NO_PROGRESS_TIMEOUT_SEC,
   builderNoProgressTimeoutMs, CLAUDE_SETTINGS, CLAUDE_FILE_TOOLS,
   CLAUDE_DISALLOWED_TOOLS, CLAUDE_VERSION, CLAUDE_EXECUTABLE, CLAUDE_STREAM_PROGRESS_ARGV,
-  GROK_EXECUTABLE, GROK_PINNED_EXECUTABLE, GROK_FILE_TOOLS, GROK_DISALLOWED_TOOLS,
+  GROK_EXECUTABLE, GROK_PINNED_EXECUTABLE, OPERATOR_GROK_AUTH,
+  GROK_FILE_TOOLS, GROK_DISALLOWED_TOOLS,
   GROK_MAX_TURNS, GROK_HOME_PREFIX, MODEL_ROUTING_POLICY,
   CLAUDE_KEYCHAIN_SERVICE, CLAUDE_OAUTH_TOKEN_FILE_DESCRIPTOR, CLAUDE_OAUTH_EXPIRY_SKEW_MS,
 };
