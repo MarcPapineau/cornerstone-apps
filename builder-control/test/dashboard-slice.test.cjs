@@ -14982,6 +14982,37 @@ test('Crew & Models roster wraps on phones and owns no animation or overflow rul
   }
 });
 
+test('DOM: Crew & Models gives a compact truthful routing reason with a fail-closed fallback', () => {
+  assert.match(code, /<span class="crew-routing-label">Why this model<\/span> ·\s*<span id="hud-crew-routing">Not recorded\.<\/span>/);
+  const selected = bootPage(routingFixture(routingRun({
+    route: { model: 'claude-opus-5', execution: 'claude-cli', source: 'tool-router.cjs routeRole' },
+  })));
+  assert.strictEqual(selected.text('hud-crew-routing'), 'Not recorded.');
+
+  const refused = bootPage(routingFixture(routingRun({
+    state: 'ROUTING_REFUSED',
+    route: {
+      state: 'REFUSED', code: 'DATA_SENSITIVITY_EXCEEDS_MODEL',
+      reason: 'SECRET data may not be sent to claude-opus-5 (max INTERNAL).',
+      source: 'tool-router.cjs routeRole',
+    },
+  })));
+  assert.strictEqual(refused.text('hud-crew-routing'),
+    'SECRET data may not be sent to claude-opus-5 (max INTERNAL).');
+});
+
+test('Crew & Models routing line wraps without motion or horizontal overflow ownership', () => {
+  const routingRules = [...code.matchAll(/([^{}]*crew-routing[^{}]*)\{([^{}]*)\}/g)]
+    .map((match) => match[2]);
+  assert.ok(routingRules.length > 0);
+  assert.ok(routingRules.some((body) => /overflow-wrap:anywhere/.test(body)),
+    'the compact routing reason has no phone-safe wrapping rule');
+  for (const body of routingRules) {
+    assert.ok(!/(?:^|;)\s*overflow\s*:/.test(body), 'the compact routing reason owns an overflow rule');
+    assert.ok(!/(?:^|;)\s*animation\s*:/.test(body), 'the compact routing reason owns an animation rule');
+  }
+});
+
 asyncTests().then(() => {
   const failedCount = process.exitCode ? 'at least 1' : '0';
   console.log(`${passed} passed, ${failedCount} failed.`);

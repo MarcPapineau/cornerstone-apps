@@ -900,6 +900,10 @@
   .crew-roster-name,.crew-roster-role,.crew-roster-fact,.crew-roster-empty{
     min-width:0;overflow-wrap:anywhere}
   .crew-roster-empty{color:var(--text-2);font-size:9px;line-height:1.4}
+  .crew-routing-line{min-width:0;margin-top:7px;padding-top:6px;border-top:1px solid #1e3446;
+    color:var(--text-1);font-size:9px;line-height:1.4;overflow-wrap:anywhere}
+  .crew-routing-label{color:#8faac0;font:650 9px/1.4 var(--mono);letter-spacing:.08em;
+    text-transform:uppercase}
   .core-node.is-review::before{background:var(--hud-violet)}
   .core-node.is-gate::before{background:var(--orange)}
   .core-node.is-evidence::before,.core-node.is-checkpoint::before{background:var(--pass)}
@@ -2087,6 +2091,8 @@
           <article class="core-node is-builder">
             <h3>Crew &amp; models</h3><div class="hud-value" id="hud-crew">Loading crew evidence…</div>
             <div class="hud-state" id="hud-crew-state">Loading worker state…</div>
+            <div class="crew-routing-line"><span class="crew-routing-label">Why this model</span> ·
+              <span id="hud-crew-routing">Not recorded.</span></div>
             <div class="crew-roster-wrap">
               <div class="crew-roster-title">Independent reviewers</div>
               <ul class="crew-roster" id="hud-crew-roster" aria-label="Recorded independent reviewer roster">
@@ -3402,11 +3408,13 @@
   // from capability, cost or failover assumptions this page cannot see. A model
   // or provider named only on the run record — not by the router — is repeated
   // as the named worker with its routing reason still UNAVAILABLE.
-  function routingRationale(run){
-    if (!run) return 'No run is active, so no routing decision is recorded.';
+  function routingRationale(run, reasonOnly){
+    if (!run) return reasonOnly ? 'Not recorded.' :
+      'No run is active, so no routing decision is recorded.';
     var route = run.route || null;
     if (route && route.state === 'REFUSED' &&
         typeof route.reason === 'string' && route.reason){
+      if (reasonOnly) return route.reason;
       return 'AEGIS routing refused to select a worker for this run' +
         (typeof route.code === 'string' && route.code ? ' (' + route.code + ')' : '') +
         '. Recorded routing reason: ' + route.reason;
@@ -3414,6 +3422,7 @@
     if (route && route.source === 'tool-router.cjs routeRole' &&
         typeof route.model === 'string' && route.model &&
         typeof route.execution === 'string' && route.execution){
+      if (reasonOnly) return 'Not recorded.';
       // Plain copy, exact meaning: the source marker that proves the selection
       // is kept as the card's accessible detail instead of being read aloud.
       return 'AEGIS chose ' + plainRouteWord(route.model) + ' for this run, and recorded ' +
@@ -3424,9 +3433,11 @@
       ? [run.builder.model, run.builder.provider].filter(Boolean).join(' via ')
       : null;
     if (named){
+      if (reasonOnly) return 'Not recorded.';
       return 'This run names ' + named + ' as its worker, but no canonical routing decision is recorded ' +
         'for it, so the routing reason is UNAVAILABLE.';
     }
+    if (reasonOnly) return 'Not recorded.';
     return 'No canonical routing decision is recorded for this run, so the routing reason is UNAVAILABLE.';
   }
 
@@ -6767,6 +6778,10 @@
         (opState.state === 'UNVERIFIED' ? opState.plain : deckFinished)
       : 'No active worker — ' + deckFinished,
     opState.state);
+    // Compact first-screen restatement of the exact same routingRationale()
+    // evidence used by the detailed pilot card. Successful selections do not
+    // carry a reason, so this line says Not recorded instead of inventing one.
+    hudText('hud-crew-routing', routingRationale(boundRun, true));
     renderCrewRoster(view && view.reviewers, e, reviewerSubjectMatchesCurrent
       ? 'CURRENT' : (reviewerSubjectMismatchKnown ? 'MISMATCHED' : 'UNKNOWN'));
     var hudReview = 'No independent-review evidence is attached to this exact code version.';
