@@ -478,19 +478,39 @@ function resolveClaudeExecutable() {
   return real;
 }
 
+function resolvePinnedGrokExecutable(pinnedPath) {
+  if (typeof pinnedPath !== 'string' || !path.isAbsolute(pinnedPath)) {
+    throw invalidLaunch('Grok pinned executable path must be absolute');
+  }
+  let pinnedStat;
+  try { pinnedStat = fs.lstatSync(pinnedPath); }
+  catch { throw invalidLaunch('Grok pinned executable is missing'); }
+  if (pinnedStat.isSymbolicLink() || !pinnedStat.isFile()) {
+    throw invalidLaunch('Grok pinned executable must be a regular file, not a symlink');
+  }
+  const real = fs.realpathSync(pinnedPath);
+  if (real !== pinnedPath) {
+    throw invalidLaunch('Grok pinned executable path must resolve to itself');
+  }
+  try { fs.accessSync(real, fs.constants.X_OK); }
+  catch { throw invalidLaunch('Grok pinned executable is not executable'); }
+  return real;
+}
+
 function resolveGrokExecutable() {
+  if (process.env.NODE_ENV === 'test' && process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE) {
+    return resolvePinnedGrokExecutable(path.resolve(process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE));
+  }
   if (process.env.NODE_ENV === 'test' && process.env.AEGIS_TEST_GROK_EXECUTABLE) {
     const real = fs.realpathSync(path.resolve(process.env.AEGIS_TEST_GROK_EXECUTABLE));
     if (!path.isAbsolute(real) || !fs.statSync(real).isFile()) throw invalidLaunch('test Grok executable must resolve to a file');
     fs.accessSync(real, fs.constants.X_OK);
     return real;
   }
-  const real = fs.realpathSync(GROK_EXECUTABLE);
-  if (real !== fs.realpathSync(GROK_PINNED_EXECUTABLE)) {
-    throw invalidLaunch('Grok executable must resolve to the pinned managed binary');
-  }
-  fs.accessSync(real, fs.constants.X_OK);
-  return real;
+  // Launch the immutable managed artifact itself. The operator convenience
+  // symlink is intentionally not consulted: moving it can never select a new
+  // builder binary for a governed run.
+  return resolvePinnedGrokExecutable(GROK_PINNED_EXECUTABLE);
 }
 
 // ── governed builder failover ───────────────────────────────────────────────
@@ -2390,7 +2410,8 @@ module.exports = {
   processAlive, processGroupAlive, boundedTail,
   summarizeClaudeStreamLine, createClaudeStreamProgressDigest, claudeStreamActivity,
   CLAUDE_TOOL_ACTIVITY, PROGRESS_ACTIVITY_CODES,
-  normalizeLaunchSpec, normalizeTimeoutSec, resolveClaudeExecutable, resolveGrokExecutable,
+  normalizeLaunchSpec, normalizeTimeoutSec, resolveClaudeExecutable, resolvePinnedGrokExecutable,
+  resolveGrokExecutable,
   launchClaudeProcess, grokArgv, prepareGrokLaunch,
   runContainedClaudeAuthStatus,
   assertClaudeOAuthFreshness,

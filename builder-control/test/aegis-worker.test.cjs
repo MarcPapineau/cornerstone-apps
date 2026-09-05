@@ -2222,6 +2222,76 @@ test('the handoff authority grants one handoff maximum, bound to the unchanged o
   assert.strictEqual(authorizeHandoff({ failure: { ...AUTH_FAILURE, failoverEligible: false } }), null);
 });
 
+test('governed Grok resolves the exact pinned binary and ignores the mutable convenience symlink', () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-grok-pin-')));
+  const pinned = path.join(tmp, 'grok-pinned');
+  const otherA = path.join(tmp, 'grok-other-a');
+  const otherB = path.join(tmp, 'grok-other-b');
+  const convenience = path.join(tmp, 'grok');
+  const nonExecutable = path.join(tmp, 'grok-not-executable');
+  const worktree = path.join(tmp, 'worktree');
+  const packet = path.join(worktree, 'packet.json');
+  let grokHome;
+  fs.mkdirSync(worktree);
+  fs.writeFileSync(path.join(worktree, 'allowed.txt'), 'before\n');
+  writePacketFixture(worktree, packet,
+    { packetId: 'PKT-GROK-PIN', agentId: 'claude-code', filesAllowed: ['allowed.txt'] });
+  for (const file of [pinned, otherA, otherB]) {
+    fs.writeFileSync(file, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  }
+  fs.writeFileSync(nonExecutable, '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+  fs.symlinkSync(otherA, convenience);
+  const prior = {
+    NODE_ENV: process.env.NODE_ENV,
+    pinned: process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE,
+    fixture: process.env.AEGIS_TEST_GROK_EXECUTABLE,
+    containment: process.env.AEGIS_TEST_CONTAINMENT_MODE,
+  };
+  try {
+    grokHome = fs.mkdtempSync('/private/tmp/aegis-grok-');
+    fs.chmodSync(grokHome, 0o700);
+    fs.mkdirSync(path.join(grokHome, '.grok'), { mode: 0o700 });
+    fs.mkdirSync(path.join(grokHome, 'tmp'), { mode: 0o700 });
+    process.env.NODE_ENV = 'test';
+    delete process.env.AEGIS_TEST_GROK_EXECUTABLE;
+    process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE = pinned;
+    process.env.AEGIS_TEST_CONTAINMENT_MODE = 'DETERMINISTIC_PROFILE_ONLY';
+    assert.strictEqual(WORKER.resolveGrokExecutable(), pinned);
+    const run = { objective: 'unchanged objective', packet, worktree: { path: worktree } };
+    const launch = { provider: 'grok-subscription', model: 'grok-4.6', prompt: 'unchanged prompt' };
+    assert.strictEqual(WORKER.prepareGrokLaunch(run, launch, grokHome).executable, pinned);
+
+    fs.unlinkSync(convenience);
+    fs.symlinkSync(otherB, convenience);
+    assert.strictEqual(WORKER.resolveGrokExecutable(), pinned,
+      'changing the convenience symlink selected a different governed builder');
+    assert.strictEqual(WORKER.prepareGrokLaunch(run, launch, grokHome).executable, pinned,
+      'changing the convenience symlink changed the executable in the governed launch descriptor');
+
+    const resolverSource = WORKER.resolveGrokExecutable.toString();
+    assert.match(resolverSource, /resolvePinnedGrokExecutable\(GROK_PINNED_EXECUTABLE\)/);
+    assert.doesNotMatch(resolverSource, /realpathSync\(GROK_EXECUTABLE\)/,
+      'production resolution still follows the operator convenience symlink');
+
+    process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE = path.join(tmp, 'missing-grok');
+    assert.throws(() => WORKER.resolveGrokExecutable(), /pinned executable is missing/);
+    process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE = nonExecutable;
+    assert.throws(() => WORKER.resolveGrokExecutable(), /pinned executable is not executable/);
+    process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE = convenience;
+    assert.throws(() => WORKER.resolveGrokExecutable(), /regular file, not a symlink/);
+  } finally {
+    if (prior.NODE_ENV === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prior.NODE_ENV;
+    if (prior.pinned === undefined) delete process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE;
+    else process.env.AEGIS_TEST_GROK_PINNED_EXECUTABLE = prior.pinned;
+    if (prior.fixture === undefined) delete process.env.AEGIS_TEST_GROK_EXECUTABLE;
+    else process.env.AEGIS_TEST_GROK_EXECUTABLE = prior.fixture;
+    if (prior.containment === undefined) delete process.env.AEGIS_TEST_CONTAINMENT_MODE;
+    else process.env.AEGIS_TEST_CONTAINMENT_MODE = prior.containment;
+    if (grokHome) fs.rmSync(grokHome, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('Grok launch descriptor pins exact file-only argv inside the outer deny-default packet boundary', () => {
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'aegis-grok-launch-'));
   const prior = {
