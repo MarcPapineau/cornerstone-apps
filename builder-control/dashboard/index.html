@@ -656,6 +656,33 @@
   .handoff-flow{min-width:0;color:var(--text-0);overflow-wrap:anywhere}
   .handoff-task{min-width:0;color:var(--text-1);overflow-wrap:anywhere}
   .handoff-at{min-width:0;color:var(--text-2);font-size:11px;overflow-wrap:anywhere}
+
+  /* ── live operations rail ──
+     One rail holding the four facts an owner asks in the same breath: whether
+     anything is working right now, which model owns that work, the last action
+     the projection recorded with the time that evidence was received, and the
+     last handoff the run record proves. The handoff strip above is the rail's
+     last row and stays the exact-evidence surface — canonical state codes, the
+     run-record time and the current action sentence — so the rows here read as
+     the founder summary and never as a second reading of the same evidence.
+
+     The rail owns no motion at all: no animation, no transition, nothing for
+     reduced motion to undo. The page's one evidence cue is drawn on the AEGIS
+     Core, and it stays the only thing on this page that moves. Every row wraps
+     onto its own line rather than clamping, because a clamped receipt time or a
+     clamped activity sentence is evidence removed from the screen. */
+  .ops-rail{margin:10px 0 0;padding:8px 10px;border:1px solid #2b465b;
+    border-left:2px solid var(--cyan);border-radius:3px;background:#0f1a24;
+    font-size:12px;line-height:1.45}
+  .ops-rail-title{font:650 10px/1.3 var(--mono);letter-spacing:.12em;color:var(--cyan);
+    margin-bottom:5px}
+  .ops-rail-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;
+    min-width:0;padding:3px 0}
+  .ops-rail-row+.ops-rail-row{border-top:1px solid #1b2c3a}
+  .ops-rail-label{flex:0 0 auto;font:650 10px/1.3 var(--mono);letter-spacing:.12em;
+    color:var(--text-2)}
+  .ops-rail-value{flex:1 1 240px;min-width:0;color:var(--text-1);overflow-wrap:anywhere}
+  .ops-rail .handoff{margin:8px 0 0}
   .founder-details{margin-top:12px}.founder-details>summary{font-size:12px;color:#9ab2c8}
 
   #topology-overview{min-height:220px;border-color:#24516b;background:#0c1620}
@@ -1407,6 +1434,8 @@
     #founder-summary .command-card.is-elapsed{border-color:#233c50}
     .operator-brief{border-color:#31586f;background:#0e1e2a;box-shadow:inset 0 1px 0 rgba(154,196,226,.07)}
     .handoff{border-color:#31586f;background:#0e1c27}
+    .ops-rail{border-color:#31586f;background:#0e1c27}
+    .ops-rail-row+.ops-rail-row{border-top-color:#24425a}
 
     /* ── operational instruments ──
        Five seated cells, each with one status rail. Every rail keys off the
@@ -3571,11 +3600,64 @@
     return handoffMoved;
   }
 
-  function renderHandoff(host, run, task){
+  // ── the live operations rail ──────────────────────────────────────
+  // The rail states four canonical facts in one reading order — what is working
+  // now, which model owns it, the last recorded action with the time its
+  // evidence was received, and the last proven handoff with its two ends — and
+  // then seats the recorded-transition strip beneath them as its last row.
+  //
+  // Every value is a field one of this page's existing resolutions already
+  // owns: supervisionEvidence() for presence and activity, builderIdentity()
+  // for the model, and observeHandoff() for the transition. The rail reaches no
+  // second verdict, keeps no history, counts nothing and consults no clock, so
+  // an absent field is reported as not recorded rather than filled in.
+  function opsRailRow(rail, field, label, value){
+    var row = el('div','ops-rail-row');
+    row.setAttribute('data-ops-rail-field', field);
+    row.appendChild(el('div','ops-rail-label',label));
+    row.appendChild(el('div','ops-rail-value',value));
+    rail.appendChild(row);
+  }
+
+  function renderHandoff(deck, run, task){
     var moved = observeHandoff(run);
+    // `host` is the rail, not the deck: the strip below is the rail's own last
+    // row, so the four founder rows and the exact transition evidence are one
+    // instrument rather than two surfaces that could drift apart.
+    var host = el('div','ops-rail');
+    host.setAttribute('data-ops-rail','live-operations');
     var strip = el('div','handoff');
     var active = !!(moved && run && moved.runId === run.runId && moved.to === run.state);
     strip.setAttribute('data-handoff-state', active ? 'ACTIVE' : 'INACTIVE');
+    // The same supervisionFacts() resolution the BUILDER PROGRESS card and
+    // Detail View print. Re-reading it here is a re-read of one answer, not a
+    // second one: a run with no builder attempt resolves to UNAVAILABLE and the
+    // rail says so.
+    var supervision = supervisionEvidence(run);
+    host.setAttribute('data-ops-rail-presence', supervision.presence);
+    host.setAttribute('data-ops-rail-handoff', active ? 'PROVEN' : 'NOT_PROVEN');
+    // With no bound run every row says the same thing, because there is one
+    // reason for all four absences and inventing four different ones would read
+    // as four separate findings.
+    var UNBOUND = 'Not recorded — no canonical run is bound to this deck.';
+    host.appendChild(el('div','ops-rail-title','Live operations'));
+    opsRailRow(host, 'working', 'WORKING NOW', !run ? UNBOUND
+      : (WORKER_PRESENCE_PLAIN[supervision.presence] ||
+        'Whether the worker is running now is UNAVAILABLE — no supervision evidence reached this page.'));
+    opsRailRow(host, 'owner', 'MODEL IN CHARGE', run ? builderIdentity(run) : UNBOUND);
+    // The activity sentence already carries the time its own evidence was
+    // recorded, so the receipt time travels with the action it belongs to and
+    // is never restated from anywhere else.
+    opsRailRow(host, 'action', 'LAST RECORDED ACTION', !run ? UNBOUND
+      : (supervision.activity ||
+        'Not recorded — no bounded builder activity evidence is recorded for this run.'));
+    // Origin and destination at a glance. The exact canonical codes and the
+    // run-record time stay on the strip below, which is this rail's detail
+    // surface; nothing is claimed here that the strip is not also carrying.
+    opsRailRow(host, 'handoff', 'LAST PROVEN HANDOFF', active
+      ? handoffActor(moved.from, run) + ' → ' + handoffActor(moved.to, run)
+      : (run ? 'Not recorded — no canonical handoff is proven for this run.' : UNBOUND));
+    deck.appendChild(host);
     if (!active){
       // Nothing observed, so nothing claimed. The node stays in the DOM and
       // hidden rather than rendering a reassuring empty state.
@@ -3714,8 +3796,10 @@
   }
 
   // ── the one evidence cue on the AEGIS Core ────────────────────────
-  // One restrained highlight, once, for each canonical builder activity this
-  // page has not displayed before. It carries a single meaning — NEW WORKER
+  // One restrained highlight, once, for each piece of canonical evidence the
+  // live operations rail reports and this page has not displayed before: a
+  // newly recorded builder activity, or a newly proven handoff, and only while
+  // the bound run is actually running. It carries a single meaning — NEW WORKER
   // EVIDENCE ARRIVED — and it judges nothing: gate readiness, independent-review
   // coverage and the core's own status word are written elsewhere, by their own
   // authorities, and are untouched here. Everything the cue rests on is resolved by
@@ -3728,23 +3812,36 @@
   var coreCueIdentity = null;
   var coreCueObserved = false;
 
-  // The bound run id, the activity category the projection recorded, and the
-  // time that evidence was recorded. Every path that is not an actively running
-  // worker under an authoritative current-run binding with complete activity
-  // evidence resolves to null, which is the no-cue answer: a failed, stopped,
-  // waiting or unverified worker, a terminal exit, an unavailable binding, a
-  // binding that names a different run, and any missing or unknown field all
-  // fail closed here rather than animating.
-  function coreActivityIdentity(run, binding){
+  // The bound run id and the two kinds of canonical evidence the rail reports:
+  // the activity category with the time it was recorded, and the handoff the
+  // run record proves. Every path that is not an actively running worker under
+  // an authoritative current-run binding resolves to null, which is the no-cue
+  // answer: a failed, stopped, waiting or unverified worker, a terminal exit,
+  // an unavailable binding and a binding that names a different run all fail
+  // closed here rather than animating.
+  //
+  // Both halves fail closed on their own terms too. Activity is read only when
+  // the projection carries a complete, bounded category, and the handoff is
+  // read only from the transition renderHandoff already proved for this same
+  // run — never re-observed here, never inherited from another run, and never
+  // left standing once the run has moved past it. If neither half is present
+  // there is nothing new to report and the answer is again null.
+  function coreEvidenceIdentity(run, binding){
     if (!run || !binding || binding.state !== 'BOUND' || binding.runId !== run.runId) return null;
     if (operationalState(run).state !== 'RUNNING') return null;
     var build = run.build || null;
     var facts = supervisionFacts(build);
-    if (facts.presence !== 'RUNNING' || !facts.activity) return null;
+    if (facts.presence !== 'RUNNING') return null;
     var s = build.supervision || {};
-    if (typeof s.activityCode !== 'string' || !s.activityCode) return null;
-    if (typeof s.activityAt !== 'string' || !s.activityAt) return null;
-    return run.runId + '|' + s.activityCode + '|' + s.activityAt;
+    var activity = facts.activity &&
+      typeof s.activityCode === 'string' && s.activityCode &&
+      typeof s.activityAt === 'string' && s.activityAt
+      ? s.activityCode + '@' + s.activityAt : null;
+    var moved = handoffMoved && handoffMoved.runId === run.runId &&
+      handoffMoved.to === run.state
+      ? handoffMoved.from + '>' + handoffMoved.to + '@' + (handoffMoved.at || '') : null;
+    if (!activity && !moved) return null;
+    return run.runId + '|' + (activity || 'NO_ACTIVITY') + '|' + (moved || 'NO_HANDOFF');
   }
 
   // Reduced motion is resolved once, on the document body, by the control in the
@@ -3766,7 +3863,7 @@
   function renderCoreActivityCue(run, binding){
     var core = $('aegis-core');
     if (!core) return;
-    var identity = coreActivityIdentity(run, binding);
+    var identity = coreEvidenceIdentity(run, binding);
     // Terminal exit, a stopped or waiting worker, or evidence this page cannot
     // read: no cue survives any of them.
     if (!identity){ clearCoreActivityCue(); return; }
@@ -6437,9 +6534,11 @@
     // run's state, and the transition the handoff indicator above already
     // proved. It never re-observes the run, so it cannot reach a second verdict.
     renderCorePath(boundRun, provenHandoff);
-    // The one motion cue, from the same two canonical facts the deck has already
-    // resolved: the run the binding names, and the activity evidence recorded
-    // against it. It fires only for evidence this page has not displayed before.
+    // The one motion cue, from the canonical facts the deck has already
+    // resolved: the run the binding names, the activity evidence recorded
+    // against it, and the handoff the rail above has already proved. It fires
+    // only for evidence this page has not displayed before, and only while that
+    // run is actually running.
     renderCoreActivityCue(boundRun, bind);
 
     var routeHead = el('div','deck-heading');

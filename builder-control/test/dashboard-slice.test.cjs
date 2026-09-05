@@ -6428,6 +6428,245 @@ test('the core cue is bound to an evidence identity and owns no timer, log or ve
     'switching reduced motion on does not take an active cue off the screen');
 });
 
+// ── the live operations rail (PKT-20260826-ASYNC-WORKER-OPERATOR-BETA) ──────
+// What is working now, which model owns it, the last recorded action with the
+// time its evidence was received, and the last proven handoff used to be facts
+// an owner assembled from separate surfaces. They are one rail now, and the
+// failure that consolidation invites is a second authority: a rail that
+// resolved presence, model identity, activity or a transition for itself would
+// be free to disagree with the supervision card, the station path and the
+// announcement that already report them. Every proof below therefore holds the
+// same property from a different angle — the rail restates, it never decides,
+// and an absence stays an absence rather than becoming a reassuring blank.
+function opsRail(page) {
+  const rails = findByAttr(page.document.getElementById('founder-body'), 'data-ops-rail');
+  assert.strictEqual(rails.length, 1, `expected exactly one live operations rail, found ${rails.length}`);
+  return rails[0];
+}
+
+function opsRailRows(page) {
+  const rows = {};
+  for (const node of findByAttr(opsRail(page), 'data-ops-rail-field')) {
+    rows[node.attrs['data-ops-rail-field']] = node.textContent;
+  }
+  return rows;
+}
+
+const RAIL_UNBOUND = 'Not recorded — no canonical run is bound to this deck.';
+const RAIL_ROUTE = { model: 'claude-opus-5', execution: 'claude-cli', source: 'tool-router.cjs routeRole' };
+const RAIL_ROUTED_MODEL = 'claude-opus-5 (claude-cli)';
+
+test('the live operations rail restates four already-resolved facts and owns no motion, clock or verdict', () => {
+  const render = code.slice(code.indexOf('function renderHandoff'),
+    code.indexOf('function renderFounderSummary'));
+  const rail = render.slice(0, render.indexOf("el('div','handoff-recorded')"));
+  assert.ok(rail.length > 0, 'no live operations rail is built ahead of the recorded-transition strip');
+  // The four facts, in the order the rail exists to answer them in.
+  const fields = [...rail.matchAll(/opsRailRow\(host, '([\w-]+)'/g)].map((m) => m[1]);
+  assert.deepStrictEqual(fields, ['working', 'owner', 'action', 'handoff'],
+    `the rail lost, added or reordered one of the four facts it answers: ${fields.join(', ') || 'none'}`);
+  // One rail, and the recorded-transition strip is seated inside it rather than
+  // beside it: two surfaces holding the same transition are two answers waiting
+  // to disagree.
+  assert.strictEqual((code.match(/el\('div','ops-rail'\)/g) || []).length, 1,
+    'a second place on the page builds a live operations rail');
+  assert.strictEqual((code.match(/function renderHandoff\b/g) || []).length, 1,
+    'the rail has more than one renderer');
+  assert.ok(/var host = el\('div','ops-rail'\);/.test(rail) && /deck\.appendChild\(host\);/.test(rail),
+    'the rail is not the element the deck receives, so the strip is not inside it');
+  assert.ok(/host\.appendChild\(strip\)/.test(render),
+    'the recorded-transition strip is no longer seated in the rail that holds it');
+  // Every value is a re-read of a resolution this page already owns.
+  for (const canonical of ['supervisionEvidence(run)', 'WORKER_PRESENCE_PLAIN[supervision.presence]',
+    'builderIdentity(run)', 'supervision.activity', 'handoffActor(moved.from, run)',
+    'handoffActor(moved.to, run)']) {
+    assert.ok(rail.includes(canonical), `the rail no longer restates the canonical ${canonical}`);
+  }
+  // It observes nothing of its own, and it reaches no gate, review or
+  // checkpoint conclusion — those have their own authorities elsewhere.
+  for (const banned of ['setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date',
+    'Math.', 'fetch(', 'innerHTML', '.push(', 'verdict', 'problems', 'subjectSha256',
+    'checkpointEvidence', 'reviewerCompleteness']) {
+    assert.ok(!rail.includes(banned),
+      `the rail uses ${banned} — it may only re-read facts the deck already resolved`);
+  }
+  // Absence is stated, never blanked: each of the four rows has a sentence for
+  // the case where the canonical field it reads is not recorded.
+  assert.ok(rail.includes(RAIL_UNBOUND), 'an unbound deck would render the rail blank instead of saying so');
+  assert.ok(rail.includes('Not recorded — no bounded builder activity evidence is recorded for this run.') &&
+    rail.includes('Not recorded — no canonical handoff is proven for this run.'),
+    'a missing activity or an unproven handoff would render as an empty row');
+  // The one thing that moves on this page is the AEGIS Core evidence cue. The
+  // rail owns no animation and no transition, so reduced motion has nothing of
+  // the rail's to undo, and nothing is clamped out of sight either.
+  // The end marker is searched from the rail's own start: .founder-details{ also
+  // appears earlier in the sheet, and an unanchored lookup slices backwards to an
+  // empty string that would satisfy every 'the rail has no X' check below.
+  const railCssStart = code.indexOf('.ops-rail{');
+  assert.notStrictEqual(railCssStart, -1, 'the live operations rail style block does not begin at .ops-rail{');
+  const railCssEnd = code.indexOf('.founder-details{', railCssStart);
+  assert.notStrictEqual(railCssEnd, -1, 'the live operations rail style block does not end before .founder-details{');
+  const railCss = code.slice(railCssStart, railCssEnd);
+  assert.ok(railCss.trim().length > 0, 'the live operations rail style block is empty');
+  assert.ok(!/@keyframes/.test(railCss) && !/\banimation\s*:/.test(railCss) &&
+    !/\btransition\s*:/.test(railCss),
+    'the rail introduced motion of its own — the AEGIS Core evidence cue is the only thing that may move');
+  assert.ok(!/display:none|-webkit-line-clamp|text-overflow/.test(railCss),
+    'part of the rail is hidden or truncated instead of wrapped, which removes evidence from the screen');
+  assert.ok(/\.ops-rail-value\{[^}]*overflow-wrap:anywhere/.test(railCss),
+    'a long receipt time or activity sentence can push a narrow viewport sideways instead of wrapping');
+});
+
+test('DOM: an unbound deck renders the rail as four honest absences and a silent strip', () => {
+  const page = bootPage(fixtureState());
+  const rows = opsRailRows(page);
+  assert.deepStrictEqual(Object.keys(rows), ['working', 'owner', 'action', 'handoff'],
+    `the rail does not read as its four canonical rows: ${Object.keys(rows).join(', ') || 'none'}`);
+  for (const [field, label] of [['working', 'WORKING NOW'], ['owner', 'MODEL IN CHARGE'],
+    ['action', 'LAST RECORDED ACTION'], ['handoff', 'LAST PROVEN HANDOFF']]) {
+    assert.strictEqual(rows[field], label + RAIL_UNBOUND,
+      `the ${field} row claimed something with no run bound: ${rows[field]}`);
+  }
+  assert.strictEqual(opsRail(page).attrs['data-ops-rail-presence'], 'NOT_RUNNING',
+    'the rail recorded a worker presence with no run bound');
+  assert.strictEqual(opsRail(page).attrs['data-ops-rail-handoff'], 'NOT_PROVEN',
+    'the rail recorded a handoff with no run bound');
+  // The strip is the rail's last row and is still hidden and silent.
+  const strip = handoffNode(page);
+  assert.ok(opsRail(page).children.includes(strip),
+    'the recorded-transition strip is not seated inside the rail');
+  assert.strictEqual(strip.hidden, true, 'the inactive strip must be hidden, not merely empty');
+  assert.strictEqual(strip.textContent, '', 'the inactive strip must say nothing at all');
+});
+
+test('DOM: a running builder rail names presence, the model and the recorded action with its receipt time', () => {
+  const page = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION);
+  const rows = opsRailRows(page);
+  assert.strictEqual(rows.working, 'WORKING NOWThe worker is running now.',
+    `the rail does not state whether anything is working now: ${rows.working}`);
+  // This run record carries no route and no builder identity, so the rail says
+  // so rather than inferring an owner from the fact that a build is running.
+  assert.strictEqual(rows.owner,
+    'MODEL IN CHARGEthe governed builder — model identity UNAVAILABLE in current status evidence',
+    `the rail inferred a model the run record does not name: ${rows.owner}`);
+  assert.strictEqual(rows.action,
+    'LAST RECORDED ACTIONReading files in the worktree — activity evidence recorded 2026-09-03T14:09:45.000Z.',
+    `the last recorded action lost its plain English or its receipt time: ${rows.action}`);
+  assert.strictEqual(rows.handoff, 'LAST PROVEN HANDOFFNot recorded — no canonical handoff is proven for this run.',
+    `one sighting of a running build was reported as a handoff: ${rows.handoff}`);
+  assert.strictEqual(opsRail(page).attrs['data-ops-rail-presence'], 'RUNNING');
+
+  // A supervisor heartbeat with no recorded activity is liveness, never an
+  // action: the presence row may say the worker is running while the action row
+  // still refuses to name something no bounded evidence recorded.
+  const beat = liveActivityPage(HEARTBEAT_ONLY_SUPERVISION);
+  const beatRows = opsRailRows(beat);
+  assert.strictEqual(beatRows.working, 'WORKING NOWThe worker is running now.',
+    `the heartbeat fixture no longer records a running worker: ${beatRows.working}`);
+  assert.strictEqual(beatRows.action,
+    'LAST RECORDED ACTIONNot recorded — no bounded builder activity evidence is recorded for this run.',
+    `a heartbeat was promoted into a recorded action: ${beatRows.action}`);
+});
+
+test('DOM: a proven transition names both ends on the rail and keeps the exact evidence on the strip', () => {
+  const page = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION);
+  assert.strictEqual(opsRailRows(page).handoff,
+    'LAST PROVEN HANDOFFNot recorded — no canonical handoff is proven for this run.',
+    'precondition: one sighting of a running build is not a transition');
+  renderMinimizedStatus(page, activityStatus(RECORDED_ACTIVITY_SUPERVISION, {
+    run: { state: 'BUILT', updatedAt: '2026-09-03T14:12:00.000Z', transitions: 5, route: RAIL_ROUTE },
+    build: { status: 'EXITED', exit: 0,
+      activity: { active: false, phase: 'STOPPED', code: 'EXITED', summary: 'Worker exited.' } },
+  }));
+  const rows = opsRailRows(page);
+  assert.strictEqual(rows.handoff,
+    'LAST PROVEN HANDOFF' + RAIL_ROUTED_MODEL + ' → the deterministic checks',
+    `the rail does not name the origin and the destination of the proven handoff: ${rows.handoff}`);
+  assert.strictEqual(rows.working, 'WORKING NOWThe worker has stopped, so nothing is running now.',
+    `a stopped worker was still reported as working: ${rows.working}`);
+  assert.strictEqual(rows.owner, 'MODEL IN CHARGE' + RAIL_ROUTED_MODEL,
+    `the rail dropped the canonical routed model: ${rows.owner}`);
+  // A stopped worker still shows what it was last seen doing, and that reading
+  // keeps its own receipt time rather than borrowing the present tense.
+  assert.strictEqual(rows.action,
+    'LAST RECORDED ACTIONReading files in the worktree — activity evidence recorded 2026-09-03T14:09:45.000Z.',
+    `the last recorded action was rewritten when the worker stopped: ${rows.action}`);
+  assert.strictEqual(opsRail(page).attrs['data-ops-rail-handoff'], 'PROVEN');
+  // The exact canonical codes and the run-record time stay on the strip inside
+  // the rail: the row is the summary, the strip is the evidence.
+  assert.ok(opsRail(page).children.includes(handoffNode(page)),
+    'the strip left the rail when the handoff was proven');
+  assert.match(handoffParts(page).RECORDED,
+    /canonical BUILDING → BUILT, run record written 2026-09-03T14:12:00\.000Z/,
+    'the exact canonical states and the run-record time left the strip');
+});
+
+test('DOM: a newly proven handoff cues the core once, and no cue survives leaving the running state', () => {
+  const page = liveActivityPage(RECORDED_ACTIVITY_SUPERVISION);
+  // The build was already running when the page opened, so the first evidence
+  // it resolves is history and is adopted silently.
+  assert.strictEqual(coreCue(page), null, 'the opening snapshot animated the core');
+  const moved = (state, updatedAt, transitions) => activityStatus(RECORDED_ACTIVITY_SUPERVISION, {
+    run: { state, updatedAt, transitions, route: RAIL_ROUTE },
+  });
+  // Out of the running state entirely: the run is not active, so nothing may be cued.
+  renderMinimizedStatus(page, moved('BUILD_CONTINUED', '2026-09-03T14:12:00.000Z', 5));
+  assert.strictEqual(coreCue(page), null, 'a run that is not running was given a cue');
+  // Back into BUILDING. The recorded activity evidence is byte-identical across
+  // every push in this proof, so the proven handoff is the only new thing the
+  // page has — and it is enough on its own.
+  renderMinimizedStatus(page, moved('BUILDING', '2026-09-03T14:13:00.000Z', 6));
+  const cued = coreCue(page);
+  assert.ok(cued === 'a' || cued === 'b', `a newly proven handoff produced no core cue: ${cued}`);
+  const rows = opsRailRows(page);
+  assert.strictEqual(rows.action,
+    'LAST RECORDED ACTIONReading files in the worktree — activity evidence recorded 2026-09-03T14:09:45.000Z.',
+    `the activity evidence moved, so this proof no longer isolates the handoff: ${rows.action}`);
+  assert.match(rows.handoff,
+    new RegExp('the build continued stage — its owner is UNAVAILABLE in current status evidence → ' +
+      escapeRegExp(RAIL_ROUTED_MODEL)),
+    `the rail did not name both ends of the handoff the cue was fired for: ${rows.handoff}`);
+  // A repaint of exactly the same evidence is not a second handoff: it neither
+  // restarts the cue nor cuts the one already on screen short.
+  renderMinimizedStatus(page, moved('BUILDING', '2026-09-03T14:13:00.000Z', 6));
+  assert.strictEqual(coreCue(page), cued,
+    'a repaint of unchanged evidence restarted or cancelled the core cue');
+  // A handoff into a stopped worker is reported in words and cues nothing.
+  renderMinimizedStatus(page, activityStatus(RECORDED_ACTIVITY_SUPERVISION, {
+    run: { state: 'BUILT', updatedAt: '2026-09-03T14:14:00.000Z', transitions: 7, route: RAIL_ROUTE },
+    build: { status: 'EXITED', exit: 0,
+      activity: { active: false, phase: 'STOPPED', code: 'EXITED', summary: 'Worker exited.' } },
+  }));
+  assert.strictEqual(coreCue(page), null,
+    'a handoff out of a stopped worker left the core claiming live worker evidence');
+  assert.strictEqual(opsRailRows(page).handoff,
+    'LAST PROVEN HANDOFF' + RAIL_ROUTED_MODEL + ' → the deterministic checks',
+    'the proven handoff was lost along with the cue it must never have produced');
+});
+
+test('the core cue fires for new activity or a proven handoff, and for nothing else', () => {
+  const fn = code.slice(code.indexOf('function coreEvidenceIdentity'),
+    code.indexOf('function motionSuppressed'));
+  assert.ok(fn.length > 0, 'the core cue evidence identity was not located');
+  // The handoff half is the transition renderHandoff already proved. Observing
+  // the run a second time here would be a second verdict about one fact.
+  assert.ok(!/observeHandoff\s*\(/.test(fn),
+    'the cue re-observes the run, so it could reach a second verdict about the same evidence');
+  assert.ok(/handoffMoved\.runId === run\.runId/.test(fn),
+    'a handoff proven for another run could still cue this one');
+  assert.ok(/handoffMoved\.to === run\.state/.test(fn),
+    'a stale handoff would keep cueing once the run has moved past it');
+  // Neither half present is not news; it is the no-cue answer.
+  assert.ok(/if \(!activity && !moved\) return null;/.test(fn),
+    'the cue can fire with neither recorded activity nor a proven handoff behind it');
+  // And the run must actually be active, on both readings the deck already owns.
+  assert.ok(/operationalState\(run\)\.state !== 'RUNNING'/.test(fn) &&
+    /facts\.presence !== 'RUNNING'/.test(fn),
+    'the cue no longer requires the bound run to be actually running');
+  assert.ok(/return run\.runId \+ '\|'/.test(fn),
+    'the cue identity is not bound to the run it describes, so it could carry across runs');
+});
+
 test('the reduced-motion note describes the cue that exists instead of denying animation', () => {
   const note = /<span class="sr" id="motion-note">([\s\S]*?)<\/span>/.exec(htmlSrc());
   assert.ok(note, 'the reduced-motion screen-reader note was removed');
