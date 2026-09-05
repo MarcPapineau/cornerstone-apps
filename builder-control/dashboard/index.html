@@ -672,9 +672,9 @@
   #raw-state section{margin:0}
   #runs-list .run-card{background:rgba(5,10,16,.42)}
 
-  @media (min-width:1600px){
-    .right-rail{position:sticky;top:86px;max-height:calc(100vh - 100px);overflow:auto;scrollbar-gutter:stable}
-  }
+  /* The operator rail's own seating is declared once, in the wide-screen
+     three-rail cockpit block further down this stylesheet, so exactly one rule
+     owns where that rail sits at every wide width. */
   @media (max-width:1599px){
     .command-shell{grid-template-columns:300px minmax(460px,1fr);grid-template-areas:"left center" "right right" "evidence evidence"}
     .right-rail{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:start}
@@ -1549,6 +1549,51 @@
     .core-station-holder{margin-top:3px;font-size:11px;line-height:135%}
     .core-path-note{margin-top:8px;font-size:11px;line-height:1.4}
     .core-path-handoff{margin-top:6px}
+  }
+
+  /* ── wide-screen three-rail operator cockpit ──────────────────────
+     The approved Strategic Systems HUD reference reads as one cockpit with
+     three rails: the mission brief on the left, the AEGIS Core and its six
+     evidence modules in the centre, and the operator's own rail — Inspector,
+     tools context and Ask AEGIS — on the right. Below 1600px the shipped shell
+     dropped that third rail out of the cockpit and laid it out as a full-width
+     three-across band underneath the centre console, so the first screen an
+     operator actually works on had two rails and the Inspector was somewhere
+     below the fold.
+
+     This block seats the rail that already exists. It moves no markup, adds no
+     panel, no control, no sentence and no second copy of any answer: the
+     Inspector, the tools disclosure and Ask AEGIS are the same three sections,
+     in the same source order, painted by the same renderers, and they are still
+     read in that order on a phone. Layout only — two grid tracks, one area map
+     and the seating the 1600px shell already used, now declared once for the
+     whole wide band instead of twice. There is no colour, no border, no shadow,
+     no clamp, no timer, no transition and no animation here, so nothing in it
+     can state, repeat or invent a reading.
+
+     It starts at 1280px rather than at the 1100px density boundary. A third
+     rail is paid for out of the centre, and the centre is where six modules
+     around a fixed-diameter core and a nine-station handoff path have to stay
+     on one screen: below 1280px there is not enough width to seat the rail
+     without squeezing the instrument the cockpit exists to show. So 1100–1279px
+     keeps exactly the two-rail layout it shipped with, and so do the tablet and
+     390px phone stacks. The rails stay fluid until they reach the same 320px
+     and 340px caps the shell already ships, so a wide desktop keeps the rail
+     widths it had.
+
+     Evidence, history, research and recovery are untouched and stay below the
+     cockpit: run history in the left rail, recovery, changes and receipts, live
+     activity and the research surfaces under the HUD in the centre console, and
+     the evidence deck across the full width beneath all three rails. */
+  @media (min-width:1280px){
+    .command-shell{grid-template-columns:minmax(0,clamp(272px,21vw,320px)) minmax(0,1fr) minmax(0,clamp(252px,20vw,340px));
+      grid-template-areas:"left center right" "evidence evidence evidence"}
+    /* One column again, seated beside the HUD while the centre scrolls, and
+       cleared by the same 104px header band this width already reserves for
+       keyboard landings. overflow:auto, so a tall rail scrolls itself: nothing
+       in it is clipped, hidden or made unreachable at any height. */
+    .right-rail{display:flex;flex-direction:column;position:sticky;top:104px;
+      max-height:calc(100vh - 118px);overflow:auto;scrollbar-gutter:stable}
   }
 
   /* ── Monday research report and the Marc decision queue ───────────

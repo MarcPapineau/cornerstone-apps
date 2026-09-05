@@ -12858,6 +12858,188 @@ test('the sharpened brief hides nothing: the moved sentences are unclamped, tapp
     'the sharpened brief introduced motion');
 });
 
+// ── wide-screen three-rail operator cockpit ────────────────────────────────
+// The gap closed here is compositional, not textual. Every wide screen below
+// 1600px laid the operator's own rail out as a full-width three-across band
+// UNDER the centre console, so the first screen the owner works on had two
+// rails and the Inspector, the tools context and Ask AEGIS were below the fold.
+// The approved reference is a cockpit with three rails — mission brief, the
+// AEGIS Core and its six modules, operator rail — so the rail that already
+// exists is seated beside the HUD instead of being stacked beneath it.
+//
+// The failure a re-composition invites is a second surface: a duplicated
+// Inspector, a second Ask AEGIS answer, a control that quietly leaves the page,
+// or a "layout" block that starts repainting state. So every proof below pairs
+// "seated on the wide screen" with "the same single DOM, the same sentences,
+// and nothing new that could claim anything".
+const cockpitStart = code.indexOf('@media (min-width:1280px)');
+const COCKPIT = cockpitStart === -1 ? '' : code.slice(cockpitStart, code.indexOf('\n  }', cockpitStart));
+
+function cockpitRules() {
+  const rules = [];
+  for (const rule of COCKPIT.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    rules.push({ selectors: rule[1].split(',').map((s) => s.trim()).filter(Boolean), body: rule[2] });
+  }
+  return rules;
+}
+
+// Seating, and nothing else. Every property this block may declare places a box
+// that already exists; none of them paints, hides, clamps, times or renames
+// anything inside it.
+const COCKPIT_SEATING_ONLY = new Set(['grid-template-columns', 'grid-template-areas', 'display',
+  'flex-direction', 'position', 'top', 'max-height', 'overflow', 'scrollbar-gutter']);
+
+test('the wide first screen seats three rails: the mission brief, the HUD, and the operator rail', () => {
+  assert.ok(COCKPIT.length > 0, 'the wide three-rail cockpit block was not located');
+  assert.strictEqual((code.match(/@media \(min-width:1280px\)/g) || []).length, 1,
+    'the cockpit is composed in more than one block, so two rules could disagree about where the rail sits');
+  const shell = cockpitRules().find((rule) => rule.selectors.join(',') === '.command-shell');
+  assert.ok(shell, 'the wide cockpit declares no shell layout at all');
+  assert.match(shell.body, /grid-template-areas:"left center right" "evidence evidence evidence"/,
+    'the wide shell is not three rails above one full-width evidence row');
+  // Three real tracks, and the centre is the one that grows: a fixed rail pair
+  // would take the width the six modules and the nine-station path need.
+  assert.match(shell.body,
+    /grid-template-columns:minmax\(0,clamp\(272px,21vw,320px\)\) minmax\(0,1fr\) minmax\(0,clamp\(252px,20vw,340px\)\)/,
+    'the cockpit rails are not fluid around a growing centre console');
+  const rail = cockpitRules().find((rule) => rule.selectors.join(',') === '.right-rail');
+  assert.ok(rail, 'the operator rail is not seated by the cockpit block');
+  assert.match(rail.body, /display:flex;flex-direction:column/,
+    'the operator rail is still laid out as a band of columns instead of as one rail');
+  assert.match(rail.body, /position:sticky/,
+    'the operator rail does not stay beside the HUD while the centre console scrolls');
+  // A capped rail that cannot scroll is a hidden control, so the cap and the
+  // scroll are in the same rule and neither can ship without the other.
+  assert.strictEqual(/max-height:/.test(rail.body), /overflow:auto/.test(rail.body),
+    'the operator rail is capped without being scrollable, so a control inside it can become unreachable');
+  // One seat, in one place: two seating rules are two answers to "where does
+  // the operator rail live" at two widths.
+  const seated = [];
+  for (const rule of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (/position:sticky/.test(rule[2]) && /right-rail/.test(rule[1])) seated.push(rule[1].trim());
+  }
+  assert.deepStrictEqual(seated, ['.right-rail'],
+    'the operator rail is seated by more than one rule, so two widths could disagree about where it sits');
+});
+
+test('the cockpit is wide-screen only: the 1100px band, the tablet stack and the 390px order are untouched', () => {
+  assert.ok(!/@media \(max-width/.test(COCKPIT),
+    'the cockpit block carries a max-width of its own, which is a second place for a width to be re-composed');
+  for (const query of COCKPIT.match(/@media \(min-width:(\d+)px\)/g) || []) {
+    assert.ok(Number(/(\d+)/.exec(query)[1]) >= 1280,
+      `the cockpit reaches below 1280px (${query}), into a layout that shipped and was not re-composed`);
+  }
+  // Both shipped narrow layouts still say exactly what they said: the two-rail
+  // band from 1100px to 1279px, and the founder-first single-column stack.
+  assert.ok(/\.command-shell\{grid-template-columns:300px minmax\(600px,1fr\);\s*grid-template-areas:"left center" "right right" "evidence evidence"\}/.test(code),
+    'the 1100–1279px band lost the two-rail layout it shipped with');
+  assert.ok(/\.command-shell\{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"\}/.test(code),
+    'the single-column stack lost its left, center, right, evidence order');
+  // The phone is not re-composed at all: the cockpit sets no shell tracks and no
+  // rail rule there, and the 390px reading order is the one that shipped.
+  assert.ok(!/\.command-shell\{[^}]*grid-template/.test(PHONE) && !/\.right-rail\{/.test(PHONE),
+    'the cockpit re-composed the phone stack instead of leaving it exactly as it shipped');
+  assert.ok(/\.brief-supporting\{display:flex;flex-direction:column;order:4\}/.test(PHONE) &&
+    /\.event-panel\{order:1\}#evidence-rail\{order:2\}#raw-state\{order:3\}/.test(PHONE),
+    'the 390px reading order changed while the wide cockpit was being seated');
+});
+
+test('the cockpit block seats boxes and does nothing else: no paint, no clamp, no motion, no words', () => {
+  assert.ok(cockpitRules().length > 0, 'the cockpit block declares no rules');
+  for (const rule of cockpitRules()) {
+    const target = rule.selectors.join(',');
+    for (const part of rule.body.split(';').map((s) => s.trim()).filter(Boolean)) {
+      const prop = part.slice(0, part.indexOf(':')).trim().toLowerCase();
+      assert.ok(COCKPIT_SEATING_ONLY.has(prop),
+        `${target} declares ${prop}, which is not seating — composition may not repaint or re-read anything`);
+    }
+    assert.ok(!/display:none|visibility:|content-visibility:|-webkit-line-clamp|text-overflow/.test(rule.body),
+      `${target} hides or truncates part of the cockpit instead of seating it`);
+    assert.ok(!/!important/.test(rule.body), `${target} outranks a shipped state signal with !important`);
+  }
+  assert.ok(!/@keyframes/.test(COCKPIT) && !/\banimation\s*:/.test(COCKPIT) &&
+    !/(?:^|;)\s*transition:(?!none)/.test(COCKPIT),
+    'the cockpit introduced motion — it is an instrument panel, not decoration');
+  for (const banned of ['gradient(', 'url(', 'image-set(', 'filter', 'backdrop-filter', 'content:',
+    'setInterval', 'setTimeout', 'requestAnimationFrame', 'fetch(', 'AEGIS_STATE', '/api/']) {
+    assert.ok(!COCKPIT.includes(banned),
+      `the cockpit block uses ${banned} — it may only seat boxes the renderers already fill`);
+  }
+  // Only the two boxes the composition moves. A third selector here would be a
+  // rail quietly editing an instrument it merely sits beside.
+  const touched = new Set();
+  for (const rule of cockpitRules()) for (const selector of rule.selectors) touched.add(selector);
+  assert.deepStrictEqual([...touched].sort(), ['.command-shell', '.right-rail'],
+    'the cockpit block reaches past the shell and the rail it seats');
+});
+
+test('the operator rail is the shipped Inspector, tools and Ask AEGIS — seated, never duplicated', () => {
+  const source = htmlSrc();
+  assert.strictEqual((source.match(/class="right-rail"/g) || []).length, 1,
+    'a second operator rail would let two rails claim the same inspector and the same answer');
+  const railStart = source.indexOf('class="right-rail"');
+  const railEnd = source.indexOf('</aside>', railStart);
+  assert.ok(railStart !== -1 && railEnd > railStart, 'the operator rail markup was not located');
+  const rail = source.slice(railStart, railEnd);
+  // Exactly the sections that shipped, in the order they shipped in.
+  assert.strictEqual((rail.match(/<section\b/g) || []).length, 2,
+    'the seated rail gained or lost a section instead of being seated as it is');
+  assert.strictEqual((rail.match(/<details\b/g) || []).length, 1,
+    'the seated rail gained or lost a disclosure instead of being seated as it is');
+  assert.ok(rail.indexOf('id="inspector"') < rail.indexOf('id="integration-overview"') &&
+    rail.indexOf('id="integration-overview"') < rail.indexOf('id="ask-aegis"'),
+    'the operator rail no longer reads Inspector, then tools, then Ask AEGIS');
+  // One of each on the whole page: seating may not become a copy.
+  for (const id of ['inspector', 'integration-overview', 'ask-aegis', 'ask-aegis-answer',
+    'ask-aegis-explain', 'ask-aegis-summarize', 'ask-aegis-next']) {
+    assert.strictEqual((source.match(new RegExp('id="' + id + '"', 'g')) || []).length, 1,
+      `${id} exists more than once, so two surfaces could answer differently`);
+  }
+  // Every control and every sentence the rail carries is the shipped one.
+  for (const label of ['Explain status', 'Summarize', 'Next action']) {
+    assert.ok(rail.includes('>' + label + '<'), `the seated rail lost the ${label} control`);
+  }
+  assert.ok(rail.includes('Select a command to explain the current evidence. ' +
+    'This does not launch a model or modify the build.'),
+  'the Ask AEGIS context sentence was rewritten while the rail was being seated');
+  assert.ok(rail.includes('Select a route stage, connector or reviewer.'),
+    'the Inspector empty-state sentence was rewritten while the rail was being seated');
+  assert.ok(rail.includes('Tools &amp; integrations') && rail.includes('Loading connector evidence…'),
+    'the tools context left the operator rail');
+});
+
+test('the cockpit reads brief, HUD, operator rail — with evidence, history, research and recovery below it', () => {
+  const source = htmlSrc();
+  const at = (needle) => {
+    const idx = source.indexOf(needle);
+    assert.notStrictEqual(idx, -1, `${needle} is missing from the command shell`);
+    return idx;
+  };
+  assert.ok(at('class="left-rail"') < at('class="center-console"') &&
+    at('class="center-console"') < at('class="right-rail"') &&
+    at('class="right-rail"') < at('class="evidence-deck"'),
+    'the three rails and the evidence deck are no longer in the shipped source order');
+  // The centre leads with the HUD; the route, recovery, the receipts inspector
+  // and the research surfaces stay under it.
+  assert.ok(at('class="strategic-core"') < at('id="topology-overview"') &&
+    at('id="topology-overview"') < at('id="recovery-deck"') &&
+    at('id="recovery-deck"') < at('id="changes-receipts"') &&
+    at('id="changes-receipts"') < at('id="research-report"'),
+    'an evidence, recovery or research surface was promoted above the central HUD');
+  assert.ok(at('class="evidence-deck"') < at('id="evidence-rail"') &&
+    at('id="evidence-rail"') < at('id="raw-state"'),
+    'the evidence rail or the deep machine state left the deck below the cockpit');
+  // History stays where it shipped: collapsed, in the mission rail, under the
+  // brief and the composer.
+  const leftStart = at('class="left-rail"');
+  const left = source.slice(leftStart, source.indexOf('</aside>', leftStart));
+  assert.ok(left.indexOf('id="founder-summary"') < left.indexOf('id="objective-composer"') &&
+    left.indexOf('id="objective-composer"') < left.indexOf('aria-labelledby="runs-h"'),
+    'the mission rail no longer reads brief, composer, then collapsed history');
+  assert.ok(/<details(?![^>]*\bopen\b)[^>]*aria-labelledby="runs-h"/.test(left),
+    'run history was opened onto the first screen instead of staying collapsed below the cockpit');
+});
+
 async function atest(name, fn) {
   try { await fn(); passed++; console.log(`ok   ${name}`); }
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }
