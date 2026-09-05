@@ -1739,6 +1739,23 @@ function get(port, path_, headers = {}) {
   });
 }
 
+// Reconciler assertions wait for the pass count the fixture itself records,
+// never for a fixed sleep: the observed outcome is what keeps the offer count
+// deterministic on a slow or loaded machine.
+function afterPasses(observed, target) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 5000;
+    const tick = () => {
+      if (observed.passes >= target) return resolve();
+      if (Date.now() > deadline) {
+        return reject(new Error(`reconciliation pass ${target} never ran (saw ${observed.passes})`));
+      }
+      setTimeout(tick, 5);
+    };
+    tick();
+  });
+}
+
 (async () => {
   await atest('hosting reconciler runs immediately, repeats on a bounded interval, and clears on close', async () => {
     const server = new EventEmitter();
@@ -1818,6 +1835,111 @@ function get(port, path_, headers = {}) {
     const reconciler = S.startRunReconciler(server, authority, 20);
     await new Promise((resolve) => setTimeout(resolve, 55));
     assert.ok(passes >= 2, 'a reconciler without an automatic-checks authority stopped reconciling');
+    server.emit('close');
+    reconciler.stop();
+  });
+
+  await atest('a run already BUILT before the pass looked is still offered exactly once', async () => {
+    const server = new EventEmitter();
+    const runId = 'RUN-20260905-11aa22bb';
+    // Another canonical status reader carried this run out of BUILDING first,
+    // so reconciliation has nothing at all to report about it. Before this was
+    // fixed the run sat at BUILT forever and was never offered.
+    const observed = { passes: 0 };
+    const offered = [];
+    const authority = {
+      reconcileBuildingRuns() { observed.passes += 1; return []; },
+      listRuns() { return [{ runId, state: 'BUILT' }]; },
+      runAutomaticDashboardChecks(...args) { offered.push(args); return { runId, ran: true }; },
+    };
+    const reconciler = S.startRunReconciler(server, authority, 10);
+    await afterPasses(observed, 4);
+    assert.deepStrictEqual(offered, [[runId]],
+      'an already-BUILT run must be offered exactly once per arrival, with the run id as the only argument');
+    server.emit('close');
+    reconciler.stop();
+  });
+
+  await atest('one BUILT arrival reported by both reconciliation and the canonical list is offered once', async () => {
+    const server = new EventEmitter();
+    const runId = 'RUN-20260905-33cc44dd';
+    const observed = { passes: 0 };
+    const offered = [];
+    const authority = {
+      reconcileBuildingRuns() {
+        observed.passes += 1;
+        return [{ runId, action: 'NOOP', state: 'BUILT' }];
+      },
+      listRuns() { return [{ runId, state: 'BUILT' }]; },
+      runAutomaticDashboardChecks(...args) { offered.push(args); return { runId, ran: true }; },
+    };
+    const reconciler = S.startRunReconciler(server, authority, 10);
+    await afterPasses(observed, 4);
+    assert.deepStrictEqual(offered, [[runId]],
+      'two views of the same BUILT arrival must not produce two offers');
+    server.emit('close');
+    reconciler.stop();
+  });
+
+  await atest('leaving BUILT clears the marker so a later BUILT arrival is offered again', async () => {
+    const server = new EventEmitter();
+    const runId = 'RUN-20260905-55ee66ff';
+    const observed = { passes: 0 };
+    const offered = [];
+    let canonicalState = 'BUILT';
+    const authority = {
+      reconcileBuildingRuns() { observed.passes += 1; return []; },
+      listRuns() { return [{ runId, state: canonicalState }]; },
+      runAutomaticDashboardChecks(...args) { offered.push(args); return { runId, ran: true }; },
+    };
+    const reconciler = S.startRunReconciler(server, authority, 10);
+    await afterPasses(observed, 3);
+    assert.deepStrictEqual(offered, [[runId]], 'the first BUILT arrival was not offered exactly once');
+    // A correction cycle takes the run away from BUILT; the second arrival at
+    // BUILT is a new arrival and is offered again.
+    canonicalState = 'CORRECTING';
+    await afterPasses(observed, observed.passes + 3);
+    assert.deepStrictEqual(offered, [[runId]], 'a run away from BUILT must never be offered');
+    canonicalState = 'BUILT';
+    await afterPasses(observed, observed.passes + 3);
+    assert.deepStrictEqual(offered, [[runId], [runId]],
+      'a run that reached BUILT again after leaving it was never offered');
+    server.emit('close');
+    reconciler.stop();
+  });
+
+  await atest('a canonically ineligible BUILT run executes nothing', async () => {
+    const server = new EventEmitter();
+    const runId = 'RUN-20260905-77aa88bb';
+    const observed = { passes: 0 };
+    const offered = [];
+    const executed = [];
+    // Eligibility stays exactly where it already lives. Hosting hands over a
+    // run id and no opinion; the canonical authority refuses, and no check,
+    // command, or lifecycle outcome exists for this run.
+    const authority = {
+      reconcileBuildingRuns() { observed.passes += 1; return []; },
+      listRuns() { return [{ runId, state: 'BUILT' }]; },
+      automaticDashboardChecksEligibility(id) {
+        return { eligible: false, runId: id, state: 'BUILT',
+          reason: 'the run is not marked automatic-checks eligible' };
+      },
+      runAutomaticDashboardChecks(id) {
+        offered.push(id);
+        const eligibility = authority.automaticDashboardChecksEligibility(id);
+        if (!eligibility.eligible) {
+          return { runId: id, action: 'automatic-checks', ran: false, reason: eligibility.reason };
+        }
+        executed.push(id);
+        return { runId: id, action: 'automatic-checks', ran: true };
+      },
+    };
+    const reconciler = S.startRunReconciler(server, authority, 10);
+    await afterPasses(observed, 4);
+    assert.deepStrictEqual(executed, [],
+      'an ineligible run must never have checks executed for it');
+    assert.deepStrictEqual(offered, [runId],
+      'an ineligible run must be offered to the refusing authority once, not repeatedly');
     server.emit('close');
     reconciler.stop();
   });

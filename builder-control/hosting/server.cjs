@@ -2176,9 +2176,10 @@ function log(req, status, started) {
  * the bounded interval catches a worker that exits after hosting starts. Both
  * use aegis-run's canonical claim/transition authority.
  *
- * A run the scan reports as BUILT is also offered — by run id, nothing else —
- * to aegis-run's automatic-checks authority, which refuses everything that is
- * not a dashboard-created run whose canonical subject is the dashboard slice.
+ * A run that is BUILT — whether this scan moved it there or some other
+ * canonical reader did first — is also offered, by run id and nothing else, to
+ * aegis-run's automatic-checks authority, which refuses everything that is not
+ * a dashboard-created run whose canonical subject is the dashboard slice.
  * Hosting selects no command and records no outcome.
  */
 function startRunReconciler(server, authority = AegisRun, intervalMs = RUN_RECONCILE_INTERVAL_MS) {
@@ -2206,9 +2207,34 @@ function startRunReconciler(server, authority = AegisRun, intervalMs = RUN_RECON
     // Hosting decides nothing about the run it is handed: whether checks may
     // start, and which ones, belongs entirely to aegis-run's authority, which
     // refuses every run that is not a dashboard-created dashboard-slice BUILT.
-    if (!Array.isArray(results) || typeof authority.runAutomaticDashboardChecks !== 'function') return;
-    for (const result of results) {
-      if (!result || typeof result.runId !== 'string') continue;
+    if (typeof authority.runAutomaticDashboardChecks !== 'function') return;
+    // Reconciliation reports only the runs this pass itself moved or observed.
+    // A run that some other canonical reader already carried out of BUILDING
+    // before this pass looked is absent from that report entirely, and used to
+    // sit at BUILT forever without ever being offered. The canonical run list
+    // is the same existing authority read, so every run that is BUILT right
+    // now is visible here regardless of who observed it first.
+    //
+    // One decision per run per pass: the canonical list is merged last, so a
+    // stale pre-move observation can never overrule the current canonical
+    // state and cause a second offer for the same arrival.
+    const observed = new Map();
+    const observe = (entry) => {
+      if (entry && typeof entry.runId === 'string' && typeof entry.state === 'string') {
+        observed.set(entry.runId, entry);
+      }
+    };
+    if (Array.isArray(results)) for (const result of results) observe(result);
+    if (typeof authority.listRuns === 'function') {
+      let canonicalRuns;
+      try { canonicalRuns = authority.listRuns(); }
+      catch (error) {
+        process.stderr.write(`[aegis-host] canonical run list unavailable: ${String(error.code || error.message || error)}\n`);
+        canonicalRuns = null;
+      }
+      if (Array.isArray(canonicalRuns)) for (const run of canonicalRuns) observe(run);
+    }
+    for (const result of observed.values()) {
       if (result.state !== 'BUILT') { offeredWhileBuilt.delete(result.runId); continue; }
       if (offeredWhileBuilt.has(result.runId)) continue;
       offeredWhileBuilt.add(result.runId);
