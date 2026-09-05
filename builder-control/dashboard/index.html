@@ -2107,7 +2107,12 @@
           <div class="aegis-core" id="aegis-core" role="status" aria-live="polite">
             <div class="core-mark">AEGIS CORE</div>
             <div class="core-sub">Gate readiness</div>
-            <div class="core-status" id="hud-core-status">UNAVAILABLE</div>
+            <!-- Fail closed in words, not in vocabulary. The shipped default is
+                 the same plain reading the renderer writes for UNAVAILABLE, and
+                 the exact canonical code it stands for is carried beside it on
+                 this node, exactly as hudState() carries it after every repaint. -->
+            <div class="core-status" id="hud-core-status" data-hud-code="UNAVAILABLE"
+              title="Canonical state code: UNAVAILABLE">Not recorded</div>
           </div>
           <article class="core-node is-gate">
             <h3>Gate queue</h3><div class="hud-value" id="hud-gate">Loading next gate…</div>
@@ -2392,11 +2397,97 @@
     if (text != null) n.textContent = text;
     return n;
   }
-  // Status is colour + label + glyph. Never colour alone (§J).
+  // Status is colour + label + glyph. Never colour alone (§J). This is the
+  // exact-code chip Detail View reads: the token itself is the written word, so
+  // an auditor's receipt surface never has to be translated back.
   function chip(state){
     var c = el('span','chip s-'+state);
     c.appendChild(el('span','g', GLYPH[state] || '?'));
     c.appendChild(el('span',null,state));
+    return c;
+  }
+
+  // ── the one plain-English label seam ──────────────────────────────────────
+  // It is declared here, ahead of the first paint, because the header's gate
+  // badge and the AEGIS Core are written during that paint: a seam initialised
+  // further down the file would leave the first screen with no word to print.
+  // It translates wording and nothing else — no state is resolved here.
+  // The word the operator reads. The canonical token is unchanged and stays in
+  // data-ops-state and on the chip's exact-code title; only the wording differs,
+  // and a token this closed map does not name stays visibly unknown with its
+  // exact code in the label itself.
+  var OPS_CHIP_PLAIN = {
+    'run-state': { RUNNING: 'Running', WAITING: 'Waiting', BLOCKED: 'Needs attention',
+      COMPLETE: 'Finished', UNVERIFIED: 'Not confirmed', IDLE: 'Nothing running',
+      UNAVAILABLE: 'Not recorded' },
+    // The canonical aegis-run lifecycle vocabulary, read through the SAME seam
+    // and the same closed-map discipline, so the first screen can lead with what
+    // the run means instead of with BUILD_FAILED, CHECKS_PASSED or REVIEW_BOUND.
+    // It renames nothing and decides nothing: aegis-run still owns the states,
+    // and the exact code stays written out wherever it already was — the handoff
+    // note, the mission line, the run cards, Detail View and every receipt.
+    'run-lifecycle': { CREATED: 'Run created', INTAKE_RECORDED: 'Objective recorded',
+      ROUTED: 'Builder chosen', WORKTREE_READY: 'Workspace ready', BUILDING: 'Building',
+      BUILD_CONTINUED: 'Build resumed', BUILT: 'Build finished', BUILD_FAILED: 'Build failed',
+      CHECKS_PASSED: 'Checks passed', CHECKS_FAILED: 'Checks failed',
+      REVIEW_BOUND: 'Review evidence attached', REVIEW_FAILED: 'Review failed',
+      CORRECTING: 'Correcting', CHECKPOINTED: 'Safe checkpoint reached',
+      ROLLED_BACK: 'Rolled back', ABANDONED: 'Abandoned', UNAVAILABLE: 'Not recorded' },
+    progress: { PROGRESS_RECORDED: 'Activity recorded', PROGRESS_UNRECORDED: 'No activity recorded',
+      TIMED_OUT: 'Timed out', NOT_RUNNING: 'Nothing running', UNAVAILABLE: 'Not recorded' },
+    watchdog: { RECORDED: 'Limits recorded', TIMED_OUT: 'Timed out',
+      NOT_RUNNING: 'Nothing running', UNAVAILABLE: 'Not recorded' },
+    cost: { AVAILABLE: 'Recorded', INCOMPLETE: 'Incomplete estimate', STALE: 'Older estimate',
+      UNAVAILABLE: 'Not recorded' },
+    checkpoint: { AVAILABLE: 'Recorded', INCOMPLETE: 'Incomplete record',
+      BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded' },
+    // The gate's own outcome vocabulary, read through the SAME seam so the HUD
+    // gate module can lead with what the outcome means instead of with
+    // READY_FOR_DETERMINISTIC_VALIDATION. It renames nothing: the gate still
+    // owns the decision, and the exact code stays on the module's own machine
+    // attribute and written out in Detail View.
+    'gate-outcome': { READY_FOR_PR: 'Ready to open a pull request',
+      READY_FOR_DETERMINISTIC_VALIDATION: 'Waiting on deterministic checks',
+      BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded' },
+    // The five machine words checkpointEvidenceState() writes. The sentence
+    // beside them is unchanged, so these only say the same thing in words the
+    // owner does not have to decode.
+    'checkpoint-evidence': { RECORDED: 'Safe state recorded',
+      ROLLBACK_UNAVAILABLE: 'Safe state recorded, no way back',
+      NOT_RECORDED: 'No safe state recorded', BLOCKED: 'Needs attention',
+      UNAVAILABLE: 'Not recorded' },
+    // Whether the work on screen is tied to the exact code version on screen.
+    'code-version': { BOUND: 'Matches this code version', UNAVAILABLE: 'Not confirmed' },
+    // The closed set of coverage words the review module already wrote. They
+    // stay the exact state code on the node; only the wording the owner reads
+    // is translated, through this one seam like every other module footer.
+    'review-coverage': {
+      'EVIDENCE UNAVAILABLE': 'No review evidence recorded',
+      'REVIEW EVIDENCE STALE OR MISMATCHED': 'Review evidence belongs to another version',
+      'REVIEW COVERAGE COMPLETE': 'Review coverage complete',
+      'SERVER VERIFICATION CANDIDATE — RUN VERSION DIFFERS':
+        'Appears ready to verify, but the recorded version differs',
+      'EVIDENCE APPEARS READY FOR SERVER VERIFICATION': 'Appears ready for server verification',
+      'REVIEW EVIDENCE NOT YET SERVER-VERIFIED': 'Not yet server-verified',
+      'REVIEW COVERAGE INCOMPLETE': 'Review coverage incomplete'
+    }
+  };
+  // Own-property lookup only: this seam is now handed canonical run states that
+  // arrive over the wire, and an inherited member must never be able to render
+  // as a state word.
+  function opsChipLabel(id, token){
+    var known = Object.prototype.hasOwnProperty.call(OPS_CHIP_PLAIN, id)
+      ? OPS_CHIP_PLAIN[id] : {};
+    return Object.prototype.hasOwnProperty.call(known, token)
+      ? known[token] : ('Unknown state ' + token);
+  }
+  // The same chip shape used everywhere — colour, glyph and a written word — with
+  // the plain word in front and the exact canonical code carried in the title.
+  function opsChip(token, label){
+    var c = el('span','chip s-'+token);
+    c.setAttribute('title','Canonical state code: '+token);
+    c.appendChild(el('span','g', GLYPH[token] || '?'));
+    c.appendChild(el('span',null,label));
     return c;
   }
 
@@ -3138,14 +3229,24 @@
     // plane's reading of the CURRENT GATE SUBJECT; unlabelled, a BLOCKED gate
     // beside a finished worker read as a failed worker.
     verdict.appendChild(el('span','ctx-gate-label','Gate'));
-    verdict.appendChild(chip(controlPlaneState(currentEng, currentBinding, currentRun,
-      availableEmptyRuns(currentView)).state));
+    // Same resolution, same s-STATE colour, same glyph — now read as what the
+    // gate MEANS rather than as the token itself, through the one shipped label
+    // seam the operational cells and the AEGIS Core already use. Nothing is
+    // decided here and nothing is lost: opsChip keeps the exact canonical code
+    // on the badge's own title, and it is repeated as this cell's machine
+    // attribute so an auditor recovers the token without a pointer. Detail View
+    // still writes the token itself, through chip().
+    var gateCode = controlPlaneState(currentEng, currentBinding, currentRun,
+      availableEmptyRuns(currentView)).state;
+    verdict.setAttribute('data-gate-code', gateCode);
+    verdict.appendChild(opsChip(gateCode, opsChipLabel('run-state', gateCode)));
   }
   // CONFIRMED FINDING #9: this used to render ANY non-BLOCKED verdict as
   // "PASS", so READY_FOR_DETERMINISTIC_VALIDATION — which explicitly means the
-  // checks have NOT been run — displayed as a pass. The exact canonical verdict
-  // is now rendered verbatim. If the gate invents a new state tomorrow, this
-  // shows that state rather than guessing which side of the line it falls on.
+  // checks have NOT been run — displayed as a pass. Every canonical state is now
+  // carried through one-for-one: the badge reads the closed label seam's word for
+  // it and keeps the exact code on the node, so a state the gate invents tomorrow
+  // shows as "Unknown state X" rather than being guessed onto a side of the line.
   renderContext(S);
 
   // ── founder summary: one primary, plain-English "what's happening" panel ──
@@ -5465,84 +5566,6 @@
   function opsCellState(value){
     return typeof value === 'string' && value.trim() ? value : 'UNAVAILABLE';
   }
-  // The word the operator reads. The canonical token is unchanged and stays in
-  // data-ops-state and on the chip's exact-code title; only the wording differs,
-  // and a token this closed map does not name stays visibly unknown with its
-  // exact code in the label itself.
-  var OPS_CHIP_PLAIN = {
-    'run-state': { RUNNING: 'Running', WAITING: 'Waiting', BLOCKED: 'Needs attention',
-      COMPLETE: 'Finished', UNVERIFIED: 'Not confirmed', IDLE: 'Nothing running',
-      UNAVAILABLE: 'Not recorded' },
-    // The canonical aegis-run lifecycle vocabulary, read through the SAME seam
-    // and the same closed-map discipline, so the first screen can lead with what
-    // the run means instead of with BUILD_FAILED, CHECKS_PASSED or REVIEW_BOUND.
-    // It renames nothing and decides nothing: aegis-run still owns the states,
-    // and the exact code stays written out wherever it already was — the handoff
-    // note, the mission line, the run cards, Detail View and every receipt.
-    'run-lifecycle': { CREATED: 'Run created', INTAKE_RECORDED: 'Objective recorded',
-      ROUTED: 'Builder chosen', WORKTREE_READY: 'Workspace ready', BUILDING: 'Building',
-      BUILD_CONTINUED: 'Build resumed', BUILT: 'Build finished', BUILD_FAILED: 'Build failed',
-      CHECKS_PASSED: 'Checks passed', CHECKS_FAILED: 'Checks failed',
-      REVIEW_BOUND: 'Review evidence attached', REVIEW_FAILED: 'Review failed',
-      CORRECTING: 'Correcting', CHECKPOINTED: 'Safe checkpoint reached',
-      ROLLED_BACK: 'Rolled back', ABANDONED: 'Abandoned', UNAVAILABLE: 'Not recorded' },
-    progress: { PROGRESS_RECORDED: 'Activity recorded', PROGRESS_UNRECORDED: 'No activity recorded',
-      TIMED_OUT: 'Timed out', NOT_RUNNING: 'Nothing running', UNAVAILABLE: 'Not recorded' },
-    watchdog: { RECORDED: 'Limits recorded', TIMED_OUT: 'Timed out',
-      NOT_RUNNING: 'Nothing running', UNAVAILABLE: 'Not recorded' },
-    cost: { AVAILABLE: 'Recorded', INCOMPLETE: 'Incomplete estimate', STALE: 'Older estimate',
-      UNAVAILABLE: 'Not recorded' },
-    checkpoint: { AVAILABLE: 'Recorded', INCOMPLETE: 'Incomplete record',
-      BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded' },
-    // The gate's own outcome vocabulary, read through the SAME seam so the HUD
-    // gate module can lead with what the outcome means instead of with
-    // READY_FOR_DETERMINISTIC_VALIDATION. It renames nothing: the gate still
-    // owns the decision, and the exact code stays on the module's own machine
-    // attribute and written out in Detail View.
-    'gate-outcome': { READY_FOR_PR: 'Ready to open a pull request',
-      READY_FOR_DETERMINISTIC_VALIDATION: 'Waiting on deterministic checks',
-      BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded' },
-    // The five machine words checkpointEvidenceState() writes. The sentence
-    // beside them is unchanged, so these only say the same thing in words the
-    // owner does not have to decode.
-    'checkpoint-evidence': { RECORDED: 'Safe state recorded',
-      ROLLBACK_UNAVAILABLE: 'Safe state recorded, no way back',
-      NOT_RECORDED: 'No safe state recorded', BLOCKED: 'Needs attention',
-      UNAVAILABLE: 'Not recorded' },
-    // Whether the work on screen is tied to the exact code version on screen.
-    'code-version': { BOUND: 'Matches this code version', UNAVAILABLE: 'Not confirmed' },
-    // The closed set of coverage words the review module already wrote. They
-    // stay the exact state code on the node; only the wording the owner reads
-    // is translated, through this one seam like every other module footer.
-    'review-coverage': {
-      'EVIDENCE UNAVAILABLE': 'No review evidence recorded',
-      'REVIEW EVIDENCE STALE OR MISMATCHED': 'Review evidence belongs to another version',
-      'REVIEW COVERAGE COMPLETE': 'Review coverage complete',
-      'SERVER VERIFICATION CANDIDATE — RUN VERSION DIFFERS':
-        'Appears ready to verify, but the recorded version differs',
-      'EVIDENCE APPEARS READY FOR SERVER VERIFICATION': 'Appears ready for server verification',
-      'REVIEW EVIDENCE NOT YET SERVER-VERIFIED': 'Not yet server-verified',
-      'REVIEW COVERAGE INCOMPLETE': 'Review coverage incomplete'
-    }
-  };
-  // Own-property lookup only: this seam is now handed canonical run states that
-  // arrive over the wire, and an inherited member must never be able to render
-  // as a state word.
-  function opsChipLabel(id, token){
-    var known = Object.prototype.hasOwnProperty.call(OPS_CHIP_PLAIN, id)
-      ? OPS_CHIP_PLAIN[id] : {};
-    return Object.prototype.hasOwnProperty.call(known, token)
-      ? known[token] : ('Unknown state ' + token);
-  }
-  // The same chip shape used everywhere — colour, glyph and a written word — with
-  // the plain word in front and the exact canonical code carried in the title.
-  function opsChip(token, label){
-    var c = el('span','chip s-'+token);
-    c.setAttribute('title','Canonical state code: '+token);
-    c.appendChild(el('span','g', GLYPH[token] || '?'));
-    c.appendChild(el('span',null,label));
-    return c;
-  }
   function opsStripCells(control, supervision, costPanel, checkpointPanel){
     return [
       // This cell is handed controlPlaneState, which answers whether the CURRENT
@@ -6807,9 +6830,11 @@
       ', run lifecycle ' + opState.state);
     // The core is the largest state word on the first screen, so it reads as
     // what the gate means through the same seam the five operational cells use.
-    // It is the same resolution — controlState.state — and the exact code is
-    // still carried beside it as the mission module's own machine attribute.
-    hudText('hud-core-status', opsChipLabel('run-state', controlState.state));
+    // It is the same resolution — controlState.state — and it is written through
+    // the seam-aware writer, so the exact canonical code stays on the very node
+    // whose word replaced it rather than only on the mission module beside it.
+    hudState('hud-core-status', opsChipLabel('run-state', controlState.state),
+      controlState.state);
     hudText('hud-crew', crew);
     // currentAction is overwritten with the gate's reason whenever the control
     // plane blocks, so reading it here described a stopped or finished worker
@@ -6872,7 +6897,13 @@
     var hudCheckpointCode = checkpointEvidenceState(boundRun);
     hudState('hud-checkpoint-state', opsChipLabel('checkpoint-evidence', hudCheckpointCode),
       hudCheckpointCode);
-    hudText('hud-system-health', cleanIdle ? 'READY FOR AN OBJECTIVE' : controlState.state);
+    // The same gate resolution the core reads, so it is worded by the same seam:
+    // a Command View card that still printed the bare token would disagree with
+    // the core about nothing except how hard it is to read. The clean-idle
+    // sentence is unchanged, and the exact code is kept on the card itself.
+    hudState('hud-system-health', cleanIdle
+      ? 'READY FOR AN OBJECTIVE' : opsChipLabel('run-state', controlState.state),
+    controlState.state);
     hudText('hud-system-health-meta', cleanIdle ? 'No active run and no recorded blocker.' : operatorBlocker);
     hudText('hud-decisions', cleanIdle ? 'None right now' : deckActions[0]);
     hudText('hud-decisions-meta', cleanIdle

@@ -118,6 +118,27 @@ const REVIEW_COVERAGE_PLAIN = Object.freeze({
   'REVIEW COVERAGE INCOMPLETE': 'Review coverage incomplete',
 });
 
+// The header's gate badge reads as what the gate MEANS, so every proof about it
+// has to hold both halves of that replacement at once: the plain word the owner
+// reads, and the exact canonical code the badge still carries for an auditor.
+// The code is read out of the badge's own machine attribute rather than out of
+// its text, which is precisely what keeps the plain word evidence-backed instead
+// of a rename — a badge that reworded a state it did not resolve would fail
+// here rather than read pleasantly.
+function headerGate(page) {
+  const node = page.document.getElementById('ctx-verdict');
+  return { code: node.attrs['data-gate-code'], text: node.textContent };
+}
+function assertHeaderGate(page, expected, message) {
+  const gate = headerGate(page);
+  assert.strictEqual(gate.code, expected,
+    `${message}: the header gate code is ${gate.code}, not ${expected}`);
+  assert.ok(gate.text.includes(RUN_STATE_PLAIN[expected]),
+    `${message}: the header does not say ${RUN_STATE_PLAIN[expected]}: ${gate.text}`);
+  assert.ok(!/[A-Z]{2,}|_/.test(gate.text),
+    `${message}: the header still leads with a machine token: ${gate.text}`);
+}
+
 console.log('AEGIS dashboard slice — invariants');
 
 // ── nothing may animate on a timer ──────────────────────────────────────────
@@ -1199,6 +1220,51 @@ test('the exact canonical run-state codes survive the plain-English first screen
     'the station role attribute changed with the wording, which is a state change and not a label change');
 });
 
+// ── the header badge and the AEGIS Core say what the state means ────────────
+// The failure guarded here is the first screen leading with BLOCKED, WAITING,
+// UNAVAILABLE or STALE — gate vocabulary the owner has to decode before knowing
+// whether anything is wrong — and the exact opposite failure, a page so friendly
+// that the code an auditor needs is gone. Both are prevented the same way the
+// five operational cells already were: ONE seam does the wording, no surface
+// resolves a state of its own, and the token is preserved on the very node whose
+// word replaced it. Detail View is explicitly not part of this: it still writes
+// the canonical token itself, through the untouched exact-code chip.
+test('the header gate badge and the AEGIS Core read as meaning while keeping their exact codes', () => {
+  const header = code.slice(code.indexOf('function renderContext'),
+    code.indexOf('function plainVerdict'));
+  assert.ok(header.length > 0, 'the header renderer was not located');
+  // The badge is the ONE control-plane resolution it has always been, worded
+  // through the one shipped seam rather than by a dictionary of its own.
+  assert.ok(/var gateCode = controlPlaneState\(currentEng, currentBinding, currentRun,\s*availableEmptyRuns\(currentView\)\)\.state;/.test(header),
+    'the header gate badge no longer reads the one existing control-plane resolution');
+  assert.ok(/verdict\.appendChild\(opsChip\(gateCode, opsChipLabel\('run-state', gateCode\)\)\);/.test(header),
+    'the header gate badge is not painted through the one shipped label seam');
+  assert.ok(!/chip\(controlPlaneState\(/.test(header),
+    'the header still paints the raw canonical gate token');
+  // The exact code survives the wording in a machine attribute, not only in a
+  // title that a pointer has to reach.
+  assert.ok(/verdict\.setAttribute\('data-gate-code', gateCode\);/.test(header),
+    'the header dropped the exact canonical gate code its plain word replaced');
+  // The core is the same resolution, now written through the seam-aware writer
+  // so its own node carries the code rather than only the module beside it.
+  assert.ok(/hudState\('hud-core-status', opsChipLabel\('run-state', controlState\.state\),\s*controlState\.state\);/.test(code),
+    'the AEGIS Core no longer keeps the exact canonical gate code on its own node');
+  // The System health card reads the same gate resolution, so it is worded by
+  // the same seam; a card still printing the bare token would disagree with the
+  // core about nothing except how hard it is to read.
+  assert.ok(/hudState\('hud-system-health', cleanIdle\s*\? 'READY FOR AN OBJECTIVE' : opsChipLabel\('run-state', controlState\.state\),\s*controlState\.state\);/.test(code),
+    'the System health card still prints the bare gate token, or lost its exact code');
+  // The shipped default fails closed in the same words, with the same code.
+  assert.ok(/<div class="core-status" id="hud-core-status" data-hud-code="UNAVAILABLE"\s+title="Canonical state code: UNAVAILABLE">Not recorded<\/div>/.test(htmlSrc()),
+    'the shipped AEGIS Core default is not the plain fail-closed word with its exact code beside it');
+  // Detail View is untouched: the exact-code chip still exists exactly once and
+  // still writes the canonical token as the word it displays.
+  assert.strictEqual((code.match(/function chip\(state\)\{/g) || []).length, 1,
+    'the exact-code chip Detail View reads was removed or duplicated');
+  assert.ok(/function chip\(state\)\{[\s\S]*?c\.appendChild\(el\('span',null,state\)\);/.test(code),
+    'the exact-code chip stopped writing the canonical token as its own word');
+});
+
 test('live activity has one translation seam and Detail View alone discloses the exact receipt', () => {
   assert.strictEqual((code.match(/function activityUpdate\(/g) || []).length, 1,
     'live activity has more than one founder-language translation authority');
@@ -2273,7 +2339,9 @@ test('the fidelity slice keeps the AEGIS Core the centre and seats the six modul
   for (const id of ['hud-mission', 'hud-crew', 'hud-review', 'hud-gate', 'hud-evidence',
     'hud-checkpoint', 'hud-core-status']) {
     assert.ok(source.includes('id="' + id + '"'), `${id} was composed away instead of being seated`);
-    assert.ok(new RegExp("hudText\\('" + id + "'").test(code),
+    // A seated module is written either as plain text or through the seam-aware
+    // writer that also carries the exact canonical code; both are the renderer.
+    assert.ok(new RegExp("hud(?:Text|State)\\('" + id + "'").test(code),
       `${id} lost the renderer that writes its canonical value`);
   }
 });
@@ -2861,7 +2929,8 @@ test('DOM: an unbound dashboard leads with a truthful idle mission and a dominan
   }
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'idle',
     'the shell must expose truthful idle state so the objective composer becomes the dominant action');
-  assert.ok(/IDLE/.test(page.text('ctx-verdict')), 'the header must say IDLE rather than inherit a stale gate verdict');
+  assertHeaderGate(page, 'IDLE',
+    'the header must report a truthful idle gate rather than inherit a stale one');
 });
 
 test('DOM: minimized empty live status with unavailable run evidence never renders clean idle', () => {
@@ -2878,8 +2947,8 @@ test('DOM: minimized empty live status with unavailable run evidence never rende
   };
   renderMinimizedStatus(page, status);
   const body = page.text('founder-body');
-  assert.ok(/UNAVAILABLE/.test(page.text('ctx-verdict')) && !/IDLE/.test(page.text('ctx-verdict')),
-    `an unavailable empty live projection rendered a healthy idle header: ${page.text('ctx-verdict')}`);
+  assertHeaderGate(page, 'UNAVAILABLE',
+    'an unavailable empty live projection rendered a healthy idle header');
   assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.UNAVAILABLE,
     'AEGIS Core rendered healthy idle without positive run-ledger evidence');
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'unavailable',
@@ -2909,8 +2978,7 @@ test('DOM: a genuinely empty minimized live status stays truthful without a top-
     'the fixture must exercise the pinned minimized contract, which has no runsState field');
   renderMinimizedStatus(page, status);
   const body = page.text('founder-body');
-  assert.ok(/IDLE/.test(page.text('ctx-verdict')),
-    `affirmatively empty live evidence did not remain idle: ${page.text('ctx-verdict')}`);
+  assertHeaderGate(page, 'IDLE', 'affirmatively empty live evidence did not remain idle');
   assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.IDLE);
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'idle');
   assert.ok(/No blocker — no run has started\./.test(body));
@@ -2937,8 +3005,7 @@ test('DOM: malformed run evidence is unavailable and never lights the clean-idle
   };
   renderMinimizedStatus(page, status);
   const body = page.text('founder-body');
-  assert.ok(/UNAVAILABLE/.test(page.text('ctx-verdict')) && !/IDLE/.test(page.text('ctx-verdict')),
-    `malformed evidence rendered clean idle: ${page.text('ctx-verdict')}`);
+  assertHeaderGate(page, 'UNAVAILABLE', 'malformed evidence rendered clean idle');
   assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.UNAVAILABLE);
   assert.notStrictEqual(page.text('hud-system-health'), 'READY FOR AN OBJECTIVE');
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'unavailable');
@@ -3194,12 +3261,16 @@ test('DOM: a checkpoint receipt cannot make a blocked mismatched current subject
   };
   const page = bootPage(fixtureState());
   renderMinimizedStatus(page, status);
-  assert.ok(/BLOCKED/.test(page.text('ctx-verdict')) && !/COMPLETE/.test(page.text('ctx-verdict')),
-    `the header hides a blocked mismatched subject behind COMPLETE: ${page.text('ctx-verdict')}`);
+  assertHeaderGate(page, 'BLOCKED',
+    'the header hides a blocked mismatched subject behind a completed one');
   assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.BLOCKED,
     'AEGIS Core hides the current blocked subject behind the historical checkpoint state');
-  assert.strictEqual(page.text('hud-system-health'), 'BLOCKED',
+  assert.strictEqual(page.document.getElementById('hud-core-status').attrs['data-hud-code'], 'BLOCKED',
+    'the AEGIS Core dropped the exact canonical gate code behind its plain word');
+  assert.strictEqual(page.text('hud-system-health'), RUN_STATE_PLAIN.BLOCKED,
     'System Health hides the current blocked subject behind the historical checkpoint state');
+  assert.strictEqual(page.document.getElementById('hud-system-health').attrs['data-hud-code'], 'BLOCKED',
+    'the System health card dropped the exact canonical gate code behind its plain word');
   assert.ok(/older code version than the current gate subject/.test(page.text('founder-body')),
     'the primary pilot deck does not explain why the checkpoint is not current completion');
   assert.ok(/This run reached a recorded checkpoint/.test(page.text('founder-body')) &&
@@ -3383,11 +3454,9 @@ test('DOM: CHECKPOINTED is COMPLETE only for positively bound current-subject cl
       engineering: scenario.engineering,
       runs: { state: 'OK', runs: [run], current: scenario.binding },
     }));
-    const header = page.text('ctx-verdict');
-    assert.ok(new RegExp(scenario.expected).test(header),
-      `${scenario.label}: expected ${scenario.expected}, got ${header}`);
+    assertHeaderGate(page, scenario.expected, scenario.label);
     if (scenario.expected !== 'COMPLETE') {
-      assert.ok(!/COMPLETE/.test(header),
+      assert.notStrictEqual(headerGate(page).code, 'COMPLETE',
         `${scenario.label}: historical checkpoint falsely became current completion`);
       assert.notStrictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.COMPLETE,
         `${scenario.label}: AEGIS Core falsely reported current completion`);
@@ -3920,8 +3989,7 @@ test('DOM: mismatched or ghost binding fails closed and preserves recorded probl
     assert.ok(/Blocking status unavailable/.test(body), `${c.name}: blocking status was presented as known`);
     assert.ok(c.reason.test(body), `${c.name}: the binding failure reason is missing: ${body}`);
     assert.ok(!/Nothing is blocking this run\./.test(body), `${c.name}: rendered a false clear signal`);
-    assert.ok(/UNAVAILABLE/.test(page.text('ctx-verdict')) && !/IDLE/.test(page.text('ctx-verdict')),
-      `${c.name}: the primary header rendered false IDLE: ${page.text('ctx-verdict')}`);
+    assertHeaderGate(page, 'UNAVAILABLE', `${c.name}: the primary header rendered a false idle gate`);
     assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.UNAVAILABLE,
       `${c.name}: AEGIS Core rendered false healthy idle`);
     assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'unavailable',
@@ -7372,7 +7440,7 @@ async function asyncTests() {
     assert.ok(/NEW OBJECTIVE/.test(page.text('founder-body')), 'founder summary did not repaint');
     assert.ok(/new222222222/.test(page.text('ctx-subject')), 'header subject did not repaint');
     assert.ok(/2026-08-27T10:01:00\.000Z/.test(page.text('ctx-generated')), 'header generated time did not repaint');
-    assert.ok(/WAITING/.test(page.text('ctx-verdict')) && !/BLOCKED/.test(page.text('ctx-verdict')),
+    assertHeaderGate(page, 'WAITING',
       'header operational state did not replace the static snapshot state');
     assert.ok(/RUN-NEW/.test(page.text('runs-list')) && !/RUN-OLD/.test(page.text('runs-list')),
       'runs did not repaint');
@@ -11103,7 +11171,7 @@ async function asyncTests() {
       `the crew instrument substituted the gate's reason for the worker state: ${crew}`);
     // The gate itself is untouched: same state word, now explicitly labelled.
     assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.BLOCKED);
-    assert.match(code, /<div class="core-sub">Gate readiness<\/div>\s*<div class="core-status" id="hud-core-status">/,
+    assert.match(code, /<div class="core-sub">Gate readiness<\/div>\s*<div class="core-status" id="hud-core-status"/,
       'the core does not name which question its state word answers');
   });
 
