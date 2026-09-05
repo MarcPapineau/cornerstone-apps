@@ -1,0 +1,41 @@
+{
+  "packetId": "PKT-20260905-PACKET-COORDINATION-DOC",
+  "agentId": "claude-code",
+  "objective": "Document the implemented task-packet coordination contract without changing executable behavior.",
+  "constraints": [
+    "Documentation only; do not edit executable code, schemas, tests, dashboard files, or runtime evidence",
+    "Describe only behavior already proven by packet-tools.test.cjs",
+    "Do not claim that concurrent execution is enabled; coordination metadata is declaration-only and execution remains serial"
+  ],
+  "sourceOfTruth": [
+    "builder-control/schemas/task-packet.schema.json",
+    "builder-control/packet-tools.cjs",
+    "builder-control/test/packet-tools.test.cjs"
+  ],
+  "filesAllowed": [
+    "builder-control/CONTROL-CONTRACT.md"
+  ],
+  "testsRequired": [
+    "git diff --check"
+  ],
+  "coordination": {
+    "executionMode": "SERIAL_ONLY",
+    "dependsOnPacketIds": [],
+    "writeSet": [
+      "builder-control/CONTROL-CONTRACT.md"
+    ]
+  },
+  "stopConditions": [
+    "The documentation would imply that AEGIS currently launches parallel writers",
+    "The documentation conflicts with the implemented schema or validator",
+    "Any executable file would need to change"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — standing non-destructive AEGIS dashboard completion authorization, reaffirmed 2026-09-05",
+    "allowsProtectedPaths": [
+      "builder-control/CONTROL-CONTRACT.md"
+    ],
+    "allowsPublicPush": true,
+    "allowsRelease": false
+  }
+}
