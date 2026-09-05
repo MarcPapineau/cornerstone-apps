@@ -3528,6 +3528,10 @@ function corePathHandoff(page) {
   return page.document.getElementById('core-path-handoff');
 }
 
+function corePathCue(page) {
+  return page.document.getElementById('core-path-cue');
+}
+
 test('DOM: an unbound dashboard marks no station and claims no handoff on the path', () => {
   const page = bootPage(fixtureState());
   const roles = stationRoles(page);
@@ -3539,6 +3543,11 @@ test('DOM: an unbound dashboard marks no station and claims no handoff on the pa
   assert.strictEqual(line.attrs['data-core-handoff'], 'INACTIVE', 'the path claimed a handoff it never observed');
   assert.strictEqual(line.hidden, true, 'the inactive handoff line must be hidden, not merely empty');
   assert.strictEqual(line.textContent, '', 'the inactive handoff line must say nothing at all');
+  const cue = corePathCue(page);
+  assert.strictEqual(cue.attrs['data-handoff-state'], 'NOT_PROVEN',
+    'the compact path cue claimed a handoff with no bound run');
+  assert.strictEqual(cue.textContent, 'Handoff: Not recorded',
+    `the compact path cue filled missing evidence with a plausible transition: ${cue.textContent}`);
 });
 
 test('DOM: a first sighting highlights the current station and still proves no handoff', () => {
@@ -3576,6 +3585,8 @@ test('DOM: a first sighting highlights the current station and still proves no h
     `the station holder is not the recorded model and execution path: ${note}`);
   assert.strictEqual(corePathHandoff(page).attrs['data-core-handoff'], 'INACTIVE',
     'the path claimed a handoff from one sighting of a running build');
+  assert.strictEqual(corePathCue(page).textContent, 'Handoff: Not recorded',
+    'a first sighting was reported as a worker/model transition on the compact cue');
 });
 
 test('DOM: a run whose canonical state is off-path marks nothing and says so', () => {
@@ -9659,6 +9670,11 @@ async function asyncTests() {
     const line = corePathHandoff(page);
     assert.strictEqual(line.attrs['data-core-handoff'], 'ACTIVE', 'a proven crossing did not reach the path');
     assert.strictEqual(line.hidden, false, 'a proven handoff must actually be visible');
+    const cue = corePathCue(page);
+    assert.strictEqual(cue.attrs['data-handoff-state'], 'PROVEN',
+      'the compact cue did not distinguish a proven handoff from missing evidence');
+    assert.strictEqual(cue.textContent, 'Handoff: the deterministic checks → independent review',
+      `the compact cue does not name both proven ends in plain English: ${cue.textContent}`);
     assert.match(line.textContent,
       /Last proven handoff: the deterministic checks handed off to independent review\./,
       `the path handoff is not readable in plain English: ${line.textContent}`);
