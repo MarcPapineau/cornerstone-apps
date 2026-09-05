@@ -11927,6 +11927,13 @@ test('DOM: the change type is a whole-word reading of the recorded request, and 
     // wording a recorded objective actually uses is read rather than missed.
     ['Optimizing the ledger read path', 'optimization', 'Optimization', /"optimizing"/],
     ['Restore the deck colours', 'visual', 'Visual', /"colours"/],
+    // Carrying the same recorded evidence in less space is the optimization
+    // request the list already publishes, so the forms recorded objectives
+    // actually write are read rather than missed.
+    ['Compact the build journal evidence', 'optimization', 'Optimization', /"compact"/],
+    ['Compacted the recorded run rail', 'optimization', 'Optimization', /"compacted"/],
+    ['Compacting the build journal', 'optimization', 'Optimization', /"compacting"/],
+    ['Compaction of the recorded run journal', 'optimization', 'Optimization', /"compaction"/],
     // Clarity is read the same way as every other type: from the words the
     // recorded objective actually uses, and the matched words are printed.
     ['Rewrite the run receipt in plain English', 'clarity', 'Clarity', /"english"/],
@@ -11992,6 +11999,25 @@ test('DOM: the change type is a whole-word reading of the recorded request, and 
   assert.strictEqual(twoTypes.attrs['data-journal-category'], 'unclassified',
     'wording matching an optimization term and a visual term was resolved into one of them');
   assert.match(journalLine(twoTypes, 'category'),
+    /matches more than one type \(optimization, visual\)/);
+
+  // The compaction forms buy no exemption from either refusal either. A form the
+  // list does not publish is still unknown wording, a substring inside an
+  // unrelated word is still not a word, and wording that also reaches a visual
+  // term is still ambiguous and still refused.
+  const unpublishedCompact = journalOneRow([journalDatedRun({ objective: 'Improve deck compactness' })]);
+  assert.strictEqual(unpublishedCompact.attrs['data-journal-category'], 'unclassified',
+    'a compaction word form the published list does not carry was resolved to a category anyway');
+  assert.match(journalLine(unpublishedCompact, 'category'), /matches no term in the published list/);
+
+  const compactSubstring = journalOneRow([journalDatedRun({ objective: 'Compactor rails stay recorded' })]);
+  assert.strictEqual(compactSubstring.attrs['data-journal-category'], 'unclassified',
+    '"compact" was matched as a substring inside an unrelated word');
+
+  const compactAmbiguous = journalOneRow([journalDatedRun({ objective: 'Compact the deck layout' })]);
+  assert.strictEqual(compactAmbiguous.attrs['data-journal-category'], 'unclassified',
+    'wording matching a compaction term and a visual term was resolved into one of them');
+  assert.match(journalLine(compactAmbiguous, 'category'),
     /matches more than one type \(optimization, visual\)/);
 
   const noObjective = journalOneRow([journalDatedRun({ objective: null })]);
@@ -12244,7 +12270,11 @@ test('DOM: every journal sentence the card no longer prints survives exactly onc
 
   // The refusals are the sentences most worth losing and least worth losing:
   // an entry that proves nothing must still say so, once, where it can be read.
-  const unproven = journalOneRow([journalDatedRun({ state: 'BUILT' })], []);
+  // The objective here is named rather than defaulted: the shared fixture's own
+  // wording is a published optimization request, and this block is proving the
+  // UNCLASSIFIED refusal still prints once in both places.
+  const unproven = journalOneRow([journalDatedRun({ state: 'BUILT',
+    objective: 'Record the founder objective' })], []);
   const unprovenDetail = journalEntryDisclosure(unproven);
   for (const sentence of [
     'Available now: UNVERIFIED — no validated checkpoint is recorded for this run',
