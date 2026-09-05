@@ -979,6 +979,52 @@ test('the one provenance line is read before every run fact on the page', () => 
     'the mission brief is read before the sentence saying whether it is confirmed current work');
 });
 
+test('the compact header trust indicator projects only the literal host and existing provenance mode', () => {
+  const source = htmlSrc();
+  const header = source.slice(source.indexOf('<header class="command-header">'), source.indexOf('</header>'));
+  assert.strictEqual((source.match(/id="trust-indicator"/g) || []).length, 1,
+    'the page has more than one hosting/authentication indicator');
+  assert.ok(header.includes('id="trust-indicator"'),
+    'the compact trust reading is not in the AEGIS header');
+  assert.match(header, /data-hosting-trust="UNAVAILABLE" data-auth-trust="UNVERIFIED"/,
+    'the static header does not fail closed before scripts establish any fact');
+
+  const fn = code.slice(code.indexOf('function renderHeaderTrust'), code.indexOf('function renderStateSource'));
+  assert.ok(fn.length > 0, 'the header trust renderer is missing');
+  assert.ok(/window\.location && window\.location\.hostname === '127\.0\.0\.1'/.test(fn),
+    'LOCAL ONLY is granted from something other than the literal 127.0.0.1 browser hostname');
+  assert.ok(/mode === 'LIVE'/.test(fn) && /state: 'AUTHENTICATED'/.test(fn),
+    'AUTHENTICATED is not a projection of the existing LIVE provenance decision');
+  assert.ok(/mode === 'DISCONNECTED' \|\| mode === 'MISSING'/.test(fn) &&
+    /state: 'UNVERIFIED'/.test(fn) && /state: 'UNAVAILABLE'/.test(fn),
+    'the pre-validation, malformed or lost-evidence states do not fail closed');
+  assert.strictEqual((code.match(/renderHeaderTrust\(mode\)/g) || []).length, 2,
+    'the trust renderer must have one declaration and one call in the provenance seam');
+  for (const banned of ['fetch(', 'EventSource', 'XMLHttpRequest', 'localStorage', 'sessionStorage',
+    'setInterval', 'setTimeout', 'Date.now', 'token', 'TLS', 'encrypted', 'secret',
+    'account', 'production', 'deployed']) {
+    assert.ok(!fn.includes(banned),
+      `the header trust renderer reads or claims ${banned} instead of projecting existing facts`);
+  }
+
+  assert.deepStrictEqual([...Hosting.LOOPBACK], ['127.0.0.1'],
+    'the hosting contract is no longer the one literal IPv4 loopback the header names');
+  assert.ok(Hosting.validateConfig({ port: 8791, host: '127.0.0.1', token: 'x'.repeat(32) }, {}).ok,
+    'the literal host shown as local only is not accepted by the hosting contract');
+  assert.strictEqual(Hosting.validateConfig({ port: 8791, host: 'localhost', token: 'x'.repeat(32) }, {}).code,
+    'NON_LOOPBACK_REFUSED', 'localhost became equivalent to the literal loopback origin');
+
+  const trustRules = [...code.matchAll(/([^{}]*\.trust-indicator[^{}]*)\{([^{}]*)\}/g)]
+    .map((match) => match[2]);
+  assert.ok(trustRules.some((body) => /max-width:100%/.test(body) && /flex-wrap:wrap/.test(body) &&
+    /white-space:normal/.test(body) && /overflow-wrap:anywhere/.test(body)),
+  'the compact indicator has no phone-safe wrapping contract');
+  for (const body of trustRules) {
+    assert.ok(!/(?:^|;)\s*(?:animation|transition)\s*:/.test(body),
+      'the header trust reading moves even though it is an evidence label');
+  }
+});
+
 test('the identity line wraps at every width and is never clamped, hidden or animated', () => {
   const rules = [];
   for (const rule of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
@@ -2518,6 +2564,10 @@ function bootPage(state, opts = {}) {
   const sandbox = {
     document,
     console: { log() {}, error() {} },
+    // The trust indicator reads the browser's actual hostname. Tests default to
+    // no host (the fail-closed file/static case) and opt into literal origins
+    // explicitly, so `localhost` can never pass by accident.
+    location: { hostname: opts.hostname || '' },
     Date,
     JSON,
     Math,
@@ -11044,6 +11094,62 @@ async function asyncTests() {
   const provenance = (page) => page.text('state-provenance');
   const provenanceState = (page) =>
     page.document.getElementById('state-provenance').getAttribute('data-provenance');
+  const trustState = (page) => {
+    const node = page.document.getElementById('trust-indicator');
+    return {
+      hosting: node.getAttribute('data-hosting-trust'),
+      auth: node.getAttribute('data-auth-trust'),
+      text: node.textContent,
+    };
+  };
+
+  await atest('DOM: the header trust reading follows literal loopback and the existing provenance lifecycle', async () => {
+    const page = bootPage(savedSnapshot(), { hostname: '127.0.0.1', status: LIVE_STATUS });
+    assert.deepStrictEqual(trustState(page), {
+      hosting: 'LOCAL_ONLY', auth: 'UNVERIFIED',
+      text: 'HostingLocal only·StatusUnverified',
+    }, 'startup claimed authentication before the status payload was validated');
+
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.deepStrictEqual(trustState(page), {
+      hosting: 'LOCAL_ONLY', auth: 'AUTHENTICATED',
+      text: 'HostingLocal only·StatusAuthenticated',
+    }, 'validated live provenance did not establish the compact authenticated reading');
+
+    page.sse.listeners.status[0]({ data: JSON.stringify({ generatedAt: LIVE_STATUS.generatedAt }) });
+    assert.deepStrictEqual(trustState(page), {
+      hosting: 'LOCAL_ONLY', auth: 'UNVERIFIED',
+      text: 'HostingLocal only·StatusUnverified',
+    }, 'an unusable status plane left the compact reading authenticated');
+
+    page.sse.listeners.status[0]({ data: JSON.stringify(LIVE_STATUS) });
+    assert.strictEqual(trustState(page).auth, 'AUTHENTICATED',
+      'validated status could not restore the authenticated reading');
+    page.sse.onerror();
+    assert.deepStrictEqual(trustState(page), {
+      hosting: 'LOCAL_ONLY', auth: 'UNAVAILABLE',
+      text: 'HostingLocal only·StatusUnavailable',
+    }, 'connection loss left the compact reading authenticated or rewrote literal hosting');
+
+    page.sse.listeners.status[0]({ data: JSON.stringify(LIVE_STATUS) });
+    assert.strictEqual(trustState(page).auth, 'AUTHENTICATED');
+    page.sse.listeners.status[0]({ data: 'not json' });
+    assert.strictEqual(trustState(page).auth, 'UNVERIFIED',
+      'a malformed status push left the compact reading authenticated');
+  });
+
+  await atest('DOM: aliases and other origins never inherit the local-only claim', async () => {
+    for (const hostname of ['', 'localhost', '::1', '127.0.0.2', '127.0.0.1.example.test']) {
+      const page = bootPage(savedSnapshot(), { hostname, status: LIVE_STATUS });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      assert.strictEqual(trustState(page).hosting, 'UNAVAILABLE',
+        `${hostname || 'an absent hostname'} was presented as the literal local-only host`);
+      assert.match(trustState(page).text, /HostingUnavailable/,
+        `${hostname || 'an absent hostname'} did not fail closed in visible words`);
+      assert.strictEqual(trustState(page).auth, 'AUTHENTICATED',
+        'the separate authenticated status fact was incorrectly derived from the hostname');
+    }
+  });
 
   await atest('DOM: startup names the saved snapshot as saved evidence with the live check still outstanding', async () => {
     // The bootstrap never answers, which is exactly the window in which the old
@@ -11123,8 +11229,8 @@ async function asyncTests() {
 
     // Reconnect: only a validated status may restore live provenance.
     page.sse.listeners.status[0]({ data: 'not json' });
-    assert.strictEqual(provenanceState(page), 'DISCONNECTED',
-      'a malformed push restored live provenance');
+    assert.strictEqual(provenanceState(page), 'UNVERIFIED',
+      'a malformed push did not fail the current status reading closed');
     page.sse.listeners.status[0]({ data: JSON.stringify(LIVE_STATUS) });
     assert.strictEqual(provenanceState(page), 'LIVE',
       'a validated push after a reconnect did not restore live provenance');

@@ -403,6 +403,15 @@
   .context-cell{padding:7px 10px;border:1px solid rgba(57,198,255,.14);border-radius:4px;
     background:rgba(57,198,255,.035);min-width:0}
   .context-cell.mono{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* A compact reading of two already-established facts: the literal browser
+     host and the existing evidence-provenance mode. It wraps rather than
+     clipping, owns no animation or transition, and makes no transport or
+     deployment claim. */
+  .trust-indicator{max-width:100%;flex-wrap:wrap;gap:4px 7px;white-space:normal;
+    overflow-wrap:anywhere;font:650 10px/1.4 var(--mono);letter-spacing:.04em}
+  .trust-indicator .trust-label{color:#8faac0;text-transform:uppercase;letter-spacing:.1em}
+  .trust-indicator .trust-value{color:var(--text-0)}
+  .trust-indicator .trust-sep{color:var(--text-2)}
   /* The header chip carries controlPlaneState — gate readiness for the current
      subject, not what the worker is doing — so it is labelled as the gate. */
   .ctx-gate-label{font:650 10px/1.3 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:#8faac0}
@@ -1910,6 +1919,15 @@
     <div class="context-strip" aria-label="Current system context">
       <span class="ctx context-cell" id="ctx-entity">AEGIS Operator</span>
       <span class="ctx context-cell mono" id="ctx-generated">—</span>
+      <!-- Fail closed in static markup. renderStateSource() is the only code
+           that repaints this line, after reading the literal browser host and
+           the provenance mode it already owns. -->
+      <span class="ctx context-cell trust-indicator" id="trust-indicator"
+        data-hosting-trust="UNAVAILABLE" data-auth-trust="UNVERIFIED">
+        <span class="trust-label">Hosting</span><span class="trust-value">Unavailable</span>
+        <span class="trust-sep" aria-hidden="true">·</span>
+        <span class="trust-label">Status</span><span class="trust-value">Unverified</span>
+      </span>
       <span class="ctx" id="ctx-verdict"></span>
     </div>
     <button type="button" class="hud-control" id="toggle-motion" aria-pressed="false"
@@ -2460,6 +2478,28 @@
       head: 'SAVED SNAPSHOT' + recordedAt(snapshotGeneratedAt) + ' — not confirmed current work',
       body: 'This is saved evidence recorded at that time. Live status is being checked now.' };
   }
+  function renderHeaderTrust(mode){
+    var host = window.location && window.location.hostname === '127.0.0.1'
+      ? { state: 'LOCAL_ONLY', label: 'Local only' }
+      : { state: 'UNAVAILABLE', label: 'Unavailable' };
+    var auth = mode === 'LIVE'
+      ? { state: 'AUTHENTICATED', label: 'Authenticated' }
+      : (mode === 'DISCONNECTED' || mode === 'MISSING'
+        ? { state: 'UNAVAILABLE', label: 'Unavailable' }
+        : { state: 'UNVERIFIED', label: 'Unverified' });
+    var node = $('trust-indicator');
+    if (!node) return;
+    node.setAttribute('data-hosting-trust', host.state);
+    node.setAttribute('data-auth-trust', auth.state);
+    node.textContent = '';
+    node.appendChild(el('span','trust-label','Hosting'));
+    node.appendChild(el('span','trust-value',host.label));
+    var sep = el('span','trust-sep','·');
+    sep.setAttribute('aria-hidden','true');
+    node.appendChild(sep);
+    node.appendChild(el('span','trust-label','Status'));
+    node.appendChild(el('span','trust-value',auth.label));
+  }
   function renderStateSource(mode, detail){
     // LIVE is granted by a validated status payload alone — never by a stream
     // opening — so the caller records its canonical time here and nowhere else.
@@ -2467,6 +2507,10 @@
       liveEvidenceSeen = true;
       liveEvidenceAt = (detail && detail.generatedAt) || null;
     }
+    // The header is a projection of this provenance decision, not another
+    // authentication authority. Losing or failing validation therefore clears
+    // its authenticated reading in the same paint as the provenance line.
+    renderHeaderTrust(mode);
     var line = provenanceLine(mode);
     var provHost = $('state-provenance');
     if (provHost) {
@@ -9583,7 +9627,12 @@
         if (applyStatus(pushed) && connState) {
           connState.textContent = 'connected — receiving authenticated status';
         }
-      } catch (e) { void e; } // malformed push, ignored
+      } catch (e) {
+        // A malformed push cannot leave the compact header claiming that the
+        // status currently arriving is authenticated. Feed the failure through
+        // the same validation/provenance seam as every other unusable payload.
+        applyStatus(null);
+      }
     });
     es.onerror = function(){
       if (connState) connState.textContent = 'disconnected — the browser will retry automatically';
