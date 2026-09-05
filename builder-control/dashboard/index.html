@@ -1485,8 +1485,10 @@
      the renderers still write the whole canonical sentence into every clamped
      element, so it stays in the DOM for assistive technology and is read
      unabridged in Detail View. Clamping is applied only to supporting prose —
-     crew, routing rationale, live evidence, builder-progress detail, elapsed
-     and the station's own role line. The two explanatory brief answers are no
+     crew, routing rationale, live evidence, builder-progress detail, elapsed,
+     the station's own role line and the operational ribbon's own resolved
+     sentence, every one of which is read in full further down this same page.
+     The two explanatory brief answers are no
      longer clamped at all: they read whole behind their own disclosure. The
      operator answers (current action, next step, blocker, last safe checkpoint,
      and the brief's right-now / next-action / attention rows) are never clamped here.
@@ -1521,22 +1523,43 @@
     /* The five operational answers stay five cells in one band at every wide
        width. The written label and the canonical state word share the first row
        and the resolved sentence reads under them, so the strip costs one band
-       instead of two rows of full-height cards. */
-    .ops-strip>.ops-strip-title{min-height:0;padding:5px 2px}
+       instead of two rows of full-height cards.
+
+       At the ordinary 1292×994 laptop viewport that band was still reading as a
+       second row of deck-sized cards under the header, and between it and the
+       heading above it the operational area took roughly a fifth of the first
+       screen — so the mission brief, the AEGIS Core and the Inspector started
+       below the fold. The rhythm below is the ribbon rhythm the phone band
+       already uses: one summary line per answer, the heading a rule rather than
+       a band, and the two ribbon segments seated tight against it.
+
+       Spacing and one line clamp, nothing else. No answer is removed, reordered,
+       renamed, re-sourced or made unreachable: every cell keeps its written
+       label, its glyph, its plain state word and its canonical data-ops-state,
+       the renderer still writes the whole canonical sentence into the cell so it
+       stays in the DOM for assistive technology, and each of those sentences is
+       read unabridged further down this same page — gate readiness in the
+       mission brief, builder progress, recorded cost and the last safe
+       checkpoint on the deck cards and in the Detail View evidence rail. */
+    .ops-strip>.ops-strip-title{min-height:0;padding:3px 2px}
     /* The command ribbon: where the evidence came from, and which run it is
        about, read as one band instead of two stacked full-width blocks. Layout
        only — both segments keep every word, neither is clamped, and below
-       1100px they stack exactly as they shipped. */
-    .ops-ribbon{display:grid;grid-template-columns:minmax(0,20fr) minmax(0,29fr);gap:4px 20px;
-      align-items:start;padding:6px 0 0}
+       1100px they stack exactly as they shipped. The bound-run identity and its
+       reason sentence are deliberately still unclamped here: which run the page
+       is describing, and whether that run is working right now, are two of the
+       facts this band exists to keep readable. */
+    .ops-ribbon{display:grid;grid-template-columns:minmax(0,20fr) minmax(0,29fr);gap:3px 20px;
+      align-items:start;padding:4px 0 0}
     .ops-ribbon>.ops-run{padding-top:0}
-    .ops-ribbon>#state-provenance{margin:0}
-    .ops-run-why{margin-top:4px}
-    .ops-strip-cells{grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;padding:7px 0 0}
-    .ops-cell{display:flex;flex-wrap:wrap;align-items:center;column-gap:8px;padding:6px 9px}
+    .ops-ribbon>#state-provenance{margin:0;padding:5px 9px}
+    .ops-run-line{gap:4px 8px}
+    .ops-run-why{margin-top:3px}
+    .ops-strip-cells{grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;padding:5px 0 0}
+    .ops-cell{display:flex;flex-wrap:wrap;align-items:center;column-gap:8px;padding:4px 9px}
     .ops-label{flex:1 1 auto;min-width:0}
     .ops-cell>.chip{flex:0 0 auto;margin-top:0}
-    .ops-value{flex:1 0 100%;margin-top:3px;-webkit-line-clamp:2}
+    .ops-value{flex:1 0 100%;margin-top:2px;-webkit-line-clamp:1}
 
     .command-shell{padding:10px 14px 14px;gap:12px}
     .left-rail,.center-console,.right-rail{gap:12px}

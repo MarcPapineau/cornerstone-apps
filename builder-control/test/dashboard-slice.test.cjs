@@ -1590,7 +1590,7 @@ test('the wide Command View fits the whole HUD, all nine stations and the build 
     'the HUD keeps the fixed 510px/430px reserve that spends the first screen on empty panel');
   assert.ok(/\.aegis-core\{width:148px;height:148px/.test(WIDE),
     'the AEGIS Core keeps a diameter that alone sets the middle HUD row taller than the fold');
-  assert.ok(/\.ops-cell\{display:flex;flex-wrap:wrap;[^}]*padding:6px 9px\}/.test(WIDE) &&
+  assert.ok(/\.ops-cell\{display:flex;flex-wrap:wrap;[^}]*padding:4px 9px\}/.test(WIDE) &&
     /\.ops-cell>\.chip\{[^}]*margin-top:0/.test(WIDE) &&
     /\.ops-strip-cells\{grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/.test(WIDE),
     'the operational status is still two rows of full-height cards on a wide screen');
@@ -13755,6 +13755,110 @@ test('the command ribbon reads provenance and the bound run as one band, in the 
   for (const id of ['state-provenance', 'ops-strip-run', 'ops-strip-cells']) {
     assert.ok(source.includes('id="' + id + '"'), `${id} was composed away instead of being seated`);
   }
+});
+
+// ── the operational band is a ribbon, not a second row of dashboard cards ──
+// The failure guarded here is the one an owner sees at 1292×994: the five
+// operational answers rendered as a second row of deck-sized cards directly
+// under the header, so the mission brief, the central AEGIS Core and the
+// Inspector all started below the fold. The correction is rhythm in the wide
+// density block only — spacing and one line clamp — so every proof below pairs
+// "slimmer" with "the same six facts are still readable in words, nothing left
+// the DOM, and every clamped sentence is still read in full somewhere else on
+// this page".
+//
+// The six facts this band has to keep readable are the bound run, gate
+// readiness, the latest builder activity, the run limits, the recorded cost and
+// the last safe checkpoint. They are read here out of the real DOM, through the
+// real renderers, so a compaction that quietly drops one fails here.
+test('the wide operational band is one slim ribbon: compacted by spacing, never by removal', () => {
+  // One summary line per answer: the written label and the canonical state word
+  // share the first row, and the resolved sentence reads under them clamped to a
+  // single line — inside a cell with ribbon padding, not card padding.
+  assert.ok(/\.ops-cell\{display:flex;flex-wrap:wrap;[^}]*padding:4px 9px\}/.test(WIDE),
+    'the five operational answers still carry full-height card padding at laptop width');
+  assert.ok(/\.ops-value\{flex:1 0 100%;margin-top:2px;-webkit-line-clamp:1\}/.test(WIDE),
+    'the strip sentence still takes two lines in every cell of the wide band');
+  assert.ok(/\.ops-strip-cells\{grid-template-columns:repeat\(5,minmax\(0,1fr\)\);gap:6px;padding:5px 0 0\}/.test(WIDE),
+    'the wide cell band keeps the card gutter and the card band padding it had');
+  // The heading and the two ribbon segments above the cells are seated tight
+  // against them, so the operational area is one band rather than three.
+  assert.ok(/\.ops-strip>\.ops-strip-title\{min-height:0;padding:3px 2px\}/.test(WIDE),
+    'the strip heading still reserves a band of its own above the ribbon');
+  assert.ok(/\.ops-ribbon\{display:grid;[^}]*gap:3px 20px;\s*align-items:start;padding:4px 0 0\}/.test(WIDE) &&
+    /\.ops-ribbon>#state-provenance\{margin:0;padding:5px 9px\}/.test(WIDE) &&
+    /\.ops-run-line\{gap:4px 8px\}/.test(WIDE) && /\.ops-run-why\{margin-top:3px\}/.test(WIDE),
+    'the ribbon segments keep the full-height rhythm the cells no longer have');
+
+  // Compaction is spacing and a clamp. Nothing in the operational band may be
+  // removed, capped, masked or repainted to make it slim.
+  for (const rule of wideRules()) {
+    const target = rule.selectors.join(',');
+    if (!/\.ops-/.test(target)) continue;
+    assert.ok(!/display:none|visibility:|content-visibility:|max-height|text-overflow/.test(rule.body),
+      `${target} hides or caps an operational answer instead of compacting it`);
+  }
+  // Clamping is a stylesheet decision, never a truncated value: the renderer
+  // still writes the whole canonical sentence into the cell.
+  assert.ok(/node\.appendChild\(el\('div','ops-value',cell\.value\)\)/.test(code),
+    'the ribbon truncates its canonical sentence in the renderer instead of in the stylesheet');
+  // And every sentence the ribbon clamps is rendered unabridged further down the
+  // same page, through the shipped seams that already carry it.
+  for (const restated of ["commandCard('BUILDER PROGRESS'", "commandCard('LAST SAFE CHECKPOINT'",
+    'evidenceCostPanel(view && view.cost)']) {
+    assert.ok(code.includes(restated),
+      `${restated} no longer restates in full a sentence the wide ribbon clamps`);
+  }
+
+  // The bound run and gate readiness, read out of the real identity row.
+  const page = rdPage(rdRun());
+  const line = ribbonRun(page);
+  assert.ok(line.fields.id.textContent.includes(RD_RUN_ID),
+    'the slim ribbon no longer names the canonically bound run');
+  assert.strictEqual(line.chips.gate.children[1].textContent,
+    RUN_STATE_PLAIN[line.host.attrs['data-ops-run']],
+    'gate readiness is no longer readable as a word on the slim ribbon');
+  assert.ok(line.fields.why.textContent.length > 0,
+    'the sentence that stops a recorded run reading as live work left the ribbon');
+
+  // The four remaining facts, each still a written label, a plain state word and
+  // its own canonical sentence in the DOM.
+  const cells = {};
+  findByAttr(page.document.getElementById('ops-strip-cells'), 'data-ops-cell')
+    .forEach((node) => { cells[node.attrs['data-ops-cell']] = node; });
+  assert.deepStrictEqual(Object.keys(cells).sort(),
+    ['checkpoint', 'cost', 'progress', 'run-state', 'watchdog'],
+    'the slim ribbon dropped one of the five operational answers');
+  for (const [id, label] of [['run-state', 'GATE READINESS'], ['progress', 'Latest builder activity'],
+    ['watchdog', 'Run limits'], ['cost', 'RECORDED COST (CAD)'],
+    ['checkpoint', 'LAST SAFE CHECKPOINT']]) {
+    const cell = cells[id];
+    const labelNode = (cell.children || []).find((c) => String(c.className) === 'ops-label');
+    assert.ok(labelNode && labelNode.textContent === label,
+      `the ${id} answer lost its written label on the slim ribbon`);
+    const chipNode = (cell.children || []).find((c) => String(c.className).includes('chip'));
+    assert.ok(chipNode && chipNode.children.length === 2 &&
+      chipNode.children[1].textContent.length > 0,
+    `the ${id} answer lost the glyph and plain state word the ribbon keeps readable`);
+    assert.match(chipNode.attrs.title, /^Canonical state code: [A-Z_]+$/,
+      `the ${id} answer lost the exact canonical code behind its plain word`);
+    const value = (cell.children || []).find((c) => String(c.className) === 'ops-value');
+    assert.ok(value && value.textContent.length > 0,
+      `the ${id} sentence left the DOM instead of being clamped in the stylesheet`);
+  }
+
+  // Every narrower layout is untouched: the base cell, the tablet band and the
+  // 390px phone stack are exactly the styles they shipped with.
+  assert.ok(/\.ops-cell\{min-width:0;padding:9px 11px/.test(code) &&
+    /\.ops-value\{[^}]*-webkit-line-clamp:4/.test(code),
+    'the shipped base status cell was rebuilt instead of being overridden above 1100px');
+  assert.ok(/\.ops-cell\{display:flex;flex-wrap:wrap;[^}]*padding:5px 10px\}/.test(PHONE) &&
+    /\.ops-value\{[^}]*-webkit-line-clamp:1\}/.test(PHONE) &&
+    /\.ops-strip-cells\{grid-template-columns:1fr\}/.test(PHONE),
+    'the 390px phone strip was changed by the wide ribbon compaction');
+  assert.ok(/\.ops-strip-cells\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}/.test(code) &&
+    /\.ops-strip-cells\{grid-template-columns:repeat\(3,minmax\(0,1fr\)\)\}/.test(code),
+    'the tablet and ordinary-laptop status bands were changed by the wide ribbon compaction');
 });
 
 test('DOM: gate readiness rides the identity row and keeps its own label, chip and written word', () => {
