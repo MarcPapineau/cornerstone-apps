@@ -2933,13 +2933,58 @@
     return FOUNDER.VERIFY;
   }
 
+  // ── one recorded builder handoff, told truthfully ─────────────────────────
+  // "No replacement builder handoff is recorded" is the correct reading when
+  // nothing was handed on. It is a false one when the run record already says
+  // Claude passed this exact unchanged task to Grok and Grok's own attempt
+  // failed on its login: that run did record a handoff, and reporting none
+  // hides the reason the work stopped. The second sentence is therefore
+  // resolved from the canonical build evidence the run record already carries
+  // — build.handoff, build.providerSelection and build.replacement — and every
+  // part must agree before it may be written: the handoff COMPLETED, it left
+  // claude-subscription for grok-subscription, the objective travelled
+  // unchanged, the selected replacement provider is the one that actually ran,
+  // and the replacement's OWN recorded failure is an authentication failure
+  // that belongs to it. A missing, contradictory or unrecognised part yields
+  // null and the caller keeps the unavailable wording, because a partly proven
+  // handoff is not a handoff.
+  //
+  // This reads recorded fields and nothing else. It adds no state source, no
+  // request, no retry, no provider selection, and no authentication behaviour
+  // of its own — the login fact is the run record's, not this page's.
+  var HANDOFF_REPLACEMENT_AUTH_FAILED = 'Claude handed the unchanged task to Grok, ' +
+    'and Grok could not continue because its login was unavailable.';
+
+  function recordedObject(value){
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  }
+
+  function completedHandoffReason(build){
+    var recorded = recordedObject(build);
+    var handoff = recorded && recordedObject(recorded.handoff);
+    var selection = recorded && recordedObject(recorded.providerSelection);
+    var replacement = recorded && recordedObject(recorded.replacement);
+    if (!handoff || !selection || !replacement) return null;
+    if (handoff.state !== 'COMPLETED' || handoff.unchangedObjective !== true) return null;
+    if (handoff.fromProvider !== 'claude-subscription' ||
+        handoff.toProvider !== 'grok-subscription') return null;
+    if (selection.provider !== 'grok-subscription' ||
+        replacement.provider !== 'grok-subscription') return null;
+    var replacementFailure = recordedObject(replacement.failure);
+    if (!replacementFailure || replacementFailure.code !== 'MODEL_AUTH_FAILURE' ||
+        replacementFailure.provider !== 'grok-subscription') return null;
+    return HANDOFF_REPLACEMENT_AUTH_FAILED;
+  }
+
   // The one place this page reads the recorded builder handoff. It restates the
-  // projection's own sentence and never composes a failover claim of its own,
-  // so the deck and the storyboard cannot disagree about what happened.
+  // projection's own sentence whenever the projection wrote one, and otherwise
+  // says only what the recorded handoff evidence above proves, so the deck and
+  // the storyboard cannot disagree about what happened.
   function recordedHandoffReason(run){
-    var recorded = run && run.build && run.build.failover;
-    return recorded && typeof recorded.reason === 'string' && recorded.reason
-      ? recorded.reason : 'No replacement builder handoff is recorded.';
+    var build = run && run.build;
+    var recorded = build && build.failover;
+    if (recorded && typeof recorded.reason === 'string' && recorded.reason) return recorded.reason;
+    return completedHandoffReason(build) || 'No replacement builder handoff is recorded.';
   }
 
   function operationalState(run){
@@ -2964,16 +3009,14 @@
     }
     // A recorded provider failure is read from the slice, never asserted here.
     // Both halves — what failed, and what happened to the handoff — come from
-    // the projection, so this surface cannot claim a failover policy of its own.
+    // the run record through the one handoff reader above, so this surface
+    // cannot claim a failover policy of its own and cannot word the handoff
+    // differently from the deck that reads the same seam.
     if (run.state === 'BUILD_FAILED' && run.build && run.build.failure &&
         run.build.failure.code) {
-      var recordedFailover = run.build.failover || null;
       var failureText = typeof run.build.failure.summary === 'string' && run.build.failure.summary
         ? run.build.failure.summary : 'The recorded builder provider could not do this work.';
-      var handoffText = recordedFailover && typeof recordedFailover.reason === 'string' &&
-        recordedFailover.reason ? recordedFailover.reason
-        : 'No replacement builder handoff is recorded.';
-      return { state: 'BLOCKED', plain: failureText + ' ' + handoffText };
+      return { state: 'BLOCKED', plain: failureText + ' ' + recordedHandoffReason(run) };
     }
     if (run.state === 'BUILD_FAILED' || run.state === 'CHECKS_FAILED') {
       return { state: 'BLOCKED', plain: 'The current run stopped on a failed build or check.' };
@@ -8171,6 +8214,11 @@
     // cannot become a second opinion about either.
     founderFinished: founderFinished,
     operationalState: operationalState,
+    // Detail View states the recorded builder handoff beside the failure it
+    // followed. It reads this one resolution rather than re-proving a handoff
+    // from the same fields, so the evidence line and the deck sentence cannot
+    // disagree about whether a replacement builder was ever handed the work.
+    completedHandoffReason: completedHandoffReason,
     // The live feed is rendered by the switchboard block below, so the ONE
     // translation of a canonical event into founder language is exported here
     // rather than copied there. The repeat sentence crosses the same seam for
@@ -8377,9 +8425,17 @@
         (typeof build.failure.summary === 'string' && build.failure.summary
           ? build.failure.summary : 'no summary is recorded.')));
       var recordedHandoff = build.failover || null;
+      // A handoff the run record proves is stated here too, for the same reason
+      // Command View states it: this line is read as the evidence behind the
+      // deck sentence, and the two must not disagree about whether one
+      // happened. It crosses the SAME seam every other shared resolution does,
+      // so there is one reader of the recorded handoff and not a second copy.
+      var handoffReader = window.AEGIS_DASHBOARD && window.AEGIS_DASHBOARD.completedHandoffReason;
+      var completedHandoff = handoffReader ? handoffReader(build) : null;
       host.appendChild(el('div', 'meta', recordedHandoff && typeof recordedHandoff.reason === 'string' &&
         recordedHandoff.reason
         ? 'Handoff ' + (recordedHandoff.state || 'UNAVAILABLE') + ': ' + recordedHandoff.reason
+        : completedHandoff ? 'Handoff COMPLETED: ' + completedHandoff
         : 'No replacement builder handoff is recorded.'));
     }
     return host;

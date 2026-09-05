@@ -5853,6 +5853,183 @@ test('DOM: a recorded provider failure is named as one, with its evidence and on
     'a provider failure was also described as stalled work or review churn');
 });
 
+// ── a recorded Claude→Grok handoff may never be reported as none ───────────
+// The defect guarded here is a sentence that reads as careful honesty while it
+// denies recorded evidence: the run record says Claude handed this exact
+// unchanged task to Grok and that Grok's own attempt failed on its login, and
+// the deck answers "No replacement builder handoff is recorded." Both halves
+// are proved below, because the fix has a worse failure mode than the defect —
+// the denial must go when the canonical evidence is complete, and it must STAY
+// whenever any part of that evidence is missing, contradictory or unproven,
+// since a handoff invented from a partial record is a fabricated one.
+const HANDOFF_COMPLETED_PLAIN = 'Claude handed the unchanged task to Grok, ' +
+  'and Grok could not continue because its login was unavailable.';
+const HANDOFF_NONE_PLAIN = 'No replacement builder handoff is recorded.';
+const HANDOFF_BLOCKED_PLAIN = 'This run already used its one automatic builder handoff.';
+
+// The canonical evidence aegis-worker records for one completed handoff whose
+// replacement builder could not authenticate: the gate decision, the provider
+// selection it was made from, and the replacement attempt with its own failure.
+const COMPLETED_HANDOFF_EVIDENCE = Object.freeze({
+  handoff: { state: 'COMPLETED', fromProvider: 'claude-subscription',
+    toProvider: 'grok-subscription', unchangedObjective: true, handoffCount: 1 },
+  providerSelection: { provider: 'grok-subscription', model: 'grok-4.6' },
+  replacement: { provider: 'grok-subscription', model: 'grok-4.6', exit: 1,
+    failure: { code: 'MODEL_AUTH_FAILURE', provider: 'grok-subscription' } },
+});
+
+// The live minimized payload, fed through the page's own switchboard seam. The
+// original Claude failure is present in every case, because that is the run
+// state in which the handoff sentence is read at all.
+function builderHandoffStatus(buildOver) {
+  const runId = 'RUN-BUILDER-HANDOFF';
+  return {
+    generatedAt: '2026-09-03T12:20:00.000Z', runsState: 'OK',
+    engineering: { state: 'OK', verdict: 'BLOCKED', problems: [], stages: [] },
+    runsBinding: { state: 'BOUND', runId, updatedAt: '2026-09-03T12:20:00.000Z',
+      evidenceState: 'OK', reason: 'bound' },
+    integration: { connectors: [] },
+    runs: [{ runId, state: 'BUILD_FAILED',
+      objective: 'Continue after the replacement builder could not authenticate',
+      updatedAt: '2026-09-03T12:20:00.000Z',
+      build: Object.assign({
+        mode: 'async', status: 'FAILED', exit: 1, timedOut: false, retrySafe: false,
+        recoveryCode: 'MODEL_AUTH_FAILURE',
+        activity: { code: 'MODEL_AUTH_FAILURE', phase: 'BLOCKED', active: false,
+          summary: 'Claude authentication failed' },
+        failure: { code: 'MODEL_AUTH_FAILURE', provider: 'claude-subscription',
+          summary: 'Claude authentication failed.' },
+      }, buildOver || {}) }],
+  };
+}
+
+function builderHandoffPage(buildOver) {
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, builderHandoffStatus(buildOver));
+  return page;
+}
+
+function operatorFieldText(page, field) {
+  const node = operatorFields(page).find((n) => n.attrs['data-operator-field'] === field);
+  assert.ok(node, `the pilot deck has no ${field} field`);
+  return node.textContent;
+}
+
+test('DOM: a completed Claude→Grok handoff whose replacement could not log in is stated, not denied', () => {
+  const page = builderHandoffPage(COMPLETED_HANDOFF_EVIDENCE);
+  const action = operatorFieldText(page, 'current-action');
+  assert.ok(action.includes(HANDOFF_COMPLETED_PLAIN),
+    `the recorded handoff and the replacement's login failure were not stated: ${action}`);
+  assert.ok(!action.includes(HANDOFF_NONE_PLAIN),
+    `a handoff the run record proves was reported as no handoff at all: ${action}`);
+  assert.ok(action.includes('Claude authentication failed.'),
+    `the original recorded provider failure was dropped when the handoff was stated: ${action}`);
+  // The deck's one next governed action reads the same seam, so the sentence a
+  // reader acts on cannot contradict the sentence they just read.
+  const next = operatorFieldText(page, 'next-step');
+  assert.ok(next.includes(HANDOFF_COMPLETED_PLAIN) && !next.includes(HANDOFF_NONE_PLAIN),
+    `the next governed action still denies the recorded handoff: ${next}`);
+  // Detail View is the evidence a reader opens behind that sentence, so it
+  // states the same recorded fact rather than the opposite one.
+  const runs = page.text('runs-list');
+  assert.ok(runs.includes(`Handoff COMPLETED: ${HANDOFF_COMPLETED_PLAIN}`),
+    `Detail View did not restate the recorded handoff: ${runs}`);
+  assert.ok(!runs.includes(HANDOFF_NONE_PLAIN),
+    'Detail View reports no handoff for a run whose own record proves one');
+});
+
+test('DOM: a blocked handoff keeps the recorded refusal and is never read as a completed one', () => {
+  const handoff = { state: 'BLOCKED', fromProvider: 'claude-subscription',
+    toProvider: 'grok-subscription', unchangedObjective: true, executable: false,
+    blockedReason: 'HANDOFF_ALREADY_USED' };
+  const providerSelection = { provider: 'grok-subscription', model: 'grok-4.6' };
+  // With the projection's own refusal sentence, that sentence is what is read.
+  const projected = builderHandoffPage({ handoff, providerSelection,
+    failover: { state: 'BLOCKED', provider: 'grok-subscription', model: 'grok-4.6',
+      reason: HANDOFF_BLOCKED_PLAIN } });
+  const refused = operatorFieldText(projected, 'current-action');
+  assert.ok(refused.includes(HANDOFF_BLOCKED_PLAIN),
+    `the projection's recorded handoff refusal was dropped: ${refused}`);
+  assert.ok(!refused.includes(HANDOFF_COMPLETED_PLAIN) && !refused.includes(HANDOFF_NONE_PLAIN),
+    `a refused handoff was reworded instead of restated: ${refused}`);
+  // Without one, a blocked handoff stays at the unavailable wording. A gate
+  // decision that refused a handoff is not evidence that one happened.
+  const quiet = operatorFieldText(builderHandoffPage({ handoff, providerSelection }), 'current-action');
+  assert.ok(quiet.includes(HANDOFF_NONE_PLAIN),
+    `a blocked handoff lost the unavailable wording: ${quiet}`);
+  assert.ok(!quiet.includes(HANDOFF_COMPLETED_PLAIN),
+    `a refused handoff was read as a completed one: ${quiet}`);
+});
+
+test('DOM: missing or partly proven handoff evidence keeps the unavailable wording', () => {
+  const absent = operatorFieldText(builderHandoffPage(), 'current-action');
+  assert.ok(absent.includes(HANDOFF_NONE_PLAIN),
+    `a run with no recorded handoff evidence lost the unavailable wording: ${absent}`);
+  assert.ok(!absent.includes(HANDOFF_COMPLETED_PLAIN),
+    `a handoff was claimed for a run whose record carries none: ${absent}`);
+  // Every single part of the proof is load-bearing: remove or contradict one
+  // and the page must fall back rather than complete the story itself.
+  const partial = {
+    'no recorded handoff': (e) => { delete e.handoff; },
+    'no recorded provider selection': (e) => { delete e.providerSelection; },
+    'no recorded replacement attempt': (e) => { delete e.replacement; },
+    'a handoff that never completed': (e) => { e.handoff.state = 'AUTHORIZED'; },
+    'an objective that did not travel unchanged': (e) => { e.handoff.unchangedObjective = false; },
+    'a handoff that left another provider': (e) => { e.handoff.fromProvider = 'grok-subscription'; },
+    'a handoff to another provider': (e) => { e.handoff.toProvider = 'codex-subscription'; },
+    'a replacement that is not the selected provider': (e) => { e.replacement.provider = 'claude-subscription'; },
+    'a replacement with no recorded failure': (e) => { delete e.replacement.failure; },
+    'a replacement failure that is not an authentication failure':
+      (e) => { e.replacement.failure.code = 'BUILDER_TIMEOUT'; },
+    'an authentication failure owned by another provider':
+      (e) => { e.replacement.failure.provider = 'claude-subscription'; },
+  };
+  for (const [name, mutate] of Object.entries(partial)) {
+    const evidence = JSON.parse(JSON.stringify(COMPLETED_HANDOFF_EVIDENCE));
+    mutate(evidence);
+    const text = operatorFieldText(builderHandoffPage(evidence), 'current-action');
+    assert.ok(text.includes(HANDOFF_NONE_PLAIN),
+      `${name}: the unavailable wording was dropped on unproven evidence: ${text}`);
+    assert.ok(!text.includes(HANDOFF_COMPLETED_PLAIN),
+      `${name}: a completed handoff was claimed from partial evidence: ${text}`);
+  }
+});
+
+test('one authority writes the recorded-handoff sentence, and it reads canonical build evidence only', () => {
+  assert.strictEqual((code.match(/function completedHandoffReason\(/g) || []).length, 1,
+    'the completed-handoff reading exists in more than one place, so two surfaces can disagree');
+  assert.strictEqual((code.match(/function recordedHandoffReason\(/g) || []).length, 1,
+    'the recorded-handoff reading exists in more than one place');
+  const fn = code.slice(code.indexOf('function completedHandoffReason('),
+    code.indexOf('function recordedHandoffReason('));
+  assert.ok(fn.length > 0, 'no completedHandoffReason() boundary found');
+  for (const banned of ['fetch(', 'callApi', '/api/', 'setTimeout', 'setInterval',
+    'Date.now', 'new Date', 'AEGIS_STATE', 'innerHTML', 'addEventListener']) {
+    assert.ok(!fn.includes(banned),
+      `the handoff reader uses ${banned} instead of re-reading the recorded run evidence`);
+  }
+  for (const canonical of ['.handoff', '.providerSelection', '.replacement', 'MODEL_AUTH_FAILURE']) {
+    assert.ok(fn.includes(canonical),
+      `the handoff reader no longer reads the canonical ${canonical}`);
+  }
+  // The lifecycle sentence, the next action and Detail View all read that one
+  // seam, so no surface can word the same recorded handoff differently.
+  assert.ok(code.includes("failureText + ' ' + recordedHandoffReason(run)"),
+    'the lifecycle sentence composes its own handoff wording again');
+  assert.ok(code.includes('recordedHandoffReason(boundRun)'),
+    'the deck next action no longer reads the shared handoff seam');
+  // Detail View lives in the second script block, so it must reach this
+  // resolution through the exported seam rather than re-proving a handoff.
+  assert.ok(/completedHandoffReason:\s*completedHandoffReason/.test(code),
+    'the completed-handoff resolution is not exported to the switchboard layer');
+  const workerRenderer = code.slice(code.indexOf('function buildEvidence'),
+    code.indexOf('function runActionRow'));
+  assert.ok(/window\.AEGIS_DASHBOARD\.completedHandoffReason/.test(workerRenderer),
+    'Detail View does not read the shared completed-handoff resolution');
+  assert.ok(!/\.handoff\b|\.replacement\b|\.providerSelection\b/.test(workerRenderer),
+    'Detail View rebuilt its own handoff proof instead of reading the resolved one');
+});
+
 test('DOM: a recorded watchdog timeout is stalled work, not a provider or review failure', () => {
   const page = bootPage(failureFixture({
     runId: 'RUN-STALLED-TIMEOUT', state: 'BUILD_FAILED',
