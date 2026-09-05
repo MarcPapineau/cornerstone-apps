@@ -97,6 +97,16 @@ Per-agent governance record: `allowedTasks[]`, `forbiddenTasks[]`, `requiredEvid
 ### Module 2 — Task Packet Generator (`schemas/task-packet.schema.json`)
 The unit of authorization. Required fields: `packetId`, `agentId`, `objective`, `constraints[]`, `sourceOfTruth[]`, `filesAllowed[]`, `testsRequired[]`, `stopConditions[]`, `authorization{}`. A packet is the ONLY way an agent earns the right to touch a protected path or run a forbidden-by-default op — and only the **exact** path/op the packet's `authorization` names, logged with who authorized it. **The three builder packets in §9 are themselves the first conformance examples** — they validate against this schema.
 
+**Optional coordination metadata (`coordination{}`) — describes sequencing, grants nothing.** A packet may omit `coordination` entirely and stays fully valid. Once it declares the key, **all three sub-keys are required** — `executionMode`, `dependsOnPacketIds`, `writeSet`. An empty array is an answer ("nothing to depend on"); a missing key is not, and is refused.
+
+| Key | Rule |
+|---|---|
+| `executionMode` | Pinned to the single value `"SERIAL_ONLY"`. Any other value is refused. No packet may declare a concurrent lane. |
+| `dependsOnPacketIds` | Packet IDs that must complete first. Each entry a non-blank packet ID, all unique, and never this packet's own `packetId`. `[]` states "no dependencies" out loud. |
+| `writeSet` | Non-empty list of **exact repository-relative file paths** this packet intends to write, each already covered by `filesAllowed`, all unique. No globs (`*`, `**`, `?`, `[]`, `{}`), no absolute or drive-letter paths, no `.`/`..` traversal, no backslashes, no empty or trailing segments. A path that does not exist yet is fine (that is a file the packet creates); a path that already exists as a **directory** is refused, because one entry would silently stand in for the whole subtree. The generated `--new` skeleton emits `writeSet: []`, which is deliberately invalid so an unscoped packet stays visibly incomplete until someone scopes it. |
+
+**This metadata confers no authority.** It can only narrow `filesAllowed`, never widen it; it authorizes no protected path, push, or release (that remains `authorization{}` alone — §6). And it **does not enable concurrent execution**: execution stays serial, nothing schedules off these fields today, and validating them is a pure read — no process and no thread is launched. It exists so a future serial-lane scheduler inherits a declared, already-validated shape rather than inventing one.
+
 ### Module 3 — Evidence Ledger (`ledger.json` + `schemas/ledger-entry.schema.json`)
 Append-only. Consolidates the `policy/ledger.json` stub shape and the **Gate-D JSON shape** into ONE entry schema: `entryId`, `ts`, `packetId`, `agentId`, `gate` (e.g. "control" / "D"), `status` (PASS/BLOCKED/INCOMPLETE), `changed[]` (paths), `commandsRun[]` (cmd + exit + output-tail), `testsRun[]`, `screenshots[]`, `commitSha`, `bundleHash`, `evidencePaths[]`, `driftChecks[]`, `notes`. Every gate decision — PASS **and** BLOCK — appends an entry. A change with no ledger entry **never happened** (mirrors the memory-file doctrine).
 
