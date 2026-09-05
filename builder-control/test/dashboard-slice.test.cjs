@@ -12102,6 +12102,185 @@ test('DOM: every journal entry preserves its exact raw evidence and timestamps b
     'a missing evidence field reached the page as a machine value');
 });
 
+// ── the open card is a founder update, and the explanation is one keypress away ──
+// Each 24-hour entry had grown to five stacked paragraphs: the requested change,
+// then availability, then why that change type was chosen, then why the entry is
+// or is not a milestone. Every one of those sentences is true and none of them
+// may be deleted — but an owner scanning the last day reads none of them, and a
+// card nobody reads is a record nobody checks. So the card keeps what changed,
+// its type, what the record proves finished and the evidence-backed milestone
+// flag, and the explanations MOVE into the disclosure the entry already carried.
+//
+// The failure guarded here is the cheap way to shorten a card: a sentence that
+// was softened, summarised, dropped, or left behind on the card AND copied into
+// the disclosure, so one recorded fact starts reading as two.
+function journalOpenCard(row) {
+  return (row.children || []).filter((node) => node.tagName !== 'DETAILS')
+    .map((node) => node.textContent).join(' ');
+}
+
+function journalEntryDisclosure(row) {
+  const found = (row.children || []).filter((node) => node.tagName === 'DETAILS');
+  assert.strictEqual(found.length, 1, 'the entry does not carry exactly one evidence disclosure');
+  return found[0];
+}
+
+function journalTimes(haystack, needle) {
+  return haystack.split(needle).length - 1;
+}
+
+test('DOM: an open 24-hour card states what changed, its type, its recorded outcome and any proven milestone', () => {
+  const row = journalOneRow([journalCheckpointRun({ objective: 'Restructure the evidence rail' })], []);
+  const open = journalOpenCard(row);
+  assert.match(open, /Recorded 2026-09-03T11:00:00\.000Z\./,
+    'the card no longer says when the change was recorded');
+  assert.match(open, /Requested change: Restructure the evidence rail/,
+    'the card no longer says what changed');
+  assert.match(open, /Change type: Structure/,
+    'the card no longer states the category the recorded request resolved to');
+  assert.match(open, /What the record proves finished: This run finished and reached its recorded safe checkpoint\./,
+    'the card no longer states the recorded outcome');
+
+  // The milestone signal stays open, because it is the one fact an owner is
+  // scanning for — and it is drawn only where evidence is bound to this entry.
+  const flag = findByAttr(row, 'data-journal-tag')
+    .find((node) => node.attrs['data-journal-tag'] === 'milestone');
+  assert.ok(flag, 'a proven milestone carries no open signal at all');
+  assert.strictEqual(findByAttr(journalEntryDisclosure(row), 'data-journal-tag')
+    .filter((node) => node === flag).length, 0,
+    'the proven milestone signal was demoted into the disclosure');
+
+  // Nothing else is: no provenance paragraph, no exact machine state, no
+  // explanation of how a fact was resolved.
+  for (const paragraph of [/Available now/, /Change type as requested/, /MILESTONE — this entry is backed by/,
+    /Not a milestone in the record/, /Release or publication receipt/, /Exact recorded timestamps/,
+    /Packet id on this run record/, /Records filed under this exact run id/, /What the checks recorded/,
+    /How to read this entry/]) {
+    assert.doesNotMatch(open, paragraph, `${paragraph} is still a paragraph on the open 24-hour card`);
+  }
+  // The disclosure says it holds the explanation, not only the receipts, or an
+  // owner has no reason to open the one place the explanation now lives.
+  assert.match(journalEntryDisclosure(row).firstElementChild.textContent,
+    /Full explanation and exact receipts for this entry/,
+    'the disclosure does not say that it holds the full explanation');
+
+  // An entry with no bound evidence carries no milestone signal on the card at
+  // all — the flag is emphasis for proof, never decoration for an entry.
+  const plain = journalOneRow([journalDatedRun({ state: 'BUILT', objective: 'Restructure the evidence rail' })], []);
+  assert.strictEqual(findByAttr(plain, 'data-journal-tag')
+    .filter((node) => node.attrs['data-journal-tag'] === 'milestone').length, 0,
+    'an entry with no bound checkpoint or receipt was still flagged as a milestone');
+  assert.match(journalOpenCard(plain),
+    /What the record proves finished: The build finished\. Its automated checks have not run yet\./,
+    'a card with no milestone lost its recorded outcome too');
+});
+
+test('DOM: every journal sentence the card no longer prints survives exactly once behind its disclosure', () => {
+  const proven = journalOneRow([journalCheckpointRun({ objective: 'Restructure the evidence rail' })],
+    [journalReceipt()]);
+  const provenDetail = journalEntryDisclosure(proven);
+  const movedWhenProven = [
+    `Available now: IN THE RECORD — checkpoint CKPT-20260903-01 validated and names rollback commit ${JOURNAL_ROLLBACK}`,
+    'Change type as requested: Structure — the recorded objective uses "restructure".',
+    'MILESTONE — this entry is backed by a checkpoint receipt the canonical projector validated and ' +
+      'a ledger receipt recorded PASS inside this run record\'s own window.',
+    'Milestone evidence — checkpoint receipt CKPT-20260903-01',
+    'Milestone evidence — ledger receipt E-JOURNAL-1',
+    'Release or publication receipt: NONE',
+    'Exact recorded timestamps: created 2026-09-03T09:00:00.000Z · updated 2026-09-03T11:00:00.000Z',
+    `Packet id on this run record: ${JOURNAL_PACKET}`,
+    'Change type: Structure — the recorded objective uses "restructure". Terms matched in the recorded ' +
+      'objective: restructure.',
+    'How to read this entry:',
+  ];
+  for (const sentence of movedWhenProven) {
+    assert.strictEqual(journalTimes(proven.textContent, sentence), 1,
+      `"${sentence}" was dropped from the entry, or is now printed twice`);
+    assert.strictEqual(journalTimes(provenDetail.textContent, sentence), 1,
+      `"${sentence}" is not inside the entry's own evidence disclosure`);
+  }
+
+  // The refusals are the sentences most worth losing and least worth losing:
+  // an entry that proves nothing must still say so, once, where it can be read.
+  const unproven = journalOneRow([journalDatedRun({ state: 'BUILT' })], []);
+  const unprovenDetail = journalEntryDisclosure(unproven);
+  for (const sentence of [
+    'Available now: UNVERIFIED — no validated checkpoint is recorded for this run',
+    'Not a milestone in the record: no validated checkpoint is recorded for this run',
+    'the recorded receipts on this page carry no packet id, so none of them can be bound to this run',
+    'Release or publication receipt: NONE',
+    'Change type as requested: Unclassified — the recorded wording matches no term in the published list',
+  ]) {
+    assert.strictEqual(journalTimes(unproven.textContent, sentence), 1,
+      `"${sentence}" was dropped from the entry, or is now printed twice`);
+    assert.strictEqual(journalTimes(unprovenDetail.textContent, sentence), 1,
+      `"${sentence}" is not inside the entry's own evidence disclosure`);
+  }
+
+  // A disclosed 24-hour entry is the same entry: compacting the rail and
+  // compacting the card cannot combine into a card with less in it.
+  const busy = journalSection(bootPage(journalFixture(journalBusyDay(6))));
+  const disclosed = journalRows(busy, 'recent-more')[0];
+  assert.match(journalOpenCard(disclosed), /Requested change: Recorded update 3/,
+    'an entry behind the 24-hour disclosure lost its open founder update');
+  assert.match(journalEntryDisclosure(disclosed).textContent, /Available now: UNVERIFIED/,
+    'an entry behind the 24-hour disclosure lost the explanation the visible cards keep');
+});
+
+test('the journal card and its disclosure are one row builder: the sentences moved, and none was re-typed', () => {
+  const journal = code.slice(code.indexOf('var JOURNAL_WINDOW_MS'),
+    code.indexOf('function renderFounderSummary'));
+  assert.ok(journal.length > 0, 'the build journal source boundary was not found');
+  for (const name of ['availability', 'category', 'milestone']) {
+    assert.strictEqual((journal.match(new RegExp(`detail\\.appendChild\\(${name}\\)`, 'g')) || []).length, 1,
+      `the ${name} explanation is not appended to the entry's one disclosure`);
+    assert.ok(!new RegExp(`li\\.appendChild\\(${name}\\)`).test(journal),
+      `the ${name} explanation is drawn open on the card as well, so one fact reads as two`);
+  }
+  // Each moved sentence is still rendered from the ONE resolver that owned it,
+  // so a compact card cannot carry a second, shorter version of the truth.
+  assert.strictEqual((journal.match(/entry\.availability\.text/g) || []).length, 1,
+    'the availability sentence is rendered from more than one place');
+  assert.strictEqual((journal.match(/entry\.milestone\.text/g) || []).length, 1,
+    'the milestone sentence is rendered from more than one place');
+  assert.strictEqual((journal.match(/entry\.category\.why/g) || []).length, 2,
+    'the change-type reason is rendered somewhere other than the moved line and its exact-evidence fact');
+  assert.strictEqual((journal.match(/function journalRow\(/g) || []).length, 1,
+    'a second row builder exists, so an open card could tell a different story from a disclosed one');
+  // No new disclosure, control or window was invented to hold the moved text.
+  assert.strictEqual((journal.match(/el\('details'/g) || []).length, 2,
+    'the moved explanations were put behind a new disclosure instead of the entry\'s existing one');
+  assert.strictEqual((journal.match(/data-journal-line/g) || []).length, 3,
+    'the journal renders more or fewer than the three moved explanation lines');
+});
+
+test('the moved journal explanations keep the wrapping and emphasis that make them readable at 390px', () => {
+  const row = journalOneRow([journalCheckpointRun()], []);
+  const detail = journalEntryDisclosure(row);
+  const lines = findByAttr(row, 'data-journal-line');
+  assert.deepStrictEqual(lines.map((node) => node.attrs['data-journal-line']),
+    ['availability', 'category', 'milestone'],
+    'the entry no longer carries exactly the three moved explanations, in their recorded order');
+  const inside = findByAttr(detail, 'data-journal-line');
+  for (const line of lines) {
+    assert.ok(inside.includes(line), 'a moved explanation is rendered outside the disclosure that holds it');
+    assert.ok(String(line.className).split(/\s+/).includes('journal-line'),
+      'a moved explanation lost the class the phone wrapping rule is written against');
+  }
+  assert.ok(lines[2].classList.contains('is-milestone'),
+    'the milestone sentence lost its own emphasis when it moved into the disclosure');
+  // The phone contract is untouched: the moved sentences still wrap, both
+  // disclosures are still finger-sized, and the reading order is the shipped one.
+  assert.ok(/\.journal-empty,\.journal-line,\.journal-tag\{overflow-wrap:anywhere\}/.test(PHONE),
+    'the moved journal sentences no longer wrap at phone width');
+  assert.ok(/\.journal-detail>summary,\.journal-more>summary\{min-height:44px;display:flex;align-items:center\}/.test(PHONE),
+    'the disclosure now holding every explanation is not finger-sized at phone width');
+  assert.ok(/\.journal-head,\.journal-entry-head\{flex-direction:column;align-items:flex-start;gap:4px\}/.test(PHONE),
+    'the compacted card head no longer stacks at phone width');
+  assert.ok(/\.event-panel\{order:1\}#evidence-rail\{order:2\}#raw-state\{order:3\}/.test(PHONE),
+    'the phone reading order changed while the 24-hour card was compacted');
+});
+
 test('the milestone emphasis is a shape and a word before it is a colour, and it never animates', () => {
   const start = code.indexOf('.journal-badges{');
   const end = code.indexOf('\n\n', start);

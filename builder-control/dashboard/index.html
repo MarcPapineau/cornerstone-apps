@@ -568,9 +568,12 @@
      Three more facts per entry, and each is emphasised only where the canonical
      record proves it. The milestone treatment is a border, a background tint AND
      the word MILESTONE, so an emphasised entry is never distinguished by colour
-     alone and never by colour at all for a screen reader. Nothing here animates,
-     transitions, clamps or truncates: the sentence that explains why an entry is
-     — or is not — a milestone wraps and stays readable at every width. */
+     alone and never by colour at all for a screen reader. The sentences those
+     facts were read from live inside the entry's own disclosure, so the card
+     stays a founder update and the explanation is one keypress away rather than
+     gone. Nothing here animates, transitions, clamps or truncates: the sentence
+     that explains why an entry is — or is not — a milestone wraps and stays
+     readable at every width, open or disclosed. */
   .journal-badges{display:flex;flex-wrap:wrap;gap:5px;align-items:center;min-width:0}
   .journal-tag{font:650 10px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;
     color:var(--text-1);border:1px solid var(--line);border-radius:3px;padding:3px 6px;
@@ -5274,11 +5277,19 @@
   //   · one entry per EXACT run id. Records filed under one id that disagree
   //     stay UNVERIFIED and unmerged — a duplicate never becomes a success;
   //   · the objective is printed as the change that was REQUESTED, and the three
-  //     founder facts beside it — change type, milestone, available now — are
+  //     founder facts read from it — change type, milestone, available now — are
   //     each resolved from ONE named canonical source and are labelled
   //     unclassified or unverified whenever that source proves nothing. BUILT and
   //     CHECKS_PASSED are build facts, and this journal will not promote either
   //     into an availability or a milestone claim.
+  //
+  // What a card draws open is the founder update — recorded time, state, change
+  // type, the requested change and what the record proves finished, plus the
+  // MILESTONE flag where evidence is bound to that exact entry. The sentences
+  // those facts were read from, and every exact receipt, are inside the entry's
+  // one existing disclosure. That split is a MOVE and never an edit: no sentence
+  // is shortened, softened or dropped to make a card read calmer, and each one
+  // is rendered exactly once.
   var JOURNAL_WINDOW_MS = 24 * 60 * 60 * 1000;
   var JOURNAL_METADATA_NOTE = 'How to read this entry: the change type is read only from the wording of ' +
     'the objective that was recorded when the change was requested, so it describes the REQUEST and never ' +
@@ -5691,22 +5702,29 @@
     li.appendChild(el('div','journal-what','Requested change: ' +
       (entry.objective || 'UNAVAILABLE — this record carries no objective.')));
     li.appendChild(el('div','journal-outcome','What the record proves finished: ' + entry.outcome));
+    // Everything above is the founder update: when, what was asked for, what
+    // kind of change it was, what the record proves finished, and — only where
+    // canonical evidence is bound to this exact entry — the milestone flag.
+    // Everything below is the same evidence explained in full. It is moved, not
+    // dropped: each sentence that used to be drawn open is the SAME sentence,
+    // rendered exactly once, one keypress away in the disclosure this entry
+    // already carried. A card that has to be read to be understood is a card an
+    // owner stops reading, and an explanation that is deleted to shorten one is
+    // exactly the fabrication this journal exists to refuse.
+    var detail = el('details','journal-detail');
+    detail.appendChild(el('summary',null,'Full explanation and exact receipts for this entry'));
     var availability = el('div','journal-line', entry.availability.text);
     availability.setAttribute('data-journal-line','availability');
-    li.appendChild(availability);
+    detail.appendChild(availability);
     var category = el('div','journal-line',
       'Change type as requested: ' + entry.category.label + ' — ' + entry.category.why);
     category.setAttribute('data-journal-line','category');
-    li.appendChild(category);
+    detail.appendChild(category);
     var milestone = el('div',
       entry.milestone.state === 'RECORDED' ? 'journal-line is-milestone' : 'journal-line',
       entry.milestone.text);
     milestone.setAttribute('data-journal-line','milestone');
-    li.appendChild(milestone);
-    // The exact receipts, collapsed rather than dropped: a native disclosure is
-    // keyboard-operable and screen-reader-operable without a control of its own.
-    var detail = el('details','journal-detail');
-    detail.appendChild(el('summary',null,'Recorded evidence for this entry'));
+    detail.appendChild(milestone);
     var facts = el('ul','rows');
     function fact(text){ facts.appendChild(el('li','meta', text)); }
     fact('Run id: ' + (entry.runId ||
@@ -5720,12 +5738,13 @@
     fact('Change type: ' + entry.category.label + ' — ' + entry.category.why +
       ' Terms matched in the recorded objective: ' +
       (entry.category.terms.length ? entry.category.terms.join(', ') + '.' : 'none.'));
-    fact(entry.availability.text);
+    // The availability sentence and the milestone sentence are the ones printed
+    // above this list, so they are not printed again here: an explanation that
+    // appears twice in one disclosure is how a single recorded fact starts
+    // reading as two. What follows is only what those sentences were read from.
     if (entry.milestone.evidence.length){
       entry.milestone.evidence.forEach(function(item){ fact(item.exact); });
       fact(JOURNAL_RELEASE_FACT);
-    } else {
-      fact(entry.milestone.text);
     }
     fact('Records filed under this exact run id: ' + entry.recordCount +
       (entry.conflict ? ' — they disagree, and each one is preserved below.' : '.'));
@@ -5837,9 +5856,10 @@
     showWindow('recent');
     section.appendChild(el('p','journal-note',
       'Every entry is the change that was requested, what the record proves finished, and whether the ' +
-      'record proves it can be used now. Change type is read from the recorded request wording alone and ' +
-      'is Unclassified whenever that wording proves nothing. Only an entry backed by a validated ' +
-      'checkpoint receipt or by a ledger receipt bound to it is highlighted as a milestone. ' +
+      'record proves it can be used now — the first two are drawn open, and the rest, with every exact ' +
+      'receipt, is inside that entry\'s own disclosure. Change type is read from the recorded request ' +
+      'wording alone and is Unclassified whenever that wording proves nothing. Only an entry backed by ' +
+      'a validated checkpoint receipt or by a ledger receipt bound to it is highlighted as a milestone. ' +
       JOURNAL_RELEASE_FACT));
     host.appendChild(section);
     return section;
