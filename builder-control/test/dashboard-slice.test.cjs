@@ -692,16 +692,16 @@ test('the first-screen composer keeps the objective and action visible while opt
   }
 });
 
-test('the primary topology is one connected operator route and connector cards clamp prose without dropping evidence', () => {
+test('the primary topology is one connected route and the connector roster keeps detail without printing it twice', () => {
   const source = htmlSrc();
   assert.ok(/#topology-live-body\s+\.route-strip\s*\{[^}]*repeat\(11,minmax\(68px,1fr\)\)/.test(code),
     'the wide-screen primary route must render the eleven exact stages as one connected row');
   assert.ok(/\.route-node::after\s*\{[^}]*background:#31536b/.test(code),
     'the exact stage route lost its visible connector line');
-  assert.ok(/\.usage-summary\s*\{[^}]*-webkit-line-clamp:3[^}]*overflow:hidden/.test(code),
-    'dense connector usage prose is not visually clamped in the summary card');
-  assert.ok(/el\('div','meta usage-summary',usage\.text\)/.test(source),
-    'the connector card no longer retains the complete truthful usage sentence in the DOM');
+  assert.ok(/\.connector-roster-facts\s*\{[^}]*repeat\(3,minmax\(0,1fr\)\)/.test(code),
+    'the connector roster no longer keeps its three operator facts on one compact row');
+  assert.ok(/line\.setAttribute\('aria-label', label \+ ': ' \+ fact\.text\)/.test(source),
+    'the compact connector fact dropped its complete recorded sentence instead of preserving it accessibly');
   assert.ok(/kv\('Last used by a run',[\s\S]{0,180}usageMessage/.test(source),
     'the inspector must retain full connector usage drill-down evidence');
 });
@@ -817,7 +817,7 @@ test('the operator deck never treats authentication as connector usage', () => {
   const deck = code.slice(start, end);
   assert.ok(/usageMessage\(c\.lastUsedByRun/.test(deck),
     'connector activity must be derived from lastUsedByRun evidence');
-  assert.ok(/Authenticated is not the same as used/.test(code),
+  assert.ok(/Authentication, verification and use are separate facts/.test(code),
     'the distinction between connectivity and use is not stated');
   assert.ok(!/authStatus\s*===\s*['"]AUTHENTICATED['"]\s*\?\s*['"]ACTIVE/.test(deck),
     'authentication is being promoted to active use');
@@ -3602,18 +3602,15 @@ test('RED: a confirmed use is never called "this run" when no run is bound', () 
     'with no binding the page must say so rather than imply the use belongs to the current run');
 });
 
-// ── V2 INTEGRATIONS — four questions, four separate answers, one authority ─
-// The Command View names a worker; the founder's next question is what that
-// worker can actually reach. Four different facts answer it, and collapsing any
-// two of them is the original connector defect returning by a different door:
-// how a call would reach the service (execution path), whether our credential
-// was valid at a dated check (authentication), whether the service itself last
-// answered a probe (verification), and whether the CURRENT bound run actually
-// consumed it (usage). These proofs hold three properties: the four are
-// rendered separately, an absent field is an explicit UNAVAILABLE rather than
-// the more flattering neighbouring fact, and the deck resolves them through the
-// same connector resolution the Detail View inspector already owns, so the two
-// surfaces can never answer the same question differently.
+// ── V2 INTEGRATIONS — three operator facts, one detail authority ─────────────
+// The compact Command View roster answers the three questions needed at a
+// glance: whether our credential was valid at a dated check, whether the
+// service itself last answered a probe, and whether the CURRENT bound run
+// actually consumed it. Execution path, health and capabilities remain in the
+// existing Inspector. These proofs hold three properties: the three operator
+// facts stay separate, an absent field is an explicit UNAVAILABLE rather than
+// the more flattering neighbouring fact, and the roster resolves them through
+// the same connector resolution the Detail View inspector already owns.
 function commandConnectorCards(page) {
   return findByAttr(page.document.getElementById('integration-overview'), 'role');
 }
@@ -3629,6 +3626,7 @@ function commandConnectorFacts(page) {
       state: node.attrs['data-connector-fact-state'],
       text: node.children.length ? node.lastChild.textContent : node.textContent,
       line: node.textContent,
+      accessible: node.attrs['aria-label'] || '',
     };
   }
   return facts;
@@ -3663,35 +3661,38 @@ test('the connection-side connector facts are resolved once and read by both Com
     'Command View resolves connector evidence outside the connector resolution the inspector already owns');
   assert.ok(/usageMessage\(c\.lastUsedByRun/.test(deck),
     'Command View usage no longer comes from the single usage authority');
+  assert.ok(!/factLine\('execution-path'/.test(deck) && !/c\.health/.test(deck),
+    'execution path or health escaped the Inspector and made the compact operator roster verbose');
   const inspector = code.slice(code.indexOf("} else if (kind === 'connector'){"), code.indexOf("kv('Supports'"));
   assert.ok(/connectorFacts\(connector\)/.test(inspector),
     'the Detail View inspector derives the same facts a second time instead of reading the resolved ones');
 });
 
-test('DOM: the Command View connector card states execution path, authentication, verification and current-run usage separately', () => {
+test('DOM: the Command View connector roster states authentication, verification and current-run usage separately', () => {
   const connector = connectorFixture({ state: 'UNAVAILABLE' });
   connector.authentication = { state: 'AUTHENTICATED',
     plain: 'Our credential for this service was valid when checked 3 minute(s) ago.' };
   connector.lastVerified = { state: 'FRESH', plain: 'Checked 3 minute(s) ago and it responded.' };
   const facts = commandConnectorFacts(bootPage(integrationFixture(connector, 'RUN-INTEGRATION')));
   assert.deepStrictEqual(Object.keys(facts).sort(),
-    ['authentication', 'execution-path', 'last-verified', 'used-by-current-run'],
-    'the four connector questions are not rendered as four separate answers');
-  assert.strictEqual(facts['execution-path'].state, 'RECORDED');
-  assert.match(facts['execution-path'].text, /^mcp$/, 'the recorded execution path was not rendered exactly');
+    ['authentication', 'last-verified', 'used-by-current-run'],
+    'the three connector questions are not rendered as three separate answers');
   assert.strictEqual(facts.authentication.state, 'AUTHENTICATED');
-  assert.match(facts.authentication.text, /valid when checked 3 minute\(s\) ago/,
-    'the card did not render the projector\'s own dated credential sentence');
+  assert.strictEqual(facts.authentication.text, 'Credential valid');
+  assert.match(facts.authentication.accessible, /valid when checked 3 minute\(s\) ago/,
+    'the compact credential reading dropped the projector\'s dated evidence from its accessible name');
   assert.strictEqual(facts['last-verified'].state, 'FRESH');
-  assert.match(facts['last-verified'].text, /Checked 3 minute\(s\) ago and it responded/,
-    'the card did not render the projector\'s own verification sentence');
+  assert.strictEqual(facts['last-verified'].text, 'Service answered');
+  assert.match(facts['last-verified'].accessible, /Checked 3 minute\(s\) ago and it responded/,
+    'the compact verification reading dropped the projector\'s evidence from its accessible name');
   assert.strictEqual(facts['used-by-current-run'].state, 'UNAVAILABLE');
-  assert.match(facts['used-by-current-run'].text, /no record exists/,
-    'absent usage evidence was not reported as missing evidence');
+  assert.strictEqual(facts['used-by-current-run'].text, 'Not recorded');
+  assert.match(facts['used-by-current-run'].accessible, /no record exists/,
+    'absent usage evidence was not preserved behind the compact missing-evidence reading');
   assert.doesNotMatch(facts['used-by-current-run'].text, /\bUsed by this run\b/,
     'an authenticated, freshly verified connector was rendered as one the current run used');
   for (const field of ['authentication', 'last-verified']) {
-    assert.doesNotMatch(facts[field].text, /\bused\b|\bconsulted\b/i,
+    assert.doesNotMatch(facts[field].accessible, /\bused\b|\bconsulted\b/i,
       `the ${field} answer claims consumption, which only a usage receipt may state`);
   }
 });
@@ -3703,38 +3704,46 @@ test('DOM: only an exact current-run usage receipt lets a connector card say the
   connector.lastVerified = { state: 'FRESH', plain: 'Checked 2 minute(s) ago and it responded.' };
   const used = commandConnectorFacts(bootPage(integrationFixture(connector, 'RUN-USE')));
   assert.strictEqual(used['used-by-current-run'].state, 'USED_CURRENT');
-  assert.match(used['used-by-current-run'].text, /Used by this run \(RUN-USE\)/,
-    'a ledger-confirmed use by the bound run was not attributed to it');
+  assert.strictEqual(used['used-by-current-run'].text, 'Used by this run');
+  assert.match(used['used-by-current-run'].accessible, /Used by this run \(RUN-USE\)/,
+    'the compact current-run reading dropped the exact bound run from its accessible evidence');
   assert.strictEqual(used.authentication.state, 'AUTHENTICATED',
     'a proven use rewrote the separate credential answer');
 
   const other = commandConnectorFacts(bootPage(integrationFixture(connector, 'RUN-OTHER')));
   assert.strictEqual(other['used-by-current-run'].state, 'USED_HISTORICAL');
-  assert.match(other['used-by-current-run'].text, /not the current run \(RUN-OTHER\)/,
-    'a use recorded for a different run was not distinguished from the bound run');
+  assert.strictEqual(other['used-by-current-run'].text, 'Another run only');
+  assert.match(other['used-by-current-run'].accessible, /not the current run \(RUN-OTHER\)/,
+    'the compact historical reading dropped the exact current-run distinction from its accessible evidence');
   assert.doesNotMatch(other['used-by-current-run'].text, /\bUsed by this run\b/);
 });
 
-test('DOM: missing credential, verification or execution evidence renders explicit UNAVAILABLE, never a neighbouring fact', () => {
+test('DOM: missing credential or verification evidence stays explicitly unavailable and the Inspector keeps execution detail', () => {
   const connector = connectorFixture({ state: 'USED', runId: 'RUN-BARE',
     observedAt: '2026-09-02T11:30:00.000Z', ledgerConfirmed: true });
   delete connector.authStatus;
   connector.executionPath = 'UNKNOWN';
   connector.health = 'HEALTHY';
   connector.staleness = { state: 'FRESH', ageMinutes: 1 };
-  const facts = commandConnectorFacts(bootPage(integrationFixture(connector, 'RUN-BARE')));
-  for (const field of ['execution-path', 'authentication', 'last-verified']) {
+  const page = bootPage(integrationFixture(connector, 'RUN-BARE'));
+  const facts = commandConnectorFacts(page);
+  for (const field of ['authentication', 'last-verified']) {
     assert.strictEqual(facts[field].state, 'UNAVAILABLE',
       `${field} was reported as a fact the projection does not carry`);
-    assert.match(facts[field].text, /^UNAVAILABLE — /,
-      `${field} absence is not stated as an explicit honest absence: ${facts[field].text}`);
-    assert.doesNotMatch(facts[field].text, /HEALTHY|FRESH|RUN-BARE/,
+    assert.strictEqual(facts[field].text, 'Not recorded');
+    assert.match(facts[field].accessible, /UNAVAILABLE — /,
+      `${field} absence is not preserved as an explicit honest absence: ${facts[field].accessible}`);
+    assert.doesNotMatch(facts[field].accessible, /HEALTHY|FRESH|RUN-BARE/,
       `${field} borrowed health, freshness or usage evidence to fill its own gap`);
   }
   // The one fact that IS recorded stays fully reported: an absence elsewhere
   // must not suppress evidence the ledger actually confirmed.
   assert.strictEqual(facts['used-by-current-run'].state, 'USED_CURRENT');
-  assert.match(facts['used-by-current-run'].text, /Used by this run \(RUN-BARE\)/);
+  assert.strictEqual(facts['used-by-current-run'].text, 'Used by this run');
+  assert.match(facts['used-by-current-run'].accessible, /Used by this run \(RUN-BARE\)/);
+  commandConnectorCards(page)[0]._listeners.click[0]();
+  assert.match(page.text('inspector'), /Execution pathUNAVAILABLE — this projection records no execution path/,
+    'the execution-path absence did not remain available in the existing Inspector');
 });
 
 test('DOM: a minimized live connector card answers through the existing inspector resolution, not a second one', () => {
@@ -3762,19 +3771,22 @@ test('DOM: a minimized live connector card answers through the existing inspecto
   });
   const facts = commandConnectorFacts(page);
   assert.strictEqual(facts.authentication.state, 'AUTHENTICATED');
-  assert.match(facts.authentication.text, /Credential checked from dated evidence/,
+  assert.match(facts.authentication.accessible, /Credential checked from dated evidence/,
     'the live card did not resolve credential evidence through the existing connector resolution');
-  assert.match(facts['last-verified'].text, /Probe succeeded from dated evidence/,
+  assert.match(facts['last-verified'].accessible, /Probe succeeded from dated evidence/,
     'the live card did not resolve verification evidence through the existing connector resolution');
 
   const cards = commandConnectorCards(page);
   cards[0]._listeners.click[0]();
   const inspector = page.text('inspector');
-  for (const field of ['execution-path', 'authentication', 'last-verified']) {
-    assert.ok(inspector.includes(facts[field].text),
+  for (const field of ['authentication', 'last-verified']) {
+    const evidence = facts[field].accessible.replace(/^[^:]+:\s*/, '');
+    assert.ok(inspector.includes(evidence),
       `Command View and the Detail View inspector disagree about ${field}: ` +
-      `card said "${facts[field].text}"`);
+      `card said "${facts[field].accessible}"`);
   }
+  assert.match(inspector, /Execution pathmcp/,
+    'the compact roster removed execution-path detail from the existing Inspector');
 });
 
 // ── FINDING #7 RED PROOFS: binding, not array position ────────────────────
