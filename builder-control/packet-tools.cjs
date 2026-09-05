@@ -199,6 +199,92 @@ function validateRepositoryPaths(packet) {
   return errors;
 }
 
+// Coordination is optional metadata for a future serial-lane scheduler. It can
+// only narrow existing authority: the mode stays pinned to SERIAL_ONLY, the
+// dependency list must be a clean non-self-referential set, and every declared
+// write path must already be inside the packet's filesAllowed scope.
+//
+// A packet may omit coordination entirely and stay valid. Once it declares
+// coordination, though, all three keys are mandatory: an empty array is an
+// answer ("nothing to depend on", "nothing scoped yet"), a missing key is not.
+function validateCoordination(packet) {
+  const coordination = packet && packet.coordination;
+  if (coordination === undefined) return []; // packets without coordination stay valid
+  if (typeof coordination !== 'object' || coordination === null || Array.isArray(coordination)) {
+    return ['coordination must be an object'];
+  }
+
+  const errors = [];
+
+  if (coordination.executionMode !== 'SERIAL_ONLY') {
+    errors.push(`coordination.executionMode must be "SERIAL_ONLY", got ${JSON.stringify(coordination.executionMode)}`);
+  }
+
+  const dependsOn = coordination.dependsOnPacketIds;
+  if (dependsOn === undefined) {
+    errors.push('coordination.dependsOnPacketIds must be declared; use [] to state that there are none');
+  } else if (!Array.isArray(dependsOn)) {
+    errors.push('coordination.dependsOnPacketIds must be an array');
+  } else {
+    const seen = new Set();
+    for (const dependency of dependsOn) {
+      if (typeof dependency !== 'string' || !dependency.trim()) {
+        errors.push(`coordination.dependsOnPacketIds ${JSON.stringify(dependency)} must be a non-empty packet id`);
+        continue;
+      }
+      if (dependency === packet.packetId) {
+        errors.push(`coordination.dependsOnPacketIds ${JSON.stringify(dependency)} must not depend on its own packet`);
+      }
+      if (seen.has(dependency)) {
+        errors.push(`coordination.dependsOnPacketIds ${JSON.stringify(dependency)} must be unique`);
+      }
+      seen.add(dependency);
+    }
+  }
+
+  const writeSet = coordination.writeSet;
+  if (writeSet === undefined) {
+    errors.push('coordination.writeSet must be declared; use [] to state that nothing is scoped yet');
+    return errors;
+  }
+  if (!Array.isArray(writeSet)) {
+    errors.push('coordination.writeSet must be an array of exact paths');
+    return errors;
+  }
+  if (writeSet.length === 0) {
+    errors.push('coordination.writeSet must contain at least one exact path; [] is only an incomplete generated skeleton');
+    return errors;
+  }
+
+  const filesAllowed = Array.isArray(packet.filesAllowed) ? packet.filesAllowed : [];
+  const seenWrites = new Set();
+  for (const value of writeSet) {
+    const problem = repositoryPathProblem(value, { exact: true });
+    if (problem) {
+      errors.push(`coordination.writeSet ${JSON.stringify(value)} ${problem}`);
+      continue;
+    }
+    if (seenWrites.has(value)) {
+      errors.push(`coordination.writeSet ${JSON.stringify(value)} must be unique`);
+    }
+    seenWrites.add(value);
+    if (!pathAllowedByGlobs(value, filesAllowed)) {
+      errors.push(`coordination.writeSet ${JSON.stringify(value)} is outside filesAllowed`);
+    }
+    // A write target is allowed not to exist yet — that is the normal case for
+    // a file this packet will create. But a path that already exists as a
+    // directory is refused: one declared entry would silently stand in for the
+    // whole subtree underneath it, which is the opposite of an exact write set.
+    let existing = null;
+    try { existing = fs.statSync(path.resolve(WORKSPACE_ROOT, value)); } catch { existing = null; }
+    if (existing && existing.isDirectory()) {
+      errors.push(`coordination.writeSet ${JSON.stringify(value)} is an existing directory; declare exact file paths`);
+    }
+  }
+
+  return errors;
+}
+
 function protectedOverrideAllowed(filePath, protectedPaths) {
   return Object.values((protectedPaths && protectedPaths.categories) || {}).some((category) =>
     category && category.overridable === true && Array.isArray(category.paths) &&
@@ -234,6 +320,13 @@ function validatePacket(packetPath) {
   if (pathErrors.length) {
     console.error('PACKET PATH VALIDATION FAILED:');
     pathErrors.forEach((error) => console.error(`  • ${error}`));
+    process.exit(1);
+  }
+
+  const coordinationErrors = validateCoordination(packet);
+  if (coordinationErrors.length) {
+    console.error('COORDINATION VALIDATION FAILED:');
+    coordinationErrors.forEach((error) => console.error(`  • ${error}`));
     process.exit(1);
   }
 
@@ -333,6 +426,14 @@ function newPacket(agentId, objective) {
     sourceOfTruth:  ['builder-control/CONTROL-CONTRACT.md'],
     filesAllowed:   [],
     testsRequired:  [],
+    // Declared, and deliberately left invalid until scoped. Emitting an empty
+    // writeSet makes the incomplete state visible; validation refuses the
+    // skeleton until exact write targets are added alongside filesAllowed.
+    coordination: {
+      executionMode:      'SERIAL_ONLY',
+      dependsOnPacketIds: [],
+      writeSet:           []
+    },
     stopConditions: [
       'Fix would require touching a protected path not listed in authorization.allowsProtectedPaths',
       'Claude Code fails twice on the same issue',
@@ -376,4 +477,4 @@ function main(args = process.argv.slice(2)) {
 
 if (require.main === module) main();
 
-module.exports = Object.freeze({ globMatch, pathAllowedByGlobs, repositoryPathProblem });
+module.exports = Object.freeze({ globMatch, pathAllowedByGlobs, repositoryPathProblem, validateCoordination });

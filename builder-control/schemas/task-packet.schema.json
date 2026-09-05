@@ -45,6 +45,33 @@
       "uniqueItems": true,
       "description": "Optional exact top-level macOS containment command. When declared it is separate from testsRequired and its zero-skip exact-subject receipt is mandatory."
     },
+    "coordination": {
+      "type": "object",
+      "description": "Optional forward-compatible metadata describing how this packet would sequence against other packets. It grants no authority: execution stays serial and the write set can only narrow filesAllowed, never widen it. Packets that omit coordination remain fully valid.",
+      "required": ["executionMode", "dependsOnPacketIds", "writeSet"],
+      "properties": {
+        "executionMode": {
+          "type": "string",
+          "const": "SERIAL_ONLY",
+          "enum": ["SERIAL_ONLY"],
+          "description": "Pinned to SERIAL_ONLY. No packet may declare a concurrent lane until tested parallel semantics exist."
+        },
+        "dependsOnPacketIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "pattern": "^B?C?[0-9A-Za-z._-]{3,}$" },
+          "uniqueItems": true,
+          "description": "Packet IDs that must complete before this one. Must be declared even when there are none: [] states \"no dependencies\" out loud, while omitting the key leaves the question unanswered. Must be unique and must not include this packet's own packetId."
+        },
+        "writeSet": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Exact repository-relative paths this packet intends to write. The finished packet must declare at least one path; a generated skeleton uses [] only to remain visibly incomplete until scoped. No globs, no absolute paths, no traversal, no backslashes. Every entry must already be covered by filesAllowed, and no entry may resolve to an existing directory."
+        }
+      },
+      "additionalProperties": false
+    },
     "stopConditions": {
       "type": "array",
       "items": { "type": "string" },
