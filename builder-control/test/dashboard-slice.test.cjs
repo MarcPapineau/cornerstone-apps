@@ -87,6 +87,36 @@ const RUN_LIFECYCLE_PLAIN = Object.freeze({
   CORRECTING: 'Correcting', CHECKPOINTED: 'Safe checkpoint reached',
   ROLLED_BACK: 'Rolled back', ABANDONED: 'Abandoned', UNAVAILABLE: 'Not recorded',
 });
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+// The four state vocabularies the Strategic Systems HUD module footers write.
+// Same discipline as above: these are the words the shipped seam must print, and
+// the exact code is asserted separately on each footer's machine attribute.
+const GATE_OUTCOME_PLAIN = Object.freeze({
+  READY_FOR_PR: 'Ready to open a pull request',
+  READY_FOR_DETERMINISTIC_VALIDATION: 'Waiting on deterministic checks',
+  BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded',
+});
+const CHECKPOINT_EVIDENCE_PLAIN = Object.freeze({
+  RECORDED: 'Safe state recorded',
+  ROLLBACK_UNAVAILABLE: 'Safe state recorded, no way back',
+  NOT_RECORDED: 'No safe state recorded', BLOCKED: 'Needs attention',
+  UNAVAILABLE: 'Not recorded',
+});
+const CODE_VERSION_PLAIN = Object.freeze({
+  BOUND: 'Matches this code version', UNAVAILABLE: 'Not confirmed',
+});
+const REVIEW_COVERAGE_PLAIN = Object.freeze({
+  'EVIDENCE UNAVAILABLE': 'No review evidence recorded',
+  'REVIEW EVIDENCE STALE OR MISMATCHED': 'Review evidence belongs to another version',
+  'REVIEW COVERAGE COMPLETE': 'Review coverage complete',
+  'SERVER VERIFICATION CANDIDATE — RUN VERSION DIFFERS':
+    'Appears ready to verify, but the recorded version differs',
+  'EVIDENCE APPEARS READY FOR SERVER VERIFICATION': 'Appears ready for server verification',
+  'REVIEW EVIDENCE NOT YET SERVER-VERIFIED': 'Not yet server-verified',
+  'REVIEW COVERAGE INCOMPLETE': 'Review coverage incomplete',
+});
 
 console.log('AEGIS dashboard slice — invariants');
 
@@ -1062,6 +1092,23 @@ test('the plain-English state words come from one shipped dictionary and invent 
     assert.ok(new RegExp(state + ": '" + plain + "'").test(seam),
       `the shipped control-plane word for ${state} is no longer ${plain}`);
   }
+  // The HUD module footers translate through this same one seam, so the words
+  // they print are asserted here rather than as a second dictionary.
+  for (const [group, expected] of [
+    ['gate-outcome', GATE_OUTCOME_PLAIN],
+    ['checkpoint-evidence', CHECKPOINT_EVIDENCE_PLAIN],
+    ['code-version', CODE_VERSION_PLAIN],
+    ['review-coverage', REVIEW_COVERAGE_PLAIN],
+  ]) {
+    assert.ok(seam.includes("'" + group + "': {"),
+      `the ${group} module footer has no group in the one shipped label seam`);
+    for (const [state, plain] of Object.entries(expected)) {
+      const key = /^[A-Z_]+$/.test(state) ? state : "'" + state + "'";
+      const entry = new RegExp(escapeRegExp(key) + ":\\s*'" + escapeRegExp(plain) + "'");
+      assert.ok(entry.test(seam),
+        `the shipped ${group} word for ${state} is no longer ${plain}`);
+    }
+  }
   // And the seam translates only wording. It reads no run, no gate and no
   // evidence, so it can never become a second state authority.
   for (const banned of ['run.', 'engineering', 'binding', 'verdict', 'problems',
@@ -1081,8 +1128,17 @@ test('the exact canonical run-state codes survive the plain-English first screen
     'an off-path run state is no longer reported with its exact code');
   assert.ok(/Canonical ' \+ moved\.from \+ ' → ' \+ moved\.to/.test(code),
     'a proven handoff no longer prints the exact canonical states it moved between');
-  assert.ok(/'GATE READINESS ' \+ controlState\.state \+\n?\s*' · RUN LIFECYCLE ' \+ opState\.state/.test(code),
+  // The HUD mission footer now reads through the shipped seam, so its exact
+  // pair has to survive as the machine attribute on the very node whose words
+  // replaced it — not as displayed tokens.
+  assert.ok(/hudState\('hud-mission-state',[\s\S]{0,300}?controlState\.state \+ ' · ' \+ opState\.state,/.test(code),
     'the HUD mission state line stopped carrying the exact gate and lifecycle codes');
+  assert.ok(/node\.setAttribute\('data-hud-code', canonicalCode\);/.test(code) &&
+    /node\.setAttribute\('title', titleText \|\| \('Canonical state code: ' \+ canonicalCode\)\);/.test(code),
+  'a HUD module footer no longer keeps the exact canonical code it was written from');
+  assert.ok(/missionMeta\.setAttribute\('data-mission-gate-code', controlState\.state\);/.test(code) &&
+    /missionMeta\.setAttribute\('data-mission-lifecycle-code', opState\.state\);/.test(code),
+  'the mission line dropped the exact gate and lifecycle codes when it started reading in plain English');
   assert.ok(/'Canonical run state: ' \+ \(\(run && run\.state\) \|\| RD_NOT_RECORDED\)/.test(code),
     'the recovery deck disclosure stopped carrying the exact canonical run state');
   assert.ok(/c\.setAttribute\('title','Canonical state code: '\+token\)/.test(code),
@@ -1607,9 +1663,9 @@ test('the mission brief gives the objective the whole rail and drops the status 
   assert.ok(!/position:absolute|margin-top:-|line-clamp|display:none/.test(headRules),
     'the mission status row overlaps, clips or hides part of the mission head');
   // Every canonical fact the head carried still renders, from the same fields.
-  assert.ok(/mission\.appendChild\(chip\(controlState\.state\)\)/.test(code),
+  assert.ok(/mission\.appendChild\(opsChip\(controlState\.state,\n?\s*opsChipLabel\('run-state', controlState\.state\)\)\)/.test(code),
     'the labelled gate-readiness chip was dropped instead of moved to its own row');
-  assert.ok(/el\('div','mission-meta','Gate readiness: ' \+ controlState\.state \+/.test(code) &&
+  assert.ok(/el\('div','mission-meta','Gate readiness: ' \+\n?\s*opsChipLabel\('run-state', controlState\.state\) \+/.test(code) &&
     /objectiveDetail\.appendChild\(el\('p','mission-objective-full',deckObjective\)\)/.test(code),
     'the gate/lifecycle pair or the exact full objective left the mission head');
   // The single-column tablet stack already gives the rail the whole page, so the
@@ -1975,7 +2031,9 @@ test('each HUD evidence module reads as nameplate, answer and state instead of o
     'hud-review-state', 'hud-gate', 'hud-gate-state', 'hud-evidence', 'hud-evidence-state',
     'hud-checkpoint', 'hud-checkpoint-state', 'hud-core-status']) {
     assert.ok(source.includes('id="' + id + '"'), `${id} was restyled away instead of being made scannable`);
-    assert.ok(new RegExp("hudText\\('" + id + "'").test(code),
+    // A module footer is written either as plain text or through the seam-aware
+    // writer that also carries the exact canonical code; both are the renderer.
+    assert.ok(new RegExp("hud(?:Text|State)\\('" + id + "'").test(code),
       `${id} lost the renderer that writes its canonical value`);
   }
 });
@@ -2181,8 +2239,8 @@ test('the fidelity slice sharpens the mission brief hierarchy without promoting 
     /#founder-summary \.mission-title\{font-size:\d+px;line-height:/.test(WIDE) &&
     /#founder-summary \.mission-meta\{margin-top:\d+px\}/.test(WIDE),
     'the mission brief still reads as four sizes of the same small text');
-  assert.ok(/el\('div','mission-meta','Gate readiness: ' \+ controlState\.state \+/.test(code) &&
-    /mission\.appendChild\(chip\(controlState\.state\)\)/.test(code) &&
+  assert.ok(/el\('div','mission-meta','Gate readiness: ' \+\n?\s*opsChipLabel\('run-state', controlState\.state\) \+/.test(code) &&
+    /mission\.appendChild\(opsChip\(controlState\.state,\n?\s*opsChipLabel\('run-state', controlState\.state\)\)\)/.test(code) &&
     /objectiveDetail\.appendChild\(el\('p','mission-objective-full',deckObjective\)\)/.test(code),
     'a canonical mission fact was restyled away rather than re-tiered');
 
@@ -3323,8 +3381,10 @@ test('DOM: the public checkpoint id and rollbackPoint render together in the run
     'the pilot deck did not render the checkpoint receipt from the public contract');
   assert.strictEqual(page.text('hud-checkpoint'), expected);
   assert.strictEqual(page.text('hud-safe-checkpoint'), expected);
-  assert.strictEqual(page.text('hud-checkpoint-state'), 'RECORDED',
+  assert.strictEqual(page.text('hud-checkpoint-state'), 'Safe state recorded',
     'the HUD checkpoint state word drifted from the checkpoint resolution beside it');
+  assert.strictEqual(page.document.getElementById('hud-checkpoint-state').attrs['data-hud-code'],
+    'RECORDED', 'the HUD checkpoint footer dropped its exact canonical code');
   assert.ok(!/\[object Object\]/.test(page.text('founder-body')),
     'a fixture-only checkpoint object leaked into visible text');
 });
@@ -4049,7 +4109,9 @@ test('DOM: checkpoint and rollback truth is plain English, and identifiers appea
   assert.strictEqual(evidencePanelValue(nonePanel), 'No safe checkpoint is recorded for this run.');
   assert.ok(!/CHK-/.test(none.text('founder-body') + none.text('evidence-rail-body')),
     'an absent checkpoint was given an identifier');
-  assert.strictEqual(none.text('hud-checkpoint-state'), 'NOT RECORDED');
+  assert.strictEqual(none.text('hud-checkpoint-state'), 'No safe state recorded');
+  assert.strictEqual(none.document.getElementById('hud-checkpoint-state').attrs['data-hud-code'],
+    'NOT_RECORDED', 'the HUD checkpoint footer dropped the exact NOT_RECORDED code');
 });
 
 test('DOM: an unvalidated checkpoint receipt is a BLOCKED recovery route, never a simple absence', () => {
@@ -4073,8 +4135,10 @@ test('DOM: an unvalidated checkpoint receipt is a BLOCKED recovery route, never 
     'the canonical refusal reason was replaced by the page\'s own explanation');
   assert.match(panel.textContent, /Recovery route: BLOCKED/);
   assert.match(panel.textContent, /Rollback commit: UNAVAILABLE/);
-  assert.strictEqual(page.text('hud-checkpoint-state'), 'BLOCKED',
+  assert.strictEqual(page.text('hud-checkpoint-state'), 'Needs attention',
     'the HUD state word disagreed with the blocked sentence beside it');
+  assert.strictEqual(page.document.getElementById('hud-checkpoint-state').attrs['data-hud-code'],
+    'BLOCKED', 'the HUD checkpoint footer dropped the exact BLOCKED code');
 
   // Failing closed is not an invitation to repair it by hand: no surface that
   // carries this state may hand the owner something to execute.
@@ -4758,11 +4822,15 @@ test('the disclosure is presentation only: no timer, no state of its own, no for
 // the worker stay separately named, the brief keeps the complete sentence, and
 // the one explanation the brief does NOT carry — the run lifecycle sentence
 // when the two verdicts disagree — stays visible on the mission line.
-function missionMetaText(page) {
+function missionMetaNode(page) {
   const node = allNodes(page.document.getElementById('founder-body'))
     .find((n) => n.className === 'mission-meta');
   assert.ok(node, 'the mission line lost its status summary');
-  return node.textContent;
+  return node;
+}
+
+function missionMetaText(page) {
+  return missionMetaNode(page).textContent;
 }
 
 function blockedBuildFixture() {
@@ -4798,22 +4866,60 @@ test('DOM: the mission line and HUD name the gate and the run lifecycle without 
     ['an unreadable run ledger', unknown],
   ];
   for (const [name, page] of pages) {
-    const meta = missionMetaText(page);
+    const metaNode = missionMetaNode(page);
+    const meta = metaNode.textContent;
+    const hudNode = page.document.getElementById('hud-mission-state');
     const hud = page.text('hud-mission-state');
-    assert.match(meta, /^Gate readiness: [A-Z_]+ · Run lifecycle: [A-Z_]+/,
+    // Both first-screen state lines now read as words. The exact canonical pair
+    // did not disappear with the tokens: it moved onto the same nodes as machine
+    // attributes, which is what the next block proves.
+    const gateCode = metaNode.attrs['data-mission-gate-code'];
+    const lifecycleCode = metaNode.attrs['data-mission-lifecycle-code'];
+    assert.ok(Object.prototype.hasOwnProperty.call(RUN_STATE_PLAIN, gateCode) &&
+      Object.prototype.hasOwnProperty.call(RUN_STATE_PLAIN, lifecycleCode),
+    `${name}: the mission line carries no exact gate/lifecycle codes: ${gateCode} / ${lifecycleCode}`);
+    assert.strictEqual(metaNode.attrs.title, 'Canonical state codes: gate readiness ' +
+      gateCode + ', run lifecycle ' + lifecycleCode,
+    `${name}: the exact canonical pair is not reachable from the mission line's plain words`);
+    assert.strictEqual(hudNode.attrs['data-hud-code'], gateCode + ' · ' + lifecycleCode,
+      `${name}: the HUD mission footer dropped the exact gate and lifecycle codes`);
+    assert.strictEqual(hudNode.attrs.title, metaNode.attrs.title,
+      `${name}: the HUD mission footer and the mission line disclose different canonical codes`);
+    const metaPair = 'Gate readiness: ' + RUN_STATE_PLAIN[gateCode] +
+      ' · Run lifecycle: ' + RUN_STATE_PLAIN[lifecycleCode];
+    assert.ok(meta.startsWith(metaPair),
       `${name}: the mission line no longer distinguishes the gate from the worker: ${meta}`);
-    assert.match(hud, /^GATE READINESS [A-Z_]+ · RUN LIFECYCLE [A-Z_]+$/,
-      `${name}: the HUD mission state is not the labelled state pair: ${hud}`);
-    // The core reads the gate in plain English while the mission state line
-    // beside it keeps the exact canonical pair, so the token is never lost —
-    // but the two must still be the SAME resolution, and this proves it by
-    // translating the mission line's own token through the shipped seam.
-    const gateToken = /^GATE READINESS ([A-Z_]+) · /.exec(hud);
-    assert.ok(gateToken, `${name}: the HUD mission state carries no exact gate code: ${hud}`);
-    assert.ok(Object.prototype.hasOwnProperty.call(RUN_STATE_PLAIN, gateToken[1]),
-      `${name}: the HUD gate code ${gateToken[1]} has no plain word in the shipped label seam`);
-    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN[gateToken[1]],
-      `${name}: the HUD mission module reports a different gate verdict than the core: ${hud}`);
+    // The one explanation the brief does not carry — the lifecycle sentence when
+    // the two readings disagree — is still the only thing appended here.
+    assert.strictEqual(meta.slice(metaPair.length).length > 0, gateCode !== lifecycleCode,
+      `${name}: the mission line's lifecycle sentence appears when the two states agree, or is missing when they differ: ${meta}`);
+    assert.strictEqual(hud, 'Gate readiness: ' + RUN_STATE_PLAIN[gateCode] +
+      ' · Run lifecycle: ' + RUN_STATE_PLAIN[lifecycleCode],
+    `${name}: the HUD mission state is not the labelled state pair: ${hud}`);
+    // Neither first-screen state line may lead with a machine token again.
+    for (const [label, value] of [['mission line', meta.split(' — ')[0]], ['HUD mission footer', hud]]) {
+      assert.ok(!/[A-Z]{2,}|_/.test(value),
+        `${name}: the ${label} still leads with a machine token: ${value}`);
+    }
+    // The gate-readiness chip beside the mission line is the same resolution and
+    // the same s-STATE colour it always was; it now reads as a word, with its
+    // exact canonical code on the chip's own title.
+    const missionHead = allNodes(page.document.getElementById('founder-body'))
+      .find((n) => String(n.className) === 'mission-head');
+    assert.ok(missionHead, `${name}: the mission head was removed`);
+    const missionChip = (missionHead.children || [])
+      .find((n) => String(n.className).includes('chip'));
+    assert.ok(missionChip, `${name}: the mission head lost its gate-readiness chip`);
+    assert.ok(String(missionChip.className).includes('s-' + gateCode),
+      `${name}: the mission chip lost the canonical state style behind its plain word`);
+    assert.strictEqual(missionChip.attrs.title, 'Canonical state code: ' + gateCode,
+      `${name}: the mission chip dropped the exact canonical code its plain word replaced`);
+    assert.strictEqual(missionChip.children[1].textContent, RUN_STATE_PLAIN[gateCode],
+      `${name}: the mission chip still leads with a machine token: ${missionChip.children[1].textContent}`);
+    // The core reads the gate in plain English through the same seam, so it and
+    // the mission module must still be the SAME resolution.
+    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN[gateCode],
+      `${name}: the HUD mission module reports a different gate reading than the core: ${hud}`);
     assert.ok(!/[A-Z]{2,}|_/.test(page.text('hud-core-status')),
       `${name}: the AEGIS Core still leads with a machine token: ${page.text('hud-core-status')}`);
     // The complete gate sentence stays in the brief, and only there on the
@@ -4834,8 +4940,12 @@ test('DOM: every exact reason survives — the brief keeps the gate sentence, th
   // Gate and lifecycle agree: the whole recorded reason, including the missing
   // handoff, is the brief's answer and the mission line stays two state words.
   const failed = bootPage(blockedBuildFixture());
-  assert.strictEqual(missionMetaText(failed), 'Gate readiness: BLOCKED · Run lifecycle: BLOCKED',
+  assert.strictEqual(missionMetaText(failed),
+    'Gate readiness: Needs attention · Run lifecycle: Needs attention',
     'a run whose gate and lifecycle agree still carries a duplicated paragraph');
+  // The words replaced the tokens on screen; the tokens are still on the node.
+  assert.strictEqual(missionMetaNode(failed).attrs['data-mission-gate-code'], 'BLOCKED');
+  assert.strictEqual(missionMetaNode(failed).attrs['data-mission-lifecycle-code'], 'BLOCKED');
   assert.strictEqual(briefField(failed, 'now').value,
     'The builder exceeded its fixed time limit. No replacement builder handoff is recorded.',
     'the recorded timeout and handoff evidence was lost with the duplicate text');
@@ -4844,17 +4954,23 @@ test('DOM: every exact reason survives — the brief keeps the gate sentence, th
   // the lifecycle sentence the brief does not carry stays on the mission line.
   const gate = bootPage(gateUnavailableFixture());
   assert.strictEqual(missionMetaText(gate),
-    'Gate readiness: UNAVAILABLE · Run lifecycle: WAITING — Deterministic checks passed with ' +
+    'Gate readiness: Not recorded · Run lifecycle: Waiting — Deterministic checks passed with ' +
     'final required evidence; the run is waiting for independent review evidence.',
     'the run lifecycle explanation was dropped instead of de-duplicated');
+  assert.strictEqual(missionMetaNode(gate).attrs.title,
+    'Canonical state codes: gate readiness UNAVAILABLE, run lifecycle WAITING',
+    'the exact canonical pair left the mission line when its wording changed');
   assert.match(briefField(gate, 'needs-marc').value, /Not confirmed — AEGIS cannot yet show/,
     'the fail-closed gate refusal was softened out of the brief');
 
   const unknown = bootPage(fixtureState());
   renderMinimizedStatus(unknown, briefUnreadableLedgerStatus());
   assert.strictEqual(missionMetaText(unknown),
-    'Gate readiness: UNAVAILABLE · Run lifecycle: IDLE — Nothing is currently running.',
+    'Gate readiness: Not recorded · Run lifecycle: Nothing running — Nothing is currently running.',
     'an unreadable ledger reported something other than the two canonical states');
+  assert.strictEqual(missionMetaNode(unknown).attrs.title,
+    'Canonical state codes: gate readiness UNAVAILABLE, run lifecycle IDLE',
+    'the unreadable-ledger mission line dropped the exact canonical pair');
   assert.match(briefField(unknown, 'needs-marc').value, /could not be read or validated/,
     'the recorded reason the ledger is unusable was withheld from the brief');
 });
@@ -6189,8 +6305,10 @@ test('DOM: new recorded builder activity cues the core once, and the opening sna
   // canonical lifecycle word, and the gate is still recorded as BLOCKED.
   assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.RUNNING,
     'the core cue moved the canonical core status word');
-  assert.strictEqual(page.text('hud-gate-state'), 'BLOCKED',
+  assert.strictEqual(page.text('hud-gate-state'), 'Needs attention',
     'a cue for new worker evidence turned a blocking gate into a passing one');
+  assert.strictEqual(page.document.getElementById('hud-gate-state').attrs['data-hud-code'], 'BLOCKED',
+    'the HUD gate footer dropped the exact canonical gate code');
   assert.match(page.text('founder-body'), /activity evidence recorded 2026-09-03T14:10:06\.000Z/,
     'the readable activity sentence was replaced by the visual cue');
 });
@@ -6983,7 +7101,11 @@ async function asyncTests() {
       throw new Error('unexpected request ' + path);
     } });
     for (let i = 0; i < 10; i++) await Promise.resolve();
-    assert.strictEqual(page.text('hud-review-state'), 'REVIEW EVIDENCE STALE OR MISMATCHED');
+    assert.strictEqual(page.text('hud-review-state'),
+      REVIEW_COVERAGE_PLAIN['REVIEW EVIDENCE STALE OR MISMATCHED']);
+    assert.strictEqual(page.document.getElementById('hud-review-state').attrs['data-hud-code'],
+      'REVIEW EVIDENCE STALE OR MISMATCHED',
+      'the HUD review footer dropped the exact coverage code behind its plain words');
     assert.ok(/different code subject.*not current coverage/.test(page.text('hud-review')),
       `HUD attributed stale reviewer rows to the current subject: ${page.text('hud-review')}`);
     const founder = page.text('founder-body');
@@ -9445,8 +9567,12 @@ async function asyncTests() {
       `CURRENT ACTION overstates or hides the server-verification candidate: ${currentAction && currentAction.textContent}`);
     assert.ok(!/waiting for independent review evidence/.test(currentAction.textContent),
       `CURRENT ACTION contradicts the completed review evidence: ${currentAction.textContent}`);
-    assert.strictEqual(page.text('hud-review-state'), 'EVIDENCE APPEARS READY FOR SERVER VERIFICATION',
+    assert.strictEqual(page.text('hud-review-state'),
+      REVIEW_COVERAGE_PLAIN['EVIDENCE APPEARS READY FOR SERVER VERIFICATION'],
       'the HUD falsely reports proven bind readiness before server verification');
+    assert.strictEqual(page.document.getElementById('hud-review-state').attrs['data-hud-code'],
+      'EVIDENCE APPEARS READY FOR SERVER VERIFICATION',
+      'the HUD review footer dropped the exact coverage code behind its plain words');
     assert.ok(/appears ready for server verification/.test(page.text('hud-decisions')),
       `the HUD hides the remaining server-verification action: ${page.text('hud-decisions')}`);
     assert.ok(!/None right now/.test(page.text('hud-decisions')),
@@ -9570,8 +9696,11 @@ async function asyncTests() {
         `${scenario.label} did not retain the fail-closed founder explanation`);
       }
       assert.notStrictEqual(guarded.text('hud-review-state'),
-        'EVIDENCE APPEARS READY FOR SERVER VERIFICATION',
+        REVIEW_COVERAGE_PLAIN['EVIDENCE APPEARS READY FOR SERVER VERIFICATION'],
         `${scenario.label} lit the HUD server-verification readiness signal`);
+      assert.notStrictEqual(guarded.document.getElementById('hud-review-state').attrs['data-hud-code'],
+        'EVIDENCE APPEARS READY FOR SERVER VERIFICATION',
+        `${scenario.label} recorded the server-verification readiness code behind a softer word`);
       assert.ok(allNodes(guarded.document.getElementById('runs-list'))
         .some((n) => n.tagName === 'BUTTON' && n.textContent === 'Verify independent review'),
       `${scenario.label} hid the run-scoped server-verification action`);
@@ -9602,8 +9731,10 @@ async function asyncTests() {
         `${scenario.label} erased the server-verification action: ${alternateNext && alternateNext.textContent}`);
       assert.ok(alternateCurrent && scenario.current.test(alternateCurrent.textContent),
         `${scenario.label} CURRENT ACTION misstates the gate/run relationship: ${alternateCurrent && alternateCurrent.textContent}`);
-      assert.strictEqual(alternate.text('hud-review-state'), scenario.hud,
+      assert.strictEqual(alternate.text('hud-review-state'), REVIEW_COVERAGE_PLAIN[scenario.hud],
         `${scenario.label} HUD misstates subject binding`);
+      assert.strictEqual(alternate.document.getElementById('hud-review-state').attrs['data-hud-code'],
+        scenario.hud, `${scenario.label} HUD dropped the exact coverage code`);
       assert.ok(/appears ready for server verification/.test(alternate.text('hud-decisions')),
         `${scenario.label} HUD hides the remaining governed action`);
     }
@@ -9623,8 +9754,12 @@ async function asyncTests() {
       throw new Error('unexpected request ' + path);
     } });
     for (let i = 0; i < 10; i++) await Promise.resolve();
-    assert.strictEqual(boundPage.text('hud-review-state'), 'REVIEW COVERAGE COMPLETE',
+    assert.strictEqual(boundPage.text('hud-review-state'),
+      REVIEW_COVERAGE_PLAIN['REVIEW COVERAGE COMPLETE'],
       'the post-bind HUD does not report completed exact-subject review coverage');
+    assert.strictEqual(boundPage.document.getElementById('hud-review-state').attrs['data-hud-code'],
+      'REVIEW COVERAGE COMPLETE',
+      'the post-bind HUD dropped the exact coverage code behind its plain words');
     assert.strictEqual(boundPage.text('hud-review'),
       '1 of 1 required reviewer row(s) executed for the current gate subject.',
       'valid exact-subject post-bind reviewer coverage was not attributed to the current gate subject');
@@ -10484,8 +10619,10 @@ async function asyncTests() {
     running.runs[0].build = { status: 'RUNNING', activity: { active: true, summary: 'Editing the dashboard renderer.' } };
     const live = bootPage(fixtureState(), { status: running });
     for (let i = 0; i < 10; i++) await Promise.resolve();
-    assert.match(live.text('hud-crew-state'), /^RUNNING — /,
+    assert.match(live.text('hud-crew-state'), new RegExp('^' + RUN_STATE_PLAIN.RUNNING + ' — '),
       `an active worker was not stated as running: ${live.text('hud-crew-state')}`);
+    assert.strictEqual(live.document.getElementById('hud-crew-state').attrs['data-hud-code'], 'RUNNING',
+      'the crew footer dropped the exact canonical lifecycle code behind its plain word');
 
     // No bound run: unknown is stated plainly, and nothing claims live work.
     const unbound = JSON.parse(JSON.stringify(REVIEW_PENDING_STATUS));
@@ -10494,7 +10631,9 @@ async function asyncTests() {
     const idle = bootPage(fixtureState(), { status: unbound });
     for (let i = 0; i < 10; i++) await Promise.resolve();
     const idleCrew = idle.text('hud-crew-state');
-    assert.match(idleCrew, /NO ACTIVE WORKER/, `a missing worker was not stated plainly: ${idleCrew}`);
+    assert.match(idleCrew, /^No active worker — /, `a missing worker was not stated plainly: ${idleCrew}`);
+    assert.strictEqual(idle.document.getElementById('hud-crew-state').attrs['data-hud-code'], 'IDLE',
+      'the crew footer dropped the exact canonical lifecycle code for an absent worker');
     assert.ok(!/RUNNING|working on right now/.test(idleCrew),
       `a historical activity claimed a live worker: ${idleCrew}`);
   });
@@ -12937,8 +13076,11 @@ test('DOM: the two explanatory brief answers read behind one collapsed, keyboard
   const missionMeta = allNodes(founder).find((node) => String(node.className) === 'mission-meta');
   assert.ok(missionTitle && missionTitle.textContent.length > 0,
     'the objective headline left the top of the brief');
-  assert.match(missionMeta.textContent, /Gate readiness: [A-Z_]+ · Run lifecycle: [A-Z_]+/,
+  assert.match(missionMeta.textContent, /^Gate readiness: .+ · Run lifecycle: .+/,
     'the compact state summary left the top of the brief');
+  assert.ok(missionMeta.attrs['data-mission-gate-code'] &&
+    missionMeta.attrs['data-mission-lifecycle-code'],
+  'the compact state summary lost the exact canonical pair behind its plain words');
   // Still exactly the five canonical answers, in the canonical order, and the
   // two that moved say exactly what they said before.
   assert.deepStrictEqual(briefRows(page).map((node) => node.attrs['data-operator-brief']),

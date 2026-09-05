@@ -1883,15 +1883,15 @@
         <div class="core-stage" aria-label="Live AEGIS system overview">
           <article class="core-node is-mission">
             <h3>Mission</h3><div class="hud-value" id="hud-mission">Loading mission…</div>
-            <div class="hud-state" id="hud-mission-state">STATE UNAVAILABLE</div>
+            <div class="hud-state" id="hud-mission-state">Loading gate and lifecycle state…</div>
           </article>
           <article class="core-node is-builder">
             <h3>Crew &amp; models</h3><div class="hud-value" id="hud-crew">Loading crew evidence…</div>
-            <div class="hud-state" id="hud-crew-state">USAGE UNAVAILABLE</div>
+            <div class="hud-state" id="hud-crew-state">Loading worker state…</div>
           </article>
           <article class="core-node is-review">
             <h3>Independent review</h3><div class="hud-value" id="hud-review">Loading review evidence…</div>
-            <div class="hud-state" id="hud-review-state">EVIDENCE UNAVAILABLE</div>
+            <div class="hud-state" id="hud-review-state">Loading review coverage…</div>
           </article>
           <div class="aegis-core" id="aegis-core" role="status" aria-live="polite">
             <div class="core-mark">AEGIS CORE</div>
@@ -1900,15 +1900,15 @@
           </div>
           <article class="core-node is-gate">
             <h3>Gate queue</h3><div class="hud-value" id="hud-gate">Loading next gate…</div>
-            <div class="hud-state" id="hud-gate-state">GATE UNAVAILABLE</div>
+            <div class="hud-state" id="hud-gate-state">Loading gate outcome…</div>
           </article>
           <article class="core-node is-evidence">
             <h3>Evidence</h3><div class="hud-value" id="hud-evidence">Loading code-version evidence…</div>
-            <div class="hud-state" id="hud-evidence-state">BINDING UNAVAILABLE</div>
+            <div class="hud-state" id="hud-evidence-state">Loading code-version state…</div>
           </article>
           <article class="core-node is-checkpoint">
             <h3>Checkpoint</h3><div class="hud-value" id="hud-checkpoint">Loading checkpoint evidence…</div>
-            <div class="hud-state" id="hud-checkpoint-state">CHECKPOINT UNAVAILABLE</div>
+            <div class="hud-state" id="hud-checkpoint-state">Loading checkpoint state…</div>
           </article>
         </div>
         <div class="core-path" id="core-path" role="group" aria-labelledby="core-path-h">
@@ -4952,7 +4952,37 @@
     cost: { AVAILABLE: 'Recorded', INCOMPLETE: 'Incomplete estimate', STALE: 'Older estimate',
       UNAVAILABLE: 'Not recorded' },
     checkpoint: { AVAILABLE: 'Recorded', INCOMPLETE: 'Incomplete record',
-      BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded' }
+      BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded' },
+    // The gate's own outcome vocabulary, read through the SAME seam so the HUD
+    // gate module can lead with what the outcome means instead of with
+    // READY_FOR_DETERMINISTIC_VALIDATION. It renames nothing: the gate still
+    // owns the decision, and the exact code stays on the module's own machine
+    // attribute and written out in Detail View.
+    'gate-outcome': { READY_FOR_PR: 'Ready to open a pull request',
+      READY_FOR_DETERMINISTIC_VALIDATION: 'Waiting on deterministic checks',
+      BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded' },
+    // The five machine words checkpointEvidenceState() writes. The sentence
+    // beside them is unchanged, so these only say the same thing in words the
+    // owner does not have to decode.
+    'checkpoint-evidence': { RECORDED: 'Safe state recorded',
+      ROLLBACK_UNAVAILABLE: 'Safe state recorded, no way back',
+      NOT_RECORDED: 'No safe state recorded', BLOCKED: 'Needs attention',
+      UNAVAILABLE: 'Not recorded' },
+    // Whether the work on screen is tied to the exact code version on screen.
+    'code-version': { BOUND: 'Matches this code version', UNAVAILABLE: 'Not confirmed' },
+    // The closed set of coverage words the review module already wrote. They
+    // stay the exact state code on the node; only the wording the owner reads
+    // is translated, through this one seam like every other module footer.
+    'review-coverage': {
+      'EVIDENCE UNAVAILABLE': 'No review evidence recorded',
+      'REVIEW EVIDENCE STALE OR MISMATCHED': 'Review evidence belongs to another version',
+      'REVIEW COVERAGE COMPLETE': 'Review coverage complete',
+      'SERVER VERIFICATION CANDIDATE — RUN VERSION DIFFERS':
+        'Appears ready to verify, but the recorded version differs',
+      'EVIDENCE APPEARS READY FOR SERVER VERIFICATION': 'Appears ready for server verification',
+      'REVIEW EVIDENCE NOT YET SERVER-VERIFIED': 'Not yet server-verified',
+      'REVIEW COVERAGE INCOMPLETE': 'Review coverage incomplete'
+    }
   };
   // Own-property lookup only: this seam is now handed canonical run states that
   // arrive over the wire, and an inherited member must never be able to render
@@ -5944,11 +5974,28 @@
     // cell above and the brief's own answer below, so the rail keeps only the
     // state pair that tells the gate and the worker apart — plus the lifecycle
     // sentence in the one case neither carries it: when the two disagree.
-    missionText.appendChild(el('div','mission-meta','Gate readiness: ' + controlState.state +
-      ' · Run lifecycle: ' + opState.state +
-      (controlState.state !== opState.state ? ' — ' + opState.plain : '')));
+    //
+    // Both states are read through the shipped opsChipLabel seam, so the first
+    // line of the first screen says what the pair means rather than printing
+    // BLOCKED or UNAVAILABLE at the owner. Neither resolution changes: the exact
+    // canonical codes stay on this same node as machine attributes and on its
+    // title, and Detail View still writes them out in full.
+    var missionMeta = el('div','mission-meta','Gate readiness: ' +
+      opsChipLabel('run-state', controlState.state) +
+      ' · Run lifecycle: ' + opsChipLabel('run-state', opState.state) +
+      (controlState.state !== opState.state ? ' — ' + opState.plain : ''));
+    missionMeta.setAttribute('data-mission-gate-code', controlState.state);
+    missionMeta.setAttribute('data-mission-lifecycle-code', opState.state);
+    missionMeta.setAttribute('title', 'Canonical state codes: gate readiness ' +
+      controlState.state + ', run lifecycle ' + opState.state);
+    missionText.appendChild(missionMeta);
     mission.appendChild(missionText);
-    mission.appendChild(chip(controlState.state));
+    // The same chip, the same resolution and the same s-STATE colour it always
+    // had — read through the shipped seam so it stops printing BLOCKED beside a
+    // line that now says what BLOCKED means. opsChip keeps the exact canonical
+    // code on the chip's own title, exactly as the five operational cells do.
+    mission.appendChild(opsChip(controlState.state,
+      opsChipLabel('run-state', controlState.state)));
     host.appendChild(mission);
 
     // Operator brief: the five questions the owner arrives with — what is
@@ -6115,15 +6162,30 @@
     // Strategic HUD: an alternate reading order for facts already established
     // above. It never estimates progress or turns authentication into usage.
     function hudText(id, value){ var node = $(id); if (node) node.textContent = value; }
+    // A module footer now reads in founder language, so the exact canonical code
+    // it was written from has to stay machine-readable on the very node whose
+    // word replaced it. Only the wording moves; the code an auditor reads does
+    // not leave this element, and no footer resolves a state of its own here.
+    function hudState(id, value, canonicalCode, titleText){
+      var node = $(id); if (!node) return;
+      node.textContent = value;
+      node.setAttribute('data-hud-code', canonicalCode);
+      node.setAttribute('title', titleText || ('Canonical state code: ' + canonicalCode));
+    }
     hudText('hud-mission', missionHeadlineText);
     // Both named states, no third copy of the paragraph the labelled gate cell
-    // and the brief already carry on the same screen.
-    hudText('hud-mission-state', 'GATE READINESS ' + controlState.state +
-      ' · RUN LIFECYCLE ' + opState.state);
+    // and the brief already carry on the same screen — and both read through the
+    // shipped label seam rather than as raw tokens.
+    hudState('hud-mission-state', 'Gate readiness: ' +
+      opsChipLabel('run-state', controlState.state) +
+      ' · Run lifecycle: ' + opsChipLabel('run-state', opState.state),
+    controlState.state + ' · ' + opState.state,
+    'Canonical state codes: gate readiness ' + controlState.state +
+      ', run lifecycle ' + opState.state);
     // The core is the largest state word on the first screen, so it reads as
     // what the gate means through the same seam the five operational cells use.
     // It is the same resolution — controlState.state — and the exact code is
-    // still printed beside it on the mission module's own state line above.
+    // still carried beside it as the mission module's own machine attribute.
     hudText('hud-core-status', opsChipLabel('run-state', controlState.state));
     hudText('hud-crew', crew);
     // currentAction is overwritten with the gate's reason whenever the control
@@ -6131,9 +6193,11 @@
     // with unrelated gate wording. Crew & models answers the worker question
     // from the same lifecycle/finished pair the ops identity line already uses;
     // the gate keeps its own state on the core, now labelled Gate readiness.
-    hudText('hud-crew-state', boundRun
-      ? opState.state + ' — ' + (opState.state === 'UNVERIFIED' ? opState.plain : deckFinished)
-      : 'NO ACTIVE WORKER — ' + deckFinished);
+    hudState('hud-crew-state', boundRun
+      ? opsChipLabel('run-state', opState.state) + ' — ' +
+        (opState.state === 'UNVERIFIED' ? opState.plain : deckFinished)
+      : 'No active worker — ' + deckFinished,
+    opState.state);
     var hudReview = 'No independent-review evidence is attached to this exact code version.';
     var hudReviewState = 'EVIDENCE UNAVAILABLE';
     if (deckRc && deckRc.rows && deckRc.rows.length && !reviewerSubjectMatchesCurrent){
@@ -6161,18 +6225,24 @@
       }
     }
     hudText('hud-review', hudReview);
-    hudText('hud-review-state', hudReviewState);
+    // The coverage word above is unchanged as a state code; the footer reads it
+    // through the shipped seam and keeps the exact code on the node.
+    hudState('hud-review-state', opsChipLabel('review-coverage', hudReviewState), hudReviewState);
     hudText('hud-gate', deckActions[0] || 'No next gate is recorded.');
-    hudText('hud-gate-state', e.verdict || 'GATE UNAVAILABLE');
+    var hudGateCode = e.verdict || 'UNAVAILABLE';
+    hudState('hud-gate-state', opsChipLabel('gate-outcome', hudGateCode), hudGateCode);
     hudText('hud-evidence', exactSubjectBound
       ? 'The current run is bound to this exact code version.'
       : 'AEGIS cannot confirm an exact code-version binding for the current run.');
-    hudText('hud-evidence-state', exactSubjectBound ? 'EXACT SUBJECT BOUND' : 'BINDING UNAVAILABLE');
+    var hudEvidenceCode = exactSubjectBound ? 'BOUND' : 'UNAVAILABLE';
+    hudState('hud-evidence-state', opsChipLabel('code-version', hudEvidenceCode), hudEvidenceCode);
     hudText('hud-checkpoint', safeCheckpoint);
     // The written state comes from the same resolution as the sentence above
     // it. Reading run.checkpoint directly here would report an unvalidated
     // receipt as NOT RECORDED while the sentence beside it says BLOCKED.
-    hudText('hud-checkpoint-state', checkpointEvidenceState(boundRun).replace(/_/g, ' '));
+    var hudCheckpointCode = checkpointEvidenceState(boundRun);
+    hudState('hud-checkpoint-state', opsChipLabel('checkpoint-evidence', hudCheckpointCode),
+      hudCheckpointCode);
     hudText('hud-system-health', cleanIdle ? 'READY FOR AN OBJECTIVE' : controlState.state);
     hudText('hud-system-health-meta', cleanIdle ? 'No active run and no recorded blocker.' : operatorBlocker);
     hudText('hud-decisions', cleanIdle ? 'None right now' : deckActions[0]);
