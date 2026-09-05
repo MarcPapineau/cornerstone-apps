@@ -1929,6 +1929,58 @@ test('Claude expired OAuth is classified as MODEL_AUTH_FAILURE only on a termina
   assert.strictEqual(WORKER.classifyBuilderFailure('grok-subscription', 1, text, ''), null);
 });
 
+test('Claude preflight auth expiry is classified only with exact no-child bootstrap evidence', () => {
+  const observed = {
+    bootstrapFailure: true,
+    bootstrapErrorCode: 'CLAUDE_SUBSCRIPTION_REAUTH_REQUIRED',
+    childLaunchObserved: false,
+  };
+  assert.strictEqual(
+    WORKER.classifyBuilderFailure('claude-subscription', 127, '', '', observed).code,
+    'MODEL_AUTH_FAILURE');
+  assert.strictEqual(WORKER.classifyBuilderFailure('claude-subscription', 127, '', '', {
+    ...observed, childLaunchObserved: true,
+  }), null);
+  assert.strictEqual(WORKER.classifyBuilderFailure('claude-subscription', 127, '', '', {
+    ...observed, bootstrapErrorCode: 'GENERIC_BOOTSTRAP_FAILURE',
+  }), null);
+});
+
+test('Claude preflight auth expiry enters the one-time failover gate before any model child launches', () => {
+  const stdinMarker = path.join(fs.realpathSync(os.tmpdir()),
+    `aegis-preflight-claude-stdin-${process.pid}-${Date.now()}.txt`);
+  const f = fixture('Keep this exact objective through preflight failover.', {
+    FAKE_CLAUDE_PREFLIGHT_AUTH_FAILURE: '1',
+    FAKE_CLAUDE_MODE: 'fail',
+    FAKE_GROK_MODE: 'fail',
+    FAKE_STDIN_FILE: stdinMarker,
+  });
+  const failed = waitFor(f.read, (run) => run.state === 'BUILD_FAILED');
+  assert.strictEqual(fs.existsSync(stdinMarker), false,
+    'the Claude model child received stdin even though preflight refused launch');
+  assert.strictEqual(failed.build.bootstrapFailure, true);
+  assert.strictEqual(failed.build.childLaunchObserved, false);
+  assert.strictEqual(failed.build.failure.code, 'MODEL_AUTH_FAILURE');
+  assert.strictEqual(failed.build.originalExit, 127);
+  assert.strictEqual(failed.build.originalDrainEvidence.noChildLaunchObserved, true);
+  assert.strictEqual(failed.build.originalDrainEvidence.childCloseObserved, false);
+  assert.strictEqual(failed.build.originalDrainEvidence.processGroupDrained, true);
+  assert.deepStrictEqual(failed.build.originalDrainEvidence.remainingProcessGroupMembers, []);
+  assert.strictEqual(WORKER.processGroupDrainVerified(failed.build.originalDrainEvidence), true);
+  assert.strictEqual(failed.build.handoff.state, 'COMPLETED');
+  assert.strictEqual(failed.build.handoff.handoffCount, 1);
+  assert.strictEqual(failed.build.handoff.sameProviderRetryAllowed, false);
+  assert.strictEqual(failed.build.failoverHandoffs, 1);
+  assert.strictEqual(failed.build.providerSelection.provider, 'grok-subscription');
+  assert.strictEqual(failed.build.providerSelection.model, 'grok-4.6');
+  assert.strictEqual(failed.build.replacement.provider, 'grok-subscription');
+  assert.ok(Number.isInteger(failed.build.replacement.exit));
+  assert.strictEqual(failed.build.exit, failed.build.replacement.exit);
+  assert.strictEqual(failed.build.authorizedMutationObserved, false);
+  assert.strictEqual(failed.build.recovery.retrySafe, false);
+  fs.rmSync(f.tmp, { recursive: true, force: true });
+});
+
 test('Claude auth failure hands the unchanged run to Grok exactly once and blocks unsafe retry', () => {
   // The replacement is pinned to a refusing stand-in so the run's terminal
   // state is the same whether or not the fixture Grok is able to start. What
@@ -2091,6 +2143,14 @@ test('an authorized mutation or an unproven process-group drain refuses the hand
     assert.strictEqual(WORKER.processGroupDrainVerified(drainEvidence), false);
   }
   assert.strictEqual(WORKER.processGroupDrainVerified(DRAINED_EVIDENCE), true);
+  assert.strictEqual(WORKER.processGroupDrainVerified({
+    processGroupId: process.pid,
+    childCloseObserved: false,
+    noChildLaunchObserved: true,
+    processGroupDrained: true,
+    remainingProcessGroupMembers: [],
+    terminated: false,
+  }), true);
 });
 
 test('data class, reviewer independence and exhausted routes each refuse the handoff', () => {

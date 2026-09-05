@@ -529,6 +529,14 @@ function classifyBuilderFailure(provider, exit, stdout, stderr, observed = {}) {
   const classified = (code, retrySafe) => Object.freeze({
     code, provider, summary: FAILOVER_FAILURE_SUMMARIES[code], retrySafe, failoverEligible: true,
   });
+  // The subscription freshness check can fail before a model process exists,
+  // so there is no terminal CLI output to parse. Accept only its exact local
+  // error code together with positive no-child evidence; generic bootstrap
+  // errors remain work-owned failures and never enter provider failover.
+  if (observed.bootstrapFailure === true && observed.childLaunchObserved === false &&
+      observed.bootstrapErrorCode === 'CLAUDE_SUBSCRIPTION_REAUTH_REQUIRED') {
+    return classified('MODEL_AUTH_FAILURE', true);
+  }
   if (/(401[^\n]*(?:oauth|token)|oauth access token has expired|failed to authenticate)/i.test(output)) {
     return classified('MODEL_AUTH_FAILURE', true);
   }
@@ -712,10 +720,12 @@ function selectFailoverBuilder(launchSpec, failure, run, policy = loadModelRouti
  * snapshot yields null members, which is refused rather than treated as empty.
  */
 function processGroupDrainVerified(evidence) {
-  return Boolean(evidence) && evidence.terminated === true &&
-    evidence.childCloseObserved === true && evidence.processGroupDrained === true &&
+  const originalAbsent = Boolean(evidence) && (evidence.childCloseObserved === true ||
+    (evidence.noChildLaunchObserved === true && evidence.childCloseObserved === false));
+  return originalAbsent && evidence.processGroupDrained === true &&
     Array.isArray(evidence.remainingProcessGroupMembers) &&
-    evidence.remainingProcessGroupMembers.length === 0;
+    evidence.remainingProcessGroupMembers.length === 0 &&
+    (evidence.noChildLaunchObserved === true || evidence.terminated === true);
 }
 
 function observeOwnedGroupDrain(childIdentity, childCloseObserved) {
@@ -1497,6 +1507,9 @@ function launchClaudeProcess(run, launchSpec, childEnv, testInternals) {
     '--strict-mcp-config',
     '--no-session-persistence',
   ];
+  if (process.env.NODE_ENV === 'test' && process.env.FAKE_CLAUDE_PREFLIGHT_AUTH_FAILURE === '1') {
+    throw claudeReauthRequired('the Keychain access token is expired or too close to expiry');
+  }
   let oauthToken = productionClaude ? readClaudeOAuthToken() : null;
   let contained;
   let command;
@@ -1848,6 +1861,119 @@ async function failOwnedAttempt(R, payload, error, childOutcome = null, childIde
       } : {}),
     });
   return 127;
+}
+
+// Route one provider-owned subscription preflight failure through the same
+// handoff classifier, authority and executor as a terminal child failure. This
+// path exists only when launchClaudeProcess proved that no model child was
+// created, so it can never hide a partial builder mutation or overlap writers.
+async function handleProviderOwnedBootstrapFailure(R, payload, run, launchSpec, error, timeoutMs) {
+  const failure = classifyBuilderFailure(launchSpec.provider, 127, '', error && error.message, {
+    bootstrapFailure: true,
+    bootstrapErrorCode: error && error.code,
+    childLaunchObserved: false,
+  });
+  if (!failure) return null;
+
+  const observedDrain = observeOwnedGroupDrain(null, false);
+  const originalDrainEvidence = Object.freeze({
+    ...observedDrain,
+    noChildLaunchObserved: true,
+    reason: observedDrain.processGroupDrained
+      ? 'NO_MODEL_CHILD_LAUNCHED_AND_PROCESS_GROUP_DRAINED'
+      : observedDrain.reason,
+  });
+  let handoff;
+  try {
+    handoff = authorizeBuilderFailover({
+      launchSpec,
+      failure,
+      run,
+      authorizedMutationObserved: false,
+      drainEvidence: originalDrainEvidence,
+    });
+  } catch (handoffError) {
+    handoff = Object.freeze({
+      state: 'BLOCKED', executable: false, blockedReason: 'FAILOVER_AUTHORITY_UNAVAILABLE',
+      reason: `The builder handoff authority could not be evaluated: ${boundedTail(handoffError.message)}`,
+      failureCode: failure.code, fromProvider: launchSpec.provider, toProvider: null,
+      toPolicyModel: null, sameProviderRetryAllowed: false, unchangedObjective: true,
+    });
+  }
+
+  // Persist the original failure and the gate decision before a replacement
+  // starts. A worker crash during the replacement can therefore never erase
+  // why the original provider was left or the proof that no child existed.
+  updateBuild(R, run.runId, payload.attemptId, {
+    workerState: handoff && handoff.state === 'AUTHORIZED' ? 'FAILOVER_AUTHORIZED' : 'BOOTSTRAP_FAILED',
+    heartbeatAt: nowIso(),
+    originalExit: 127,
+    bootstrapFailure: true,
+    childLaunchObserved: false,
+    authorizedMutationObserved: false,
+    originalDrainEvidence,
+    failure,
+    providerSelection: handoff && handoff.toProvider ? {
+      provider: handoff.toProvider,
+      model: handoff.launchSpec ? handoff.launchSpec.model : null,
+      reason: handoff.selectionReason || handoff.reason,
+    } : null,
+    handoff,
+    stderrTail: boundedTail(error && error.message),
+  });
+
+  let replacement = null;
+  if (handoff && handoff.state === 'AUTHORIZED') {
+    try {
+      replacement = await executeFailoverBuilder(run, handoff, timeoutMs);
+      handoff = Object.freeze({ ...handoff, state: 'COMPLETED', handoffCount: 1 });
+    } catch (replacementError) {
+      handoff = Object.freeze({
+        ...handoff, state: 'FAILED', executable: false, handoffCount: 1,
+        reason: `The authorized handoff could not be executed: ${boundedTail(replacementError.message)}`,
+      });
+    }
+  }
+
+  const effectiveExit = replacement ? replacement.exit : 127;
+  const fresh = updateBuild(R, run.runId, payload.attemptId, {
+    workerState: effectiveExit === 0 ? 'EXITED' : 'FAILED',
+    endedAt: nowIso(), heartbeatAt: nowIso(), exit: effectiveExit,
+    originalExit: 127, bootstrapFailure: true, childLaunchObserved: false,
+    authorizedMutationObserved: replacement ? replacement.authorizedMutationObserved : false,
+    originalDrainEvidence, failure,
+    providerSelection: handoff && handoff.toProvider ? {
+      provider: handoff.toProvider,
+      model: handoff.launchSpec ? handoff.launchSpec.model : null,
+      reason: handoff.selectionReason || handoff.reason,
+    } : null,
+    handoff,
+    failoverHandoffs: replacement ? 1 : recordedAutomaticHandoffs(run),
+    replacement,
+    recovery: handoff ? {
+      reason: failure.code,
+      observedAt: nowIso(),
+      terminationVerified: processGroupDrainVerified(originalDrainEvidence),
+      retrySafe: false,
+      sameProviderRetryAllowed: false,
+      providerFailoverRequired: handoff.state !== 'COMPLETED',
+      handoffState: handoff.state,
+      blockedReason: handoff.blockedReason || null,
+      selectedProvider: handoff.toProvider || null,
+      selectedModel: handoff.launchSpec ? handoff.launchSpec.model : null,
+      attemptId: payload.attemptId,
+    } : null,
+    stderrTail: boundedTail(error && error.message),
+  });
+  if (fresh.state === 'BUILDING') {
+    const outcomeNote = replacement
+      ? `governed failover builder ${replacement.provider} exited ${effectiveExit} after ` +
+        `${failure.code} on ${launchSpec.provider}`
+      : `provider bootstrap failed with ${failure.code}; governed failover ${handoff && handoff.state || 'UNAVAILABLE'}`;
+    R.transitionWorkerAttempt(run.runId, payload.attemptId, process.pid,
+      effectiveExit === 0 ? 'BUILT' : 'BUILD_FAILED', outcomeNote);
+  }
+  return effectiveExit;
 }
 
 async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
@@ -2234,6 +2360,11 @@ async function executePayload(payloadPath, expectedRunId, expectedAttemptId) {
   }
   return effectiveExit;
   } catch (error) {
+    if (!child && launchSpec && error && error.code === 'CLAUDE_SUBSCRIPTION_REAUTH_REQUIRED') {
+      const handled = await handleProviderOwnedBootstrapFailure(
+        R, payload, run, launchSpec, error, normalizeTimeoutSec(payload.timeoutSec) * 1000);
+      if (handled !== null) return handled;
+    }
     return failOwnedAttempt(R, payload, error, childOutcome, childIdentity);
   }
   } finally {
