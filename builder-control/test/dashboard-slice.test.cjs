@@ -11627,6 +11627,155 @@ test('DOM: the journal window toggle is a real keyboard control that hides no ev
     'a journal window marked hidden is still displayed by the .journal-list rule');
 });
 
+// ── the 24-hour window is compact, not shortened ──────────────────────────
+// Six recorded updates inside one 24 hours is an ordinary build day, and drawing
+// all six open is what turns a 320px left rail into a page-long column beside a
+// deck that fits one screen. The failure guarded here is the obvious way to fix
+// that: quietly stop rendering the older half of the window, or re-sort it, or
+// clamp its text, so a rail that reads calm is a rail that no longer carries the
+// record. So each proof pairs "the rail is short" with "every recorded entry is
+// still here, exactly once, in the recorded order, with its exact receipts".
+const JOURNAL_MANY_IDS = ['RUN-20260903-aaaaaaaa', 'RUN-20260903-bbbbbbbb', 'RUN-20260903-cccccccc',
+  'RUN-20260903-dddddddd', 'RUN-20260903-eeeeeeee', 'RUN-20260903-ffffffff'];
+const JOURNAL_MANY_HOURS = ['11', '10', '09', '08', '07', '06'];
+
+function journalBusyDay(count) {
+  // Newest first by id, handed to the page in the WRONG order on purpose: the
+  // visible set has to be the head of the resolver's own ordering, never the
+  // order the ledger happened to arrive in.
+  return JOURNAL_MANY_IDS.slice(0, count).map((runId, index) => journalRun({ runId,
+    objective: `Recorded update ${index}`,
+    updatedAt: `2026-09-03T${JOURNAL_MANY_HOURS[index]}:00:00.000Z` })).reverse();
+}
+
+function journalMoreDisclosure(section) {
+  const found = findByAttr(section, 'data-journal-more');
+  assert.strictEqual(found.length, 1,
+    'the held-back 24-hour entries are not behind exactly one disclosure');
+  return found[0];
+}
+
+test('DOM: the 24-hour window draws the newest few entries and discloses the rest exactly once', () => {
+  const older = journalRun({ runId: 'RUN-20260901-99999999', objective: 'Older work',
+    updatedAt: '2026-09-01T11:00:00.000Z' });
+  const section = journalSection(bootPage(journalFixture(journalBusyDay(6).concat([older]))));
+
+  // The rail: the newest three, in the recorded order the resolver already
+  // established, and nothing else painted open.
+  assert.deepStrictEqual(journalRows(section, 'recent').map((row) => row.attrs['data-journal-entry']),
+    JOURNAL_MANY_IDS.slice(0, 3),
+    'the open 24-hour list is not exactly the newest three recorded entries, newest first');
+
+  // The record: the exact remainder, once, still newest first, behind a native
+  // disclosure that counts what it is holding.
+  const more = journalMoreDisclosure(section);
+  assert.strictEqual(more.tagName, 'DETAILS',
+    'the remaining recorded entries are not behind a native disclosure');
+  assert.strictEqual(more.firstElementChild.tagName, 'SUMMARY',
+    'the disclosure holding recorded entries has no keyboard-operable summary');
+  assert.match(more.firstElementChild.textContent, /Show 3 more from the last 24 hours/,
+    'the disclosure does not say how many recorded entries it is holding back');
+  assert.deepStrictEqual(journalRows(section, 'recent-more').map((row) => row.attrs['data-journal-entry']),
+    JOURNAL_MANY_IDS.slice(3),
+    'the disclosed entries are not the exact remainder of the same newest-first window');
+  // It belongs to the 24-hour list, so the existing window toggle still owns it:
+  // switching to the earlier view closes the whole window, disclosure included.
+  assert.strictEqual(findByAttr(journalList(section, 'recent'), 'data-journal-more').length, 1,
+    'the disclosure sits outside the 24-hour list it belongs to, so the window toggle no longer governs it');
+  assert.strictEqual(journalList(section, 'recent-more').getAttribute('hidden'), null,
+    'the disclosed entries are hidden a second time, so opening the disclosure would reveal nothing');
+
+  // Nothing is dropped and nothing is drawn twice: six recent entries plus the
+  // one earlier record, each rendered exactly once anywhere in the journal.
+  const painted = findByAttr(section, 'data-journal-entry').map((row) => row.attrs['data-journal-entry']);
+  assert.strictEqual(painted.length, 7,
+    'compacting the 24-hour window deleted a recorded entry or painted one twice');
+  assert.deepStrictEqual(Array.from(new Set(painted)).sort(),
+    JOURNAL_MANY_IDS.concat(['RUN-20260901-99999999']).sort(),
+    'a recorded entry is missing from the journal, or appears under two windows at once');
+
+  // The window control still counts every recorded entry, not just the visible
+  // ones, so a compact rail can never read as a quieter build day.
+  const tabs = journalTabs(section);
+  assert.match(tabs.recent.textContent, /Last 24 hours \(6\)/,
+    'the 24-hour count reports the visible entries rather than the recorded ones');
+  assert.match(tabs.older.textContent, /Earlier & undated \(1\)/);
+
+  // The earlier and undated view is unchanged: it is already one control away,
+  // so it holds no second disclosure and hides nothing of its own.
+  assert.deepStrictEqual(journalRows(section, 'older').map((row) => row.attrs['data-journal-entry']),
+    ['RUN-20260901-99999999']);
+  assert.strictEqual(findByAttr(journalList(section, 'older'), 'data-journal-more').length, 0,
+    'the earlier and undated view was collapsed too, which hides evidence behind two disclosures');
+
+  // A disclosed entry is the same entry, not a summary of one: its founder
+  // sentences and its exact recorded receipts travel with it.
+  const disclosed = journalRows(section, 'recent-more')[0];
+  assert.match(journalLine(disclosed, 'availability'), /Available now: UNVERIFIED/,
+    'a disclosed entry lost the availability sentence the visible entries carry');
+  const detail = (disclosed.children || []).find((node) => node.tagName === 'DETAILS');
+  assert.ok(detail, 'a disclosed entry lost its own exact-evidence disclosure');
+  assert.match(detail.textContent, /Exact recorded timestamps: created UNAVAILABLE · updated 2026-09-03T08:00:00\.000Z/,
+    'a disclosed entry lost the exact recorded timestamps it was rendered from');
+});
+
+test('DOM: a short 24-hour window is drawn open, with no disclosure and no held-back entry', () => {
+  const section = journalSection(bootPage(journalFixture(journalBusyDay(3))));
+  assert.deepStrictEqual(journalRows(section, 'recent').map((row) => row.attrs['data-journal-entry']),
+    JOURNAL_MANY_IDS.slice(0, 3), 'a window at the visible limit was not drawn open');
+  assert.strictEqual(findByAttr(section, 'data-journal-more').length, 0,
+    'a disclosure appeared with no recorded entry behind it');
+  assert.strictEqual(journalList(section, 'recent-more'), null,
+    'an empty overflow list was rendered, which reads as evidence being held back');
+});
+
+test('the journal overflow is one declared cap over the resolver\'s own order, and it hides no text', () => {
+  const journal = code.slice(code.indexOf('var JOURNAL_WINDOW_MS'),
+    code.indexOf('function renderFounderSummary'));
+  assert.ok(journal.length > 0, 'the build journal source boundary was not found');
+  // One declared number, and the split is a slice of the list the existing
+  // resolver already ordered — no second sort, filter, window or source.
+  assert.ok(/var JOURNAL_VISIBLE_RECENT = 3;/.test(journal),
+    'the visible 24-hour set is not one declared cap');
+  assert.ok(/pane\.entries\.slice\(JOURNAL_VISIBLE_RECENT\)/.test(journal) &&
+    /pane\.entries\.slice\(0, JOURNAL_VISIBLE_RECENT\)/.test(journal),
+    'the visible and disclosed sets are not the two halves of one already-ordered list');
+  assert.ok(/pane\.name === 'recent' && pane\.entries\.length > JOURNAL_VISIBLE_RECENT/.test(journal),
+    'the cap reaches a window other than the 24-hour one, or collapses a list it does not need to');
+  assert.strictEqual((journal.match(/function journalOverflow\(/g) || []).length, 1,
+    'more than one place holds back a recorded journal entry');
+  assert.strictEqual((journal.match(/journalOverflow\(overflow\)/g) || []).length, 1,
+    'the overflow disclosure is built from more than one place, or never built at all');
+  // Entries are rendered by the one existing row builder, so a disclosed entry
+  // cannot become a shorter, second kind of entry.
+  assert.strictEqual((journal.match(/list\.appendChild\(journalRow\(entry\)\)/g) || []).length, 2,
+    'a disclosed entry is painted by something other than the journal\'s one row builder');
+  assert.strictEqual((journal.match(/function journalRow\(/g) || []).length, 1,
+    'a second row builder exists, so a disclosed entry could be a shorter kind of entry');
+
+  // The rail is shortened by disclosing rows, never by hiding recorded text.
+  const start = code.indexOf('.journal-more{');
+  const end = code.indexOf('\n\n', start);
+  assert.ok(start !== -1 && end > start, 'the journal overflow CSS block was not found');
+  const css = code.slice(start, end);
+  assert.ok(/\.journal-more>summary\{cursor:pointer/.test(css),
+    'the overflow summary does not read as a control');
+  assert.ok(/\.journal-more>summary:focus-visible\{outline:2px solid var\(--focus\)/.test(css),
+    'the overflow summary loses the page\'s keyboard focus ring');
+  assert.ok(!/@keyframes/.test(css) && !/\banimation\s*:/.test(css) && !/\btransition\s*:/.test(css),
+    'the journal overflow animates — a disclosure may not move to look important');
+  for (const banned of [/-webkit-line-clamp/, /text-overflow/, /overflow\s*:\s*hidden/,
+    /white-space\s*:\s*nowrap/, /max-height/, /display\s*:\s*none/]) {
+    assert.ok(!banned.test(css), `the journal overflow uses ${banned} to hide recorded text`);
+  }
+  // Phone: the new disclosure is as tappable as the exact-evidence one beside
+  // it, and the phone reading order is untouched by any of this.
+  assert.ok(/\.journal-detail>summary,\.journal-more>summary\{min-height:44px;display:flex;align-items:center\}/.test(PHONE),
+    'the overflow disclosure is not finger-sized at phone width');
+  assert.ok(/\.event-panel\{order:1\}#evidence-rail\{order:2\}#raw-state\{order:3\}/.test(PHONE),
+    'the phone reading order changed while the desktop rail was compacted');
+});
+
 test('DOM: a record written twice is one fact, and equal-time records that differ still disagree', () => {
   const identical = [
     journalRun({ state: 'BUILT', updatedAt: '2026-09-03T11:00:00.000Z' }),

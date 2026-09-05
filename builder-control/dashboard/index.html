@@ -582,6 +582,20 @@
     overflow-wrap:anywhere}
   .journal-line.is-milestone{color:var(--text-0)}
 
+  /* ── journal overflow disclosure ──
+     The left rail is a rail, not a page. A busy 24 hours of recorded build
+     updates can run it several screens past the operational deck beside it, so
+     only the newest few entries are drawn in the open and the rest of the SAME
+     window is kept — once, in the same newest-first order — inside one native
+     disclosure. Nothing is clamped, truncated, summarised or dropped: the
+     collapsed entries are the same cards with the same exact receipts, one
+     keypress away, and the window toggle's count still names every one of them. */
+  .journal-more{margin:0}
+  .journal-more>summary{cursor:pointer;padding:6px 2px;
+    font:650 11px/1.4 var(--mono);letter-spacing:.06em;color:var(--text-1);overflow-wrap:anywhere}
+  .journal-more>summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+  .journal-more>.journal-list{margin-top:6px}
+
   /* ── handoff indicator ──
      One compact strip, rendered only when canonical run state reports that the
      bound run moved from one workflow stage to another. It carries no motion
@@ -1145,7 +1159,10 @@
        competing for one phone line. Nothing is demoted, clamped or dropped. */
     .journal-head,.journal-entry-head{flex-direction:column;align-items:flex-start;gap:4px}
     .journal-tabs>.hud-control{flex:1 1 auto}
-    .journal-detail>summary{min-height:44px;display:flex;align-items:center}
+    /* Both journal disclosures — the per-entry exact receipts and the one that
+       holds the rest of the 24-hour window — are as tappable as every other
+       disclosure on this page. */
+    .journal-detail>summary,.journal-more>summary{min-height:44px;display:flex;align-items:center}
     .journal-when,.journal-what,.journal-outcome,.journal-asof,.journal-note,
     .journal-empty,.journal-line,.journal-tag{overflow-wrap:anywhere}
     /* The state chip, the change type and the milestone flag are three separate
@@ -5729,6 +5746,31 @@
     return li;
   }
 
+  // How many of the 24-hour entries stay in the open. Everything past this point
+  // is disclosed, never discarded: the visible set is the head of the list the
+  // resolver already ordered, and the disclosure below holds the exact remainder.
+  var JOURNAL_VISIBLE_RECENT = 3;
+
+  // The one place a 24-hour entry may be held back, and it holds each of them
+  // exactly once: the same rows, in the same recorded order, inside a native
+  // details/summary that any keyboard opens. The summary counts what it holds,
+  // so a collapsed remainder can never read as an absence of records.
+  function journalOverflow(entries){
+    // A list may only hold list items, so the disclosure travels inside one.
+    var li = el('li');
+    var more = el('details','journal-more');
+    more.setAttribute('data-journal-more','recent');
+    var summary = el('summary',null,
+      'Show ' + entries.length + ' more from the last 24 hours');
+    more.appendChild(summary);
+    var list = el('ul','journal-list');
+    list.setAttribute('data-journal-list','recent-more');
+    entries.forEach(function(entry){ list.appendChild(journalRow(entry)); });
+    more.appendChild(list);
+    li.appendChild(more);
+    return li;
+  }
+
   function renderBuildJournal(host, journal){
     var section = el('div','build-journal');
     section.setAttribute('data-build-journal', journal.state);
@@ -5778,7 +5820,16 @@
       var list = el('ul','journal-list');
       list.setAttribute('data-journal-list', pane.name);
       if (!pane.entries.length) list.appendChild(el('li','journal-empty', pane.empty));
-      else pane.entries.forEach(function(entry){ list.appendChild(journalRow(entry)); });
+      else {
+        // Only the 24-hour window is capped, and only in what it draws open. The
+        // earlier and undated view is already one control away and keeps every
+        // entry visible the moment it is opened.
+        var overflow = (pane.name === 'recent' && pane.entries.length > JOURNAL_VISIBLE_RECENT)
+          ? pane.entries.slice(JOURNAL_VISIBLE_RECENT) : [];
+        var visible = overflow.length ? pane.entries.slice(0, JOURNAL_VISIBLE_RECENT) : pane.entries;
+        visible.forEach(function(entry){ list.appendChild(journalRow(entry)); });
+        if (overflow.length) list.appendChild(journalOverflow(overflow));
+      }
       lists[pane.name] = list;
     });
     section.appendChild(tabs);
