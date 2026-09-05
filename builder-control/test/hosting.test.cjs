@@ -653,25 +653,62 @@ test('switchboard: cancel and retry are wired; Pause remains unavailable without
 // worker publishes verified ownership evidence and cancelRun uses its
 // authenticated, attempt-bound cancellation mailbox. The browser may expose
 // Cancel only when that public ownership projection is complete.
+//
+// Cancel is now gated exactly the way Retry is: by ONE shared authority —
+// cancelOffer() — that the run-card control and the recovery deck both read,
+// rather than by a state list inlined in runActionRow. This test follows the
+// gate to where it actually lives instead of pinning the removed
+// hasCancellationCapability() helper, because what has to hold forever is the
+// gate's content and its single owner, not the name a superseded helper had.
 test('RED: cancel and retry render only in states where they are operational', () => {
   const html = dashboardHtml();
   const row = html.slice(html.indexOf('function runActionRow'), html.indexOf('function renderRuns'));
   assert.ok(row.length > 0, 'runActionRow not found — the action-row contract cannot be checked');
 
-  const cancelable = row.slice(row.indexOf('CANCELABLE'), row.indexOf('/api/cancel'));
-  assert.ok(/CANCELABLE\.indexOf\(run\.state\)\s*!==\s*-1/.test(row),
-    'Cancel is rendered unconditionally — it must be gated on the run state');
-  assert.ok(/hasCancellationCapability\(run\)/.test(cancelable),
-    'BUILDING cancellation is not gated on the canonical public capability');
-  const capability = html.slice(html.indexOf('function hasCancellationCapability'),
-    html.indexOf('function buildEvidence'));
-  assert.match(capability,
+  // The row consults the shared authority and fails closed. Without it the
+  // browser knows nothing about what the canonical run state allows, so it must
+  // offer nothing rather than guess — Cancel is unavailable, not assumed.
+  assert.match(row, /window\.AEGIS_DASHBOARD\.cancelOffer\(run\)/,
+    'the action row does not read the shared Cancel authority');
+  assert.match(row,
+    /:\s*\{\s*worker:\s*false,\s*lifecycle:\s*false,\s*offered:\s*false\s*\}/,
+    'Cancel does not fail closed when the canonical cancelOffer authority is absent');
+  assert.match(row, /if \(cancelState\.offered\) \{/,
+    'Cancel is rendered unconditionally — it must be gated on the shared offer');
+  assert.match(html, /cancelOffer:\s*cancelOffer/,
+    'the canonical Cancel authority is not exported through the shared dashboard seam');
+
+  // The row's obligation is to consult that authority, never to re-derive the
+  // verdict beside it. A second reading of run.state inside the Cancel block
+  // would be exactly the duplicated state authority this page refuses.
+  const cancelGate = row.slice(row.indexOf('var cancelState ='), row.indexOf("callApi('/api/cancel'"));
+  assert.ok(cancelGate.length > 0, 'the Cancel control block could not be located in the action row');
+  assert.doesNotMatch(cancelGate, /run\.state/,
+    'the action row re-derives Cancel from run.state instead of the shared authority');
+  assert.doesNotMatch(cancelGate, /cancelAvailable/,
+    'the action row reads the server cancellation projection directly, bypassing its one authority');
+
+  // BUILDING is offerable only on the server's own bounded projection.
+  const offer = html.slice(html.indexOf('function cancelOffer'),
+    html.indexOf('function cancellationReceipt'));
+  assert.ok(offer.length > 0, 'cancelOffer not found — the cancellation contract cannot be checked');
+  assert.match(offer,
     /run\.state\s*===\s*'BUILDING'[\s\S]{0,160}run\.build\.cancelAvailable\s*===\s*true/,
     'the dashboard does not require the bounded server-projected cancellation capability');
-  assert.doesNotMatch(capability, /workerPid|status\s*===\s*'STARTING'/,
+  assert.doesNotMatch(offer, /workerPid|status\s*===\s*'STARTING'/,
     'the browser inferred cancellation authority from process or activity telemetry');
+
+  // The lifecycle half is the transition authority's abandonable state list and
+  // nothing else. BUILDING must not appear in it, or a build with no canonical
+  // cancellation authority would still be offered Cancel through the back door;
+  // a terminal run must not appear in it, because it cannot be cancelled at all.
+  const abandonStates = html.slice(html.indexOf('var CANCEL_ABANDON_STATES'),
+    html.indexOf('function cancelOffer'));
+  assert.ok(abandonStates.length > 0, 'the canonical abandonable state list could not be located');
+  assert.ok(!/'BUILDING'/.test(abandonStates),
+    'BUILDING is listed as lifecycle-abandonable — cancelling a live build requires the server projection');
   for (const terminal of ['ABANDONED', 'ROLLED_BACK', 'CHECKPOINTED']) {
-    assert.ok(!new RegExp(`'${terminal}'`).test(cancelable),
+    assert.ok(!new RegExp(`'${terminal}'`).test(abandonStates),
       `${terminal} is listed as cancelable — a terminal run cannot be cancelled, and offering it is theater`);
   }
 
