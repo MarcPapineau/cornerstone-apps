@@ -1596,6 +1596,54 @@
       max-height:calc(100vh - 118px);overflow:auto;scrollbar-gutter:stable}
   }
 
+  /* ── wide-screen lower operations deck ───────────────────────────
+     Above the fold the approved reference is the three-rail cockpit the block
+     directly above seats, and it is untouched here. Below it the same page
+     shipped a single file of seven full-width centre panels followed by a flat
+     five-across evidence band, so on a 1920px screen the operational answers an
+     owner reads after the HUD — the handoff path, the recovery answers, the
+     recorded receipts, live activity, the research proposals, the decision
+     queue, the event log, system health and the last safe checkpoint — arrived
+     as a long stack of unrelated surfaces with most of the width left empty
+     beside each one.
+
+     This block seats those existing surfaces into one lower deck. It is
+     composition only: no panel is added, removed, hidden, clamped, reordered,
+     re-sourced or re-worded; every one of them is still painted by the single
+     canonical renderer it shipped with; and the DOM is exactly the DOM the
+     narrower layouts read, so the reading order and the accessibility tree are
+     identical at every width.
+
+     Three bands stay full width, because squeezing them would be truncation
+     rather than composition and every panel here is overflow:hidden, which
+     makes a squeezed instrument a silently clipped one:
+       · the Strategic Systems HUD, whose foot carries the nine-station handoff
+         path — the deck's spine — on one row;
+       · the build route, whose eleven exact stages are one connected row;
+       · the decision queue, for the reason its own block below already gives —
+         an irreversible decision may not be read as a half-shown
+         recommendation.
+     The remaining four supporting surfaces pair two-up in the order they are
+     already read — recovery beside the recorded receipts, live activity beside
+     the research proposals — so no half row is left empty. The evidence band
+     gives the event log a double track, so the deck below the rails reads as
+     one log plus one instrument bank rather than as five equal slots.
+
+     1760px is the honest floor, not a round number: below it a half centre
+     column is narrower than the two 232px answer tracks the recovery and
+     receipts grids already ship, so the pairing would cost an answer column
+     instead of saving height. Every narrower layout — the 1280px cockpit
+     above, the 1100px band, the tablet stack and the 390px phone order — is
+     therefore left exactly as it shipped. Nothing here paints, times, hides,
+     clamps, re-words or animates anything. */
+  @media (min-width:1760px){
+    .center-console{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+    .center-console>*{min-width:0}
+    .strategic-core,#topology-overview,#decision-queue{grid-column:1/-1}
+    .evidence-deck{grid-template-columns:repeat(6,minmax(0,1fr))}
+    .event-panel{grid-column:span 2}
+  }
+
   /* ── Monday research report and the Marc decision queue ───────────
      Presentation only: spacing, reading order and wrapping for two panels whose
      every sentence is a field the research contract already validated. Nothing

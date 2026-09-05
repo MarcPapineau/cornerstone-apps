@@ -13351,6 +13351,241 @@ test('the cockpit reads brief, HUD, operator rail — with evidence, history, re
     'run history was opened onto the first screen instead of staying collapsed below the cockpit');
 });
 
+// ── wide-screen lower operations deck ──────────────────────────────────────
+// The cockpit above the fold was composed by the block proved above. Below it
+// the same page still shipped a single file of seven full-width centre panels
+// followed by a flat five-across evidence band, so on a wide desktop the
+// answers an owner reads after the HUD — the handoff path, recovery, the
+// recorded receipts, live activity, the research proposals, the decision
+// queue, the event log, system health and the last safe checkpoint — arrived
+// as a long stack of unrelated surfaces with most of the width empty beside
+// each one.
+//
+// The failure a lower-deck composition invites is not ugliness, it is loss:
+// a duplicated panel, an instrument squeezed under `overflow:hidden` until it
+// is silently clipped, a visual order that no longer matches the DOM an
+// assistive technology reads, a "layout" block that starts repainting state,
+// or a narrower layout quietly re-composed on the way past. Every proof below
+// therefore pairs "seated on the wide screen" with "the same single DOM, the
+// same renderers, nothing squeezed, and nothing narrower touched".
+const deckStart = code.indexOf('@media (min-width:1760px)');
+const LOWER_DECK = deckStart === -1 ? '' : code.slice(deckStart, code.indexOf('\n  }', deckStart));
+
+function lowerDeckRules() {
+  const rules = [];
+  for (const rule of LOWER_DECK.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    rules.push({ selectors: rule[1].split(',').map((s) => s.trim()).filter(Boolean), body: rule[2] });
+  }
+  return rules;
+}
+
+function lowerDeckDeclaration(selector, prop) {
+  for (const rule of lowerDeckRules()) {
+    if (!rule.selectors.includes(selector)) continue;
+    const found = new RegExp('(?:^|;)\\s*' + prop + '\\s*:\\s*([^;]+)').exec(rule.body);
+    if (found) return found[1].trim();
+  }
+  return null;
+}
+
+// The centre console in the order the DOM reads it. Read out of the markup
+// rather than hardcoded, so a panel added, removed or moved fails the
+// placement proof below instead of being ratified by a stale list.
+function centreConsolePanels() {
+  const source = htmlSrc();
+  const start = source.indexOf('<div class="center-console">');
+  assert.notStrictEqual(start, -1, 'the centre console was not located');
+  const end = source.indexOf('<aside class="right-rail"', start);
+  assert.ok(end > start, 'the centre console has no end boundary');
+  const panels = [];
+  for (const tag of source.slice(start, end).matchAll(/<section\b([^>]*)>/g)) {
+    const id = /\bid="([^"]+)"/.exec(tag[1]);
+    if (id) { panels.push(id[1]); continue; }
+    const cls = /\bclass="([^"]+)"/.exec(tag[1]);
+    assert.ok(cls, `a centre-console section carries neither an id nor a class: ${tag[0]}`);
+    panels.push(cls[1].trim().split(/\s+/)[0]);
+  }
+  return panels;
+}
+
+// Seating, and nothing else. Every property this block may declare places a box
+// that already exists; none of them paints, hides, clamps, times or renames
+// anything inside it.
+const LOWER_DECK_SEATING_ONLY = new Set(['display', 'grid-template-columns', 'align-items',
+  'grid-column', 'min-width']);
+
+test('the wide lower section is one operations deck: full-width bands, paired supporting surfaces, one log-led evidence band', () => {
+  assert.ok(LOWER_DECK.length > 0, 'the wide-screen lower operations deck block was not located');
+  assert.strictEqual((code.match(/@media \(min-width:1760px\)/g) || []).length, 1,
+    'the lower deck is composed in more than one block, so two rules could disagree about where a panel sits');
+  assert.strictEqual(lowerDeckDeclaration('.center-console', 'display'), 'grid',
+    'the lower section is still a single file of full-width panels rather than a deck');
+  assert.strictEqual(lowerDeckDeclaration('.center-console', 'grid-template-columns'),
+    'repeat(2,minmax(0,1fr))',
+    'the deck does not pair its supporting surfaces into two even, zero-floor tracks');
+  // minmax(0,...) tracks cap the column, so every seated panel needs its own
+  // zero floor too or it overflows a track that cannot grow — and every panel
+  // on this page is overflow:hidden, which turns that into silent clipping.
+  assert.strictEqual(lowerDeckDeclaration('.center-console>*', 'min-width'), '0',
+    'a seated panel can overflow its own capped track and be clipped by the shipped overflow:hidden');
+  // The evidence band leads with the log and still seats every shipped
+  // instrument on one row: the spans must add up to the tracks exactly, or a
+  // panel is pushed onto an orphan row that reads as a missing instrument.
+  assert.strictEqual(lowerDeckDeclaration('.evidence-deck', 'grid-template-columns'),
+    'repeat(6,minmax(0,1fr))', 'the evidence band did not gain the track the event log is widened into');
+  assert.strictEqual(lowerDeckDeclaration('.event-panel', 'grid-column'), 'span 2',
+    'the event log is still one of five equal slots instead of leading the band');
+  assert.ok(/\.evidence-deck\{grid-template-columns:repeat\(5,minmax\(0,1fr\)\)\}/.test(code),
+    'the shipped five-across evidence band was replaced instead of being re-seated at wide width only');
+  assert.ok(/#evidence-rail\{grid-column:1\/-1/.test(code) && /#raw-state\{grid-column:1\/-1\}/.test(code),
+    'the detail rail or the deep machine state now competes for a band track instead of spanning it');
+});
+
+test('the deck seats the handoff path, the route and the decision queue full width — nothing is squeezed or clipped', () => {
+  const full = lowerDeckRules().find((rule) => /grid-column:1\/-1/.test(rule.body));
+  assert.ok(full, 'the deck spans nothing full width, so every instrument is halved');
+  assert.deepStrictEqual([...full.selectors].sort(),
+    ['#decision-queue', '#topology-overview', '.strategic-core'],
+    'the full-width band of the deck is not exactly the HUD with its handoff path, the exact route and the decision queue');
+  // Why each of those three may never be halved, proved against the shipped
+  // rule that would be truncated if it were.
+  assert.ok(/\.core-path-track\{[^}]*grid-template-columns:repeat\(9,minmax\(0,1fr\)\)/.test(code),
+    'the handoff path is no longer one nine-station row, so the band it is seated in proves nothing');
+  assert.ok(/#topology-live-body\s+\.route-strip\s*\{[^}]*repeat\(11,minmax\(68px,1fr\)\)/.test(code),
+    'the exact eleven-stage route is no longer one connected row, so its full-width band proves nothing');
+  assert.ok(/\.command-shell section,\.command-shell details\.panel\{position:relative;overflow:hidden/.test(code),
+    'panels are no longer overflow:hidden, so the reason the deck must not squeeze an instrument has moved');
+  // The pairing must leave no empty cell: an orphaned half row reads as a panel
+  // that failed to render. Simulated over the real DOM order.
+  const panels = centreConsolePanels();
+  const isFull = (name) => full.selectors.includes('#' + name) || full.selectors.includes('.' + name);
+  const rows = [];
+  for (const panel of panels) {
+    const last = rows[rows.length - 1];
+    if (isFull(panel)) { rows.push([panel]); rows.push([]); continue; }
+    if (last && last.length === 1 && !isFull(last[0])) last.push(panel);
+    else rows.push([panel]);
+  }
+  const laid = rows.filter((row) => row.length > 0);
+  for (const row of laid) {
+    assert.ok(row.length === 2 || isFull(row[0]),
+      `${row[0]} is left alone in a half-width row, which reads as a panel that failed to render`);
+  }
+  assert.deepStrictEqual(laid.flat(), panels,
+    'the deck lost, duplicated or reordered a centre-console panel while seating it');
+});
+
+test('the lower deck seats boxes and does nothing else: no paint, no clamp, no motion, no state, no words', () => {
+  assert.ok(lowerDeckRules().length > 0, 'the lower deck block declares no rules');
+  for (const rule of lowerDeckRules()) {
+    const target = rule.selectors.join(',');
+    for (const part of rule.body.split(';').map((s) => s.trim()).filter(Boolean)) {
+      const prop = part.slice(0, part.indexOf(':')).trim().toLowerCase();
+      assert.ok(LOWER_DECK_SEATING_ONLY.has(prop),
+        `${target} declares ${prop}, which is not seating — composition may not repaint or re-read anything`);
+    }
+    assert.ok(!/display:none|visibility:|content-visibility:|-webkit-line-clamp|text-overflow|overflow:/.test(rule.body),
+      `${target} hides or truncates part of the deck instead of seating it`);
+    assert.ok(!/!important/.test(rule.body), `${target} outranks a shipped state signal with !important`);
+  }
+  // Visual order must stay reading order: `order` and dense packing both move a
+  // panel on screen without moving it in the DOM, which is exactly how a
+  // keyboard or screen-reader operator and a sighted one stop reading the same
+  // deck. Neither may appear here.
+  assert.ok(!/\border\s*:/.test(LOWER_DECK) && !/\bdense\b/.test(LOWER_DECK) &&
+    !/grid-auto-flow|grid-row|grid-template-areas/.test(LOWER_DECK),
+    'the deck re-orders panels on screen, so the visual deck and the DOM an assistive technology reads diverge');
+  assert.ok(!/@keyframes/.test(LOWER_DECK) && !/\banimation\s*:/.test(LOWER_DECK) &&
+    !/(?:^|;)\s*transition:(?!none)/.test(LOWER_DECK),
+    'the lower deck introduced motion — it is an instrument panel, not decoration');
+  for (const banned of ['gradient(', 'url(', 'image-set(', 'filter', 'backdrop-filter', 'content:',
+    'setInterval', 'setTimeout', 'requestAnimationFrame', 'fetch(', 'AEGIS_STATE', '/api/']) {
+    assert.ok(!LOWER_DECK.includes(banned),
+      `the lower deck block uses ${banned} — it may only seat boxes the renderers already fill`);
+  }
+  const touched = new Set();
+  for (const rule of lowerDeckRules()) for (const selector of rule.selectors) touched.add(selector);
+  assert.deepStrictEqual([...touched].sort(),
+    ['#decision-queue', '#topology-overview', '.center-console', '.center-console>*',
+      '.event-panel', '.evidence-deck', '.strategic-core'],
+    'the lower deck block reaches past the containers and the panels it seats');
+});
+
+test('the lower deck is wide-screen only: the cockpit, the 1100px band, the tablet stack and the 390px order are untouched', () => {
+  assert.ok(!/@media \(max-width/.test(LOWER_DECK),
+    'the deck block carries a max-width of its own, which is a second place for a width to be re-composed');
+  for (const query of LOWER_DECK.match(/@media \(min-width:(\d+)px\)/g) || []) {
+    assert.ok(Number(/(\d+)/.exec(query)[1]) >= 1760,
+      `the lower deck reaches below 1760px (${query}), into a layout that shipped and was not re-composed`);
+  }
+  // 1760px is the floor because below it a half centre column is narrower than
+  // the two 232px answer tracks recovery and the receipts inspector already
+  // ship, so the pairing would cost an answer column instead of saving height.
+  // If that shipped minimum ever moves, this floor has to be re-derived.
+  assert.ok(/#rd-answers\{display:grid;grid-template-columns:repeat\(auto-fit,minmax\(232px,1fr\)\)/.test(code) &&
+    /#cr-answers\{display:grid;grid-template-columns:repeat\(auto-fit,minmax\(232px,1fr\)\)/.test(code),
+    'the answer-track minimum the 1760px floor was derived from has changed without the floor being re-derived');
+  // The deck is declared after every narrower rule it must not outrank, and it
+  // is the only place the centre console is ever laid out as a grid.
+  assert.ok(deckStart > code.lastIndexOf('@media (max-width:680px)') &&
+    deckStart > code.indexOf('@media (min-width:1280px)'),
+    'the lower deck is declared ahead of a narrower layout, so a phone or the cockpit could inherit it');
+  const stylesheet = code.slice(code.indexOf('<style'), code.indexOf('</style>'));
+  const composed = [];
+  for (const rule of stylesheet.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (/center-console/.test(rule[1]) && /display:grid/.test(rule[2])) composed.push(rule[1].trim());
+  }
+  assert.deepStrictEqual(composed, ['.center-console'],
+    'the centre console is composed by more than one rule, so two widths could disagree about the deck');
+  // Every shipped narrow layout still says exactly what it said.
+  assert.ok(/\.command-shell\{grid-template-columns:300px minmax\(600px,1fr\);\s*grid-template-areas:"left center" "right right" "evidence evidence"\}/.test(code),
+    'the 1100–1279px band lost the two-rail layout it shipped with');
+  assert.ok(/\.command-shell\{grid-template-columns:1fr;grid-template-areas:"left" "center" "right" "evidence"\}/.test(code),
+    'the single-column stack lost its left, center, right, evidence order');
+  assert.ok(/\.evidence-deck\{grid-template-columns:repeat\(3,minmax\(0,1fr\)\)\}\.event-panel\{grid-column:span 2\}/.test(code) &&
+    /\.evidence-deck\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}\.event-panel\{grid-column:span 2\}/.test(code),
+    'a narrower evidence band was re-composed while the wide deck was being seated');
+  assert.ok(/\.evidence-deck\{grid-template-columns:1fr\}\.event-panel\{grid-column:auto\}/.test(PHONE) &&
+    /\.event-panel\{order:1\}#evidence-rail\{order:2\}#raw-state\{order:3\}/.test(PHONE),
+    'the 390px evidence band or reading order changed while the wide deck was being seated');
+  assert.ok(!/\.center-console\{/.test(PHONE) && !/\.command-shell\{[^}]*grid-template/.test(PHONE),
+    'the lower deck re-composed the phone stack instead of leaving it exactly as it shipped');
+});
+
+test('the deck is the shipped surfaces re-seated: every answer still exists exactly once, from one renderer', () => {
+  const source = htmlSrc();
+  // One of each, page-wide: seating may never become a copy, because two
+  // surfaces holding the same answer are two answers waiting to disagree.
+  for (const id of ['core-path', 'core-path-track', 'core-path-note', 'topology-overview',
+    'recovery-deck', 'rd-answers', 'changes-receipts', 'cr-answers', 'research-report',
+    'decision-queue', 'decision-queue-list', 'live-activity', 'events',
+    'hud-system-health', 'hud-decisions', 'hud-safe-checkpoint']) {
+    assert.strictEqual((source.match(new RegExp('id="' + id + '"', 'g')) || []).length, 1,
+      `${id} exists more than once, so two surfaces on the deck could answer differently`);
+  }
+  for (const cls of ['center-console', 'evidence-deck', 'live-panel', 'event-panel', 'strategic-core']) {
+    assert.strictEqual((source.match(new RegExp('class="[^"]*\\b' + cls + '\\b[^"]*"', 'g')) || []).length, 1,
+      `a second ${cls} would let two decks claim the same evidence`);
+  }
+  assert.strictEqual((source.match(/class="hud-summary"/g) || []).length, 3,
+    'the deck gained or lost a summary instrument instead of re-seating the three that shipped');
+  // The headings and empty-state sentences the deck seats are the shipped ones.
+  for (const words of ['Handoff path', 'Live activity', 'Event history', 'Marc decision queue',
+    'System health', 'Decisions required', 'Last safe checkpoint',
+    'Waiting for the first status push.', 'Recorded checkpoint evidence only.',
+    'HANDOFF PATH UNAVAILABLE — no canonical run state is loaded.']) {
+    assert.ok(source.includes(words), `the deck rewrote or dropped "${words}" while being seated`);
+  }
+  // Still one canonical renderer per surface, still driven by the single pass
+  // the cockpit is driven by: a deck may not become a second source of truth.
+  for (const fn of ['renderCorePath', 'renderEvidenceRail', 'renderFounderSummary']) {
+    assert.strictEqual((code.match(new RegExp('function ' + fn + '\\b', 'g')) || []).length, 1,
+      `${fn} was duplicated, which is a second renderer for a surface the deck seats`);
+  }
+  assert.ok(/renderCorePath\(boundRun, provenHandoff\);/.test(code),
+    'the seated handoff path is no longer driven by the single handoff the indicator proved');
+});
+
 async function atest(name, fn) {
   try { await fn(); passed++; console.log(`ok   ${name}`); }
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }
