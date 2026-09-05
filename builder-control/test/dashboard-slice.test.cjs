@@ -68,6 +68,26 @@ const HOSTILE_WORKER_OUTPUT = Object.freeze({
   unlabelled: 'tR7xQm2LpZ0aVbNc8YeWuJ4KsHdG1fXo',
 });
 
+// The plain words the shipped OPS_CHIP_PLAIN seam is expected to print, held
+// here as an independent expectation rather than read out of the page: a silent
+// rewording of the seam must fail these proofs, not be ratified by them. The
+// canonical token is what the page must still carry in its machine attributes,
+// its chip titles and its detail sentences, and that is asserted separately.
+const RUN_STATE_PLAIN = Object.freeze({
+  RUNNING: 'Running', WAITING: 'Waiting', BLOCKED: 'Needs attention',
+  COMPLETE: 'Finished', UNVERIFIED: 'Not confirmed', IDLE: 'Nothing running',
+  UNAVAILABLE: 'Not recorded',
+});
+const RUN_LIFECYCLE_PLAIN = Object.freeze({
+  CREATED: 'Run created', INTAKE_RECORDED: 'Objective recorded',
+  ROUTED: 'Builder chosen', WORKTREE_READY: 'Workspace ready', BUILDING: 'Building',
+  BUILD_CONTINUED: 'Build resumed', BUILT: 'Build finished', BUILD_FAILED: 'Build failed',
+  CHECKS_PASSED: 'Checks passed', CHECKS_FAILED: 'Checks failed',
+  REVIEW_BOUND: 'Review evidence attached', REVIEW_FAILED: 'Review failed',
+  CORRECTING: 'Correcting', CHECKPOINTED: 'Safe checkpoint reached',
+  ROLLED_BACK: 'Rolled back', ABANDONED: 'Abandoned', UNAVAILABLE: 'Not recorded',
+});
+
 console.log('AEGIS dashboard slice — invariants');
 
 // ── nothing may animate on a timer ──────────────────────────────────────────
@@ -987,8 +1007,94 @@ test('the identity line restates existing resolutions and cannot name a run the 
   const renderer = code.slice(code.indexOf('function renderOpsRun'), code.indexOf('function renderFounderSummary'));
   assert.ok(/'BUILD ACTIVITY'/.test(renderer) && /'GATE READINESS'/.test(renderer),
     'the identity line does not label which state belongs to the worker and which to the gate');
-  assert.ok(/chip\(identity\.build\)/.test(renderer) && /chip\(identity\.state\)/.test(renderer),
-    'the identity line no longer paints both the build and the gate reading');
+  // Both readings are still painted, and both are painted through the ONE
+  // shipped label seam — the same opsChip/opsChipLabel pair the five cells
+  // beneath already use, so the row cannot grow a second wording authority.
+  assert.ok(/opsChip\(identity\.build, opsChipLabel\('run-state', identity\.build\)\)/.test(renderer) &&
+    /opsChip\(identity\.state, opsChipLabel\('run-state', identity\.state\)\)/.test(renderer),
+    'the identity line no longer paints both the build and the gate reading through the one label seam');
+  assert.ok(/opsChipLabel\('run-lifecycle', identity\.canonical\)/.test(renderer),
+    'the lifecycle reading is not translated by the one shipped label seam');
+  assert.ok(/canonicalNode\.setAttribute\('data-ops-run-code', identity\.canonical\)/.test(renderer) &&
+    /canonicalNode\.setAttribute\('title','Canonical run state code: ' \+ identity\.canonical\)/.test(renderer),
+    'the plain lifecycle word was written without keeping its exact canonical code on the same node');
+});
+
+// ── one label seam, and the exact codes survive it ──────────────────────────
+// The failure guarded here is a first screen that leads with BUILD_FAILED,
+// CHECKS_PASSED or REVIEW_BOUND — machine vocabulary the owner has to decode —
+// and the opposite failure, a page so friendly that the exact canonical code an
+// auditor needs is gone. Both are prevented the same way: ONE closed map, no
+// second dictionary, and the token preserved everywhere it already appeared.
+test('the plain-English state words come from one shipped dictionary and invent no state', () => {
+  assert.strictEqual((code.match(/var OPS_CHIP_PLAIN\s*=/g) || []).length, 1,
+    'a second plain-language state dictionary appeared, so two surfaces can word one state differently');
+  assert.strictEqual((code.match(/function opsChipLabel\(/g) || []).length, 1,
+    'the label seam has more than one translation authority');
+  const seam = code.slice(code.indexOf('var OPS_CHIP_PLAIN'), code.indexOf('function opsChip('));
+  assert.ok(seam.length > 0, 'no OPS_CHIP_PLAIN seam boundary found');
+  // A closed map: an unnamed token stays visibly unknown WITH its exact code,
+  // and an inherited member can never render as a state word.
+  assert.ok(/'Unknown state ' \+ token/.test(seam),
+    'an unmapped token no longer keeps its exact code in the label the operator reads');
+  assert.ok(/Object\.prototype\.hasOwnProperty\.call\(known, token\)/.test(seam),
+    'the label seam resolves tokens by plain member lookup, so an inherited member can render as a state');
+  // The lifecycle group names every state aegis-run declares and nothing else:
+  // the page may not invent a lifecycle stage or quietly drop one.
+  const group = /'run-lifecycle': \{([\s\S]*?)\},\n/.exec(seam);
+  assert.ok(group, 'the canonical lifecycle vocabulary has no entry in the shipped label seam');
+  const mapped = [...group[1].matchAll(/\b([A-Z_]+):\s*'/g)].map((match) => match[1]);
+  const canonical = Object.keys(canonicalRunStates());
+  for (const state of canonical) {
+    assert.ok(mapped.includes(state),
+      `${state} is a canonical aegis-run state with no plain word, so the first screen would print the token`);
+  }
+  for (const state of mapped) {
+    assert.ok(canonical.includes(state) || state === 'UNAVAILABLE',
+      `the label seam names ${state}, which aegis-run does not declare as a run state`);
+  }
+  // The expectations these proofs assert against are the shipped words.
+  for (const [state, plain] of Object.entries(RUN_LIFECYCLE_PLAIN)) {
+    assert.ok(new RegExp(state + ": '" + plain + "'").test(seam),
+      `the shipped lifecycle word for ${state} is no longer ${plain}`);
+  }
+  for (const [state, plain] of Object.entries(RUN_STATE_PLAIN)) {
+    assert.ok(new RegExp(state + ": '" + plain + "'").test(seam),
+      `the shipped control-plane word for ${state} is no longer ${plain}`);
+  }
+  // And the seam translates only wording. It reads no run, no gate and no
+  // evidence, so it can never become a second state authority.
+  for (const banned of ['run.', 'engineering', 'binding', 'verdict', 'problems',
+    'setTimeout', 'fetch(', 'Date.now', 'Math.random']) {
+    assert.ok(!seam.includes(banned),
+      `the label seam reads ${banned} — it may translate a word and nothing else`);
+  }
+});
+
+test('the exact canonical run-state codes survive the plain-English first screen', () => {
+  // Every surface that already wrote the token out still writes it out. These
+  // are the audit and detail sentences an operator or reviewer reads to get the
+  // exact code back, and the plain first screen may not cost a single one.
+  assert.ok(/'Current station: ' \+ current\.label \+ ' — canonical run state ' \+ run\.state/.test(code),
+    'the handoff note stopped citing the exact canonical run state beneath the path');
+  assert.ok(/'Canonical run state ' \+ run\.state \+ ' belongs to no station on this path'/.test(code),
+    'an off-path run state is no longer reported with its exact code');
+  assert.ok(/Canonical ' \+ moved\.from \+ ' → ' \+ moved\.to/.test(code),
+    'a proven handoff no longer prints the exact canonical states it moved between');
+  assert.ok(/'GATE READINESS ' \+ controlState\.state \+\n?\s*' · RUN LIFECYCLE ' \+ opState\.state/.test(code),
+    'the HUD mission state line stopped carrying the exact gate and lifecycle codes');
+  assert.ok(/'Canonical run state: ' \+ \(\(run && run\.state\) \|\| RD_NOT_RECORDED\)/.test(code),
+    'the recovery deck disclosure stopped carrying the exact canonical run state');
+  assert.ok(/c\.setAttribute\('title','Canonical state code: '\+token\)/.test(code),
+    'a plain chip word no longer carries the exact canonical code it replaced');
+  // The station mark reads as meaning, not as vocabulary, and the role word it
+  // leads with is still the machine role the station records.
+  const path = code.slice(code.indexOf('function renderCorePath'), code.indexOf('function reviewerEvidenceReady'));
+  assert.ok(/'CURRENT · ' \+ opsChipLabel\('run-lifecycle', run\.state\)/.test(path) &&
+    /'HANDED FROM · ' \+ opsChipLabel\('run-lifecycle', moved\.from\)/.test(path),
+    'the handoff stations still print raw canonical tokens on the first screen');
+  assert.ok(/var role = isCurrent \? 'CURRENT' : \(isFrom \? 'HANDED FROM' : 'NOT CURRENT'\);/.test(path),
+    'the station role attribute changed with the wording, which is a state change and not a label change');
 });
 
 test('live activity has one translation seam and Detail View alone discloses the exact receipt', () => {
@@ -2666,7 +2772,7 @@ test('DOM: minimized empty live status with unavailable run evidence never rende
   const body = page.text('founder-body');
   assert.ok(/UNAVAILABLE/.test(page.text('ctx-verdict')) && !/IDLE/.test(page.text('ctx-verdict')),
     `an unavailable empty live projection rendered a healthy idle header: ${page.text('ctx-verdict')}`);
-  assert.strictEqual(page.text('hud-core-status'), 'UNAVAILABLE',
+  assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.UNAVAILABLE,
     'AEGIS Core rendered healthy idle without positive run-ledger evidence');
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'unavailable',
     'the shell rendered clean idle without positive run-ledger evidence');
@@ -2697,7 +2803,7 @@ test('DOM: a genuinely empty minimized live status stays truthful without a top-
   const body = page.text('founder-body');
   assert.ok(/IDLE/.test(page.text('ctx-verdict')),
     `affirmatively empty live evidence did not remain idle: ${page.text('ctx-verdict')}`);
-  assert.strictEqual(page.text('hud-core-status'), 'IDLE');
+  assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.IDLE);
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'idle');
   assert.ok(/No blocker — no run has started\./.test(body));
   assert.ok(/READY FOR AN OBJECTIVE/.test(page.text('hud-system-health')));
@@ -2725,7 +2831,7 @@ test('DOM: malformed run evidence is unavailable and never lights the clean-idle
   const body = page.text('founder-body');
   assert.ok(/UNAVAILABLE/.test(page.text('ctx-verdict')) && !/IDLE/.test(page.text('ctx-verdict')),
     `malformed evidence rendered clean idle: ${page.text('ctx-verdict')}`);
-  assert.strictEqual(page.text('hud-core-status'), 'UNAVAILABLE');
+  assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.UNAVAILABLE);
   assert.notStrictEqual(page.text('hud-system-health'), 'READY FOR AN OBJECTIVE');
   assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'unavailable');
   assert.ok(/could not be read or validated/.test(body),
@@ -2982,7 +3088,7 @@ test('DOM: a checkpoint receipt cannot make a blocked mismatched current subject
   renderMinimizedStatus(page, status);
   assert.ok(/BLOCKED/.test(page.text('ctx-verdict')) && !/COMPLETE/.test(page.text('ctx-verdict')),
     `the header hides a blocked mismatched subject behind COMPLETE: ${page.text('ctx-verdict')}`);
-  assert.strictEqual(page.text('hud-core-status'), 'BLOCKED',
+  assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.BLOCKED,
     'AEGIS Core hides the current blocked subject behind the historical checkpoint state');
   assert.strictEqual(page.text('hud-system-health'), 'BLOCKED',
     'System Health hides the current blocked subject behind the historical checkpoint state');
@@ -3175,10 +3281,10 @@ test('DOM: CHECKPOINTED is COMPLETE only for positively bound current-subject cl
     if (scenario.expected !== 'COMPLETE') {
       assert.ok(!/COMPLETE/.test(header),
         `${scenario.label}: historical checkpoint falsely became current completion`);
-      assert.notStrictEqual(page.text('hud-core-status'), 'COMPLETE',
+      assert.notStrictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.COMPLETE,
         `${scenario.label}: AEGIS Core falsely reported current completion`);
     } else {
-      assert.strictEqual(page.text('hud-core-status'), 'COMPLETE',
+      assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.COMPLETE,
         'positive current-subject checkpoint lost its completion signal');
       assert.ok(/Checkpoint CP-CURRENT · rollback commit 4{40}/.test(page.text('founder-body')),
         'positive completion lost its checkpoint receipt');
@@ -3339,6 +3445,20 @@ test('DOM: a first sighting highlights the current station and still proves no h
     'more than one station claimed to be current');
   assert.ok(!Object.values(roles).includes('HANDED FROM'),
     'a single observation was drawn as a completed handoff between two stations');
+  // The mark reads as what the run is doing; the exact code is not printed on
+  // it because the note directly beneath still writes it out in full.
+  const marks = allNodes(page.document.getElementById('core-path-track'))
+    .filter((node) => String(node.className) === 'core-station-mark')
+    .map((node) => node.textContent);
+  assert.strictEqual(marks.length, 9, `expected one written mark per station, found ${marks.length}`);
+  assert.ok(marks.includes('CURRENT · Building'),
+    `the current station does not say in plain English what the run is doing: ${marks.join(' | ')}`);
+  for (const mark of marks) {
+    const marked = /^(?:CURRENT|HANDED FROM) · (.+)$/.exec(mark);
+    if (!marked) continue;
+    assert.ok(!/[A-Z]{2,}|_/.test(marked[1]),
+      `a marked station still reads as a machine code: ${mark}`);
+  }
   const note = page.text('core-path-note');
   assert.match(note, /Current station: Build — canonical run state BUILDING/,
     `the current station does not cite the exact canonical run state: ${note}`);
@@ -3669,7 +3789,7 @@ test('DOM: mismatched or ghost binding fails closed and preserves recorded probl
     assert.ok(!/Nothing is blocking this run\./.test(body), `${c.name}: rendered a false clear signal`);
     assert.ok(/UNAVAILABLE/.test(page.text('ctx-verdict')) && !/IDLE/.test(page.text('ctx-verdict')),
       `${c.name}: the primary header rendered false IDLE: ${page.text('ctx-verdict')}`);
-    assert.strictEqual(page.text('hud-core-status'), 'UNAVAILABLE',
+    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.UNAVAILABLE,
       `${c.name}: AEGIS Core rendered false healthy idle`);
     assert.strictEqual(page.document.getElementById('operator-shell').attrs['data-run-status'], 'unavailable',
       `${c.name}: the shell rendered false idle`);
@@ -4684,8 +4804,18 @@ test('DOM: the mission line and HUD name the gate and the run lifecycle without 
       `${name}: the mission line no longer distinguishes the gate from the worker: ${meta}`);
     assert.match(hud, /^GATE READINESS [A-Z_]+ · RUN LIFECYCLE [A-Z_]+$/,
       `${name}: the HUD mission state is not the labelled state pair: ${hud}`);
-    assert.ok(hud.startsWith('GATE READINESS ' + page.text('hud-core-status')),
+    // The core reads the gate in plain English while the mission state line
+    // beside it keeps the exact canonical pair, so the token is never lost —
+    // but the two must still be the SAME resolution, and this proves it by
+    // translating the mission line's own token through the shipped seam.
+    const gateToken = /^GATE READINESS ([A-Z_]+) · /.exec(hud);
+    assert.ok(gateToken, `${name}: the HUD mission state carries no exact gate code: ${hud}`);
+    assert.ok(Object.prototype.hasOwnProperty.call(RUN_STATE_PLAIN, gateToken[1]),
+      `${name}: the HUD gate code ${gateToken[1]} has no plain word in the shipped label seam`);
+    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN[gateToken[1]],
       `${name}: the HUD mission module reports a different gate verdict than the core: ${hud}`);
+    assert.ok(!/[A-Z]{2,}|_/.test(page.text('hud-core-status')),
+      `${name}: the AEGIS Core still leads with a machine token: ${page.text('hud-core-status')}`);
     // The complete gate sentence stays in the brief, and only there on the
     // first screen — that duplication is what made this screen unreadable.
     const now = briefField(page, 'now').value;
@@ -4802,7 +4932,7 @@ test('DOM: a finished-but-unverified run is explained in founder language, not i
     'the deck cannot explain why the integrated version still requires verification');
 
   // The refusal itself is unchanged.
-  assert.strictEqual(page.text('hud-core-status'), 'BLOCKED',
+  assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.BLOCKED,
     'founder language softened a blocked control state into a finished one');
   assert.match(briefField(page, 'needs-marc').value, /older code version/,
     'Attention dropped the real blocker');
@@ -6057,7 +6187,7 @@ test('DOM: new recorded builder activity cues the core once, and the opening sna
     'a different recorded activity category at the same evidence time was folded into a duplicate');
   // The cue is worker evidence, not a gate outcome: the core still prints the
   // canonical lifecycle word, and the gate is still recorded as BLOCKED.
-  assert.strictEqual(page.text('hud-core-status'), 'RUNNING',
+  assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.RUNNING,
     'the core cue moved the canonical core status word');
   assert.strictEqual(page.text('hud-gate-state'), 'BLOCKED',
     'a cue for new worker evidence turned a blocking gate into a passing one');
@@ -6350,7 +6480,7 @@ async function asyncTests() {
     for (let i = 0; i < 10; i++) await Promise.resolve();
     assert.match(page.text('founder-body'), /Render the authenticated live mission/i,
       'authenticated /api/status did not repopulate the founder mission');
-    assert.strictEqual(page.text('hud-core-status'), 'RUNNING');
+    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.RUNNING);
     assert.match(page.text('hud-crew'), /claude/i,
       'authenticated route evidence did not repopulate the crew instrument');
     assert.match(page.text('fatal'), /LIVE STATUS ACTIVE — generated state\.js is unavailable/,
@@ -6366,7 +6496,7 @@ async function asyncTests() {
     assert.match(page.text('fatal'), /UNAVAILABLE — no AEGIS state is loaded/);
     assert.match(page.text('live-conn-state'), /UNAVAILABLE — could not bootstrap \/api\/status/);
     assert.match(page.text('founder-body'), /UNAVAILABLE/i);
-    assert.strictEqual(page.text('hud-core-status'), 'UNAVAILABLE');
+    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.UNAVAILABLE);
     assert.match(page.text('runs-list'), /Run history UNAVAILABLE/i);
     assert.doesNotMatch(page.text('runs-list'), /No runs yet/i,
       'two unavailable state sources fabricated a clean empty run ledger');
@@ -6439,7 +6569,7 @@ async function asyncTests() {
     assert.match(page.text('runs-list'), /Mandatory host containment is pending/);
     assert.doesNotMatch(page.text('founder-body'), /final required evidence/i,
       'the primary pilot deck called pre-host checks final');
-    assert.strictEqual(page.text('hud-core-status'), 'WAITING');
+    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.WAITING);
   });
 
   await atest('DOM: unverified check counters never render snapshot PASS prose', async () => {
@@ -8639,7 +8769,7 @@ async function asyncTests() {
     assert.ok(!allNodes(page.document.getElementById('runs-list'))
       .some((node) => node.tagName === 'BUTTON' && node.textContent === 'Retry'),
     'unsafe same-provider Retry was exposed for MODEL_AUTH_FAILURE');
-    assert.strictEqual(page.text('hud-core-status'), 'BLOCKED');
+    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.BLOCKED);
   });
 
   await atest('DOM: unverified worker termination is BLOCKED, never STOPPED, and exposes only administrative abandonment', async () => {
@@ -8671,7 +8801,7 @@ async function asyncTests() {
       .filter((node) => node.tagName === 'BUTTON').map((node) => node.textContent);
     assert.ok(buttons.includes('Cancel'), 'administrative abandonment was not available');
     assert.ok(!buttons.includes('Retry'), 'unsafe Retry was exposed while termination remained unverified');
-    assert.strictEqual(page.text('hud-core-status'), 'BLOCKED');
+    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.BLOCKED);
   });
 
   await atest('DOM: BUILDING Cancel requires verified async ownership, disables pending, then repaints from SSE', async () => {
@@ -10141,14 +10271,41 @@ async function asyncTests() {
     return { host, fields, chips, chipNode: chips.gate };
   }
 
+  // A chip states its condition four ways: the machine attribute beside it, a
+  // written word the operator can read, a glyph, and the exact canonical code
+  // kept on the title and in the s-STATE style. Colour is never the carrier and
+  // the token is never the headline, but the token is never lost either.
   function assertChipShape(chipNode, state, label) {
     assert.ok(chipNode, `the identity line has no ${label} chip`);
     assert.strictEqual(chipNode.children.length, 2,
       `the ${label} chip must carry a glyph and a written state, not colour alone`);
     assert.ok(chipNode.children[0].textContent.trim().length > 0,
       `the ${label} chip glyph is empty, leaving colour as the only shape`);
-    assert.strictEqual(chipNode.children[1].textContent, state,
-      `the ${label} chip does not write out its canonical state`);
+    assert.ok(Object.prototype.hasOwnProperty.call(RUN_STATE_PLAIN, state),
+      `${label}: ${state} has no plain word in the shipped label seam`);
+    assert.strictEqual(chipNode.children[1].textContent, RUN_STATE_PLAIN[state],
+      `the ${label} chip does not read its canonical state in plain English`);
+    assert.strictEqual(chipNode.attrs.title, 'Canonical state code: ' + state,
+      `the ${label} chip does not keep its exact canonical code accessible`);
+    assert.ok(String(chipNode.className).includes('s-' + state),
+      `the ${label} chip lost the canonical state style behind its plain word`);
+  }
+
+  // The plain word replaced the token on screen; the exact aegis-run code must
+  // still be on the same node, so nothing is softened away from an auditor.
+  function assertCanonicalField(line, state) {
+    const node = line.fields.canonical;
+    assert.ok(node, 'the identity line carries no lifecycle reading at all');
+    assert.ok(Object.prototype.hasOwnProperty.call(RUN_LIFECYCLE_PLAIN, state),
+      `${state} has no plain word in the shipped lifecycle label seam`);
+    assert.strictEqual(node.textContent, RUN_LIFECYCLE_PLAIN[state],
+      `the identity line does not read the recorded lifecycle state in plain English`);
+    assert.ok(!/[A-Z]{2,}|_/.test(node.textContent),
+      `the identity line still leads with a machine token: ${node.textContent}`);
+    assert.strictEqual(node.attrs['data-ops-run-code'], state,
+      `the identity line dropped the exact canonical code ${state}`);
+    assert.strictEqual(node.attrs.title, 'Canonical run state code: ' + state,
+      `the exact canonical code ${state} is not reachable from the plain word`);
   }
 
   // The gate chip states its condition three ways, exactly like a strip cell:
@@ -10194,8 +10351,7 @@ async function asyncTests() {
     assert.strictEqual(line.host.attrs['data-ops-run-id'], 'RUN-SUPERVISION');
     assert.strictEqual(line.fields.id.textContent, 'RUN-SUPERVISION',
       'the identity line does not name the canonically bound run');
-    assert.strictEqual(line.fields.canonical.textContent, 'BUILDING',
-      'the identity line does not carry the recorded canonical lifecycle state');
+    assertCanonicalField(line, 'BUILDING');
     assert.match(line.fields.why.textContent,
       /Nothing has finished yet — the assigned worker is still building this change\./,
       `the recorded state is not stated in founder language: ${line.fields.why.textContent}`);
@@ -10214,8 +10370,7 @@ async function asyncTests() {
     // separating the two questions may not soften a real failure.
     assertBuildChip(line, 'BLOCKED');
     assert.strictEqual(line.fields.id.textContent, 'RUN-OLD-FAILED');
-    assert.strictEqual(line.fields.canonical.textContent, 'REVIEW_FAILED',
-      'the recorded canonical state of the displayed run is missing');
+    assertCanonicalField(line, 'REVIEW_FAILED');
     assert.match(line.fields.why.textContent,
       /Nothing finished — this run stopped on independent review\./,
       `the failed outcome is not stated in founder language: ${line.fields.why.textContent}`);
@@ -10237,7 +10392,7 @@ async function asyncTests() {
     assertBuildChip(line, 'UNAVAILABLE');
     assert.strictEqual(line.host.attrs['data-ops-run-id'], 'UNAVAILABLE');
     assert.strictEqual(line.fields.id.textContent, 'UNAVAILABLE');
-    assert.strictEqual(line.fields.canonical.textContent, 'UNAVAILABLE');
+    assertCanonicalField(line, 'UNAVAILABLE');
     assert.match(line.fields.why.textContent,
       /UNAVAILABLE — canonical binding evidence does not name a current run/,
       `an unbound page did not fail closed: ${line.fields.why.textContent}`);
@@ -10284,8 +10439,7 @@ async function asyncTests() {
     assertIdentityChip(line, 'BLOCKED');
     // The worker is stated separately, and truthfully.
     assertBuildChip(line, 'WAITING');
-    assert.strictEqual(line.fields.canonical.textContent, 'CHECKS_PASSED',
-      'the recorded canonical lifecycle state of the finished worker is missing');
+    assertCanonicalField(line, 'CHECKS_PASSED');
     assert.match(line.fields.why.textContent, /The build finished and its automated checks passed\./,
       `a finished worker was not stated as finished: ${line.fields.why.textContent}`);
     assert.ok(!/Nothing finished|Nothing has finished yet|stopped on/.test(line.fields.why.textContent),
@@ -10319,7 +10473,7 @@ async function asyncTests() {
     assert.ok(!/required checks on this exact code version|unmet requirements/.test(crew),
       `the crew instrument substituted the gate's reason for the worker state: ${crew}`);
     // The gate itself is untouched: same state word, now explicitly labelled.
-    assert.strictEqual(page.text('hud-core-status'), 'BLOCKED');
+    assert.strictEqual(page.text('hud-core-status'), RUN_STATE_PLAIN.BLOCKED);
     assert.match(code, /<div class="core-sub">Gate readiness<\/div>\s*<div class="core-status" id="hud-core-status">/,
       'the core does not name which question its state word answers');
   });
@@ -12698,22 +12852,36 @@ test('DOM: gate readiness rides the identity row and keeps its own label, chip a
   // Two separate chips, each a glyph plus a written state word, so neither
   // reading is legible by colour alone and neither can rewrite the other. The
   // gate chip is the control-plane reading the host already records; the build
-  // chip is the lifecycle reading, and it is not the same node.
+  // chip is the lifecycle reading, and it is not the same node. The word is now
+  // the operator's plain English, and the exact canonical code has to stay
+  // reachable on the same node — in its title and in its s-STATE style.
   for (const id of ['build', 'gate']) {
     const node = line.chips[id];
     assert.ok(node, `the identity row has no ${id} chip`);
     assert.strictEqual(node.children.length, 2,
       `the ${id} chip carries no glyph beside its written state`);
     assert.ok(node.children[0].textContent.trim().length > 0, `the ${id} chip glyph is empty`);
-    assert.match(node.children[1].textContent, /^[A-Z_]+$/,
-      `the ${id} chip does not write out its canonical state`);
+    assert.ok(!/[A-Z]{2,}|_/.test(node.children[1].textContent),
+      `the ${id} chip still leads with a machine token: ${node.children[1].textContent}`);
+    assert.match(node.attrs.title, /^Canonical state code: [A-Z_]+$/,
+      `the ${id} chip dropped the exact canonical code its plain word replaced`);
   }
   assert.notStrictEqual(line.chips.build, line.chips.gate,
     'the two readings were merged back into one chip on the compacted row');
-  assert.strictEqual(line.chips.gate.children[1].textContent, line.host.attrs['data-ops-run'],
+  assert.strictEqual(line.chips.gate.attrs.title,
+    'Canonical state code: ' + line.host.attrs['data-ops-run'],
     'the gate chip on the identity row is not the control-plane reading the line records');
-  assert.strictEqual(line.chips.build.children[1].textContent, 'RUNNING',
+  assert.strictEqual(line.chips.gate.children[1].textContent,
+    RUN_STATE_PLAIN[line.host.attrs['data-ops-run']],
+    'the gate chip does not read the control-plane state in plain English');
+  assert.strictEqual(line.chips.build.children[1].textContent, RUN_STATE_PLAIN.RUNNING,
     'a recorded running worker lost its lifecycle reading when the row was compacted');
+  // The lifecycle state itself reads as what it means, and its exact aegis-run
+  // code is still carried on the very node whose word replaced it.
+  assert.strictEqual(line.fields.canonical.textContent, RUN_LIFECYCLE_PLAIN.BUILDING,
+    'the identity row still leads with the canonical lifecycle token');
+  assert.strictEqual(line.fields.canonical.attrs['data-ops-run-code'], 'BUILDING');
+  assert.strictEqual(line.fields.canonical.attrs.title, 'Canonical run state code: BUILDING');
   assert.ok(allNodes(line.host.children[0]).some((node) => node.attrs['data-ops-run-chip'] === 'gate'),
     'the gate chip was moved off the identity row instead of onto it');
   // The sentence that stops a recorded run from being read as live work is
@@ -12733,7 +12901,8 @@ test('DOM: gate readiness rides the identity row and keeps its own label, chip a
     assert.ok(!renderer.includes(banned),
       `the identity renderer uses ${banned} — it may only paint the resolution it was handed`);
   }
-  assert.ok(/chip\(identity\.build\)/.test(renderer) && /chip\(identity\.state\)/.test(renderer),
+  assert.ok(/opsChip\(identity\.build, opsChipLabel\('run-state', identity\.build\)\)/.test(renderer) &&
+    /opsChip\(identity\.state, opsChipLabel\('run-state', identity\.state\)\)/.test(renderer),
     'the identity row stopped painting both the build and the gate reading');
 });
 

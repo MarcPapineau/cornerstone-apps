@@ -3575,9 +3575,15 @@
       item.setAttribute('data-station', station.id);
       item.setAttribute('data-station-role', role);
       item.appendChild(el('span','core-station-name',station.label));
+      // The role stays the mark's leading word and the station's own
+      // data-station-role; only the state beside it is read as what it means.
+      // The exact canonical code is not lost — the station note directly below
+      // still writes "canonical run state X" in full, and a proven handoff
+      // still prints "Canonical X → Y". Those are this path's detail surfaces.
       item.appendChild(el('span','core-station-mark',
-        isCurrent ? 'CURRENT · ' + run.state
-          : (isFrom ? 'HANDED FROM · ' + moved.from : 'NOT CURRENT')));
+        isCurrent ? 'CURRENT · ' + opsChipLabel('run-lifecycle', run.state)
+          : (isFrom ? 'HANDED FROM · ' + opsChipLabel('run-lifecycle', moved.from)
+            : 'NOT CURRENT')));
       // Identity is only ever named for the station canonical state proves the
       // run is on, and only from the model/tool the run record already carries.
       if (isCurrent) item.appendChild(el('span','core-station-holder','Held by ' + handoffActor(run.state, run)));
@@ -3586,8 +3592,8 @@
     if (!run || !run.state){
       note.textContent = 'HANDOFF PATH UNAVAILABLE — no run is bound, so no station is current.';
     } else if (!current){
-      note.textContent = 'Canonical run state ' + run.state + ' belongs to no station on this path, ' +
-        'so no station is marked current.';
+      note.textContent = 'Canonical run state ' + run.state + ' belongs to no station on this path' +
+        ', so no station is marked current.';
     } else {
       note.textContent = 'Current station: ' + current.label + ' — canonical run state ' + run.state +
         ', held by ' + handoffActor(run.state, run) + '.';
@@ -4926,6 +4932,19 @@
     'run-state': { RUNNING: 'Running', WAITING: 'Waiting', BLOCKED: 'Needs attention',
       COMPLETE: 'Finished', UNVERIFIED: 'Not confirmed', IDLE: 'Nothing running',
       UNAVAILABLE: 'Not recorded' },
+    // The canonical aegis-run lifecycle vocabulary, read through the SAME seam
+    // and the same closed-map discipline, so the first screen can lead with what
+    // the run means instead of with BUILD_FAILED, CHECKS_PASSED or REVIEW_BOUND.
+    // It renames nothing and decides nothing: aegis-run still owns the states,
+    // and the exact code stays written out wherever it already was — the handoff
+    // note, the mission line, the run cards, Detail View and every receipt.
+    'run-lifecycle': { CREATED: 'Run created', INTAKE_RECORDED: 'Objective recorded',
+      ROUTED: 'Builder chosen', WORKTREE_READY: 'Workspace ready', BUILDING: 'Building',
+      BUILD_CONTINUED: 'Build resumed', BUILT: 'Build finished', BUILD_FAILED: 'Build failed',
+      CHECKS_PASSED: 'Checks passed', CHECKS_FAILED: 'Checks failed',
+      REVIEW_BOUND: 'Review evidence attached', REVIEW_FAILED: 'Review failed',
+      CORRECTING: 'Correcting', CHECKPOINTED: 'Safe checkpoint reached',
+      ROLLED_BACK: 'Rolled back', ABANDONED: 'Abandoned', UNAVAILABLE: 'Not recorded' },
     progress: { PROGRESS_RECORDED: 'Activity recorded', PROGRESS_UNRECORDED: 'No activity recorded',
       TIMED_OUT: 'Timed out', NOT_RUNNING: 'Nothing running', UNAVAILABLE: 'Not recorded' },
     watchdog: { RECORDED: 'Limits recorded', TIMED_OUT: 'Timed out',
@@ -4935,9 +4954,14 @@
     checkpoint: { AVAILABLE: 'Recorded', INCOMPLETE: 'Incomplete record',
       BLOCKED: 'Needs attention', UNAVAILABLE: 'Not recorded' }
   };
+  // Own-property lookup only: this seam is now handed canonical run states that
+  // arrive over the wire, and an inherited member must never be able to render
+  // as a state word.
   function opsChipLabel(id, token){
-    var known = OPS_CHIP_PLAIN[id] || {};
-    return known[token] || ('Unknown state ' + token);
+    var known = Object.prototype.hasOwnProperty.call(OPS_CHIP_PLAIN, id)
+      ? OPS_CHIP_PLAIN[id] : {};
+    return Object.prototype.hasOwnProperty.call(known, token)
+      ? known[token] : ('Unknown state ' + token);
   }
   // The same chip shape used everywhere — colour, glyph and a written word — with
   // the plain word in front and the exact canonical code carried in the title.
@@ -5077,10 +5101,21 @@
     idNode.setAttribute('data-ops-run-field','id');
     line.appendChild(idNode);
     line.appendChild(el('span','ops-run-label','BUILD ACTIVITY'));
-    var canonicalNode = el('span','ops-run-canonical',identity.canonical);
+    // The lifecycle state, read as what it means rather than as the token that
+    // records it. The exact canonical code is not dropped: it stays on this
+    // node's own machine attribute and exact-code title, and it is still
+    // written out in full by the handoff note, the mission line, the run card
+    // and every Detail View receipt. Only the word the owner reads changes.
+    var canonicalNode = el('span','ops-run-canonical',
+      opsChipLabel('run-lifecycle', identity.canonical));
     canonicalNode.setAttribute('data-ops-run-field','canonical');
+    canonicalNode.setAttribute('data-ops-run-code', identity.canonical);
+    canonicalNode.setAttribute('title','Canonical run state code: ' + identity.canonical);
     line.appendChild(canonicalNode);
-    var buildChip = chip(identity.build);
+    // The same chip the five cells beneath already use: a plain word in front,
+    // the canonical token kept exact on the title and in the s-STATE style, and
+    // the same glyph, so neither reading changes shape, colour or severity.
+    var buildChip = opsChip(identity.build, opsChipLabel('run-state', identity.build));
     buildChip.setAttribute('data-ops-run-chip','build');
     line.appendChild(buildChip);
     // Both labelled readings share the identity row, so the ribbon costs one
@@ -5089,7 +5124,7 @@
     // sentence below is still written in full and never clamped.
     var gate = el('span','ops-run-gate');
     gate.appendChild(el('span','ops-run-label','GATE READINESS'));
-    var gateChip = chip(identity.state);
+    var gateChip = opsChip(identity.state, opsChipLabel('run-state', identity.state));
     gateChip.setAttribute('data-ops-run-chip','gate');
     gate.appendChild(gateChip);
     line.appendChild(gate);
@@ -6085,7 +6120,11 @@
     // and the brief already carry on the same screen.
     hudText('hud-mission-state', 'GATE READINESS ' + controlState.state +
       ' · RUN LIFECYCLE ' + opState.state);
-    hudText('hud-core-status', controlState.state);
+    // The core is the largest state word on the first screen, so it reads as
+    // what the gate means through the same seam the five operational cells use.
+    // It is the same resolution — controlState.state — and the exact code is
+    // still printed beside it on the mission module's own state line above.
+    hudText('hud-core-status', opsChipLabel('run-state', controlState.state));
     hudText('hud-crew', crew);
     // currentAction is overwritten with the gate's reason whenever the control
     // plane blocks, so reading it here described a stopped or finished worker
