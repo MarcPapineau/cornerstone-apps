@@ -1,0 +1,56 @@
+{
+  "packetId": "PKT-20260905-BUILD-LANE-SELECTOR",
+  "agentId": "claude-code",
+  "objective": "Add a plain-English dashboard build-lane selector backed by an exact server-owned packet allowlist, with no browser-selected paths or execution authority.",
+  "constraints": [
+    "Modify only the dashboard host, dashboard page, and their two focused test files",
+    "Browser input may submit only an opaque laneId; it may never submit a packet path, packet ID, command, model, provider, timeout, permissions, files, or tests",
+    "No default or fallback to the broad operator-beta packet",
+    "Lane choice is immutable after intake and Retry cannot change it",
+    "Existing packet validation, packet digest retention, routing, checks, authorization, and Start runId-only boundary remain authoritative",
+    "Use only the two already-existing validated packets named in this implementation packet"
+  ],
+  "sourceOfTruth": [
+    "builder-control/CONTROL-CONTRACT.md",
+    "builder-control/hosting/server.cjs",
+    "builder-control/dashboard/index.html",
+    "builder-control/packets/PKT-20260904-DASHBOARD-PRESENTATION.json",
+    "builder-control/packets/PKT-20260901-AEGIS-CONTROL-SURFACE-BETA.json"
+  ],
+  "filesAllowed": [
+    "builder-control/hosting/server.cjs",
+    "builder-control/dashboard/index.html",
+    "builder-control/test/hosting.test.cjs",
+    "builder-control/test/dashboard-slice.test.cjs"
+  ],
+  "testsRequired": [
+    "node builder-control/test/hosting.test.cjs",
+    "node builder-control/test/dashboard-slice.test.cjs",
+    "git diff --check"
+  ],
+  "coordination": {
+    "executionMode": "SERIAL_ONLY",
+    "dependsOnPacketIds": [
+      "PKT-20260905-PACKET-PLANNER"
+    ],
+    "writeSet": [
+      "builder-control/hosting/server.cjs",
+      "builder-control/dashboard/index.html",
+      "builder-control/test/hosting.test.cjs",
+      "builder-control/test/dashboard-slice.test.cjs"
+    ]
+  },
+  "stopConditions": [
+    "The browser can select or infer an arbitrary packet path or packet ID",
+    "The lane can change after objective intake",
+    "A missing or unknown lane creates a run, ledger entry, worktree, or worker",
+    "The implementation would require changing aegis-run.cjs, packet-tools.cjs, routing, worker, review, or schema files",
+    "Claude Code fails twice on the same issue"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — standing non-destructive AEGIS dashboard completion authorization, reaffirmed 2026-09-05",
+    "allowsProtectedPaths": [],
+    "allowsPublicPush": true,
+    "allowsRelease": false
+  }
+}
