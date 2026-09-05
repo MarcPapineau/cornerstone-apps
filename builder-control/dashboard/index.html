@@ -578,6 +578,39 @@
   .journal-tag{font:650 10px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;
     color:var(--text-1);border:1px solid var(--line);border-radius:3px;padding:3px 6px;
     overflow-wrap:anywhere}
+  /* ── change-type accent ──
+     Each RESOLVED change type carries one existing palette token in exactly two
+     restrained places: the card's left rail, and the border of the tag that
+     already prints that type in words. The colour is never the meaning — the tag
+     reads "Change type: Error repair" whether or not the accent paints — so it
+     only makes a day of cards easier to group down a column. It stops there on
+     purpose: it never touches the state chip beside it and never tints the card
+     body, because the recorded lifecycle state and the milestone emphasis below
+     own those, and a change type must never be able to look like either. The
+     milestone rule is written AFTER these and carries the same specificity, so a
+     proven entry still takes the cyan rail it earned.
+     Rails and tag borders are non-text indicators, held to this design's 3:1 bar.
+     The tag's own text keeps the --text-1 it was measured at rather than being
+     recoloured to an accent that would drop small type under the 4.5:1 it needs.
+     The palette holds no seven unmistakable hues — two of these are relatives
+     rather than opposites — which is the other reason the written label, and not
+     the accent, stays the authority on what a card is.
+     Unclassified is not a resolved type. It is given nothing and keeps exactly
+     the neutral card an unproven reading already had. */
+  .journal-entry[data-journal-category="structure"]{border-left:3px solid var(--blocked)}
+  .journal-entry[data-journal-category="structure"] [data-journal-tag="category"]{border-color:var(--blocked)}
+  .journal-entry[data-journal-category="speed"]{border-left:3px solid var(--active)}
+  .journal-entry[data-journal-category="speed"] [data-journal-tag="category"]{border-color:var(--active)}
+  .journal-entry[data-journal-category="error-repair"]{border-left:3px solid var(--fail)}
+  .journal-entry[data-journal-category="error-repair"] [data-journal-tag="category"]{border-color:var(--fail)}
+  .journal-entry[data-journal-category="optimization"]{border-left:3px solid var(--pass)}
+  .journal-entry[data-journal-category="optimization"] [data-journal-tag="category"]{border-color:var(--pass)}
+  .journal-entry[data-journal-category="tooling"]{border-left:3px solid var(--warn)}
+  .journal-entry[data-journal-category="tooling"] [data-journal-tag="category"]{border-color:var(--warn)}
+  .journal-entry[data-journal-category="visual"]{border-left:3px solid var(--orange)}
+  .journal-entry[data-journal-category="visual"] [data-journal-tag="category"]{border-color:var(--orange)}
+  .journal-entry[data-journal-category="clarity"]{border-left:3px solid var(--unknown)}
+  .journal-entry[data-journal-category="clarity"] [data-journal-tag="category"]{border-color:var(--unknown)}
   .journal-tag.is-milestone{color:#d8f5ff;border-color:var(--cyan);background:var(--cyan-soft)}
   .journal-entry[data-journal-milestone="RECORDED"]{border-color:var(--cyan);
     border-left:3px solid var(--cyan);background:rgba(20,38,52,.72)}

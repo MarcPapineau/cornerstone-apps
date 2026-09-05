@@ -12375,6 +12375,145 @@ test('the milestone emphasis is a shape and a word before it is a colour, and it
     'the state chip, change type and milestone flag compete for one phone line');
 });
 
+// ── the change type is easier to scan, and no easier to misread ────────────
+// A day of build updates is read down a column, and seven identically grey
+// cards make an owner read seven headings to find the one type they came for.
+// So each RESOLVED type carries one accent in two places — the card's left rail
+// and the border of the tag that already prints the type in words.
+//
+// The failures guarded here are exactly the ones an accent invites: a colour
+// that starts carrying the meaning the label carried; an accent that reaches the
+// recorded state chip or the milestone emphasis and lets a change type look like
+// a lifecycle fact; a new colour, category or id invented to be accented; two
+// types sharing one accent, which groups nothing; and the "unclassified" refusal
+// quietly given a look of its own so a proven reading and a refused one stop
+// being told apart.
+const JOURNAL_ACCENTS = [
+  ['structure', '--blocked'], ['speed', '--active'], ['error-repair', '--fail'],
+  ['optimization', '--pass'], ['tooling', '--warn'], ['visual', '--orange'],
+  ['clarity', '--unknown'],
+];
+
+const JOURNAL_ACCENT_LABELS = {
+  structure: ['Restructure the evidence rail', 'Structure'],
+  speed: ['Speed up the founder deck', 'Speed'],
+  'error-repair': ['Repair the broken receipt binding', 'Error repair'],
+  optimization: ['Optimise the ledger read path', 'Optimization'],
+  tooling: ['Add a harness for the governed worker', 'Tooling'],
+  visual: ['Tighten the spacing on the deck', 'Visual'],
+  clarity: ['Make the gate wording readable', 'Clarity'],
+};
+
+function journalEmphasisCss() {
+  const start = code.indexOf('.journal-badges{');
+  const end = code.indexOf('\n\n', start);
+  assert.ok(start !== -1 && end > start, 'the journal emphasis CSS block was not found');
+  return code.slice(start, end);
+}
+
+function journalCategoryTag(row) {
+  const found = findByAttr(row, 'data-journal-tag')
+    .find((node) => node.attrs['data-journal-tag'] === 'category');
+  assert.ok(found, 'the entry carries no change-type tag at all');
+  return found;
+}
+
+test('each resolved change type carries one distinct accent, declared only as a rail and a tag border', () => {
+  const css = journalEmphasisCss();
+  const tokens = new Set();
+  for (const [id, token] of JOURNAL_ACCENTS) {
+    // Each assertion matches the WHOLE declaration block, so a rule that also
+    // filled, recoloured, clamped or animated the card would not match at all.
+    assert.ok(new RegExp(`\\.journal-entry\\[data-journal-category="${id}"\\]\\{border-left:3px solid var\\(${token}\\)\\}`)
+      .test(css), `the ${id} card carries no left rail of its own, or its rail declares more than a border`);
+    assert.ok(new RegExp(`\\.journal-entry\\[data-journal-category="${id}"\\] \\[data-journal-tag="category"\\]\\{border-color:var\\(${token}\\)\\}`)
+      .test(css), `the ${id} change-type tag carries no accent of its own, or it recolours the tag's text`);
+    // Only tokens this stylesheet already declares: an accent may not introduce
+    // a colour, and the tag's own text keeps the --text-1 it was measured at.
+    assert.ok(new RegExp(`${token}:\\s*#`).test(code),
+      `${token} is not an existing palette token, so the accent invented a colour`);
+    tokens.add(token);
+  }
+  assert.strictEqual(tokens.size, JOURNAL_ACCENTS.length,
+    'two change types share one accent, so the accent groups nothing');
+  assert.ok(!tokens.has('--cyan'),
+    'a change type took the accent a proven milestone is emphasised with');
+
+  // Exactly fourteen rules: one rail and one tag border per resolved type, and
+  // nothing else keyed to a change type anywhere in this block.
+  const accentRules = css.split('\n').filter((line) => line.includes('[data-journal-category='));
+  assert.strictEqual(accentRules.length, JOURNAL_ACCENTS.length * 2,
+    'the change-type accent is drawn by more or fewer rules than one rail and one tag border per type');
+  for (const rule of accentRules) {
+    assert.ok(!/\.chip|is-milestone|data-journal-tag="milestone"|data-journal-state|data-journal-milestone/.test(rule),
+      `a change-type accent reaches the recorded state or milestone signal: ${rule.trim()}`);
+  }
+  assert.ok(!/@keyframes/.test(css) && !/\banimation\s*:/.test(css) && !/\btransition\s*:/.test(css),
+    'the change-type accent animates — a card may not move to look like a category');
+
+  // The proven milestone still wins the rail it earned: the two rules carry the
+  // same specificity, so the milestone rule must stay written after these.
+  const lastAccent = css.lastIndexOf('[data-journal-category=');
+  const milestone = css.indexOf('.journal-entry[data-journal-milestone="RECORDED"]');
+  assert.ok(milestone !== -1 && lastAccent !== -1 && milestone > lastAccent,
+    'the change-type accent is written after the milestone rule, so it steals the rail a proven entry earned');
+  assert.ok(/\.journal-entry\[data-journal-milestone="RECORDED"\]\{[^}]*border-left:3px solid var\(--cyan\)/.test(css),
+    'the proven milestone lost the rail of its own when the change type gained one');
+
+  // The accented ids are the published ones. Nothing was invented to be
+  // accented, and the refusal is not a type and is given nothing.
+  const lexicon = code.slice(code.indexOf('var JOURNAL_CATEGORIES = ['),
+    code.indexOf('var JOURNAL_UNCLASSIFIED'));
+  assert.strictEqual((lexicon.match(/\{ id: '/g) || []).length, JOURNAL_ACCENTS.length + 1,
+    'the published category list no longer holds exactly the accented types plus the unclassified fallback');
+  for (const [id] of JOURNAL_ACCENTS) {
+    assert.ok(lexicon.includes(`{ id: '${id}'`), `${id} is accented but is not a published change type`);
+  }
+  assert.ok(!/data-journal-category="unclassified"/.test(code),
+    'the unclassified refusal was given a look of its own instead of the neutral card it already had');
+
+  // Phone width is untouched: the accented tag still wraps rather than dragging
+  // a 390px viewport sideways, and the badges still get their own row.
+  assert.ok(/\.journal-empty,\.journal-line,\.journal-tag\{overflow-wrap:anywhere\}/.test(PHONE),
+    'the accented change-type tag no longer wraps at phone width');
+  assert.ok(/\.journal-badges\{width:100%\}/.test(PHONE),
+    'the accented change-type tag now competes with the state chip for one phone line');
+});
+
+test('DOM: an accented card still names its change type in words, and unclassified stays plain', () => {
+  for (const [id, [objective, label]] of Object.entries(JOURNAL_ACCENT_LABELS)) {
+    const row = journalOneRow([journalDatedRun({ objective })]);
+    // The attribute the accent is keyed to is the resolver's own reading, so an
+    // accent can never be painted onto an entry whose sentence disagrees.
+    assert.strictEqual(row.attrs['data-journal-category'], id,
+      `"${objective}" no longer resolves to the type its accent is keyed to`);
+    const tag = journalCategoryTag(row);
+    assert.strictEqual(tag.textContent, `Change type: ${label}`,
+      `the ${id} accent replaced or abbreviated the written type instead of accompanying it`);
+    assert.ok(String(tag.className).split(/\s+/).includes('journal-tag'),
+      `the ${id} tag lost the class its wrapping and phone rules are written against`);
+    assert.match(journalLine(row, 'category'),
+      new RegExp(`Change type as requested: ${label} — the recorded objective uses`),
+      `the ${id} entry lost the sentence its accent was read from`);
+  }
+
+  // A refusal is not a type: it carries the same written label and no accent.
+  const unclassified = journalOneRow([journalDatedRun({ objective: 'Record the founder objective' })]);
+  assert.strictEqual(unclassified.attrs['data-journal-category'], 'unclassified');
+  assert.strictEqual(journalCategoryTag(unclassified).textContent, 'Change type: Unclassified',
+    'the unclassified refusal stopped naming itself when the resolved types gained accents');
+
+  // Type and milestone are two readings, and the accent took neither from the
+  // other: a proven entry keeps its evidence-backed flag and its type.
+  const proven = journalOneRow([journalCheckpointRun({ objective: 'Restructure the evidence rail' })]);
+  assert.strictEqual(proven.attrs['data-journal-category'], 'structure');
+  assert.strictEqual(proven.attrs['data-journal-milestone'], 'RECORDED');
+  assert.strictEqual(journalCategoryTag(proven).textContent, 'Change type: Structure');
+  assert.ok(findByAttr(proven, 'data-journal-tag')
+    .some((node) => node.attrs['data-journal-tag'] === 'milestone'),
+    'a proven milestone lost its flag when the change type gained an accent');
+});
+
 test('the three added journal facts are each resolved from one named canonical source', () => {
   const journal = code.slice(code.indexOf('var JOURNAL_WINDOW_MS'),
     code.indexOf('function renderFounderSummary'));
