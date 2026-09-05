@@ -3768,6 +3768,9 @@
     var current = run && run.state ? pathStation(run.state) : null;
     var moved = (proven && run && proven.runId === run.runId && proven.to === run.state) ? proven : null;
     var from = moved ? pathStation(moved.from) : null;
+    // The plate the path itself marks CURRENT, kept so the Inspector can open on
+    // the station this render already resolved rather than resolve one of its own.
+    var currentItem = null;
     track.textContent = '';
     CORE_PATH.forEach(function(station){
       var item = el('li','core-station');
@@ -3793,6 +3796,7 @@
       // Identity is only ever named for the station canonical state proves the
       // run is on, and only from the model/tool the run record already carries.
       if (isCurrent) item.appendChild(el('span','core-station-holder','Held by ' + handoffActor(run.state, run)));
+      if (isCurrent) currentItem = item;
       track.appendChild(item);
     });
     if (!run || !run.state){
@@ -3804,6 +3808,9 @@
       note.textContent = 'Current station: ' + current.label + ' — canonical run state ' + run.state +
         ', held by ' + handoffActor(run.state, run) + '.';
     }
+    // The Inspector opens on whatever this render just marked, and on the exact
+    // sentence written above it. Nothing is resolved a second time here.
+    openStationOnRail(current, run, currentItem, note.textContent);
     line.setAttribute('data-core-handoff', moved ? 'ACTIVE' : 'INACTIVE');
     if (!moved){
       // No proven transition, so the path says nothing about one. It does not
@@ -3816,6 +3823,77 @@
     line.textContent = 'Last proven handoff: ' + handoffActor(moved.from, run) + ' handed off to ' +
       handoffActor(moved.to, run) + '. Canonical ' + moved.from + ' → ' + moved.to +
       ', run record written ' + (moved.at || 'UNAVAILABLE') + '.';
+  }
+
+  // ── the Inspector's opening answer ────────────────────────────────
+  // The right rail shipped empty until something was clicked. At the ordinary
+  // 1292×994 laptop viewport that rail is seated beside the HUD on the first
+  // screen, so the operator opened the deck onto "Select a route stage,
+  // connector or reviewer" next to an instrument that was plainly mid-run. This
+  // opens it on the station the path directly above has ALREADY marked CURRENT.
+  //
+  // It reaches nothing new and decides nothing. The station is the one
+  // pathStation(run.state) resolved for the track, the sentence is the note the
+  // path has already written, the state is the run's own canonical code, and the
+  // provenance is the run record those came from — so there is no second status
+  // source here, and no second reading of the run.
+  //
+  // It is not a control and it is not motion: no station becomes clickable or
+  // focusable, nothing is focused or scrolled, no timer or transition is
+  // involved, and the rail is rewritten only when the canonical reading of the
+  // current station actually changes. A repaint that resolves to the same run
+  // and the same reading re-points the mark at the freshly rendered plate and
+  // writes nothing else.
+  //
+  // And it yields permanently. The first time the operator selects a route
+  // stage, connector or reviewer — by pointer or by keyboard — or clears the
+  // rail with Escape, this stops writing to the Inspector for the rest of the
+  // session, so no repaint and no live push can take that selection back.
+  //
+  // These four are the Inspector's own state. They are declared here, ahead of
+  // the first paint, because the opening answer is written during that paint:
+  // initialising them further down the file would erase it.
+  var current = null;                  // the node the Inspector is showing
+  var currentOperatorSelection = null;
+  var stationOnRail = null;            // the station reading the rail is showing
+  var operatorOwnsInspector = false;
+
+  function openStationOnRail(station, run, item, note){
+    if (operatorOwnsInspector) return;
+    // No bound run, or a canonical state that belongs to no station on the path.
+    // The note above says exactly that, and the rail must not go on showing a
+    // station that is no longer current: it returns to its own prompt.
+    if (!station || !item || !run || !run.state){
+      if (stationOnRail === null) return;
+      stationOnRail = null;
+      if (current) current.removeAttribute('aria-current');
+      current = null; currentOperatorSelection = null;
+      var box = $('inspector'); box.textContent = '';
+      box.appendChild(el('p','empty','Select a route stage, connector or reviewer.'));
+      return;
+    }
+    // What the rail is showing, in full: which run, which station, and the exact
+    // sentence the path wrote — which already carries the canonical state and
+    // the holder. Keying on the station alone would leave BUILDING on the rail
+    // after the run reached BUILT, because both sit at the same station.
+    var key = (run.runId || 'UNBOUND') + ' · ' + station.id + ' · ' + note;
+    if (stationOnRail === key){
+      // The same reading again, on a freshly rendered plate. The rail is already
+      // correct, so only the mark moves onto the node now in the page.
+      if (current && current !== item) current.removeAttribute('aria-current');
+      current = item; item.setAttribute('aria-current','true');
+      return;
+    }
+    stationOnRail = key;
+    select(item, 'stage', {
+      label: station.label,
+      state: run.state,
+      reason: note,
+      id: station.id,
+      source: run.source || 'UNAVAILABLE — the bound run record path is not in the current projection',
+      authorityNote: 'the bound run record’s own canonical state, read through the handoff path ' +
+        'above; this view re-expresses it and decides nothing'
+    }, true);
   }
 
   // ── the one evidence cue on the AEGIS Core ────────────────────────
@@ -7714,8 +7792,10 @@
   renderResearch(S.research);
 
   // ── inspector ───────────────────────────────────────────────────
-  var current = null;
-  var currentOperatorSelection = null;
+  // `current`, `currentOperatorSelection`, `stationOnRail` and
+  // `operatorOwnsInspector` are declared with the opening answer further up,
+  // which runs during the first paint; re-initialising them here would clear
+  // the station the rail just opened on.
   function resolvedConnector(data){
     var live = data || {};
     var envelope = S && S.integration && S.integration.connectors;
@@ -7732,10 +7812,14 @@
   function known(value, unavailable){
     return value == null || value === '' ? (unavailable || 'UNAVAILABLE — no evidence in the current or generated projection') : value;
   }
-  function select(node, kind, data){
+  // `auto` is set ONLY by the opening answer above. Every pointer and keyboard
+  // path leaves it unset, and an unset call is the operator taking the rail:
+  // from that moment the opening answer stops writing to it.
+  function select(node, kind, data, auto){
     if (current) current.removeAttribute('aria-current');
     current = node; node.setAttribute('aria-current','true');
     currentOperatorSelection = { kind: kind, data: data };
+    if (!auto) operatorOwnsInspector = true;
     var box = $('inspector'); box.textContent = '';
     var dl = el('dl','kv');
     function kv(k,v){ dl.appendChild(el('dt',null,k)); dl.appendChild(el('dd',null, v == null ? '—' : String(v))); }
@@ -7745,7 +7829,13 @@
       kv('State', data.state); kv('Reason', data.reason);
       kv('Stage id', data.id);
       box.appendChild(dl);
-      box.appendChild(prov(eng.source, 'derived from the gate verdict; this view re-expresses it and decides nothing'));
+      // A gate stage carries no source of its own and keeps the gate's, which is
+      // where its verdict came from. A handoff-path station is not a gate
+      // verdict — it is the bound run record's own canonical state — so it hands
+      // in the record it was read from rather than being printed under a
+      // provenance that never produced it.
+      box.appendChild(prov(data.source || eng.source,
+        data.authorityNote || 'derived from the gate verdict; this view re-expresses it and decides nothing'));
     } else if (kind === 'connector'){
       var connector = resolvedConnector(data);
       box.appendChild(el('h3',null,known(connector.label, 'Connector')));
@@ -7781,7 +7871,11 @@
       kv('Note','Available to run is not the same as having run. A review counts only when a record is bound to this subject.');
       box.appendChild(dl); box.appendChild(prov(data.source));
     }
-    $('live').textContent = (data.label || data.toolId) + ' selected.';
+    // "X selected." confirms an act the operator performed. The opening answer
+    // performed none, and this is the same live region the handoff indicator
+    // announces a proven transition into earlier in the very same paint — so an
+    // automatic open must not speak over it.
+    if (!auto) $('live').textContent = (data.label || data.toolId) + ' selected.';
   }
   function prov(src, extra){
     var p = el('div','prov');
@@ -7793,6 +7887,9 @@
 
   document.addEventListener('keydown', function(e){
     if (e.key === 'Escape' && current){
+      // Emptying the rail is the operator speaking too, so the opening answer
+      // must not refill it on the next repaint.
+      operatorOwnsInspector = true;
       current.removeAttribute('aria-current'); current = null;
       $('inspector').textContent = '';
       $('inspector').appendChild(el('p','empty','Select a stage, connector or reviewer.'));

@@ -14474,6 +14474,270 @@ test('the deck is the shipped surfaces re-seated: every answer still exists exac
     'the seated handoff path is no longer driven by the single handoff the indicator proved');
 });
 
+// ── the Inspector's opening answer ──────────────────────────────────────────
+// The right rail is the operator's own rail, and at the ordinary 1292×994
+// laptop viewport it is seated beside the HUD on the first screen. It shipped
+// empty until something was clicked, so the deck opened on "Select a route
+// stage, connector or reviewer" next to an instrument that was plainly mid-run.
+//
+// The failure these proofs guard against is that useless rail — and its exact
+// opposite, a rail that keeps rewriting itself over the operator's own
+// selection. So they hold both halves: the rail opens on the canonically
+// current handoff station with no click, and it never takes the rail back once
+// the operator has spoken.
+const OPENING_ROUTE_STAGE = Object.freeze({ id: 'build', step: 5, label: 'Builder execution',
+  state: 'ACTIVE', reason: 'the governed worker is still running' });
+
+const openingEngineering = () =>
+  Object.assign({}, fixtureState().engineering, { stages: [OPENING_ROUTE_STAGE] });
+
+function openingRun(over) {
+  return Object.assign({
+    runId: 'RUN-OPENING', state: 'BUILDING',
+    objective: 'Open the operator rail on the current stage',
+    updatedAt: '2026-09-04T10:00:00.000Z', transitions: 4, route: RAIL_ROUTE,
+    source: 'builder-control/runs/RUN-OPENING.json',
+    build: {
+      mode: 'async', status: 'RUNNING', workerPid: 8181,
+      startedAt: '2026-09-04T09:50:00.000Z', heartbeatAt: '2026-09-04T09:59:59.000Z',
+      endedAt: null, exit: null, timedOut: false, cancelAvailable: true,
+      activity: { active: true, phase: 'RUNNING', code: 'RUNNING', summary: 'Builder is running' },
+      supervision: RECORDED_ACTIVITY_SUPERVISION,
+    },
+  }, over || {});
+}
+
+// A stopped worker, so a push that moves the run past BUILDING is not also
+// claiming a builder is still running while it does so.
+const STOPPED_BUILD = Object.freeze({
+  mode: 'async', status: 'EXITED', workerPid: 8181,
+  startedAt: '2026-09-04T09:50:00.000Z', heartbeatAt: '2026-09-04T09:59:59.000Z',
+  endedAt: '2026-09-04T10:04:00.000Z', exit: 0, timedOut: false, cancelAvailable: false,
+  activity: { active: false, phase: 'STOPPED', code: 'EXITED', summary: 'Worker exited.' },
+  supervision: RECORDED_ACTIVITY_SUPERVISION,
+});
+
+function openingPage() {
+  const run = openingRun();
+  return bootPage(fixtureState({
+    generatedAt: '2026-09-04T10:00:00.000Z',
+    engineering: openingEngineering(),
+    runs: { state: 'OK', runs: [run], current: { state: 'BOUND', runId: run.runId,
+      updatedAt: run.updatedAt, reason: 'exact current run is bound' } },
+  }));
+}
+
+// The same evidence as a minimized /api/status push, so every repaint in these
+// proofs crosses the real switchboard seam rather than a renderer call a proof
+// made up for itself.
+function openingStatus(over) {
+  const run = openingRun(over);
+  return {
+    generatedAt: '2026-09-04T10:00:10.000Z',
+    engineering: openingEngineering(),
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [run],
+    runsBinding: { state: 'BOUND', runId: run.runId, updatedAt: run.updatedAt,
+      evidenceState: 'OK', reason: 'exact current run is bound' },
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  };
+}
+
+function unboundStatus() {
+  return {
+    generatedAt: '2026-09-04T10:06:00.000Z',
+    engineering: openingEngineering(),
+    integration: { connectors: [] }, reviewers: [],
+    cost: { state: 'UNAVAILABLE', reason: null },
+    runs: [],
+    runsBinding: { state: 'UNAVAILABLE', runId: null, updatedAt: null,
+      evidenceState: 'OK', reason: 'no run records exist yet, so no run is current.' },
+    events: [], knowledge: { state: 'UNKNOWN', conflicts: null },
+  };
+}
+
+// The station sentences are written here rather than read out of the page: a
+// silent rewording of the current-station reading must fail these proofs, not
+// be ratified by them.
+const BUILDING_STATION = 'Current station: Build — canonical run state BUILDING, ' +
+  'held by ' + RAIL_ROUTED_MODEL + '.';
+const BUILT_STATION = 'Current station: Build — canonical run state BUILT, ' +
+  'held by the deterministic checks.';
+const CHECKS_STATION = 'Current station: Checks — canonical run state CHECKS_PASSED, ' +
+  'held by independent review.';
+const RAIL_PROMPT = 'Select a route stage, connector or reviewer.';
+
+const railBody = (page) => page.text('inspector');
+const markedStations = (page) => allNodes(page.document.getElementById('core-path-track'))
+  .filter((node) => node.attrs['aria-current'] === 'true');
+const routeStages = (page) => allNodes(page.document.getElementById('topology-live-body'))
+  .filter((node) => node.tagName === 'BUTTON' && /route-node/.test(node.className));
+
+test('DOM: the Inspector opens on the canonically current handoff station, with no click', () => {
+  const page = openingPage();
+  const body = railBody(page);
+  assert.ok(!body.includes(RAIL_PROMPT),
+    'the operator rail still opens on an empty prompt beside a plainly running build');
+  for (const phrase of ['BuildStateBUILDING', 'Reason' + BUILDING_STATION, 'Stage idbuild']) {
+    assert.ok(body.includes(phrase), `the opened Inspector is missing: ${phrase}`);
+  }
+  // Exactly the sentence the handoff path itself wrote, not a second one
+  // composed for the rail — the two surfaces cannot disagree about one station.
+  assert.ok(page.text('core-path-note').includes(BUILDING_STATION),
+    'the rail and the handoff path no longer print the same current-station sentence');
+  // And under the run record's own provenance, never the gate verdict's.
+  assert.ok(body.includes('builder-control/runs/RUN-OPENING.json'),
+    'the opened station does not name the run record it was read from');
+  assert.ok(!body.includes('derived from the gate verdict'),
+    'a lifecycle station was printed under a gate verdict that never produced it');
+  assert.ok(body.includes('read through the handoff path'),
+    'the opened station does not state the authority it re-expresses');
+  // Opening the rail is not an act the operator performed, and this is the same
+  // live region the handoff indicator announces a proven transition into during
+  // the very same paint. It must stay silent.
+  assert.ok(!page.text('live').includes('selected.'),
+    'the rail opened itself and announced it to assistive technology as an operator selection');
+  // The mark lands on the plate the path drew as CURRENT, and on nothing else.
+  const marked = markedStations(page);
+  assert.strictEqual(marked.length, 1, `expected one marked station, found ${marked.length}`);
+  assert.strictEqual(marked[0].attrs['data-station'], 'build');
+  assert.strictEqual(marked[0].attrs['data-station-role'], 'CURRENT');
+});
+
+test('DOM: a same-state repaint rewrites nothing and leaves the mark on a plate in the page', () => {
+  const page = openingPage();
+  const first = railBody(page);
+  const firstMark = markedStations(page)[0];
+  assert.ok(first.includes(BUILDING_STATION), 'precondition: the rail did not open');
+  renderMinimizedStatus(page, openingStatus());
+  assert.strictEqual(railBody(page), first,
+    'a repaint of the same canonical reading rewrote the rail');
+  const marked = markedStations(page);
+  assert.strictEqual(marked.length, 1, `the repaint left ${marked.length} stations marked`);
+  assert.notStrictEqual(marked[0], firstMark,
+    'precondition: the path did not re-render its plates, so this proves nothing about a repaint');
+  assert.strictEqual(marked[0].attrs['data-station'], 'build');
+});
+
+test('DOM: operator selection takes the rail by pointer and by keyboard, and no repaint takes it back', () => {
+  const pointer = openingPage();
+  const stages = routeStages(pointer);
+  assert.strictEqual(stages.length, 1, `expected one rendered route stage, found ${stages.length}`);
+  stages[0]._listeners.click[0]();
+  const chosen = railBody(pointer);
+  assert.ok(chosen.includes('Builder execution') && chosen.includes('StateACTIVE'),
+    `the pointer selection did not reach the Inspector: ${chosen}`);
+  // The gate stage still reads under the gate's own provenance, unchanged.
+  assert.ok(chosen.includes('derived from the gate verdict'),
+    'a route stage lost the gate provenance it has always been printed under');
+  assert.ok(!chosen.includes(BUILDING_STATION),
+    'the opening answer was still on the rail after the operator selected a route stage');
+  // A selection the operator did make is still announced, exactly as it shipped.
+  assert.ok(pointer.text('live').includes('Builder execution selected.'),
+    `an operator selection is now silent to assistive technology: ${pointer.text('live')}`);
+  renderMinimizedStatus(pointer, openingStatus());
+  assert.strictEqual(railBody(pointer), chosen, 'a repaint took the rail back from the operator');
+  renderMinimizedStatus(pointer, openingStatus({ state: 'CHECKS_PASSED',
+    updatedAt: '2026-09-04T10:05:00.000Z', transitions: 6, build: STOPPED_BUILD }));
+  assert.ok(pointer.text('core-path-note').includes(CHECKS_STATION),
+    'precondition: the handoff path did not actually move to a new current station');
+  assert.strictEqual(railBody(pointer), chosen,
+    'a newly current station overwrote a selection the operator had made');
+
+  // The keyboard path is the same seam: Enter on a route stage owns the rail too.
+  const keyboard = openingPage();
+  assert.ok(railBody(keyboard).includes(BUILDING_STATION), 'precondition: the rail did not open');
+  let prevented = false;
+  routeStages(keyboard)[0]._listeners.keydown[0](
+    { key: 'Enter', preventDefault: () => { prevented = true; } });
+  assert.ok(prevented, 'Enter on a route stage no longer activates it');
+  const typed = railBody(keyboard);
+  assert.ok(typed.includes('Builder execution') && !typed.includes(BUILDING_STATION),
+    `the keyboard selection did not reach the Inspector: ${typed}`);
+  renderMinimizedStatus(keyboard, openingStatus({ state: 'CHECKS_PASSED',
+    updatedAt: '2026-09-04T10:05:00.000Z', transitions: 6, build: STOPPED_BUILD }));
+  assert.strictEqual(railBody(keyboard), typed,
+    'a repaint took the rail back from a keyboard selection');
+});
+
+test('DOM: an unclaimed rail follows the canonical current station and never keeps a stale one', () => {
+  const page = openingPage();
+  assert.ok(railBody(page).includes(BUILDING_STATION), 'precondition: the rail did not open');
+  // The same run at the same plate, with a new canonical state: BUILDING and
+  // BUILT share the Build station, so a station-only reading would leave the
+  // rail printing BUILDING after the build had finished.
+  renderMinimizedStatus(page, openingStatus({ state: 'BUILT',
+    updatedAt: '2026-09-04T10:04:30.000Z', transitions: 5, build: STOPPED_BUILD }));
+  assert.ok(railBody(page).includes(BUILT_STATION) && !railBody(page).includes(BUILDING_STATION),
+    `the rail kept a superseded canonical state: ${railBody(page)}`);
+  // A newly bound run, at a different station.
+  renderMinimizedStatus(page, openingStatus({ runId: 'RUN-OPENING-NEXT', state: 'CHECKS_PASSED',
+    updatedAt: '2026-09-04T10:05:00.000Z', transitions: 6, build: STOPPED_BUILD }));
+  assert.ok(railBody(page).includes(CHECKS_STATION),
+    `the rail did not follow a newly bound run to its current station: ${railBody(page)}`);
+  assert.strictEqual(markedStations(page)[0].attrs['data-station'], 'checks');
+  // And nothing current at all empties the rail back to its own prompt rather
+  // than leaving a station on screen that is no longer anybody's.
+  renderMinimizedStatus(page, unboundStatus());
+  assert.ok(page.text('core-path-note').includes('HANDOFF PATH UNAVAILABLE'),
+    'precondition: the path still claims a current station');
+  assert.ok(railBody(page).includes(RAIL_PROMPT),
+    `the rail kept a station after nothing was current any more: ${railBody(page)}`);
+  assert.strictEqual(markedStations(page).length, 0, 'a station stayed marked with no run bound');
+});
+
+test('the opening answer adds no control, no motion and no second source, and yields for good', () => {
+  const block = code.slice(code.indexOf("// ── the Inspector's opening answer"),
+    code.indexOf('// ── the one evidence cue on the AEGIS Core'));
+  assert.ok(block.length > 1200, 'the opening answer block was not located');
+  // Its own comments describe what it must not do; a rule that names a ban must
+  // not be mistaken for breaking it.
+  const fn = block.replace(/^\s*\/\/.*$/gm, '');
+  // Not a control and not motion: no station becomes clickable or focusable,
+  // nothing is focused or scrolled, and it owns no clock, timer or frame loop.
+  for (const banned of ['addEventListener', 'tabIndex', 'tabindex', '.focus(', 'scrollIntoView',
+    'setInterval', 'setTimeout', 'requestAnimationFrame', 'Date.now', 'new Date', 'Math.random',
+    'fetch(', 'innerHTML', 'classList', 'style.', 'animation', 'transition']) {
+    assert.ok(!fn.includes(banned),
+      `the opening answer uses ${banned} — it may only re-read what the handoff path already resolved`);
+  }
+  // It writes through the existing Inspector renderer and resolves no station of
+  // its own: the station, the sentence and the state are the path's.
+  assert.ok(/select\(item, 'stage', \{/.test(fn),
+    'the opening answer no longer writes through the existing Inspector renderer');
+  assert.ok(!/CORE_PATH|pathStation\(|opsChipLabel\(/.test(fn),
+    'the opening answer resolves a station or a state word of its own instead of taking the marked one');
+  assert.strictEqual((code.match(/openStationOnRail\(/g) || []).length, 2,
+    'the opening answer is called from somewhere other than the single handoff-path render');
+  assert.ok(/openStationOnRail\(current, run, currentItem, note\.textContent\);/.test(code),
+    'the opening answer is not handed the station, run and sentence the path just resolved');
+  // An emptied rail returns to the sentence the shipped markup already carries.
+  assert.ok(fn.includes("el('p','empty','" + RAIL_PROMPT + "')") && htmlSrc().includes(RAIL_PROMPT),
+    'the cleared rail no longer returns to the prompt the page ships with');
+  // The operator's own selection is final. `auto` is set by this seam alone, so
+  // every pointer and keyboard path takes the rail permanently — as does Escape.
+  assert.ok(/function select\(node, kind, data, auto\)\{[\s\S]*?if \(!auto\) operatorOwnsInspector = true;/.test(code),
+    'a pointer or keyboard selection no longer takes the Inspector from the opening answer');
+  assert.strictEqual((code.match(/select\([^)]*, true\);/g) || []).length, 1,
+    'something other than the opening answer selects without claiming the operator made it');
+  assert.ok(/operatorOwnsInspector = true;\s*current\.removeAttribute\('aria-current'\); current = null;/.test(code),
+    'Escape empties the rail without stopping the opening answer from refilling it');
+  // The live region belongs to acts the operator performed, and the handoff
+  // indicator announces a proven transition into it earlier in the same paint.
+  assert.ok(/if \(!auto\) \$\('live'\)\.textContent = \(data\.label \|\| data\.toolId\) \+ ' selected\.';/.test(code),
+    'an automatic open speaks over the live region the handoff indicator announces into');
+  assert.ok(/if \(operatorOwnsInspector\) return;/.test(fn),
+    'the opening answer can still write to a rail the operator has taken');
+  // The Inspector's selection state is initialised once, ahead of the first
+  // paint. A second initialisation further down the file would erase the
+  // station the rail just opened on.
+  assert.strictEqual((code.match(/var current = null;/g) || []).length, 1,
+    'the Inspector selection is initialised twice, so the opening answer would be cleared');
+  assert.strictEqual((code.match(/var operatorOwnsInspector = false;/g) || []).length, 1,
+    'a second operator-ownership flag would let a repaint overwrite an operator selection');
+});
+
 async function atest(name, fn) {
   try { await fn(); passed++; console.log(`ok   ${name}`); }
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }
