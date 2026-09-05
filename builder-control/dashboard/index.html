@@ -866,6 +866,24 @@
      every run state, so it separates and can never be read as a signal. */
   .core-node .hud-state{margin-top:8px;padding-top:7px;border-top:1px solid #1e3446;
     font:600 10px/1.4 var(--mono);letter-spacing:.07em;color:var(--text-2)}
+  /* Crew roster: one compact restatement of reviewer facts already carried by
+     the projection. It owns no availability or review resolver of its own, and
+     its words, not colour, distinguish an available tool from a recorded
+     exact-subject review. Every value wraps inside the HUD card. */
+  .crew-roster-wrap{min-width:0;margin-top:7px;padding-top:6px;border-top:1px solid #1e3446}
+  .crew-roster-title{font:650 9px/1.3 var(--mono);letter-spacing:.11em;text-transform:uppercase;
+    color:#8faac0}
+  .crew-roster{list-style:none;display:grid;gap:2px;min-width:0;margin:4px 0 0;padding:0}
+  .crew-roster-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(72px,.9fr);
+    gap:4px;min-width:0;padding:3px 0 0;border-top:1px solid #182b3a}
+  .crew-roster-row:first-child{padding-top:0;border-top:0}
+  .crew-roster-id,.crew-roster-facts{display:grid;align-content:start;gap:1px;min-width:0}
+  .crew-roster-name{color:var(--text-0);font:650 9px/1.2 var(--mono)}
+  .crew-roster-role{color:var(--text-2);font-size:8px;line-height:1.2}
+  .crew-roster-facts{color:var(--text-1);font:600 8px/1.2 var(--mono);text-align:right}
+  .crew-roster-name,.crew-roster-role,.crew-roster-fact,.crew-roster-empty{
+    min-width:0;overflow-wrap:anywhere}
+  .crew-roster-empty{color:var(--text-2);font-size:9px;line-height:1.4}
   .core-node.is-review::before{background:var(--hud-violet)}
   .core-node.is-gate::before{background:var(--orange)}
   .core-node.is-evidence::before,.core-node.is-checkpoint::before{background:var(--pass)}
@@ -2041,6 +2059,12 @@
           <article class="core-node is-builder">
             <h3>Crew &amp; models</h3><div class="hud-value" id="hud-crew">Loading crew evidence…</div>
             <div class="hud-state" id="hud-crew-state">Loading worker state…</div>
+            <div class="crew-roster-wrap">
+              <div class="crew-roster-title">Independent reviewers</div>
+              <ul class="crew-roster" id="hud-crew-roster" aria-label="Recorded independent reviewer roster">
+                <li class="crew-roster-empty">Reviewer data UNAVAILABLE — waiting for dashboard projection.</li>
+              </ul>
+            </div>
           </article>
           <article class="core-node is-review">
             <h3>Independent review</h3><div class="hud-value" id="hud-review">Loading review evidence…</div>
@@ -3209,6 +3233,110 @@
       return 'Governed builder active · model identity UNAVAILABLE in current status evidence.';
     }
     return 'No active worker · assigned model UNAVAILABLE in current status evidence.';
+  }
+
+  // One reviewer-to-stage lookup, shared by the compact Crew roster and the
+  // existing reviewer panel. Availability remains the reviewer projection's
+  // fact; a stage remains the engineering projection's fact. Neither can turn
+  // the other into selection, usage or a completed review.
+  function reviewerStage(reviewer, stageRows){
+    var stageId = reviewer && reviewer.toolId === 'codex-local' ? 'codex' :
+      (reviewer && reviewer.toolId === 'grok-cli' ? 'grok' : null);
+    if (!stageId || !Array.isArray(stageRows)) return null;
+    return stageRows.filter(function(stage){ return stage && stage.id === stageId; })[0] || null;
+  }
+
+  function reviewerRecordName(reviewer){
+    if (!reviewer) return null;
+    if (reviewer.toolId === 'codex-local') return 'codex';
+    if (reviewer.toolId === 'grok-cli') return 'grok';
+    if (reviewer.toolId === 'copilot-cli') return 'copilot';
+    return null;
+  }
+
+  // The roster is presentation only. Its rows come directly from the reviewer
+  // array already supplied to this repaint. Exact-subject wording is permitted
+  // only when the gate, reviewer table and current binding were proven equal by
+  // the existing subject comparison in renderFounderSummary.
+  function renderCrewRoster(source, engineering, subjectState){
+    var host = $('hud-crew-roster');
+    if (!host) return;
+    host.textContent = '';
+    var isLiveRows = Array.isArray(source);
+    var sourceState = isLiveRows ? 'OK' : ((source && source.state) || 'UNAVAILABLE');
+    var rows = isLiveRows ? source :
+      (source && Array.isArray(source.reviewers) ? source.reviewers : null);
+    if (sourceState !== 'OK' || !rows){
+      host.setAttribute('data-roster-state','UNAVAILABLE');
+      host.appendChild(el('li','crew-roster-empty','Reviewer data UNAVAILABLE — ' +
+        ((source && source.reason) || 'the current dashboard projection carries no readable reviewer array.')));
+      return;
+    }
+    if (!rows.length){
+      host.setAttribute('data-roster-state','UNAVAILABLE');
+      host.appendChild(el('li','crew-roster-empty',
+        'Reviewer data UNAVAILABLE — no reviewer rows are present in the current dashboard projection.'));
+      return;
+    }
+    host.setAttribute('data-roster-state','RECORDED');
+    var stageRows = engineering && Array.isArray(engineering.stages) ? engineering.stages : [];
+    var completenessRows = engineering && engineering.reviewerCompleteness &&
+      Array.isArray(engineering.reviewerCompleteness.rows)
+      ? engineering.reviewerCompleteness.rows : [];
+    rows.forEach(function(reviewer){
+      var li = el('li','crew-roster-row');
+      var label = (reviewer && (reviewer.label || reviewer.toolId)) || 'Reviewer identity unknown';
+      var role = reviewer && typeof reviewer.role === 'string' && reviewer.role
+        ? reviewer.role : 'Role unknown — no role is recorded';
+      var availability = reviewer && typeof reviewer.availability === 'string' && reviewer.availability
+        ? reviewer.availability : 'UNKNOWN';
+      var id = el('div','crew-roster-id');
+      id.appendChild(el('span','crew-roster-name',label));
+      id.appendChild(el('span','crew-roster-role',role));
+      li.appendChild(id);
+
+      var facts = el('div','crew-roster-facts');
+      var availabilityText = availability === 'AVAILABLE'
+        ? 'Available · AVAILABLE'
+        : (availability === 'UNAVAILABLE' || availability === 'DISABLED' || availability === 'BLOCKED'
+          ? 'Unavailable · ' + availability
+          : 'Availability · ' + availability);
+      facts.appendChild(el('span','crew-roster-fact',availabilityText));
+
+      var stage = reviewerStage(reviewer, stageRows);
+      var stageState = stage && typeof stage.state === 'string' && stage.state ? stage.state : null;
+      var recordName = reviewerRecordName(reviewer);
+      var record = recordName ? completenessRows.filter(function(row){
+        return row && row.reviewer === recordName;
+      })[0] || null : null;
+      var stageText;
+      var recordText;
+      if (subjectState === 'MISMATCHED'){
+        stageText = 'Stage · NOT CURRENT';
+        recordText = 'Record · NOT CURRENT';
+      } else if (subjectState !== 'CURRENT'){
+        stageText = 'Stage · UNKNOWN';
+        recordText = 'Record · UNKNOWN';
+      } else {
+        stageText = stageState ? 'Stage · ' + stageState : 'Stage · UNKNOWN';
+        if (record && record.executed === 'EXECUTED'){
+          recordText = 'Record · ' + (record.disposition || 'EXECUTED');
+        } else if (record && typeof record.executed === 'string' && record.executed){
+          recordText = 'Record · ' + record.executed;
+        } else {
+          recordText = 'Record · UNKNOWN';
+        }
+      }
+      facts.appendChild(el('span','crew-roster-fact',stageText));
+      facts.appendChild(el('span','crew-roster-fact',recordText));
+      li.appendChild(facts);
+      li.setAttribute('data-reviewer-tool',(reviewer && reviewer.toolId) || 'UNKNOWN');
+      li.setAttribute('data-availability-state',availability);
+      li.setAttribute('data-review-stage',subjectState === 'CURRENT' ? (stageState || 'UNKNOWN') : subjectState);
+      li.setAttribute('data-review-record',subjectState === 'CURRENT' && record
+        ? (record.executed || 'UNKNOWN') : 'UNKNOWN');
+      host.appendChild(li);
+    });
   }
 
   // Why this model / tool. The only canonical routing evidence this page has is
@@ -6579,6 +6707,8 @@
         (opState.state === 'UNVERIFIED' ? opState.plain : deckFinished)
       : 'No active worker — ' + deckFinished,
     opState.state);
+    renderCrewRoster(view && view.reviewers, e, reviewerSubjectMatchesCurrent
+      ? 'CURRENT' : (reviewerSubjectMismatchKnown ? 'MISMATCHED' : 'UNKNOWN'));
     var hudReview = 'No independent-review evidence is attached to this exact code version.';
     var hudReviewState = 'EVIDENCE UNAVAILABLE';
     if (deckRc && deckRc.rows && deckRc.rows.length && !reviewerSubjectMatchesCurrent){
@@ -7021,6 +7151,7 @@
       binding: (S.runs && S.runs.current) || null,
       cost: S.cost || null,
       integration: S.integration || null,
+      reviewers: S.reviewers || null,
       // The SAME recorded receipts the event panel is painted from, read here
       // only as milestone evidence. An event plane that is not OK is handed over
       // as an empty list, which can withhold a milestone and never invent one.
@@ -7351,9 +7482,7 @@
       var right = el('div','badges');
       right.appendChild(chip(r.availability));
       // Available to run is not the same as having run. Say which.
-      var st = stageRows.filter(function(s){
-        return (r.toolId === 'codex-local' && s.id === 'codex') || (r.toolId === 'grok-cli' && s.id === 'grok');
-      })[0];
+      var st = reviewerStage(r, stageRows);
       if (st) right.appendChild(chip(st.state || 'UNKNOWN'));
       li.appendChild(left); li.appendChild(right);
       li.tabIndex = 0; li.style.cursor='pointer';
@@ -9348,6 +9477,7 @@
         // not open a second source and it never estimates a missing figure.
         cost: status.cost || null,
         integration: status.integration || null,
+        reviewers: status.reviewers || null,
         // The same recorded receipts renderEvents is given below, handed to the
         // deck so the build journal can read milestone evidence from the ONE
         // event plane this push carried and from no other source.

@@ -14743,6 +14743,111 @@ async function atest(name, fn) {
   catch (e) { console.error(`FAIL ${name}: ${e.message}`); process.exitCode = 1; }
 }
 
+// ── Crew & Models roster ────────────────────────────────────────────────────
+const CREW_SUBJECT = 'c'.repeat(64);
+const CREW_OTHER_SUBJECT = 'd'.repeat(64);
+const CREW_RUN_ID = 'RUN-CREW-ROSTER-CURRENT';
+
+function crewStatus(over) {
+  return Object.assign({
+    generatedAt: '2026-09-05T10:00:00.000Z',
+    engineering: {
+      state: 'OK', verdict: 'BLOCKED', subjectSha256: CREW_SUBJECT,
+      problems: [],
+      stages: [
+        { id: 'codex', state: 'REVIEWING' },
+        { id: 'grok', state: 'WAITING' },
+      ],
+      reviewerCompleteness: {
+        subjectSha256: CREW_SUBJECT,
+        rows: [
+          { reviewer: 'codex', executed: 'EXECUTED', disposition: 'PASS' },
+          { reviewer: 'grok', executed: 'EXECUTED', disposition: 'PASS' },
+        ],
+      },
+    },
+    runs: [{ runId: CREW_RUN_ID, state: 'CHECKS_PASSED', updatedAt: '2026-09-05T09:59:00.000Z' }],
+    runsBinding: {
+      state: 'BOUND', runId: CREW_RUN_ID, subjectState: 'BOUND',
+      subjectSha256: CREW_SUBJECT, runSubjectSha256: CREW_SUBJECT,
+      gateSubjectSha256: CREW_SUBJECT,
+    },
+    reviewers: [
+      { toolId: 'codex-local', label: 'Codex', role: 'Independent engineering review', availability: 'AVAILABLE' },
+      { toolId: 'grok-cli', label: 'Grok', role: 'Adversarial red team', availability: 'AVAILABLE' },
+    ],
+    integration: { connectors: [] }, events: [], cost: { state: 'UNAVAILABLE' },
+  }, over || {});
+}
+
+function crewRows(page) {
+  return page.document.getElementById('hud-crew-roster').children;
+}
+
+test('DOM: current Crew & Models rows show recorded facts without selection or usage claims', () => {
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, crewStatus());
+  const rows = crewRows(page);
+  assert.strictEqual(rows.length, 2);
+  assert.match(rows[0].textContent, /CodexIndependent engineering review/);
+  assert.match(rows[0].textContent, /Available · AVAILABLE/);
+  assert.match(rows[0].textContent, /Stage · REVIEWING/);
+  assert.match(rows[0].textContent, /Record · PASS/);
+  assert.match(rows[1].textContent, /GrokAdversarial red team/);
+  assert.match(rows[1].textContent, /Stage · WAITING/);
+  assert.doesNotMatch(page.text('hud-crew-roster'), /selected|used|usage/i);
+});
+
+test('DOM: MISMATCHED or UNKNOWN subjects never claim a current review', () => {
+  for (const subjectCase of [
+    { label: 'MISMATCHED', reviewerSubject: CREW_OTHER_SUBJECT, gateSubjectSha256: CREW_SUBJECT },
+    { label: 'UNKNOWN', reviewerSubject: null, gateSubjectSha256: null },
+  ]) {
+    const engineering = crewStatus().engineering;
+    engineering.reviewerCompleteness.subjectSha256 = subjectCase.reviewerSubject;
+    const status = crewStatus({ engineering,
+      runsBinding: Object.assign({}, crewStatus().runsBinding, {
+        gateSubjectSha256: subjectCase.gateSubjectSha256,
+      }) });
+    const page = bootPage(fixtureState());
+    renderMinimizedStatus(page, status);
+    const text = page.text('hud-crew-roster');
+    assert.ok(text.includes(subjectCase.label === 'MISMATCHED'
+      ? 'Record · NOT CURRENT' : 'Record · UNKNOWN'), subjectCase.label);
+    assert.ok(!text.includes('Record · PASS'), `${subjectCase.label} claimed a current review`);
+  }
+});
+
+test('DOM: absent reviewer data renders UNAVAILABLE', () => {
+  const page = bootPage(fixtureState());
+  renderMinimizedStatus(page, crewStatus({ reviewers: { state: 'UNAVAILABLE', reason: 'reviewer projection absent' } }));
+  assert.strictEqual(crewRows(page).length, 1);
+  assert.match(page.text('hud-crew-roster'), /Reviewer data UNAVAILABLE/);
+  assert.strictEqual(page.document.getElementById('hud-crew-roster').attrs['data-roster-state'], 'UNAVAILABLE');
+});
+
+test('DOM: a live status repaint feeds reviewer data into the same roster renderer', () => {
+  const page = bootPage(fixtureState());
+  assert.match(page.text('hud-crew-roster'), /Reviewer data UNAVAILABLE/);
+  renderMinimizedStatus(page, crewStatus());
+  assert.strictEqual(crewRows(page).length, 2);
+  assert.match(page.text('hud-crew-roster'), /Codex/);
+  assert.match(code, /renderCrewRoster\(view && view\.reviewers/);
+  assert.match(code, /reviewers: status\.reviewers \|\| null/);
+});
+
+test('Crew & Models roster wraps on phones and owns no animation or overflow rule', () => {
+  const rosterRules = [...code.matchAll(/([^{}]*crew-roster[^{}]*)\{([^{}]*)\}/g)]
+    .map((match) => match[2]);
+  assert.ok(rosterRules.length > 0);
+  assert.ok(rosterRules.some((body) => /overflow-wrap:anywhere/.test(body)),
+    'long reviewer text has no phone-safe wrapping rule');
+  for (const body of rosterRules) {
+    assert.ok(!/(?:^|;)\s*overflow\s*:/.test(body), 'the new roster owns an overflow rule');
+    assert.ok(!/(?:^|;)\s*animation\s*:/.test(body), 'the new roster owns an animation rule');
+  }
+});
+
 asyncTests().then(() => {
   const failedCount = process.exitCode ? 'at least 1' : '0';
   console.log(`${passed} passed, ${failedCount} failed.`);
