@@ -1,0 +1,46 @@
+{
+  "packetId": "PKT-20260905-PACKET-PLANNER",
+  "agentId": "claude-code",
+  "objective": "Build a deterministic read-only packet planner that exposes dependency waves, a serial integration order, and exact write-set conflicts without launching work.",
+  "constraints": [
+    "Add only the planner and its focused test; do not change existing runtime, routing, locking, review, schema, or dashboard files",
+    "Reuse packet-tools.cjs as the canonical packet validator rather than duplicating its rules",
+    "Planning is read-only and deterministic; no workers, models, reviewers, git commands, locks, runs, or filesystem writes",
+    "Analytical waves do not authorize concurrency; the output executionMode remains SERIAL_ONLY"
+  ],
+  "sourceOfTruth": [
+    "builder-control/CONTROL-CONTRACT.md",
+    "builder-control/packet-tools.cjs",
+    "builder-control/schemas/task-packet.schema.json"
+  ],
+  "filesAllowed": [
+    "builder-control/packet-planner.cjs",
+    "builder-control/test/packet-planner.test.cjs"
+  ],
+  "testsRequired": [
+    "node builder-control/test/packet-planner.test.cjs",
+    "git diff --check"
+  ],
+  "coordination": {
+    "executionMode": "SERIAL_ONLY",
+    "dependsOnPacketIds": [
+      "PKT-20260905-PACKET-COORDINATION-DOC"
+    ],
+    "writeSet": [
+      "builder-control/packet-planner.cjs",
+      "builder-control/test/packet-planner.test.cjs"
+    ]
+  },
+  "stopConditions": [
+    "The implementation would need to edit an existing runtime or governance file",
+    "The planner would launch, schedule, approve, or mutate any work",
+    "Deterministic output cannot be proven with the focused tests",
+    "Claude Code fails twice on the same issue"
+  ],
+  "authorization": {
+    "authorizedBy": "Marc Papineau — standing non-destructive AEGIS dashboard completion authorization, reaffirmed 2026-09-05",
+    "allowsProtectedPaths": [],
+    "allowsPublicPush": true,
+    "allowsRelease": false
+  }
+}
