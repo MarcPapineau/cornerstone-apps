@@ -5421,6 +5421,18 @@
     { id: 'visual', label: 'Visual',
       terms: ['visual','visually','visuals','ui','layout','layouts','style','styles','styled','styling','css',
         'typography','spacing','colour','color','colours','colors'] },
+    // Clarity is a change to the WORDS a surface uses, which is a different
+    // request from a change to how it looks, so it is published as its own type
+    // rather than folded into Visual. Matching is whole-word like every other
+    // entry here, so a phrase cannot be a term: the recorded phrase "plain
+    // English" is read from "english", and the generic word "plain" is
+    // deliberately NOT published, because "plain text" is not a request about
+    // readable wording and this list refuses to guess that it is. An objective
+    // whose only clarity word is unpublished wording stays unclassified, and one
+    // that also reaches another type is still ambiguous and still refused.
+    { id: 'clarity', label: 'Clarity',
+      terms: ['readable','readability','wording','english','translate','translated','translates','translation',
+        'concise','concisely','conciseness'] },
     // The fallback is published in this same list so there is one category source
     // and no second place a label can drift from. It carries no terms, so nothing
     // can ever match it — it is only ever fallen back to.

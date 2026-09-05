@@ -11927,6 +11927,11 @@ test('DOM: the change type is a whole-word reading of the recorded request, and 
     // wording a recorded objective actually uses is read rather than missed.
     ['Optimizing the ledger read path', 'optimization', 'Optimization', /"optimizing"/],
     ['Restore the deck colours', 'visual', 'Visual', /"colours"/],
+    // Clarity is read the same way as every other type: from the words the
+    // recorded objective actually uses, and the matched words are printed.
+    ['Rewrite the run receipt in plain English', 'clarity', 'Clarity', /"english"/],
+    ['Make the gate wording readable', 'clarity', 'Clarity', /"readable", "wording"/],
+    ['Translate the concise ledger summary', 'clarity', 'Clarity', /"translate", "concise"/],
   ];
   for (const [objective, id, label, matched] of cases) {
     const row = journalOneRow([journalDatedRun({ objective })]);
@@ -11963,6 +11968,25 @@ test('DOM: the change type is a whole-word reading of the recorded request, and 
   assert.strictEqual(unknownForm.attrs['data-journal-category'], 'unclassified',
     'a word form the published list does not carry was resolved to a category anyway');
   assert.match(journalLine(unknownForm, 'category'), /matches no term in the published list/);
+
+  // Clarity buys no exemption from either refusal. A word the clarity list does
+  // not publish is unknown wording, and wording that reaches clarity AND another
+  // published type is still ambiguous and still refused.
+  const unpublishedClarity = journalOneRow([journalDatedRun({ objective: 'Clarify the founder deck' })]);
+  assert.strictEqual(unpublishedClarity.attrs['data-journal-category'], 'unclassified',
+    'a clarity request was inferred from wording the published list does not carry');
+  assert.match(journalLine(unpublishedClarity, 'category'), /matches no term in the published list/);
+
+  const plainText = journalOneRow([journalDatedRun({ objective: 'Record the exit code as plain text' })]);
+  assert.strictEqual(plainText.attrs['data-journal-category'], 'unclassified',
+    '"plain text" was read as a request about readable wording');
+
+  const clarityAmbiguous = journalOneRow([
+    journalDatedRun({ objective: 'Translate the deck styling into plain English' })]);
+  assert.strictEqual(clarityAmbiguous.attrs['data-journal-category'], 'unclassified',
+    'wording matching a visual term and a clarity term was resolved into one of them');
+  assert.match(journalLine(clarityAmbiguous, 'category'),
+    /matches more than one type \(visual, clarity\)/);
 
   const twoTypes = journalOneRow([journalDatedRun({ objective: 'Optimise the deck styling' })]);
   assert.strictEqual(twoTypes.attrs['data-journal-category'], 'unclassified',
@@ -12334,8 +12358,14 @@ test('the three added journal facts are each resolved from one named canonical s
   // Array.from rebuilds the ids in this realm: the literal is parsed in a separate
   // vm context, so an array it produced itself can never compare deep-strict-equal.
   assert.deepStrictEqual(Array.from(categories, (category) => category.id),
-    ['structure', 'speed', 'error-repair', 'optimization', 'tooling', 'visual', 'unclassified'],
-    'the published category list is not the six canonical types plus unclassified');
+    ['structure', 'speed', 'error-repair', 'optimization', 'tooling', 'visual', 'clarity', 'unclassified'],
+    'the published category list is not the seven canonical types plus unclassified');
+  // Whole-word matching cannot compare a phrase, so the clarity type publishes
+  // the recorded WORDS it reads and not the generic word "plain": a list that
+  // claimed "plain" would read "plain text" as a request about wording.
+  const clarity = categories.find((category) => category.id === 'clarity');
+  assert.ok(clarity && !clarity.terms.includes('plain'),
+    'the clarity type claims the generic word "plain", so unrelated wording can match it');
   for (const category of categories) {
     if (category.id === 'unclassified') {
       assert.ok(Array.isArray(category.terms) && !category.terms.length,
