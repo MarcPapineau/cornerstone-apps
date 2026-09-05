@@ -5393,6 +5393,15 @@
   //   · no objective, or records that disagree → unclassified.
   // There is no scoring, no ranking and no nearest category, because a ranking
   // is exactly how a guess starts reading as a recorded fact.
+  //
+  // Because the match is exact, a word form the lexicon does not publish is a
+  // word the lexicon does not know: "optimizing" and "colours" read as unknown
+  // wording unless they are written out here. So each published term carries the
+  // ordinary forms a recorded objective actually uses. That widens what the list
+  // KNOWS and never what it infers — a form is only ever added for a concept the
+  // list already publishes, no term is claimed by two categories, and wording
+  // that is absent, that matches nothing, or that matches two categories still
+  // resolves to unclassified by exactly the refusals above.
   var JOURNAL_CATEGORIES = [
     { id: 'structure', label: 'Structure',
       terms: ['structure','structural','restructure','restructured','refactor','refactored','refactoring',
@@ -5403,13 +5412,15 @@
       terms: ['fix','fixes','fixed','bug','bugs','error','errors','repair','repairs','regression',
         'regressions','crash','crashes','broken','defect','defects'] },
     { id: 'optimization', label: 'Optimization',
-      terms: ['optimise','optimize','optimised','optimized','optimisation','optimization','efficiency',
-        'streamline','streamlined'] },
+      terms: ['optimise','optimize','optimised','optimized','optimises','optimizes','optimising','optimizing',
+        'optimisation','optimization','optimisations','optimizations','efficiency','efficient','efficiently',
+        'streamline','streamlined','streamlines','streamlining'] },
     { id: 'tooling', label: 'Tooling',
       terms: ['tooling','tool','tools','cli','script','scripts','harness','lint','linting','pipeline',
         'test','tests'] },
     { id: 'visual', label: 'Visual',
-      terms: ['visual','visually','ui','layout','styling','css','typography','spacing','colour','color'] },
+      terms: ['visual','visually','visuals','ui','layout','layouts','style','styles','styled','styling','css',
+        'typography','spacing','colour','color','colours','colors'] },
     // The fallback is published in this same list so there is one category source
     // and no second place a label can drift from. It carries no terms, so nothing
     // can ever match it — it is only ever fallen back to.

@@ -11923,6 +11923,10 @@ test('DOM: the change type is a whole-word reading of the recorded request, and 
     ['Optimise the ledger read path', 'optimization', 'Optimization', /"optimise"/],
     ['Add a harness for the governed worker', 'tooling', 'Tooling', /"harness"/],
     ['Tighten the spacing on the deck', 'visual', 'Visual', /"spacing"/],
+    // The published list carries the ordinary forms of its own terms, so the
+    // wording a recorded objective actually uses is read rather than missed.
+    ['Optimizing the ledger read path', 'optimization', 'Optimization', /"optimizing"/],
+    ['Restore the deck colours', 'visual', 'Visual', /"colours"/],
   ];
   for (const [objective, id, label, matched] of cases) {
     const row = journalOneRow([journalDatedRun({ objective })]);
@@ -11951,6 +11955,20 @@ test('DOM: the change type is a whole-word reading of the recorded request, and 
   const substring = journalOneRow([journalDatedRun({ objective: 'Prefixed identifiers stay stable' })]);
   assert.strictEqual(substring.attrs['data-journal-category'], 'unclassified',
     'a category was matched on a substring inside an unrelated word');
+
+  // Publishing more word forms widens what the list KNOWS and never what it
+  // infers: a form the list does not carry is still unknown wording, and wording
+  // that reaches both an optimization and a visual term is still ambiguous.
+  const unknownForm = journalOneRow([journalDatedRun({ objective: 'Restyle the founder deck' })]);
+  assert.strictEqual(unknownForm.attrs['data-journal-category'], 'unclassified',
+    'a word form the published list does not carry was resolved to a category anyway');
+  assert.match(journalLine(unknownForm, 'category'), /matches no term in the published list/);
+
+  const twoTypes = journalOneRow([journalDatedRun({ objective: 'Optimise the deck styling' })]);
+  assert.strictEqual(twoTypes.attrs['data-journal-category'], 'unclassified',
+    'wording matching an optimization term and a visual term was resolved into one of them');
+  assert.match(journalLine(twoTypes, 'category'),
+    /matches more than one type \(optimization, visual\)/);
 
   const noObjective = journalOneRow([journalDatedRun({ objective: null })]);
   assert.strictEqual(noObjective.attrs['data-journal-category'], 'unclassified');
